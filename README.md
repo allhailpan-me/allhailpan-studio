@@ -1,2 +1,0 @@
-# allhailpan-studio
-allhailpan studio

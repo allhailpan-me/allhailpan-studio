@@ -1,0 +1,11 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store

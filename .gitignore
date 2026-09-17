@@ -1,0 +1,11 @@
+build/
+out/
+cmake-build-*/
+.vs/
+.vscode/
+.idea/
+*.user
+*.db
+*.ipch
+*.vsidx
+.DS_Store
