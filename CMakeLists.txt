@@ -110,9 +110,15 @@ endif()
 
 # ASIO (Windows only, optional)
 if(WIN32 AND AHP_ASIO_SDK_DIR)
-    target_include_directories(AllHailPanStudio PRIVATE "${AHP_ASIO_SDK_DIR}/common")
-    target_compile_definitions(AllHailPanStudio PRIVATE JUCE_ASIO=1)
-    message(STATUS "ASIO support enabled from ${AHP_ASIO_SDK_DIR}")
+    if(EXISTS "${AHP_ASIO_SDK_DIR}/common/iasiodrv.h")
+        target_include_directories(AllHailPanStudio PRIVATE "${AHP_ASIO_SDK_DIR}/common")
+        target_compile_definitions(AllHailPanStudio PRIVATE JUCE_ASIO=1)
+        message(STATUS "ASIO support enabled from ${AHP_ASIO_SDK_DIR}")
+    else()
+        # A missing or moved SDK shouldn't stop the build: carry on without ASIO
+        message(WARNING "No ASIO SDK at ${AHP_ASIO_SDK_DIR} - building without ASIO. "
+                        "Set AHP_ASIO_SDK_DIR to the folder containing common/iasiodrv.h to re-enable it.")
+    endif()
 endif()
 
 target_link_libraries(AllHailPanStudio

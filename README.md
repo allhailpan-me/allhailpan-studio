@@ -86,6 +86,12 @@ cmake --build build --parallel
 - **Missing plugins** (for example, a project opened on another computer) are listed when opening. Their saved settings stay in the project, so saving again doesn't lose them.
 - **Autosave** runs every two minutes while you have unsaved changes. If the app closes unexpectedly, you're offered your work back the next time it starts.
 
+### Exporting
+- **File > Export song to WAV** renders the whole arrangement to a 24-bit WAV at your device's sample rate. It runs offline, so it's much faster than playing the song through.
+- **File > Export stems** writes one file per mixer insert, plus the full mix, into a folder. Each stem is post-fader and post-effects, so they add back up to the mix.
+- Exports include everything: instruments, audio clips, automation, mixer levels and all effects, with four seconds of tail so reverbs ring out.
+- The app goes quiet while rendering and a progress window lets you cancel. Your playback position is left where it was.
+
 ### Undo and redo
 - **Ctrl+Z** undoes, **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes. The **Undo** and **Redo** buttons are at the top right.
 - There is no step limit. Every finished edit is one step: moving, trimming, stretching, pasting, deleting, recording, note and automation edits, clip settings, track names, mutes and routing.
@@ -155,7 +161,7 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 6. ~~Mixer with inserts, FX slots and metering~~ Sends
 7. ~~Audio and MIDI recording, parameter automation recording~~ Input monitoring, loop recording
 8. ~~Time-stretching and pitch-shifting with Rubber Band~~
-9. ~~Project save and load (including plugin state), autosave~~ WAV and stem export
+9. ~~Project save and load (including plugin state), autosave, WAV and stem export~~
 10. ~~Automation lanes in MIDI clips~~ Standalone automation clips
 
 ## Project layout

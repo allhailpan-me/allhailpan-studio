@@ -13,6 +13,7 @@
 #include "PluginPicker.h"
 #include "Logo.h"
 #include "ProjectIO.h"
+#include "ExportJob.h"
 #include <map>
 
 class MainComponent : public juce::Component,
@@ -132,6 +133,8 @@ private:
     void confirmDiscard (std::function<void()> then);
     void showLoadProblems (const ProjectIO::LoadReport&);
     void findMissingSamples();
+    void exportAudio (bool stems);
+    void checkExportProgress();
     void clearSession();
     void markDirty();
     void updateTitle();
@@ -191,6 +194,7 @@ private:
     int autosaveTicks = 0;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<MixerWindow> mixerWindow;
+    std::unique_ptr<ExportJob> exportJob;
     juce::RecentlyOpenedFilesList recent;
 
     // recording state

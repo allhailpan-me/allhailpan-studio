@@ -307,6 +307,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (auto* out = outputChannelData[ch])
             std::fill_n (out, numSamples, 0.0f);
 
+    if (offlineActive.load())
+        return;                    // an export owns the graph right now
+
     float* outL = numOutputChannels > 0 ? outputChannelData[0] : nullptr;
     float* outR = numOutputChannels > 1 ? outputChannelData[1] : nullptr;
 
@@ -897,4 +900,131 @@ void AudioEngine::renderPreview (float* left, float* right, int numSamples)
             right[i] += (srcR[f0] + (srcR[f0 + 1] - srcR[f0]) * frac) * 0.8f;
         previewPos += step;
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Offline export
+
+bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeconds,
+                                 const std::vector<int>& stemInserts,
+                                 const RenderSink& sink,
+                                 const std::function<bool (double)>& progress)
+{
+    if (capacity <= 0 || blockSize <= 0 || sampleRate <= 0.0)
+        return false;
+
+    offlineActive.store (true);
+    juce::Thread::sleep (60);                 // let the device callback fall quiet
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+
+    // Remember the live transport so the session is undisturbed afterwards
+    const double savedPosition = position;
+    const bool   savedPlaying  = playing.load();
+    const auto   savedLastBeat = lastBeat;
+
+    playing.store (true);
+    position = fromBeat;
+    lastBeat = -1;
+    liveMidi.clear();
+    panicRequest.store (true);                // start from silence
+
+    const int    n              = std::min (blockSize, capacity);
+    const double beatsPerSample = bpm.load() / 60.0 / sampleRate;
+    const double tailBlocks     = std::ceil (tailSeconds * sampleRate / n);
+    const double totalBeats     = std::max (1.0e-6, toBeat - fromBeat);
+
+    bool ok = true;
+    int  tailLeft = -1;
+
+    while (true)
+    {
+        const bool sequencing = position < toBeat;
+        if (! sequencing)
+        {
+            if (tailLeft < 0)
+                tailLeft = (int) tailBlocks;
+            if (tailLeft-- <= 0)
+                break;
+        }
+
+        const double blockStart = position;
+        for (int i = 0; i < n; ++i)
+        {
+            blockBeats[(size_t) i] = position;
+            position += beatsPerSample;
+        }
+
+        playHead.bpm       = bpm.load();
+        playHead.ppq       = blockStart;
+        playHead.seconds   = blockStart * 60.0 / playHead.bpm;
+        playHead.samples   = (juce::int64) (playHead.seconds * sampleRate);
+        playHead.playing   = sequencing;
+        playHead.recording = false;
+        playHead.looping   = false;
+
+        for (auto& ins : insertSlots)
+            ins.buffer.clear (0, n);
+
+        scheduleMidi (n, false, sequencing);
+        if (sequencing)
+            applyAutomation (blockStart);
+
+        for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
+        {
+            auto& c = channelSlots[(size_t) slotIndex];
+            if (c.plugin == nullptr)
+                continue;
+
+            juce::AudioBuffer<float> view (c.buffer.getArrayOfWritePointers(), c.channels, n);
+            view.clear();
+            c.plugin->processBlock (view, c.midi);
+
+            auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, c.insert.load())].buffer;
+            const int outs = juce::jlimit (1, c.channels, c.plugin->getTotalNumOutputChannels());
+            if (c.sumOutputs.load() && outs > 2)
+            {
+                for (int ch = 0; ch < outs; ++ch)
+                    dest.addFrom (ch & 1, 0, view, ch, 0, n);
+            }
+            else
+            {
+                dest.addFrom (0, 0, view, 0, 0, n);
+                dest.addFrom (1, 0, view, std::min (1, outs - 1), 0, n);
+            }
+        }
+
+        if (sequencing)
+            renderAudioClips (n);
+
+        auto& master = insertSlots[0].buffer;
+        for (int i = 1; i < kNumInserts; ++i)
+        {
+            processInsert (i, n);
+            master.addFrom (0, 0, insertSlots[(size_t) i].buffer, 0, 0, n);
+            master.addFrom (1, 0, insertSlots[(size_t) i].buffer, 1, 0, n);
+
+            if (std::find (stemInserts.begin(), stemInserts.end(), i) != stemInserts.end())
+                sink (i, insertSlots[(size_t) i].buffer.getArrayOfReadPointers(), n);
+        }
+        processInsert (0, n);
+        sink (-1, master.getArrayOfReadPointers(), n);
+
+        if (progress && ! progress (juce::jlimit (0.0, 1.0, (position - fromBeat) / totalBeats)))
+        {
+            ok = false;
+            break;
+        }
+    }
+
+    // Leave the session exactly as it was
+    panicRequest.store (true);
+    position = savedPosition;
+    lastBeat = savedLastBeat;
+    playing.store (savedPlaying);
+    playHead.playing = savedPlaying;
+
+    offlineActive.store (false);
+    return ok;
 }

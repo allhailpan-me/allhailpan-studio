@@ -1304,6 +1304,8 @@ void MainComponent::timerCallback()
     if (recordingMidi)
         collectRecordedMidi();
 
+    checkExportProgress();
+
     if (engine.isCountingIn())
     {
         const int beatsLeft = (int) std::ceil (engine.countInBeatsLeft() - 1.0e-6);
@@ -1360,6 +1362,9 @@ void MainComponent::showFileMenu()
     menu.addItem (item (4, "Save as...", "Ctrl+Shift+S"));
     menu.addItem (item (5, "Save with samples (copies audio beside the project)", {}));
     menu.addSeparator();
+    menu.addItem (item (8, "Export song to WAV...", "", project.songEndBeats() > 0.0));
+    menu.addItem (item (9, "Export stems (one file per mixer insert)...", "", project.songEndBeats() > 0.0));
+    menu.addSeparator();
     menu.addItem (item (6, "Find missing samples" + (missing.isEmpty() ? juce::String() : " (" + juce::String (missing.size()) + ")"),
                         {}, ! missing.isEmpty()));
     menu.addItem (item (7, "Show project in folder", {}, currentFile.existsAsFile()));
@@ -1393,6 +1398,8 @@ void MainComponent::showFileMenu()
                 else                                  self.saveProject (self.currentFile, true);
                 break;
             case 6: self.findMissingSamples(); break;
+            case 8: self.exportAudio (false); break;
+            case 9: self.exportAudio (true); break;
             case 7: self.currentFile.revealToUser(); break;
             default: break;
         }
@@ -1762,4 +1769,131 @@ void MainComponent::requestQuit (std::function<void()> quitNow)
         ProjectIO::autosaveFile().deleteFile();
         if (quitNow) quitNow();
     });
+}
+
+
+// ---------------------------------------------------------------------------
+// Export
+
+void MainComponent::exportAudio (bool stems)
+{
+    if (exportJob != nullptr)
+    {
+        setStatus ("An export is already running.");
+        return;
+    }
+    if (recordingAudio || recordingMidi)
+        finishRecording();
+    engine.stopAndRewind();
+
+    const double songEnd = project.songEndBeats();
+    if (songEnd <= 0.0)
+    {
+        setStatus ("There's nothing in the playlist to export yet.");
+        return;
+    }
+    if (engine.devices().getCurrentAudioDevice() == nullptr)
+    {
+        setStatus ("Open Audio settings and choose a device first: exports use its sample rate.");
+        return;
+    }
+
+    const auto songName = currentFile != juce::File() ? currentFile.getFileNameWithoutExtension() : juce::String ("Untitled");
+    const auto folder   = currentFile != juce::File() ? currentFile.getParentDirectory() : projectsFolder();
+
+    // Which inserts actually carry sound
+    std::vector<int> used;
+    for (int c = 0; c < kNumChannels; ++c)
+        if (engine.getChannelPlugin (c) != nullptr)
+            used.push_back (project.channels[(size_t) c].insert);
+    for (const auto& clip : project.clips)
+        if (clip.isAudio())
+            used.push_back (project.tracks[(size_t) clip.track].insert);
+    std::sort (used.begin(), used.end());
+    used.erase (std::unique (used.begin(), used.end()), used.end());
+    used.erase (std::remove (used.begin(), used.end(), 0), used.end());
+
+    const auto initial = stems ? folder.getChildFile (songName + " stems")
+                               : folder.getChildFile (songName + ".wav");
+
+    chooser = std::make_unique<juce::FileChooser> (stems ? "Choose a folder for the stems" : "Export the song as WAV",
+                                                   initial, stems ? juce::String() : juce::String ("*.wav"));
+
+    const int chooserFlags = stems
+        ? (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectDirectories)
+        : (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+           | juce::FileBrowserComponent::warnAboutOverwriting);
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    chooser->launchAsync (chooserFlags, [safeThis, stems, used, songEnd, songName] (const juce::FileChooser& fc)
+    {
+        const auto chosen = fc.getResult();
+        if (safeThis == nullptr || chosen == juce::File())
+            return;
+        auto& self = *safeThis;
+
+        juce::File masterFile;
+        std::vector<std::pair<int, juce::File>> stemFiles;
+
+        if (stems)
+        {
+            chosen.createDirectory();
+            masterFile = chosen.getChildFile (songName + " (full mix).wav");
+            for (int index : used)
+            {
+                auto name = self.engine.insert (index).name.replaceCharacters ("\\/:*?\"<>|", "         ").trim();
+                if (name.isEmpty())
+                    name = "Insert " + juce::String (index);
+                stemFiles.emplace_back (index, chosen.getChildFile (name + ".wav"));
+            }
+        }
+        else
+        {
+            masterFile = chosen.hasFileExtension ("wav") ? chosen : chosen.withFileExtension ("wav");
+        }
+
+        self.exportJob = std::make_unique<ExportJob> (self.engine, songEnd, self.engine.getSampleRate(),
+                                                      masterFile, std::move (stemFiles), stems);
+        self.exportJob->startThread();
+        self.setStatus ("Exporting...");
+    });
+}
+
+void MainComponent::checkExportProgress()
+{
+    if (exportJob == nullptr)
+        return;
+
+    if (! exportJob->done.load())
+    {
+        setStatus ("Exporting... " + juce::String (juce::roundToInt (exportJob->progress.load() * 100.0)) + "%");
+        return;
+    }
+
+    auto job = std::move (exportJob);      // finished: take it off the field
+    job->stopThread (2000);
+
+    if (job->problem.isNotEmpty())
+    {
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                          .withIconType (juce::MessageBoxIconType::WarningIcon)
+                                          .withTitle ("Export problem")
+                                          .withMessage (job->problem)
+                                          .withButton ("OK"),
+                                      nullptr);
+        setStatus ("Export failed.");
+        return;
+    }
+
+    if (! job->succeeded.load())
+    {
+        setStatus ("Export stopped early.");
+        return;
+    }
+
+    const auto file = job->getMasterFile();
+    setStatus (job->exportedStems()
+                   ? "Exported the mix and " + juce::String (job->numStems()) + " stems to " + file.getParentDirectory().getFullPathName()
+                   : "Exported to " + file.getFullPathName());
+    file.revealToUser();
 }

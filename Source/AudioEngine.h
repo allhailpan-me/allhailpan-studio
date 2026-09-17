@@ -157,6 +157,17 @@ public:
     void drainRecordedParams (std::vector<RecordedParam>& out);
     void pushRecordedParam (int index, float value);   // any thread
 
+    // ---- offline export ----
+    // Renders the arrangement faster than real time. The live audio goes quiet
+    // while this runs. sink is called per block with -1 for the master mix, or
+    // the insert number for a stem.
+    using RenderSink = std::function<void (int insertOrMaster, const float* const* data, int numSamples)>;
+    bool renderOffline (double fromBeat, double toBeat, double tailSeconds,
+                        const std::vector<int>& stemInserts,
+                        const RenderSink& sink,
+                        const std::function<bool (double)>& progress);
+    bool isRenderingOffline() const noexcept { return offlineActive.load(); }
+
     // ---- AudioIODeviceCallback ----
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,
                                            float* const* outputChannelData, int numOutputChannels,
@@ -262,6 +273,7 @@ private:
 
     std::atomic<bool>   playing { false }, rewind { false }, metronome { true };
     std::atomic<bool>   panicRequest { false }, snapshotChanged { false }, countingIn { false };
+    std::atomic<bool>   offlineActive { false };
     std::atomic<double> countInEnd { -1.0e9 };
     std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0e9 }, songEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
