@@ -15,7 +15,7 @@ namespace
         return juce::String (bar) + ":" + juce::String (beat) + ":" + juce::String (tick).paddedLeft ('0', 2);
     }
 
-    enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth };
+    enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth, recInstrument, recInstrumentMidi };
 }
 
 MainComponent::MainComponent()
@@ -33,12 +33,24 @@ MainComponent::MainComponent()
     recordButton.setTooltip ("Record (Ctrl+R)");
 
     recordMode.addItem ("Rec: Auto", recAuto);
-    recordMode.addItem ("Rec: Audio", recAudio);
+    recordMode.addItem ("Rec: Input audio", recAudio);
     recordMode.addItem ("Rec: MIDI + automation", recMidi);
-    recordMode.addItem ("Rec: Audio + MIDI", recBoth);
+    recordMode.addItem ("Rec: Input audio + MIDI", recBoth);
+    recordMode.addItem ("Rec: Instrument sound", recInstrument);
+    recordMode.addItem ("Rec: Instrument sound + MIDI", recInstrumentMidi);
     recordMode.setSelectedId (plugins.settings().getIntValue ("recordMode", recAuto), juce::dontSendNotification);
     recordMode.onChange = [this] { plugins.settings().setValue ("recordMode", recordMode.getSelectedId()); };
-    recordMode.setTooltip ("Auto records MIDI when the selected channel has an instrument, otherwise audio from your interface");
+    recordMode.setTooltip ("Auto records the selected channel's sound and its MIDI when an instrument is loaded,\n"
+                           "otherwise audio from your interface.\n"
+                           "\"Instrument sound\" captures whatever the plugin makes, including notes you play with the\n"
+                           "mouse inside its own window, which never reach the app as MIDI.");
+
+    countInBox.addItem ("Count: off", 1);
+    countInBox.addItem ("Count: 1 bar", 2);
+    countInBox.addItem ("Count: 2 bars", 3);
+    countInBox.setSelectedId (plugins.settings().getIntValue ("countIn", 1), juce::dontSendNotification);
+    countInBox.onChange = [this] { plugins.settings().setValue ("countIn", countInBox.getSelectedId()); };
+    countInBox.setTooltip ("Counts you in with the metronome before recording starts. The song stays silent during the count.");
 
     clickButton.setToggleState (engine.isMetronomeOn(), juce::dontSendNotification);
     clickButton.onClick = [this]
@@ -184,7 +196,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
-                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode),
+                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&mixerTab),
                      static_cast<juce::Component*> (&audioButton), static_cast<juce::Component*> (&pluginsButton),
@@ -289,9 +301,15 @@ void MainComponent::stopAll()
 
     if (wasIdle)
     {
-        // Pressing Stop again is a panic button: silence anything still ringing
+        // Pressing Stop again is a panic button: silence anything still ringing,
+        // reset the instruments themselves (for plugins that drone on regardless
+        // of note-offs), and send the start marker back to the beginning.
         engine.panic();
-        setStatus ("Stopped every note.");
+        engine.resetInstruments();
+        engine.setSongStart (0.0);
+        engine.stopAndRewind();
+        playlist.refresh();
+        setStatus ("Stopped every note, reset the instruments, and moved the start back to the beginning.");
     }
     engine.keyboard().allNotesOff (0);
     engine.stopPreview();
@@ -347,24 +365,40 @@ void MainComponent::toggleRecord()
     auto* device      = engine.devices().getCurrentAudioDevice();
     const bool hasInput = device != nullptr && ! device->getActiveInputChannels().isZero();
 
-    bool wantAudio = false, wantMidi = false;
+    bool wantInput = false, wantInstrument = false, wantMidi = false;
     switch (recordMode.getSelectedId())
     {
-        case recAudio: wantAudio = true; break;
-        case recMidi:  wantMidi = true; break;
-        case recBoth:  wantAudio = true; wantMidi = true; break;
-        default:       wantMidi = instrument != nullptr; wantAudio = ! wantMidi; break;
+        case recAudio:          wantInput = true; break;
+        case recMidi:           wantMidi = true; break;
+        case recBoth:           wantInput = true; wantMidi = true; break;
+        case recInstrument:     wantInstrument = true; break;
+        case recInstrumentMidi: wantInstrument = true; wantMidi = true; break;
+        default:
+            // Auto: an instrument records as MIDI, so it stays editable and the
+            // sound can still be changed afterwards. Notes played inside the
+            // plugin's own window are captured too, if it sends them out.
+            if (instrument != nullptr) wantMidi = true;
+            else                       wantInput = true;
+            break;
     }
 
-    if (wantMidi && instrument == nullptr)
+    if ((wantMidi || wantInstrument) && instrument == nullptr)
     {
-        if (! wantAudio) { setStatus ("Load an instrument on channel " + juce::String (channel + 1) + " to record MIDI."); return; }
-        wantMidi = false;
+        if (! wantInput)
+        {
+            setStatus ("Load an instrument on channel " + juce::String (channel + 1) + " first, or record your input instead.");
+            return;
+        }
+        wantMidi = wantInstrument = false;
     }
-    if (wantAudio && ! hasInput)
+    if (wantInput && ! hasInput)
     {
-        if (! wantMidi) { setStatus ("No input is switched on. Open Audio settings and enable an input channel."); return; }
-        wantAudio = false;
+        if (! wantMidi && ! wantInstrument)
+        {
+            setStatus ("No input is switched on. Open Audio settings and enable an input channel.");
+            return;
+        }
+        wantInput = false;
     }
 
     int armed = project.firstArmedTrack();
@@ -373,30 +407,45 @@ void MainComponent::toggleRecord()
         armed = project.firstEmptyTrackFrom (0);
         project.tracks[(size_t) armed].armed = true;
     }
+    const bool recordingSomeAudio = wantInput || wantInstrument;
     audioTrack  = armed;
-    midiTrack   = wantAudio ? project.firstEmptyTrackFrom (armed + 1) : armed;
+    midiTrack   = recordingSomeAudio ? project.firstEmptyTrackFrom (armed + 1) : armed;
     midiChannel = channel;
 
     takeNotes.clear();
     heldNotes.clear();
     takeLanes.clear();
 
+    const double countBeats = (countInBox.getSelectedId() - 1) * 4.0;
+
     engine.stopAndRewind();
-    if (wantAudio)
+    engine.setRecordSource (wantInstrument ? channel : -1);
+    if (recordingSomeAudio)
         engine.startAudioRecording();
     if (wantMidi)
     {
+        paramRecorder.reset();
         engine.startMidiRecording (channel);
         recordingPlugin = instrument;
+        recordingPluginProducesMidi = instrument->producesMidi();
         recordingPlugin->addListener (&paramRecorder);
     }
-    recordingAudio = wantAudio;
-    recordingMidi  = wantMidi;
-    engine.setPlaying (true);
+
+    recordingAudio      = recordingSomeAudio;
+    recordingInstrument = wantInstrument;
+    recordingMidi       = wantMidi;
+
+    if (countBeats > 0.0)
+        engine.startWithCountIn (engine.getSongStart(), countBeats);
+    else
+        engine.setPlaying (true);
     project.changed();
 
-    juce::String what = wantAudio && wantMidi ? "audio and MIDI" : wantAudio ? "audio" : "MIDI and automation";
-    setStatus ("Recording " + what + ". Press Space or Stop to finish.");
+    juce::String what = wantInstrument ? (wantMidi ? "this channel's sound, its notes and its knob moves" : "this channel's sound")
+                      : wantInput      ? (wantMidi ? "your input and MIDI" : "your input")
+                                       : "MIDI and automation";
+    setStatus (countBeats > 0.0 ? "Counting in, then recording " + what + "..."
+                                : "Recording " + what + ". Press Space or Stop to finish.");
 }
 
 void MainComponent::collectRecordedMidi()
@@ -490,9 +539,24 @@ void MainComponent::finishRecording()
             project.selection = { id };
             pianoRoll.setClip (id);
 
-            setStatus ("Recorded " + juce::String ((int) pattern->notes.size()) + " notes and "
-                       + juce::String ((int) pattern->lanes.size()) + " automation lanes onto "
-                       + project.tracks[(size_t) midiTrack].name + ". Double-click the clip to edit it.");
+            juce::String message = "Recorded " + juce::String ((int) pattern->notes.size()) + " notes and "
+                                 + juce::String ((int) pattern->lanes.size()) + " automation lanes onto "
+                                 + project.tracks[(size_t) midiTrack].name + ". Double-click the clip to edit it.";
+            if (pattern->notes.empty())
+            {
+                const bool announces = recordingPluginProducesMidi;
+                message << (announces
+                    ? "  (The plugin offers a MIDI output but sent nothing. Check its own MIDI settings.)"
+                    : "  (This plugin has no MIDI output, so notes played inside its window can't be recorded. "
+                      "Use Rec: Instrument sound to capture them as audio.)");
+            }
+            else if (engine.getPluginMidiCaptured() > 0)
+            {
+                message << "  (" + juce::String (engine.getPluginMidiCaptured()) + " of those came from the plugin itself.)";
+            }
+            if (pattern->lanes.empty() && ! paramRecorder.sawGesture)
+                message << "  (This plugin doesn't tell the app when you grab a knob, so its moves weren't recorded.)";
+            setStatus (message);
         }
         else
         {
@@ -509,13 +573,18 @@ void MainComponent::finishRecording()
     if (recordingAudio)
     {
         recordingAudio = false;
+        recordingInstrument = false;
+        engine.setRecordSource (-1);
         auto take = engine.stopAudioRecording();
         if (take.has_value())
         {
             const double sampleRate = engine.getSampleRate();
-            const double latency    = engine.getRoundTripLatencySamples() / sampleRate;
+            const double latency    = recordingInstrument ? 0.0 : engine.getRoundTripLatencySamples() / sampleRate;
+            const auto   name       = recordingInstrument && project.channels[(size_t) midiChannel].name.isNotEmpty()
+                                          ? project.channels[(size_t) midiChannel].name + " take "
+                                          : juce::String ("Take ");
             const auto   file       = BrowserPanel::recordingsFolder()
-                                          .getChildFile ("Take " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav");
+                                          .getChildFile (name + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav");
 
             const bool   saved     = writeWavFile (file, take->audio, sampleRate);
             const double startBeat = take->startBeat;
@@ -768,6 +837,11 @@ void MainComponent::loadInstrument (const juce::PluginDescription& description)
             safeThis->project.channels[(size_t) channel].name = name;
             safeThis->refreshChannelControls();
             safeThis->openPluginWindow (*raw);
+
+            if (! raw->producesMidi())
+                safeThis->setStatus (name + " doesn't send MIDI out, so notes you play inside its own window can't be "
+                                            "recorded as notes. Everything you play from a keyboard is fine, and "
+                                            "\"Rec: Instrument sound\" captures the rest as audio.");
 
             const int buses = safeThis->engine.getChannelOutputBuses (channel);
             if (buses > 1)
@@ -1104,20 +1178,21 @@ void MainComponent::resized()
     auto bar = topBar.reduced (10, 10);
     logo.setBounds (topBar.getX() + 8, topBar.getY() + 3, 38, topBar.getHeight() - 6);
     bar.removeFromLeft (40 + 132);                          // logo + wordmark
-    fileButton  .setBounds (bar.removeFromLeft (52));  bar.removeFromLeft (10);
+    fileButton  .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (10);
     playButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     stopButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     recordButton.setBounds (bar.removeFromLeft (50));  bar.removeFromLeft (4);
-    recordMode  .setBounds (bar.removeFromLeft (150)); bar.removeFromLeft (10);
-    clock       .setBounds (bar.removeFromLeft (96));  bar.removeFromLeft (10);
-    tempoLabel  .setBounds (bar.removeFromLeft (48));
-    tempo       .setBounds (bar.removeFromLeft (84));  bar.removeFromLeft (6);
-    clickButton .setBounds (bar.removeFromLeft (54));  bar.removeFromLeft (18);
-    playlistTab .setBounds (bar.removeFromLeft (76));
-    pianoTab    .setBounds (bar.removeFromLeft (86));
-    mixerTab    .setBounds (bar.removeFromLeft (62));
-    pluginsButton.setBounds (bar.removeFromRight (74)); bar.removeFromRight (6);
-    audioButton  .setBounds (bar.removeFromRight (116)); bar.removeFromRight (14);
+    recordMode  .setBounds (bar.removeFromLeft (140)); bar.removeFromLeft (4);
+    countInBox  .setBounds (bar.removeFromLeft (112)); bar.removeFromLeft (10);
+    clock       .setBounds (bar.removeFromLeft (86));  bar.removeFromLeft (10);
+    tempoLabel  .setBounds (bar.removeFromLeft (42));
+    tempo       .setBounds (bar.removeFromLeft (78));  bar.removeFromLeft (6);
+    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (18);
+    playlistTab .setBounds (bar.removeFromLeft (72));
+    pianoTab    .setBounds (bar.removeFromLeft (80));
+    mixerTab    .setBounds (bar.removeFromLeft (58));
+    pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
+    audioButton  .setBounds (bar.removeFromRight (104)); bar.removeFromRight (14);
     redoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (4);
     undoButton   .setBounds (bar.removeFromRight (54));
 
@@ -1229,7 +1304,17 @@ void MainComponent::timerCallback()
     if (recordingMidi)
         collectRecordedMidi();
 
-    clock.setText (formatPosition (engine.getBeatPosition()), juce::dontSendNotification);
+    if (engine.isCountingIn())
+    {
+        const int beatsLeft = (int) std::ceil (engine.countInBeatsLeft() - 1.0e-6);
+        clock.setText (juce::String (std::max (1, beatsLeft)), juce::dontSendNotification);
+        clock.setColour (juce::Label::textColourId, Ahp::rec);
+    }
+    else
+    {
+        clock.setText (formatPosition (engine.getBeatPosition()), juce::dontSendNotification);
+        clock.setColour (juce::Label::textColourId, Ahp::bone);
+    }
     recordButton.setToggleState (recordingAudio || recordingMidi, juce::dontSendNotification);
     playButton.setToggleState (engine.isPlaying(), juce::dontSendNotification);
 

@@ -36,13 +36,47 @@ public:
 private:
     enum class View { playlist, pianoRoll };
 
-    // Records parameter moves from the plugin being recorded
+    // Records parameter moves from the plugin being recorded.
+    // Only knobs the user actually grabs are recorded: plugins like Synplant
+    // animate their own parameters constantly, and recording that flood would
+    // play back as nonsense.
     struct ParamRecorder : public juce::AudioProcessorListener
     {
         explicit ParamRecorder (AudioEngine& e) : engine (e) {}
-        void audioProcessorParameterChanged (juce::AudioProcessor*, int index, float value) override { engine.pushRecordedParam (index, value); }
+
+        void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor*, int index) override
+        {
+            const juce::SpinLock::ScopedLockType lock (gestureLock);
+            held.insert (index);
+            sawGesture = true;
+        }
+        void audioProcessorParameterChangeGestureEnd (juce::AudioProcessor*, int index) override
+        {
+            const juce::SpinLock::ScopedLockType lock (gestureLock);
+            held.erase (index);
+        }
+        void audioProcessorParameterChanged (juce::AudioProcessor*, int index, float value) override
+        {
+            {
+                const juce::SpinLock::ScopedLockType lock (gestureLock);
+                if (held.count (index) == 0)
+                    return;                      // the plugin moved it, not the user
+            }
+            engine.pushRecordedParam (index, value);
+        }
         void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+
+        void reset()
+        {
+            const juce::SpinLock::ScopedLockType lock (gestureLock);
+            held.clear();
+            sawGesture = false;
+        }
+
         AudioEngine& engine;
+        juce::SpinLock gestureLock;
+        std::set<int>  held;
+        bool sawGesture = false;
     };
 
     // Notices when the user tweaks any plugin, so the project counts as changed
@@ -126,7 +160,7 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
-    juce::ComboBox   recordMode;
+    juce::ComboBox   recordMode, countInBox;
     juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };
     juce::TextButton undoButton { "Undo" }, redoButton { "Redo" }, fileButton { "File" };
@@ -160,9 +194,10 @@ private:
     juce::RecentlyOpenedFilesList recent;
 
     // recording state
-    bool   recordingAudio = false, recordingMidi = false;
+    bool   recordingAudio = false, recordingMidi = false, recordingInstrument = false;
     int    audioTrack = 0, midiTrack = 0, midiChannel = 0;
     juce::AudioPluginInstance* recordingPlugin = nullptr;
+    bool recordingPluginProducesMidi = false;
     std::vector<MidiNote> takeNotes;                    // absolute beats
     std::map<int, std::pair<double, float>> heldNotes;  // note -> (start, velocity)
     std::map<int, AutoLane> takeLanes;                  // param index -> lane (absolute beats)

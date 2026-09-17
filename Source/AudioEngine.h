@@ -30,10 +30,23 @@ public:
     // ---- transport ----
     void setPlaying (bool shouldPlay) noexcept   { playing.store (shouldPlay); }
     bool isPlaying() const noexcept              { return playing.load(); }
-    void stopAndRewind() noexcept                { playing.store (false); rewind.store (true); }
+    void stopAndRewind() noexcept                { playing.store (false); rewind.store (true); cancelCountIn(); }
     void   setSongStart (double beat) noexcept   { songStart.store (std::max (0.0, beat)); }
     double getSongStart() const noexcept         { return songStart.load(); }
     void   locate (double beat) noexcept         { locateRequest.store (std::max (0.0, beat)); }
+
+    // Count-in: the metronome counts the bars in while the song stays silent,
+    // then playback and recording begin exactly at startBeat.
+    void startWithCountIn (double startBeat, double countBeats) noexcept
+    {
+        countInEnd.store (countBeats > 0.0 ? startBeat : -1.0e9);
+        countingIn.store (countBeats > 0.0);
+        locateRequest.store (startBeat - countBeats);
+        playing.store (true);
+    }
+    void cancelCountIn() noexcept   { countInEnd.store (-1.0e9); countingIn.store (false); }
+    bool isCountingIn() const noexcept { return countingIn.load() && playing.load(); }
+    double countInBeatsLeft() const noexcept { return std::max (0.0, countInEnd.load() - beatPosition.load()); }
 
     void   setBpm (double newBpm) noexcept       { bpm.store (juce::jlimit (20.0, 400.0, newBpm)); }
     double getBpm() const noexcept               { return bpm.load(); }
@@ -59,6 +72,9 @@ public:
     void setSelectedChannel (int channel) noexcept { selectedChannel.store (juce::jlimit (0, kNumChannels - 1, channel)); }
     // Stops every sounding note everywhere (the classic DAW panic button)
     void panic() noexcept { panicRequest.store (true); }
+    // Rebuilds every instrument's audio state. Stops plugins that keep making
+    // sound even after being told to stop. Settings and windows are untouched.
+    void resetInstruments();
     int  getSelectedChannel() const noexcept       { return selectedChannel.load(); }
 
     // ---- mixer ----
@@ -119,6 +135,10 @@ public:
     void stopPreview() { preview (nullptr); }
 
     // ---- recording ----
+    // Records either the interface input (-1) or an instrument channel's own
+    // output, which is the only way to capture plugins you play with the mouse.
+    void setRecordSource (int channel) noexcept { recordSource.store (channel); }
+    int  getRecordSource() const noexcept       { return recordSource.load(); }
     void startAudioRecording()                         { recorder.begin(); }
     std::optional<Recorder::Take> stopAudioRecording() { return recorder.end(); }
     bool isRecordingAudio() const noexcept             { return recorder.isActive(); }
@@ -128,6 +148,8 @@ public:
     bool isRecordingMidi() const noexcept              { return midiRecording.load(); }
     int  getMidiRecordChannel() const noexcept         { return midiRecordChannel.load(); }
     double getMidiRecordStartBeat() const noexcept     { return midiRecordStart.load(); }
+    // How many MIDI messages the recorded plugin sent back to us
+    int  getPluginMidiCaptured() const noexcept        { return pluginMidiCaptured.load(); }
 
     struct RecordedMidi  { double beat = 0.0; juce::uint8 bytes[3] {}; int size = 0; };
     struct RecordedParam { double beat = 0.0; int index = 0; float value = 0.0f; };
@@ -203,6 +225,7 @@ private:
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
     void trackLiveMessage (int slot, const juce::MidiMessage&);
+    void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
     void renderPreview (float* left, float* right, int numSamples);
 
@@ -229,6 +252,7 @@ private:
     std::atomic<bool>   midiRecording { false };
     std::atomic<int>    midiRecordChannel { 0 };
     std::atomic<double> midiRecordStart { -1.0 };
+    std::atomic<int>    pluginMidiCaptured { 0 };
     static constexpr int recCapacity = 8192;
     std::vector<RecordedMidi>  midiRing  = std::vector<RecordedMidi> (recCapacity);
     juce::AbstractFifo         midiFifo { recCapacity };
@@ -237,10 +261,11 @@ private:
     juce::SpinLock             paramWriteLock;
 
     std::atomic<bool>   playing { false }, rewind { false }, metronome { true };
-    std::atomic<bool>   panicRequest { false }, snapshotChanged { false };
-    std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0 }, songEnd { 0.0 };
+    std::atomic<bool>   panicRequest { false }, snapshotChanged { false }, countingIn { false };
+    std::atomic<double> countInEnd { -1.0e9 };
+    std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0e9 }, songEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
-    std::atomic<int>    selectedChannel { 0 };
+    std::atomic<int>    selectedChannel { 0 }, recordSource { -1 };
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;
@@ -250,12 +275,16 @@ private:
     std::vector<juce::uint8> clipNotes = std::vector<juce::uint8> ((size_t) kNumChannels * 128);
     std::vector<juce::uint8> liveNotes = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels * 128);
     int liveChannel = 0;
+    // What we sent into the recorded plugin this block, so notes it echoes back
+    // aren't recorded twice
+    std::array<juce::uint32, 128> sentToPlugin {};
+    int sentToPluginCount = 0;
 
     double position = 0.0;
     juce::int64 lastBeat = -1;
     bool   wasRunning = false;
     std::vector<double> blockBeats;
-    std::vector<float>  clickBuffer;
+    std::vector<float>  clickBuffer, silence;
     int    clickSamplesLeft = 0;
     double clickPhase = 0.0, clickFreq = 1000.0, clickDecay = 0.999;
     float  clickAmp = 0.0f;

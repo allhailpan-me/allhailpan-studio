@@ -139,14 +139,22 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
 
     resetButton.onClick = [this]
     {
-        if (auto* c = singleSelected(); c != nullptr && c->isAudio())
+        auto* c = singleSelected();
+        if (c == nullptr)
+            return;
+
+        if (c->isAudio())
         {
             c->pitch = 0.0;
             c->stretch = 1.0;
             c->gainDb = 0.0f;
-            project.changed();
-            updateClipBar();
         }
+        else if (c->pattern != nullptr)
+        {
+            c->pattern->lanes.clear();     // drop recorded knob moves
+        }
+        project.changed();
+        updateClipBar();
     };
     openRollButton.onClick = [this]
     {
@@ -244,6 +252,8 @@ void PlaylistComponent::layoutClipBar (juce::Rectangle<int> r)
     auto midiRow = pitchLabel.getBounds().getUnion (pitchSlider.getBounds());
     channelBox.setBounds (midiRow.withWidth (220));
     openRollButton.setBounds (stretchLabel.getBounds().getUnion (stretchSlider.getBounds()).withWidth (140));
+    if (! pitchSlider.isVisible())
+        resetButton.setBounds (gainLabel.getBounds().getUnion (gainSlider.getBounds()).withTrimmedLeft (210).withWidth (90));
 
     clipStatus.setBounds (r);
 }
@@ -265,9 +275,11 @@ void PlaylistComponent::updateClipBar()
     clipName.setVisible (c != nullptr);
     clipStatus.setVisible (c != nullptr || project.selection.size() > 1);
     for (auto* comp : { static_cast<juce::Component*> (&pitchLabel), static_cast<juce::Component*> (&pitchSlider),
-                        static_cast<juce::Component*> (&stretchLabel), static_cast<juce::Component*> (&stretchSlider),
-                        static_cast<juce::Component*> (&resetButton) })
+                        static_cast<juce::Component*> (&stretchLabel), static_cast<juce::Component*> (&stretchSlider) })
         comp->setVisible (audio);
+
+    resetButton.setVisible (audio || (midi && c->pattern != nullptr && ! c->pattern->lanes.empty()));
+    resetButton.setButtonText (audio ? "Reset" : "Clear auto");
     gainLabel.setVisible (c != nullptr);
     gainSlider.setVisible (c != nullptr);
     channelBox.setVisible (midi);

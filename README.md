@@ -69,7 +69,7 @@ cmake --build build --parallel
 **Views:** Playlist (**F5**), Piano roll (**F7**), Mixer (**F9**), switched with the tabs at the top.
 
 ### Transport
-- **Space** plays and pauses. **Stop** returns to the start marker. Pressing **Stop** again when already stopped is a panic button: it silences any note still ringing.
+- **Space** plays and pauses. **Stop** returns to the start marker. Pressing **Stop** again when already stopped does three things: silences every note, resets the instruments (which also stops plugins that drone on regardless of note-offs), and sends the start marker back to the beginning, so the next **Play** starts from bar 1. Clicking the ruler or an empty spot afterwards sets a new start point as usual.
 - **Click the ruler** to play from that point. Click empty playlist space to move the playhead there; double-click it to play from there.
 - Playback **loops at the end of the last clip**, not the end of the grid. The faint line in the playlist marks that point.
 
@@ -104,10 +104,13 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 
 ### Recording
 - Choose the mode next to **Rec**:
-  - **Auto** records MIDI if the selected channel has an instrument, otherwise audio.
-  - **Audio**, **MIDI + automation**, or **Audio + MIDI**.
+  - **Auto** records MIDI if the selected channel has an instrument, otherwise audio from your interface.
+  - **Input audio**, **MIDI + automation**, **Input audio + MIDI**.
+  - **Instrument sound** (and **Instrument sound + MIDI**) records the channel's own output as audio. Use it for plugins that make sound the app can't capture as notes.
+- **Notes played inside a plugin's window** are recorded too, but only if the plugin offers a MIDI output. The app checks when you load it and says so if it doesn't, and the status bar reports how many notes came from the plugin after each take. Synplant does: clicking and dragging its branches plays notes and transmits them, so they land in the piano roll and stay editable. Anything the plugin passes straight through from your keyboard isn't recorded twice.
+- **Count-in:** the box next to the mode counts you in with the metronome for 1 or 2 bars before recording starts. The song stays silent during the count, the clock counts down in red, and recording begins exactly on the start marker. It's remembered between sessions.
 - Press **Rec** (**Ctrl+R**). It records onto the armed track, or the first empty one.
-- MIDI recording captures the notes you play **and every knob you move in the plugin's window**. The result is a MIDI clip; double-click it to open the piano roll.
+- MIDI recording captures the notes you play **and every knob you grab in the plugin's window**. Only knobs you actually move are recorded: plugins that animate their own controls (Synplant, for one) would otherwise fill the clip with noise. Some plugins don't report knob grabs at all, and the status bar says so after recording. The result is a MIDI clip; double-click it to open the piano roll.
 - Audio takes are saved as 24-bit WAV in `Documents/ALLHAILPAN Studio/Recordings`, lined up for your interface's latency.
 
 ### Playlist
@@ -118,7 +121,7 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 - **Snap** runs from Bar down to 1/6 step or None; hold **Alt** to ignore it. **Ctrl+scroll** zooms.
 - **Clip bar** (bottom), for one selected clip:
   - Audio clips: **Pitch** (±24 semitones), **Stretch**, **Gain**, **Reset**.
-  - MIDI clips: which channel the clip plays, and a button to open it.
+  - MIDI clips: which channel the clip plays, a button to open it, and **Clear auto** to delete recorded knob moves.
 - Stretching and pitch use Rubber Band's highest-quality engine. It renders in the background, and a quick preview plays until the render is done.
 - Right-click a track name to send its audio to a mixer insert, arm it, or mute it.
 
@@ -175,3 +178,19 @@ Third-party components:
 - [Rubber Band Library](https://breakfastquay.com/rubberband/) by Particular Programs Ltd, GPL v2 or later (downloaded at build time)
 
 The ALLHAILPAN name and logo are not covered by the code license. See `TRADEMARKS.md`.
+
+## Making a release build
+
+The Debug build is for development. For a program you can keep or share, build Release:
+
+1. In Visual Studio, change the configuration dropdown in the toolbar from **x64-Debug** to **x64-Release**.
+2. Wait for CMake to finish, then **Build > Build All** (Ctrl+Shift+B).
+3. The app appears at `out\build\x64-Release\AllHailPanStudio_artefacts\Release\ALLHAILPAN Studio.exe`.
+
+That .exe is self-contained: the C++ runtime is linked in, so it runs on a machine with no Visual Studio installed. Copy it anywhere, pin it to the taskbar, and it will find your audio device and plugin list through the settings it stores in your user folder.
+
+If you share the .exe, AGPLv3 requires the matching source to be available to whoever receives it. Publishing it from this repository's Releases page satisfies that.
+
+## Contributing
+
+Bug reports, workflow complaints, plugin testing and code are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).

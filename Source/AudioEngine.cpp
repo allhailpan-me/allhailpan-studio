@@ -104,6 +104,23 @@ void AudioEngine::setChannelInsert (int channel, int insertIndex) noexcept
         channelSlots[(size_t) channel].insert.store (juce::jlimit (0, kNumInserts - 1, insertIndex));
 }
 
+void AudioEngine::resetInstruments()
+{
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    for (auto& c : channelSlots)
+    {
+        if (c.plugin == nullptr)
+            continue;
+        c.plugin->suspendProcessing (true);
+        c.plugin->reset();
+        c.plugin->releaseResources();
+        preparePlugin (*c.plugin);
+        c.plugin->suspendProcessing (false);
+    }
+    std::fill (clipNotes.begin(), clipNotes.end(), (juce::uint8) 0);
+    std::fill (liveNotes.begin(), liveNotes.end(), (juce::uint8) 0);
+}
+
 void AudioEngine::setChannelSumsOutputs (int channel, bool shouldSum) noexcept
 {
     if (juce::isPositiveAndBelow (channel, kNumChannels))
@@ -190,6 +207,7 @@ void AudioEngine::startMidiRecording (int channel)
         paramFifo.reset();
     }
     midiRecordChannel.store (juce::jlimit (0, kNumChannels - 1, channel));
+    pluginMidiCaptured.store (0);
     midiRecordStart.store (-1.0);
     midiRecording.store (true);
 }
@@ -236,6 +254,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const int cap = bufferCapacity();
     blockBeats.assign ((size_t) cap, 0.0);
     clickBuffer.assign ((size_t) cap, 0.0f);
+    silence.assign ((size_t) cap, 0.0f);
 
     const juce::SpinLock::ScopedLockType lock (graphLock);
     for (auto& c : channelSlots)
@@ -299,8 +318,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         lastBeat = -1;
         jumped = true;
     }
-    const double jumpTo = locateRequest.exchange (-1.0);
-    if (jumpTo >= 0.0)
+    const double jumpTo = locateRequest.exchange (-1.0e9);
+    if (jumpTo > -1.0e8)
     {
         position = jumpTo;
         lastBeat = -1;
@@ -308,10 +327,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     const bool   isRunning      = playing.load();
-    const bool   clickOn        = metronome.load();
+    const double countEnd       = countInEnd.load();
+    const bool   counting       = isRunning && position < countEnd;
+    if (! counting && countingIn.load())
+        cancelCountIn();                       // the count reached the record point
+    const bool   clickOn        = metronome.load() || counting;
     const double currentBpm     = bpm.load();
     const double beatsPerSample = currentBpm / 60.0 / sampleRate;
     const bool   recording      = recorder.isActive() || midiRecording.load();
+    const bool   sequencing     = isRunning && ! counting;   // clips stay quiet during the count
     const double loopEnd        = songEnd.load();
     const int    slots          = (int) blockBeats.size();
     const int    n              = std::min (numSamples, slots);
@@ -323,8 +347,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     keyboardState.processNextMidiBuffer (liveMidi, 0, numSamples, true);
 
     // ---- audio recording tap ----
-    if (isRunning && numInputChannels > 0)
+    const int recordFrom = recordSource.load();
+    bool recordingTapped = false;
+    if (sequencing && recordFrom < 0 && numInputChannels > 0)
+    {
         recorder.push (inputChannelData[0], numInputChannels > 1 ? inputChannelData[1] : nullptr, numSamples, position);
+        recordingTapped = true;
+    }
 
     // ---- playhead, loop, metronome ----
     bool wrapped = false;
@@ -336,7 +365,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (isRunning)
         {
             // Loop at the end of the last clip (not while recording)
-            if (! recording && loopEnd > 0.0 && position >= loopEnd)
+            if (! recording && ! counting && loopEnd > 0.0 && position >= loopEnd)
             {
                 position = 0.0;
                 lastBeat = -1;
@@ -373,7 +402,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     wasRunning = isRunning;
 
     // ---- MIDI recording tap ----
-    if (midiRecording.load() && isRunning && n > 0)
+    if (midiRecording.load() && sequencing && n > 0)
     {
         if (midiRecordStart.load() < 0.0)
             midiRecordStart.store (blockStartBeat);
@@ -413,18 +442,35 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             for (auto& ins : insertSlots)
                 ins.buffer.clear (0, numSamples);
 
-            scheduleMidi (numSamples, sendAllOff, isRunning);
-            if (isRunning)
+            scheduleMidi (numSamples, sendAllOff, sequencing);
+            if (sequencing)
                 applyAutomation (blockStartBeat);
 
             // instruments
-            for (auto& c : channelSlots)
+            const int recordingChannel = (midiRecording.load() && sequencing) ? midiRecordChannel.load() : -1;
+            for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
             {
+                auto& c = channelSlots[(size_t) slotIndex];
                 if (c.plugin == nullptr)
                     continue;
+
+                // Remember what goes in, so anything the plugin passes straight
+                // through isn't recorded a second time
+                sentToPluginCount = 0;
+                if (slotIndex == recordingChannel)
+                    for (const auto meta : c.midi)
+                        if (meta.numBytes >= 2 && sentToPluginCount < (int) sentToPlugin.size())
+                            sentToPlugin[(size_t) sentToPluginCount++] =
+                                (juce::uint32) ((meta.data[0] << 8) | meta.data[1]);
+
                 juce::AudioBuffer<float> view (c.buffer.getArrayOfWritePointers(), c.channels, numSamples);
                 view.clear();
                 c.plugin->processBlock (view, c.midi);
+
+                // Notes played inside the plugin's own window (Synplant's branches,
+                // arpeggiators, internal sequencers) come back out here
+                if (slotIndex == recordingChannel)
+                    capturePluginMidi (slotIndex, c.midi, numSamples);
 
                 auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, c.insert.load())].buffer;
                 const int outs = juce::jlimit (1, c.channels, c.plugin->getTotalNumOutputChannels());
@@ -442,7 +488,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
             }
 
-            if (isRunning)
+            // Recording an instrument's own output: tap it before the mixer
+            if (sequencing && recordFrom >= 0 && recorder.isActive()
+                && juce::isPositiveAndBelow (recordFrom, kNumChannels))
+            {
+                auto& source = channelSlots[(size_t) recordFrom].buffer;
+                if (source.getNumChannels() >= 2 && source.getNumSamples() >= numSamples)
+                {
+                    recorder.push (source.getReadPointer (0), source.getReadPointer (1), numSamples, blockStartBeat);
+                    recordingTapped = true;
+                }
+            }
+
+            if (sequencing)
                 renderAudioClips (numSamples);
 
             // inserts into master
@@ -459,6 +517,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (outR != nullptr) std::copy_n (master.getReadPointer (1), numSamples, outR);
         }
     }
+
+    // If the graph was skipped this block, keep the take in time
+    if (sequencing && recordFrom >= 0 && recorder.isActive() && ! recordingTapped
+        && numSamples <= (int) silence.size())
+        recorder.push (silence.data(), silence.data(), numSamples, blockStartBeat);
 
     // ---- preview and metronome (after the master, so mastering FX don't touch them) ----
     if (outL != nullptr)
@@ -534,6 +597,49 @@ void AudioEngine::releaseStaleClipNotes (double beat)
                 row[note] = 0;
             }
         }
+    }
+}
+
+void AudioEngine::capturePluginMidi (int slot, const juce::MidiBuffer& produced, int numSamples)
+{
+    juce::ignoreUnused (slot);
+    const int n = std::min (numSamples, (int) blockBeats.size());
+    if (n <= 0)
+        return;
+
+    for (const auto meta : produced)
+    {
+        if (meta.numBytes < 2 || meta.numBytes > 3)
+            continue;
+
+        // Skip anything we fed in that the plugin simply passed along
+        const auto key = (juce::uint32) ((meta.data[0] << 8) | meta.data[1]);
+        bool echoed = false;
+        for (int i = 0; i < sentToPluginCount; ++i)
+            if (sentToPlugin[(size_t) i] == key)
+            {
+                sentToPlugin[(size_t) i] = 0xffffffff;   // consume one match
+                echoed = true;
+                break;
+            }
+        if (echoed)
+            continue;
+
+        const auto message = juce::MidiMessage (meta.data, meta.numBytes, 0.0);
+        if (! message.isNoteOnOrOff() && ! message.isController() && ! message.isPitchWheel())
+            continue;
+
+        pluginMidiCaptured.fetch_add (1);
+        const auto scope = midiFifo.write (1);
+        const double beat = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
+        scope.forEach ([&] (int index)
+        {
+            auto& r = midiRing[(size_t) index];
+            r.beat = beat;
+            r.size = meta.numBytes;
+            for (int b = 0; b < 3; ++b)
+                r.bytes[b] = b < meta.numBytes ? meta.data[b] : (juce::uint8) 0;
+        });
     }
 }
 
@@ -663,6 +769,8 @@ void AudioEngine::applyAutomation (double beat)
         for (const auto& lane : clip.lanes)
         {
             if (! juce::isPositiveAndBelow (lane.paramIndex, params.size()) || lane.lane.points.empty())
+                continue;
+            if (! params[lane.paramIndex]->isAutomatable())
                 continue;
             const float v = juce::jlimit (0.0f, 1.0f, lane.lane.valueAt (beat));
             auto& last = slot.lastAuto[(size_t) lane.paramIndex];

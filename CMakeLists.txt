@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
+cmake_policy(SET CMP0091 NEW)   # lets us choose the MSVC runtime
 
 project(AllHailPanStudio VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -44,7 +45,16 @@ juce_add_gui_app(AllHailPanStudio
     COMPANY_NAME "AllHailPan"
     BUNDLE_ID    com.allhailpan.studio
     VERSION      ${PROJECT_VERSION}
+    ICON_BIG     "${CMAKE_CURRENT_SOURCE_DIR}/Assets/app_icon.png"
 )
+
+# Release builds should run on any machine, without Visual Studio or the
+# Microsoft runtime installed, so link the C++ runtime into the .exe.
+if(MSVC)
+    set_target_properties(AllHailPanStudio PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_compile_options(AllHailPanStudio PRIVATE $<$<CONFIG:Release>:/O2>)
+endif()
 
 target_sources(AllHailPanStudio PRIVATE
     Source/Main.cpp
