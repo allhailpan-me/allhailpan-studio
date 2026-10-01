@@ -2,16 +2,34 @@
 #include "MainComponent.h"
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
+#include "PluginScanner.h"
 
 class AhpApplication : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override    { return JUCE_APPLICATION_NAME_STRING; }
     const juce::String getApplicationVersion() override { return JUCE_APPLICATION_VERSION_STRING; }
-    bool moreThanOneInstanceAllowed() override          { return false; }
 
-    void initialise (const juce::String&) override
+    /** Only one studio at a time, but plugin scanning launches this same
+        executable as a short lived child. Without this exception JUCE would
+        hand the child's command line to the running studio and quit, and no
+        plugin would ever be scanned. */
+    bool moreThanOneInstanceAllowed() override
     {
+        return getCommandLineParameters().contains (OutOfProcessScanner::scanFlag);
+    }
+
+    void initialise (const juce::String& commandLine) override
+    {
+        // Launched to examine a single plugin? Do that and exit, with no
+        // window and no audio device. If the plugin crashes, only this
+        // throwaway process dies.
+        if (runScanIfRequested (commandLine))
+        {
+            quit();
+            return;
+        }
+
         juce::LookAndFeel::setDefaultLookAndFeel (&lookAndFeel);
         mainWindow = std::make_unique<MainWindow> (getApplicationName());
     }

@@ -1,6 +1,7 @@
 #include "PluginManager.h"
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
+#include "PluginScanner.h"
 
 PluginManager::PluginManager()
 {
@@ -17,6 +18,10 @@ PluginManager::PluginManager()
 
     if (auto xml = settings().getXmlValue ("pluginList"))
         knownPlugins.recreateFromXml (*xml);
+
+    // Plugins are examined in a child process, so one that crashes on load
+    // cannot take the studio down with it.
+    knownPlugins.setCustomScanner (std::make_unique<OutOfProcessScanner>());
 
     knownPlugins.addChangeListener (this);
 }
