@@ -382,7 +382,7 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 if (auto plugin = readPlugin (*hosted, factory, error))
                 {
                     engine.setFx (i, k, std::move (plugin));
-                    ctl.bypass[(size_t) k].store (fx->getBoolAttribute ("bypass"));
+                    engine.setFxBypass (i, k, fx->getBoolAttribute ("bypass"));
                 }
                 else
                 {

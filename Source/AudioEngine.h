@@ -5,6 +5,7 @@
 #include <array>
 #include "Project.h"
 #include "Recorder.h"
+#include "LatencyDelay.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -59,6 +60,11 @@ public:
     int    getBlockSize() const noexcept         { return blockSize; }
     int    getRoundTripLatencySamples();
 
+    /** How far the mixer runs behind the playhead because of look ahead
+        plugins. Added to the interface's own round trip, this is the delay
+        between a note being triggered and it leaving the outputs. */
+    int    getPluginLatencySamples() const noexcept { return totalLatency.load(); }
+
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);
     juce::AudioPluginInstance* getChannelPlugin (int channel) const noexcept;
@@ -90,6 +96,11 @@ public:
     InsertControls& insert (int index) noexcept { return controls[(size_t) juce::jlimit (0, kNumInserts - 1, index)]; }
 
     void setFx (int insert, int slot, std::unique_ptr<juce::AudioPluginInstance>);
+
+    /** Bypassing changes how long that insert's path is, so it goes through
+        here rather than the atomic directly: delay compensation is recomputed
+        straight afterwards. */
+    void setFxBypass (int insert, int slot, bool shouldBypass);
     juce::AudioPluginInstance* getFx (int insert, int slot) const noexcept;
 
     template <typename Fn> void forEachPlugin (Fn&& fn) const
@@ -214,22 +225,26 @@ private:
     {
         std::array<FxSlot, kNumFxSlots> fx;
         juce::AudioBuffer<float> buffer;
+        LatencyDelay align;          // holds this insert back to match the longest one
     };
     struct ChannelSlot
     {
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::AudioBuffer<float> buffer;
+        juce::AudioBuffer<float> mixdown;   // stereo fold of the instrument, before alignment
         juce::MidiBuffer midi;
         int channels = 2;
         std::atomic<int> insert { 1 };
         std::atomic<bool> sumOutputs { false };
         int outputBuses = 1;
         std::vector<float> lastAuto;
+        LatencyDelay align;          // holds this instrument back to match the longest one
     };
 
     void preparePlugin (juce::AudioPluginInstance&);
     static int channelsFor (const juce::AudioPluginInstance&);
     int  bufferCapacity() const noexcept { return std::max (blockSize * 2, 8192); }
+    void updateLatency();
     void processInsert (int index, int numSamples);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
@@ -252,6 +267,11 @@ private:
     std::array<InsertControls, kNumInserts> controls;
     Snapshot snapshot;
     int capacity = 0;
+
+    // Delay compensation. clipDelay holds playlist audio back to match the
+    // slowest instrument; totalLatency is what the whole mixer runs behind.
+    std::atomic<int> clipDelaySamples { 0 };
+    std::atomic<int> totalLatency { 0 };
 
     std::shared_ptr<SampleData> previewHold;
     const SampleData* previewData = nullptr;
