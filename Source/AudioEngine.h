@@ -148,6 +148,7 @@ public:
     {
         std::vector<AudioClipRT> audio;
         std::vector<MidiClipRT>  midi;
+        std::vector<Modulator>   modulators;   // copied whole; they are small
         double songEnd = 0.0;
     };
     void setSnapshot (Snapshot&&);
@@ -251,6 +252,13 @@ private:
         std::atomic<bool> sumOutputs { false };
         int outputBuses = 1;
         std::vector<float> lastAuto;
+
+        // Modulation rides on top of whatever the parameter is already set to.
+        // modBase is that underlying value and modWritten is what was last
+        // sent, so a knob moved by hand or by automation can be told apart
+        // from the engine's own writing and becomes the new base.
+        std::vector<float> modBase, modWritten;
+        std::vector<bool>  modActive;
         LatencyDelay align;          // holds this instrument back to match the longest one
     };
 
@@ -267,6 +275,7 @@ private:
     void trackLiveMessage (int slot, const juce::MidiMessage&);
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
+    void applyModulation (double beat);
     void renderPreview (float* left, float* right, int numSamples);
 
     juce::AudioDeviceManager   deviceManager;
@@ -289,6 +298,11 @@ private:
     // make one bus run later than another.
     std::array<std::atomic<int>, kNumInserts> clipDelaySamples {};
     std::atomic<int> totalLatency { 0 };
+
+    // Modulators follow the song while it plays, so a project sounds the
+    // same every time and matches its export. While stopped they run off
+    // this free clock instead, so a sound can still be dialled in.
+    double modFreeClock = 0.0;
 
     std::shared_ptr<SampleData> previewHold;
     const SampleData* previewData = nullptr;

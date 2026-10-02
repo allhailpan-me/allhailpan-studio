@@ -62,10 +62,12 @@ MainComponent::MainComponent()
     playlistTab.onClick = [this] { setView (View::playlist); };
     pianoTab.onClick    = [this] { setView (View::pianoRoll); };
     rackTab.onClick     = [this] { setView (View::rack); };
+    modTab.onClick      = [this] { setView (View::modulators); };
     mixerTab.onClick    = [this] { toggleMixerWindow(); };
     playlistTab.setTooltip ("F5");
     pianoTab.setTooltip ("F7");
     rackTab.setTooltip ("Step sequencer for all 16 channels (F6)");
+    modTab.setTooltip ("Move any plugin parameter in time, locked to the tempo (F8)");
     mixerTab.setTooltip ("Opens the mixer window (F9)");
 
     fileButton.onClick = [this] { showFileMenu(); };
@@ -189,6 +191,9 @@ MainComponent::MainComponent()
     pianoRoll.onSetPosition = [this] (double b) { setPosition (b); };
 
     rack.onEdited         = [this] { markDirty(); };
+
+    modPanel.onEdited           = [this] { markDirty(); };
+    modPanel.getSelectedChannel = [this] { return engine.getSelectedChannel(); };
     rack.onSelectChannel  = [this] (int channel) { selectChannel (channel); grabKeyboardFocus(); };
 
     mixer.onInteraction = [this] { grabKeyboardFocus(); };
@@ -206,13 +211,14 @@ MainComponent::MainComponent()
     addAndMakeVisible (playlist);
     addChildComponent (pianoRoll);
     addChildComponent (rack);
+    addChildComponent (modPanel);
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
                      static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
-                     static_cast<juce::Component*> (&mixerTab),
+                     static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&mixerTab),
                      static_cast<juce::Component*> (&audioButton), static_cast<juce::Component*> (&pluginsButton),
                      static_cast<juce::Component*> (&undoButton), static_cast<juce::Component*> (&redoButton),
                      static_cast<juce::Component*> (&fileButton),
@@ -718,7 +724,8 @@ void MainComponent::pushArrangement (bool allowRenders)
         }
     }
 
-    snap.songEnd = project.songEndBeats();
+    snap.songEnd    = project.songEndBeats();
+    snap.modulators = project.modulators;      // small, so copied whole
     engine.setSnapshot (std::move (snap));
     stretchCache.keepOnly (keysInUse);
 }
@@ -738,6 +745,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
         playlist.refresh();
         if (view == View::pianoRoll) pianoRoll.refresh();
         if (view == View::rack)      rack.refresh();
+        if (view == View::modulators) modPanel.refresh();
         if (mixerWindow != nullptr)  mixer.refresh();
         return;
     }
@@ -1088,18 +1096,59 @@ void MainComponent::toggleMixerWindow()
     mixerTab.setToggleState (true, juce::dontSendNotification);
 }
 
+void MainComponent::checkModulationLearn()
+{
+    if (! modPanel.isLearning())
+        return;
+
+    juce::AudioProcessor* processor = nullptr;
+    int index = -1;
+
+    if (! editWatcher.takeGrab (processor, index))
+        return;
+
+    // Work out which channel the grabbed plugin belongs to. Only instruments
+    // can be modulated at the moment, so an effect's knob is ignored.
+    for (int channel = 0; channel < kNumChannels; ++channel)
+        if (engine.getChannelPlugin (channel) == processor)
+        {
+            juce::String paramName = "Parameter " + juce::String (index + 1);
+            const auto& params = processor->getParameters();
+
+            if (juce::isPositiveAndBelow (index, params.size()))
+            {
+                if (! params[index]->isAutomatable())
+                {
+                    setStatus ("That control cannot be automated, so it cannot be modulated either.");
+                    return;
+                }
+                paramName = params[index]->getName (24);
+            }
+
+            modPanel.parameterTouched (channel, index, paramName);
+            setStatus ("Modulating " + paramName + " on channel " + juce::String (channel + 1));
+            return;
+        }
+
+    setStatus ("Modulation can only be attached to an instrument's own controls.");
+}
+
 void MainComponent::setView (View v)
 {
     view = v;
     playlist.setVisible (v == View::playlist);
     pianoRoll.setVisible (v == View::pianoRoll);
     rack.setVisible (v == View::rack);
+    modPanel.setVisible (v == View::modulators);
     playlistTab.setToggleState (v == View::playlist, juce::dontSendNotification);
     pianoTab.setToggleState (v == View::pianoRoll, juce::dontSendNotification);
     rackTab.setToggleState (v == View::rack, juce::dontSendNotification);
+    modTab.setToggleState (v == View::modulators, juce::dontSendNotification);
 
     if (v == View::rack)
         rack.refresh();
+    if (v == View::modulators)
+        modPanel.refresh();
 
     if (v == View::pianoRoll)
     {
@@ -1120,6 +1169,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (key.getKeyCode() == juce::KeyPress::F5Key)      { setView (View::playlist); return true; }
     if (key.getKeyCode() == juce::KeyPress::F6Key)      { setView (View::rack); return true; }
     if (key.getKeyCode() == juce::KeyPress::F7Key)      { setView (View::pianoRoll); return true; }
+    if (key.getKeyCode() == juce::KeyPress::F8Key)      { setView (View::modulators); return true; }
     if (key.getKeyCode() == juce::KeyPress::F9Key)      { toggleMixerWindow(); return true; }
     if (is ('r', cmd))                                  { toggleRecord(); return true; }
     if (is ('z', cmd))                                  { undoRedo (false); return true; }
@@ -1212,6 +1262,7 @@ void MainComponent::resized()
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));
+    modTab      .setBounds (bar.removeFromLeft (48));
     mixerTab    .setBounds (bar.removeFromLeft (58));
     pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
     audioButton  .setBounds (bar.removeFromRight (104)); bar.removeFromRight (14);
@@ -1235,6 +1286,7 @@ void MainComponent::resized()
     playlist.setBounds (work);
     pianoRoll.setBounds (work);
     rack.setBounds (work);
+    modPanel.setBounds (work);
 
     piano.setBounds (pianoArea);
     piano.setKeyWidth ((float) pianoArea.getWidth() / 50.0f);
@@ -1322,6 +1374,8 @@ void MainComponent::timerCallback()
 
     if (editWatcher.touched.exchange (false) && juce::Time::getMillisecondCounter() > ignoreEditsUntil)
         markDirty();
+
+    checkModulationLearn();
 
     if (++autosaveTicks >= 60 * 120)        // every two minutes
     {

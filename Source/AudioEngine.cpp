@@ -619,6 +619,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (sequencing)
                 applyAutomation (blockStartBeat);
 
+            // Locked to the song while it plays, free running while stopped.
+            applyModulation (isRunning ? blockStartBeat : modFreeClock);
+            modFreeClock += numSamples * beatsPerSample;
+
             // instruments
             const int recordingChannel = (midiRecording.load() && sequencing) ? midiRecordChannel.load() : -1;
             for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
@@ -976,6 +980,102 @@ void AudioEngine::applyAutomation (double beat)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Modulation
+//
+// A modulator rides on top of whatever a parameter is already set to, rather
+// than replacing it: the knob still means what it means, and the modulator
+// moves it around that point. Several modulators on one parameter add up.
+//
+// Telling the engine's own writing apart from a knob the user grabbed needs no
+// extra plumbing. Before writing, the parameter is compared with what was
+// written last block; if it has moved on its own, somebody else set it, and
+// that becomes the new resting value. That covers the user turning it, a
+// plugin preset loading, and automation, all with one check.
+// ---------------------------------------------------------------------------
+void AudioEngine::applyModulation (double beat)
+{
+    if (snapshot.modulators.empty())
+        return;
+
+    for (int channel = 0; channel < kNumChannels; ++channel)
+    {
+        auto& slot = channelSlots[(size_t) channel];
+        if (slot.plugin == nullptr)
+            continue;
+
+        const auto& params = slot.plugin->getParameters();
+        const auto  count  = (size_t) params.size();
+
+        if (slot.modBase.size() != count)
+        {
+            slot.modBase.assign (count, 0.0f);
+            slot.modWritten.assign (count, -1.0f);
+            slot.modActive.assign (count, false);
+        }
+
+        // Gather this block's offset for every parameter this channel modulates.
+        bool anyThisChannel = false;
+        for (const auto& m : snapshot.modulators)
+        {
+            if (! m.enabled)
+                continue;
+
+            for (const auto& t : m.targets)
+                if (t.channel == channel && juce::isPositiveAndBelow (t.paramIndex, (int) count))
+                {
+                    const size_t p = (size_t) t.paramIndex;
+
+                    if (! slot.modActive[p])
+                    {
+                        // First time this parameter is touched: wherever it sits
+                        // now is the value to move around.
+                        slot.modBase[p] = params[t.paramIndex]->getValue();
+                        slot.modActive[p] = true;
+                        slot.modWritten[p] = slot.modBase[p];
+                    }
+
+                    anyThisChannel = true;
+                }
+        }
+
+        if (! anyThisChannel)
+            continue;
+
+        for (size_t p = 0; p < count; ++p)
+        {
+            if (! slot.modActive[p])
+                continue;
+
+            auto* param = params[(int) p];
+            if (! param->isAutomatable())
+                continue;
+
+            const float current = param->getValue();
+            if (std::abs (current - slot.modWritten[p]) > 1.0e-4f)
+                slot.modBase[p] = current;      // somebody else moved it
+
+            float offset = 0.0f;
+            for (const auto& m : snapshot.modulators)
+            {
+                if (! m.enabled)
+                    continue;
+
+                for (const auto& t : m.targets)
+                    if (t.channel == channel && (size_t) t.paramIndex == p)
+                        offset += m.valueAt (beat) * t.depth;
+            }
+
+            const float wanted = juce::jlimit (0.0f, 1.0f, slot.modBase[p] + offset);
+            if (std::abs (wanted - slot.modWritten[p]) > 1.0e-5f)
+            {
+                param->setValue (wanted);
+                slot.modWritten[p] = wanted;
+            }
+        }
+    }
+}
+
 void AudioEngine::renderAudioClips (int numSamples)
 {
     if (snapshot.audio.empty() || numSamples <= 0)
@@ -1224,6 +1324,7 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         scheduleMidi (n, false, sequencing);
         if (sequencing)
             applyAutomation (blockStart);
+        applyModulation (blockStart);
 
         for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
         {

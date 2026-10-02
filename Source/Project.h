@@ -72,6 +72,92 @@ struct AutoLane
     }
 };
 
+//=============================================================================
+// Modulators.
+//
+// A modulator is a shape that runs in time and is wired to any number of
+// plugin parameters, each with its own depth. It is the difference between
+// drawing a filter sweep by hand every eight bars and saying "this moves".
+// Because it drives ordinary parameters, it works on any hosted plugin rather
+// than only on built in devices.
+//
+// Rates are in beats, so everything stays locked to the tempo.
+//=============================================================================
+
+enum class ModShape { sine = 0, triangle, saw, rampUp, square, randomStep, sampleHold };
+
+inline const char* modShapeName (ModShape s)
+{
+    switch (s)
+    {
+        case ModShape::sine:       return "Sine";
+        case ModShape::triangle:   return "Triangle";
+        case ModShape::saw:        return "Saw down";
+        case ModShape::rampUp:     return "Ramp up";
+        case ModShape::square:     return "Square";
+        case ModShape::randomStep: return "Random";
+        case ModShape::sampleHold: return "Sample and hold";
+    }
+    return "Sine";
+}
+
+struct ModTarget
+{
+    int   channel    = 0;      // instrument channel the parameter belongs to
+    int   paramIndex = 0;
+    float depth      = 0.5f;   // -1..1, added to the parameter's own value
+    juce::String paramName;    // remembered for display when the plugin is absent
+
+    bool operator== (const ModTarget&) const = default;
+};
+
+struct Modulator
+{
+    juce::String name  = "LFO";
+    ModShape shape     = ModShape::sine;
+    double   rateBeats = 4.0;     // length of one cycle
+    double   phase     = 0.0;     // 0..1 offset into the cycle
+    bool     bipolar   = true;    // swings either side of the value, or only up
+    bool     enabled   = true;
+    std::vector<ModTarget> targets;
+
+    bool operator== (const Modulator&) const = default;
+
+    /** The modulator's output at a point in the song, in -1..1 (bipolar) or
+        0..1 (unipolar). */
+    float valueAt (double beat) const
+    {
+        const double cycles = beat / std::max (1.0e-6, rateBeats) + phase;
+        const double t = cycles - std::floor (cycles);
+
+        double v = 0.0;
+        switch (shape)
+        {
+            case ModShape::sine:     v = std::sin (t * 6.283185307179586); break;
+            case ModShape::triangle: v = 4.0 * std::abs (t - 0.5) - 1.0;   break;
+            case ModShape::saw:      v = 1.0 - 2.0 * t;                    break;
+            case ModShape::rampUp:   v = 2.0 * t - 1.0;                    break;
+            case ModShape::square:   v = t < 0.5 ? 1.0 : -1.0;             break;
+
+            case ModShape::randomStep:
+            case ModShape::sampleHold:
+            {
+                // Hashing the cycle number gives a value that is random but
+                // repeatable, so a project sounds the same on every play.
+                const auto step = (juce::uint32) (juce::int64) std::floor (cycles);
+                juce::uint32 h = step * 2654435761u;
+                h ^= h >> 15;
+                h *= 2246822519u;
+                h ^= h >> 13;
+                v = (h / 4294967296.0) * 2.0 - 1.0;
+                break;
+            }
+        }
+
+        return (float) (bipolar ? v : (v + 1.0) * 0.5);
+    }
+};
+
 struct MidiPattern
 {
     std::vector<MidiNote> notes;
@@ -194,6 +280,7 @@ public:
     std::vector<ChannelInfo> channels;
     std::vector<Clip>        clips;
     std::set<int>            selection;
+    std::vector<Modulator>   modulators;
     double bpm = 128.0;
 
     // ---- channel rack ----
@@ -223,6 +310,8 @@ public:
         channels.assign ((size_t) kNumChannels, {});
         for (int i = 0; i < kNumChannels; ++i)
             channels[(size_t) i].insert = i + 1;
+
+        modulators.clear();
 
         rackStart       = 0.0;
         rackBars        = 1;
@@ -409,6 +498,63 @@ public:
 
     /** Moves a channel's existing rack notes to a new key, so picking a
         different drum does not appear to wipe the row. */
+    // ---- modulators ----
+
+    Modulator* modulator (int index)
+    {
+        return juce::isPositiveAndBelow (index, (int) modulators.size())
+                 ? &modulators[(size_t) index] : nullptr;
+    }
+
+    int addModulator()
+    {
+        Modulator m;
+        m.name = "LFO " + juce::String ((int) modulators.size() + 1);
+        m.rateBeats = 4.0;
+        modulators.push_back (std::move (m));
+        changed();
+        return (int) modulators.size() - 1;
+    }
+
+    void removeModulator (int index)
+    {
+        if (! juce::isPositiveAndBelow (index, (int) modulators.size()))
+            return;
+        modulators.erase (modulators.begin() + index);
+        changed();
+    }
+
+    /** Wires a modulator to a parameter, replacing any existing wiring between
+        the same pair rather than stacking duplicates. */
+    void assignModulation (int index, int channel, int paramIndex,
+                           const juce::String& paramName, float depth)
+    {
+        auto* m = modulator (index);
+        if (m == nullptr)
+            return;
+
+        for (auto& t : m->targets)
+            if (t.channel == channel && t.paramIndex == paramIndex)
+            {
+                t.depth = depth;
+                t.paramName = paramName;
+                changed();
+                return;
+            }
+
+        m->targets.push_back ({ channel, paramIndex, depth, paramName });
+        changed();
+    }
+
+    void removeModulation (int index, int targetIndex)
+    {
+        auto* m = modulator (index);
+        if (m == nullptr || ! juce::isPositiveAndBelow (targetIndex, (int) m->targets.size()))
+            return;
+        m->targets.erase (m->targets.begin() + targetIndex);
+        changed();
+    }
+
     /** Re-stretches every clip that follows the tempo. Called when the project
         tempo changes, so matched audio tracks the grid instead of drifting. */
     void retuneTempoFollowers()

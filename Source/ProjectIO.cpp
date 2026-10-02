@@ -184,6 +184,32 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("rackBars", project.rackBars);
     root.setAttribute ("rackStepsPerBar", project.rackStepsPerBar);
 
+    // ---- modulators ----
+    if (! project.modulators.empty())
+    {
+        auto* modsXml = root.createNewChildElement ("MODULATORS");
+
+        for (const auto& m : project.modulators)
+        {
+            auto* e = modsXml->createNewChildElement ("MOD");
+            e->setAttribute ("name", m.name);
+            e->setAttribute ("shape", (int) m.shape);
+            e->setAttribute ("rate", m.rateBeats);
+            e->setAttribute ("phase", m.phase);
+            e->setAttribute ("bipolar", m.bipolar);
+            e->setAttribute ("enabled", m.enabled);
+
+            for (const auto& t : m.targets)
+            {
+                auto* target = e->createNewChildElement ("TARGET");
+                target->setAttribute ("channel", t.channel);
+                target->setAttribute ("param", t.paramIndex);
+                target->setAttribute ("depth", (double) t.depth);
+                target->setAttribute ("paramName", t.paramName);
+            }
+        }
+    }
+
     // ---- tracks ----
     auto* tracksXml = root.createNewChildElement ("TRACKS");
     for (auto& t : project.tracks)
@@ -366,6 +392,31 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
     project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));
     project.rackStepsPerBar = juce::jlimit (1, 32, root->getIntAttribute ("rackStepsPerBar", 16));
+
+    project.modulators.clear();
+    if (auto* modsXml = root->getChildByName ("MODULATORS"))
+        for (auto* e : modsXml->getChildWithTagNameIterator ("MOD"))
+        {
+            Modulator m;
+            m.name      = e->getStringAttribute ("name", "LFO");
+            m.shape     = (ModShape) juce::jlimit (0, 6, e->getIntAttribute ("shape", 0));
+            m.rateBeats = juce::jlimit (0.0625, 128.0, e->getDoubleAttribute ("rate", 4.0));
+            m.phase     = juce::jlimit (0.0, 1.0, e->getDoubleAttribute ("phase", 0.0));
+            m.bipolar   = e->getBoolAttribute ("bipolar", true);
+            m.enabled   = e->getBoolAttribute ("enabled", true);
+
+            for (auto* t : e->getChildWithTagNameIterator ("TARGET"))
+            {
+                ModTarget target;
+                target.channel    = juce::jlimit (0, kNumChannels - 1, t->getIntAttribute ("channel"));
+                target.paramIndex = std::max (0, t->getIntAttribute ("param"));
+                target.depth      = (float) juce::jlimit (-1.0, 1.0, t->getDoubleAttribute ("depth", 0.5));
+                target.paramName  = t->getStringAttribute ("paramName");
+                m.targets.push_back (std::move (target));
+            }
+
+            project.modulators.push_back (std::move (m));
+        }
     report.songStart = root->getDoubleAttribute ("songStart", 0.0);
     engine.setBpm (report.bpm);
     engine.setSongStart (report.songStart);
