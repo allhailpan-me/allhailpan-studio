@@ -9,6 +9,7 @@
 #include "BrowserPanel.h"
 #include "PlaylistComponent.h"
 #include "PianoRollComponent.h"
+#include "ChannelRackComponent.h"
 #include "MixerComponent.h"
 #include "PluginPicker.h"
 #include "Logo.h"
@@ -35,7 +36,7 @@ public:
     void requestQuit (std::function<void()> quitNow);
 
 private:
-    enum class View { playlist, pianoRoll };
+    enum class View { playlist, pianoRoll, rack };
 
     // Records parameter moves from the plugin being recorded.
     // Only knobs the user actually grabs are recorded: plugins like Synplant
@@ -158,13 +159,14 @@ private:
     BrowserPanel       browser   { cache, engine, plugins.settings() };
     PlaylistComponent  playlist  { project, engine, cache };
     PianoRollComponent pianoRoll { project, engine };
+    ChannelRackComponent rack { project, engine };
     MixerComponent     mixer     { engine, project };
     SpinningLogo       logo;
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
     juce::ComboBox   recordMode, countInBox;
-    juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, mixerTab { "Mixer" };
+    juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };
     juce::TextButton undoButton { "Undo" }, redoButton { "Redo" }, fileButton { "File" };
     juce::Slider     tempo;

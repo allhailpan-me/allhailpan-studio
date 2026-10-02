@@ -100,6 +100,14 @@ struct ChannelInfo
 {
     juce::String name;        // plugin name, or empty
     int insert = 1;
+
+    // Channel rack. rackNote is what a step plays, which matters for drum
+    // plugins that put every sound on a different key. rackTrack is the
+    // playlist track this channel's rack clips live on, assigned the first
+    // time a step is drawn so rows stay put.
+    int rackNote  = 60;
+    int rackTrack = -1;
+
     // A plugin the project uses but this computer doesn't have. Kept so that
     // saving again doesn't throw its settings away.
     std::shared_ptr<juce::XmlElement> missingPlugin;
@@ -180,6 +188,18 @@ public:
     std::set<int>            selection;
     double bpm = 128.0;
 
+    // ---- channel rack ----
+    // The rack edits a region of the arrangement rather than owning its own
+    // kind of data: every step is a real note in a real MIDI clip, so the same
+    // bar can be opened in the piano roll and edited there.
+    double rackStart     = 0.0;   // beat the pattern begins on
+    int    rackBars      = 1;
+    int    rackStepsPerBar = 16;
+
+    double rackStepBeats() const noexcept { return 4.0 / std::max (1, rackStepsPerBar); }
+    int    rackStepCount() const noexcept { return std::max (1, rackBars) * std::max (1, rackStepsPerBar); }
+    double rackLengthBeats() const noexcept { return std::max (1, rackBars) * 4.0; }
+
     // Effects that couldn't be loaded, by insert * kNumFxSlots + slot
     std::map<int, std::shared_ptr<juce::XmlElement>> missingFx;
 
@@ -195,6 +215,11 @@ public:
         channels.assign ((size_t) kNumChannels, {});
         for (int i = 0; i < kNumChannels; ++i)
             channels[(size_t) i].insert = i + 1;
+
+        rackStart       = 0.0;
+        rackBars        = 1;
+        rackStepsPerBar = 16;
+
         resetHistory();
         changed();
     }
@@ -221,6 +246,174 @@ public:
             if (c.id == id)
                 return &c;
         return nullptr;
+    }
+
+    // ---- channel rack ----------------------------------------------------
+    // Steps are stored as ordinary notes in an ordinary MIDI clip, so nothing
+    // here is a second kind of arrangement data. The rack only ever touches a
+    // clip whose channel, start and length match the pattern exactly, which
+    // keeps it from disturbing anything else on the playlist.
+
+    Clip* rackClip (int channel)
+    {
+        const double len = rackLengthBeats();
+        for (auto& c : clips)
+            if (! c.isAudio() && c.channel == channel
+                && std::abs (c.start - rackStart) < 1.0e-6
+                && std::abs (c.length - len) < 1.0e-6)
+                return &c;
+        return nullptr;
+    }
+
+    /** The track this channel's rack clips sit on, claiming a free one the
+        first time it is needed so rows do not wander between patterns. */
+    int rackTrackFor (int channel)
+    {
+        auto& info = channels[(size_t) channel];
+
+        if (info.rackTrack >= 0 && info.rackTrack < (int) tracks.size())
+            return info.rackTrack;
+
+        const double from = rackStart;
+        const double to   = rackStart + rackLengthBeats();
+
+        std::set<int> taken;
+        for (auto& c : channels)
+            if (c.rackTrack >= 0)
+                taken.insert (c.rackTrack);
+
+        for (int t = 0; t < (int) tracks.size(); ++t)
+        {
+            if (taken.count (t))
+                continue;
+
+            bool occupied = false;
+            for (auto& c : clips)
+                if (c.track == t && c.start < to && c.endBeat (bpm) > from)
+                {
+                    occupied = true;
+                    break;
+                }
+
+            if (! occupied)
+            {
+                info.rackTrack = t;
+                return t;
+            }
+        }
+
+        info.rackTrack = juce::jlimit (0, (int) tracks.size() - 1, channel);
+        return info.rackTrack;
+    }
+
+    Clip* rackClipFor (int channel)
+    {
+        if (auto* existing = rackClip (channel))
+            return existing;
+
+        Clip c;
+        c.type    = ClipType::midi;
+        c.channel = channel;
+        c.track   = rackTrackFor (channel);
+        c.start   = rackStart;
+        c.length  = rackLengthBeats();
+        c.pattern = std::make_shared<MidiPattern>();
+
+        return find (addClip (std::move (c)));
+    }
+
+    /** The note a step would occupy, if there is one. */
+    MidiNote* rackNoteAt (int channel, int step)
+    {
+        auto* clip = rackClip (channel);
+        if (clip == nullptr || clip->pattern == nullptr)
+            return nullptr;
+
+        const double stepBeats = rackStepBeats();
+        const double at    = step * stepBeats;
+        const double slack = stepBeats * 0.5;
+        const int    pitch = channels[(size_t) channel].rackNote;
+
+        for (auto& n : clip->pattern->notes)
+            if (n.note == pitch && std::abs (n.start - at) < slack)
+                return &n;
+
+        return nullptr;
+    }
+
+    bool rackStepOn (int channel, int step) { return rackNoteAt (channel, step) != nullptr; }
+
+    void setRackStep (int channel, int step, bool on, float velocity = 0.8f)
+    {
+        if (on)
+        {
+            if (auto* existing = rackNoteAt (channel, step))
+            {
+                existing->velocity = velocity;
+                changed();
+                return;
+            }
+
+            auto* clip = rackClipFor (channel);
+            if (clip == nullptr || clip->pattern == nullptr)
+                return;
+
+            const double stepBeats = rackStepBeats();
+            MidiNote n;
+            n.start    = step * stepBeats;
+            n.length   = stepBeats * 0.9;      // a touch short, so repeats retrigger
+            n.note     = channels[(size_t) channel].rackNote;
+            n.velocity = velocity;
+            clip->pattern->notes.push_back (n);
+        }
+        else
+        {
+            auto* clip = rackClip (channel);
+            if (clip == nullptr || clip->pattern == nullptr)
+                return;
+
+            const double stepBeats = rackStepBeats();
+            const double at    = step * stepBeats;
+            const double slack = stepBeats * 0.5;
+            const int    pitch = channels[(size_t) channel].rackNote;
+            auto& notes = clip->pattern->notes;
+
+            notes.erase (std::remove_if (notes.begin(), notes.end(),
+                                         [&] (const MidiNote& n)
+                                         {
+                                             return n.note == pitch && std::abs (n.start - at) < slack;
+                                         }),
+                         notes.end());
+        }
+
+        changed();
+    }
+
+    void clearRackRow (int channel)
+    {
+        if (auto* clip = rackClip (channel))
+            if (clip->pattern != nullptr)
+            {
+                clip->pattern->notes.clear();
+                changed();
+            }
+    }
+
+    /** Moves a channel's existing rack notes to a new key, so picking a
+        different drum does not appear to wipe the row. */
+    void setRackNote (int channel, int note)
+    {
+        auto& info = channels[(size_t) channel];
+        const int from = info.rackNote;
+        info.rackNote = juce::jlimit (0, 127, note);
+
+        if (auto* clip = rackClip (channel))
+            if (clip->pattern != nullptr)
+                for (auto& n : clip->pattern->notes)
+                    if (n.note == from)
+                        n.note = info.rackNote;
+
+        changed();
     }
 
     std::vector<Clip> selectedClips() const

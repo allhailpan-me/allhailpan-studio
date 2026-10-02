@@ -61,9 +61,11 @@ MainComponent::MainComponent()
 
     playlistTab.onClick = [this] { setView (View::playlist); };
     pianoTab.onClick    = [this] { setView (View::pianoRoll); };
+    rackTab.onClick     = [this] { setView (View::rack); };
     mixerTab.onClick    = [this] { toggleMixerWindow(); };
     playlistTab.setTooltip ("F5");
     pianoTab.setTooltip ("F7");
+    rackTab.setTooltip ("Step sequencer for all 16 channels (F6)");
     mixerTab.setTooltip ("Opens the mixer window (F9)");
 
     fileButton.onClick = [this] { showFileMenu(); };
@@ -179,6 +181,9 @@ MainComponent::MainComponent()
     pianoRoll.onInteraction = [this] { grabKeyboardFocus(); };
     pianoRoll.onSetPosition = [this] (double b) { setPosition (b); };
 
+    rack.onEdited         = [this] { markDirty(); };
+    rack.onSelectChannel  = [this] (int channel) { selectChannel (channel); grabKeyboardFocus(); };
+
     mixer.onInteraction = [this] { grabKeyboardFocus(); };
     mixer.onEdited      = [this] { markDirty(); };
     mixer.onSlotClicked = [this] (int insert, int slot) { showFxMenu (insert, slot); };
@@ -193,12 +198,14 @@ MainComponent::MainComponent()
     addAndMakeVisible (browser);
     addAndMakeVisible (playlist);
     addChildComponent (pianoRoll);
+    addChildComponent (rack);
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
                      static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
-                     static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&mixerTab),
+                     static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
+                     static_cast<juce::Component*> (&mixerTab),
                      static_cast<juce::Component*> (&audioButton), static_cast<juce::Component*> (&pluginsButton),
                      static_cast<juce::Component*> (&undoButton), static_cast<juce::Component*> (&redoButton),
                      static_cast<juce::Component*> (&fileButton),
@@ -713,7 +720,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
 {
     if (source == &project)
     {
-        const bool editing = playlist.isEditing() || pianoRoll.isDragging();
+        const bool editing = playlist.isEditing() || pianoRoll.isDragging() || rack.isDragging();
         pushArrangement (! editing);
         if (! editing)
         {
@@ -723,6 +730,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
         }
         playlist.refresh();
         if (view == View::pianoRoll) pianoRoll.refresh();
+        if (view == View::rack)      rack.refresh();
         if (mixerWindow != nullptr)  mixer.refresh();
         return;
     }
@@ -1078,8 +1086,13 @@ void MainComponent::setView (View v)
     view = v;
     playlist.setVisible (v == View::playlist);
     pianoRoll.setVisible (v == View::pianoRoll);
+    rack.setVisible (v == View::rack);
     playlistTab.setToggleState (v == View::playlist, juce::dontSendNotification);
     pianoTab.setToggleState (v == View::pianoRoll, juce::dontSendNotification);
+    rackTab.setToggleState (v == View::rack, juce::dontSendNotification);
+
+    if (v == View::rack)
+        rack.refresh();
 
     if (v == View::pianoRoll)
     {
@@ -1098,6 +1111,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
 
     if (key == juce::KeyPress::spaceKey)                { togglePlay(); return true; }
     if (key.getKeyCode() == juce::KeyPress::F5Key)      { setView (View::playlist); return true; }
+    if (key.getKeyCode() == juce::KeyPress::F6Key)      { setView (View::rack); return true; }
     if (key.getKeyCode() == juce::KeyPress::F7Key)      { setView (View::pianoRoll); return true; }
     if (key.getKeyCode() == juce::KeyPress::F9Key)      { toggleMixerWindow(); return true; }
     if (is ('r', cmd))                                  { toggleRecord(); return true; }
@@ -1190,6 +1204,7 @@ void MainComponent::resized()
     clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (18);
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
+    rackTab     .setBounds (bar.removeFromLeft (52));
     mixerTab    .setBounds (bar.removeFromLeft (58));
     pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
     audioButton  .setBounds (bar.removeFromRight (104)); bar.removeFromRight (14);
@@ -1212,6 +1227,7 @@ void MainComponent::resized()
     browser.setBounds (work.removeFromLeft (260));
     playlist.setBounds (work);
     pianoRoll.setBounds (work);
+    rack.setBounds (work);
 
     piano.setBounds (pianoArea);
     piano.setKeyWidth ((float) pianoArea.getWidth() / 50.0f);
@@ -1328,6 +1344,7 @@ void MainComponent::timerCallback()
 
     if (view == View::playlist)  playlist.updatePlayhead();
     if (view == View::pianoRoll) pianoRoll.updatePlayhead();
+    if (view == View::rack)      rack.updatePlayhead();
     if (mixerWindow != nullptr)  mixer.updateMeters();
     repaint (statusBar);
 }

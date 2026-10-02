@@ -174,6 +174,11 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("bpm", engine.getBpm());
     root.setAttribute ("songStart", engine.getSongStart());
 
+    // ---- channel rack ----
+    root.setAttribute ("rackStart", project.rackStart);
+    root.setAttribute ("rackBars", project.rackBars);
+    root.setAttribute ("rackStepsPerBar", project.rackStepsPerBar);
+
     // ---- tracks ----
     auto* tracksXml = root.createNewChildElement ("TRACKS");
     for (auto& t : project.tracks)
@@ -221,6 +226,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("index", c);
         e->setAttribute ("name", info.name);
         e->setAttribute ("insert", info.insert);
+        e->setAttribute ("rackNote", info.rackNote);
+        e->setAttribute ("rackTrack", info.rackTrack);
         e->setAttribute ("sumOutputs", engine.getChannelSumsOutputs (c));
         writePlugin (*e, engine.getChannelPlugin (c), info.missingPlugin);
     }
@@ -339,6 +346,10 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.clearAll();
 
     report.bpm       = root->getDoubleAttribute ("bpm", 128.0);
+
+    project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
+    project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));
+    project.rackStepsPerBar = juce::jlimit (1, 32, root->getIntAttribute ("rackStepsPerBar", 16));
     report.songStart = root->getDoubleAttribute ("songStart", 0.0);
     engine.setBpm (report.bpm);
     engine.setSongStart (report.songStart);
@@ -403,6 +414,8 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
             auto& info = project.channels[(size_t) c];
             info.insert = juce::jlimit (0, kNumInserts - 1, e->getIntAttribute ("insert", c + 1));
+            info.rackNote  = juce::jlimit (0, 127, e->getIntAttribute ("rackNote", 60));
+            info.rackTrack = e->getIntAttribute ("rackTrack", -1);
             engine.setChannelInsert (c, info.insert);
 
             if (auto* hosted = e->getChildByName (hostedTag))
