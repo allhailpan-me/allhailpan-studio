@@ -68,7 +68,7 @@ public:
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);
     juce::AudioPluginInstance* getChannelPlugin (int channel) const noexcept;
-    void setChannelInsert (int channel, int insert) noexcept;
+    void setChannelInsert (int channel, int insert);
     // Multi-output instruments (Microtonic Multi, drum plugins, samplers) put
     // their sounds on separate output buses. With this on, every output bus is
     // mixed down to the channel's stereo signal.
@@ -92,6 +92,13 @@ public:
         std::atomic<bool>  mute   { false };
         std::atomic<float> peakL  { 0.0f }, peakR { 0.0f };
         std::array<std::atomic<bool>, kNumFxSlots> bypass {};
+
+        // Aux sends. sendTo is the destination insert, or 0 for off (sending
+        // to the master is what the direct path already does). A send may only
+        // feed a higher numbered insert, which is what keeps the mixer free of
+        // feedback loops and lets one pass over the inserts resolve everything.
+        std::array<std::atomic<int>,   kNumSends> sendTo {};
+        std::array<std::atomic<float>, kNumSends> sendLevel {};
     };
     InsertControls& insert (int index) noexcept { return controls[(size_t) juce::jlimit (0, kNumInserts - 1, index)]; }
 
@@ -101,6 +108,10 @@ public:
         here rather than the atomic directly: delay compensation is recomputed
         straight afterwards. */
     void setFxBypass (int insert, int slot, bool shouldBypass);
+
+    /** Routes a portion of one insert into another. A send may only feed a
+        higher numbered insert; anything else is treated as off. */
+    void setSend (int insert, int sendIndex, int destination, float level);
     juce::AudioPluginInstance* getFx (int insert, int slot) const noexcept;
 
     template <typename Fn> void forEachPlugin (Fn&& fn) const
@@ -225,7 +236,9 @@ private:
     {
         std::array<FxSlot, kNumFxSlots> fx;
         juce::AudioBuffer<float> buffer;
-        LatencyDelay align;          // holds this insert back to match the longest one
+        juce::AudioBuffer<float> sendScratch;              // one send's copy, mid flight
+        LatencyDelay align;                                // levels this insert against the others
+        std::array<LatencyDelay, kNumSends> sendAlign;     // levels each send against its destination's other inputs
     };
     struct ChannelSlot
     {
@@ -246,6 +259,7 @@ private:
     int  bufferCapacity() const noexcept { return std::max (blockSize * 2, 8192); }
     void updateLatency();
     void processInsert (int index, int numSamples);
+    void routeSends (int index, int numSamples);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
@@ -270,7 +284,10 @@ private:
 
     // Delay compensation. clipDelay holds playlist audio back to match the
     // slowest instrument; totalLatency is what the whole mixer runs behind.
-    std::atomic<int> clipDelaySamples { 0 };
+    // Playlist audio has no plugin in front of it, so it is held back to match
+    // whatever else arrives at the same insert. Per insert, because a send can
+    // make one bus run later than another.
+    std::array<std::atomic<int>, kNumInserts> clipDelaySamples {};
     std::atomic<int> totalLatency { 0 };
 
     std::shared_ptr<SampleData> previewHold;

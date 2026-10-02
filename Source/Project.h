@@ -13,6 +13,7 @@
 static constexpr int kNumChannels = 16;   // instrument slots
 static constexpr int kNumInserts  = 17;   // 0 = master, 1..16 = inserts
 static constexpr int kNumFxSlots  = 8;
+static constexpr int kNumSends    = 2;   // aux sends per insert
 
 struct Track
 {

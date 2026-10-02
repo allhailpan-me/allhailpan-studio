@@ -155,6 +155,11 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         ctl.volume.store (0.8f);
         ctl.pan.store (0.0f);
         ctl.mute.store (false);
+        for (int k = 0; k < kNumSends; ++k)
+        {
+            ctl.sendTo[(size_t) k].store (0);
+            ctl.sendLevel[(size_t) k].store (0.0f);
+        }
         for (auto& b : ctl.bypass)
             b.store (false);
     }
@@ -200,6 +205,15 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("volume", (double) ctl.volume.load());
         e->setAttribute ("pan", (double) ctl.pan.load());
         e->setAttribute ("mute", ctl.mute.load());
+
+        for (int k = 0; k < kNumSends; ++k)
+            if (ctl.sendTo[(size_t) k].load() > 0)
+            {
+                auto* send = e->createNewChildElement ("SEND");
+                send->setAttribute ("index", k);
+                send->setAttribute ("to", ctl.sendTo[(size_t) k].load());
+                send->setAttribute ("level", (double) ctl.sendLevel[(size_t) k].load());
+            }
 
         for (int k = 0; k < kNumFxSlots; ++k)
         {
@@ -384,6 +398,18 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             ctl.volume.store ((float) juce::jlimit (0.0, 1.25, e->getDoubleAttribute ("volume", 0.8)));
             ctl.pan.store ((float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0)));
             ctl.mute.store (e->getBoolAttribute ("mute"));
+
+            for (auto* send : e->getChildWithTagNameIterator ("SEND"))
+            {
+                const int k = send->getIntAttribute ("index", -1);
+                if (! juce::isPositiveAndBelow (k, kNumSends))
+                    continue;
+
+                // Routed through the engine so it is validated and the delay
+                // compensation is recomputed.
+                engine.setSend (i, k, send->getIntAttribute ("to", 0),
+                                (float) send->getDoubleAttribute ("level", 0.0));
+            }
 
             for (auto* fx : e->getChildWithTagNameIterator ("FX"))
             {
