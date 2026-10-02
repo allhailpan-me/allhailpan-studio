@@ -35,7 +35,7 @@ public:
         addButton.setButtonText ("+  add modulator");
         addButton.onClick = [this]
         {
-            selected = project.addModulator();
+            project.addModulator();
             rebuild();
         };
 
