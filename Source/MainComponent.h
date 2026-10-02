@@ -11,6 +11,7 @@
 #include "PianoRollComponent.h"
 #include "ChannelRackComponent.h"
 #include "ModulatorPanel.h"
+#include "MixReportPanel.h"
 #include "MixerComponent.h"
 #include "PluginPicker.h"
 #include "Logo.h"
@@ -37,7 +38,7 @@ public:
     void requestQuit (std::function<void()> quitNow);
 
 private:
-    enum class View { playlist, pianoRoll, rack, modulators };
+    enum class View { playlist, pianoRoll, rack, modulators, mixReport };
 
     // Records parameter moves from the plugin being recorded.
     // Only knobs the user actually grabs are recorded: plugins like Synplant
@@ -192,6 +193,7 @@ private:
     PianoRollComponent pianoRoll { project, engine };
     ChannelRackComponent rack { project, engine };
     ModulatorPanel       modPanel { project, engine };
+    MixReportPanel       mixReport { engine };
     MixerComponent     mixer     { engine, project };
     SpinningLogo       logo;
 
@@ -199,7 +201,7 @@ private:
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
     juce::ComboBox   recordMode, countInBox;
     juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" };
-    juce::TextButton modTab { "Mod" }, mixerTab { "Mixer" };
+    juce::TextButton modTab { "Mod" }, reportTab { "Report" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };
     juce::TextButton undoButton { "Undo" }, redoButton { "Redo" }, fileButton { "File" };
     juce::Slider     tempo;

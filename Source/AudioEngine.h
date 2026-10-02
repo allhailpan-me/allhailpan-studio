@@ -6,6 +6,7 @@
 #include "Project.h"
 #include "Recorder.h"
 #include "LatencyDelay.h"
+#include "LoudnessMeter.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -59,6 +60,21 @@ public:
     double getSampleRate() const noexcept        { return sampleRate; }
     int    getBlockSize() const noexcept         { return blockSize; }
     int    getRoundTripLatencySamples();
+
+    // ---- mix analysis ----
+    // Measured on the master, after every effect, so it is what actually
+    // leaves the studio.
+    struct MixReading
+    {
+        double integratedLufs = -200.0, shortTermLufs = -200.0, momentaryLufs = -200.0;
+        double loudnessRange = 0.0;
+        float  truePeak = 0.0f;
+        float  correlation = 1.0f;   // +1 in phase, 0 wide, negative cancels in mono
+        bool   measuring = false;
+    };
+
+    MixReading getMixReading() const;
+    void resetMixAnalysis() { analysisReset.store (true); }
 
     /** How far the mixer runs behind the playhead because of look ahead
         plugins. Added to the interface's own round trip, this is the delay
@@ -268,6 +284,7 @@ private:
     void updateLatency();
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
+    void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
@@ -303,6 +320,15 @@ private:
     // same every time and matches its export. While stopped they run off
     // this free clock instead, so a sound can still be dialled in.
     double modFreeClock = 0.0;
+
+    // Mix analysis. Measured on the audio thread, read by the interface.
+    LoudnessMeter      loudness;
+    std::atomic<bool>  analysisReset { false };
+    std::atomic<double> analysisIntegrated { -200.0 }, analysisShortTerm { -200.0 };
+    std::atomic<double> analysisMomentary { -200.0 }, analysisRange { 0.0 };
+    std::atomic<float>  analysisTruePeak { 0.0f }, analysisCorrelation { 1.0f };
+    std::atomic<bool>   analysisRunning { false };
+    double corrLR = 0.0, corrLL = 0.0, corrRR = 0.0;
 
     std::shared_ptr<SampleData> previewHold;
     const SampleData* previewData = nullptr;

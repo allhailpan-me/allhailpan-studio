@@ -425,6 +425,9 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     }
     capacity = cap;
 
+    loudness.prepare (sampleRate);
+    corrLR = corrLL = corrRR = 0.0;
+
     // Plugins report their latency only once prepared, and the block size just
     // changed, so the delay lines are sized and set here.
     updateLatency();
@@ -710,6 +713,10 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 master.addFrom (1, 0, slot.buffer, 1, 0, numSamples);
             }
             processInsert (0, numSamples);
+
+            // Measured here, after every effect: this is what actually leaves
+            // the studio, which is what a loudness figure has to describe.
+            measureMix (master, numSamples, isRunning);
 
             if (outL != nullptr) std::copy_n (master.getReadPointer (0), numSamples, outL);
             if (outR != nullptr) std::copy_n (master.getReadPointer (1), numSamples, outR);
@@ -1179,6 +1186,64 @@ void AudioEngine::processInsert (int index, int numSamples)
 
     ctl.peakL.store (std::max (slot.buffer.getMagnitude (0, 0, numSamples), ctl.peakL.load() * 0.9f));
     ctl.peakR.store (std::max (slot.buffer.getMagnitude (1, 0, numSamples), ctl.peakR.load() * 0.9f));
+}
+
+void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSamples, bool isRunning)
+{
+    if (analysisReset.exchange (false))
+    {
+        loudness.prepare (sampleRate);
+        corrLR = corrLL = corrRR = 0.0;
+    }
+
+    // Only while the transport rolls, so an idle session does not quietly
+    // average itself down toward silence.
+    if (! isRunning || numSamples <= 0 || master.getNumChannels() < 2)
+    {
+        analysisRunning.store (false);
+        return;
+    }
+
+    analysisRunning.store (true);
+    loudness.process (master.getArrayOfReadPointers(), 2, numSamples);
+
+    // Correlation between the two channels, which is what tells you whether a
+    // mix will survive being folded to mono.
+    const auto* l = master.getReadPointer (0);
+    const auto* r = master.getReadPointer (1);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        corrLR += (double) l[i] * r[i];
+        corrLL += (double) l[i] * l[i];
+        corrRR += (double) r[i] * r[i];
+    }
+
+    // Decay, so the figure follows the music rather than the whole session.
+    const double keep = std::pow (0.5, numSamples / (sampleRate * 2.0));
+    corrLR *= keep; corrLL *= keep; corrRR *= keep;
+
+    const double denominator = std::sqrt (corrLL * corrRR);
+    analysisCorrelation.store (denominator > 1.0e-12 ? (float) (corrLR / denominator) : 1.0f);
+
+    analysisIntegrated.store (loudness.getIntegratedLufs());
+    analysisShortTerm.store (loudness.getShortTermLufs());
+    analysisMomentary.store (loudness.getMomentaryLufs());
+    analysisRange.store (loudness.getLoudnessRange());
+    analysisTruePeak.store (loudness.getTruePeak());
+}
+
+AudioEngine::MixReading AudioEngine::getMixReading() const
+{
+    MixReading r;
+    r.integratedLufs = analysisIntegrated.load();
+    r.shortTermLufs  = analysisShortTerm.load();
+    r.momentaryLufs  = analysisMomentary.load();
+    r.loudnessRange  = analysisRange.load();
+    r.truePeak       = analysisTruePeak.load();
+    r.correlation    = analysisCorrelation.load();
+    r.measuring      = analysisRunning.load();
+    return r;
 }
 
 void AudioEngine::routeSends (int index, int numSamples)

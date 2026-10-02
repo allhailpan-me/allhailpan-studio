@@ -63,11 +63,13 @@ MainComponent::MainComponent()
     pianoTab.onClick    = [this] { setView (View::pianoRoll); };
     rackTab.onClick     = [this] { setView (View::rack); };
     modTab.onClick      = [this] { setView (View::modulators); };
+    reportTab.onClick   = [this] { setView (View::mixReport); };
     mixerTab.onClick    = [this] { toggleMixerWindow(); };
     playlistTab.setTooltip ("F5");
     pianoTab.setTooltip ("F7");
     rackTab.setTooltip ("Step sequencer for all 16 channels (F6)");
     modTab.setTooltip ("Move any plugin parameter in time, locked to the tempo (F8)");
+    reportTab.setTooltip ("What the finished mix measures, and what that means");
     mixerTab.setTooltip ("Opens the mixer window (F9)");
 
     fileButton.onClick = [this] { showFileMenu(); };
@@ -212,13 +214,15 @@ MainComponent::MainComponent()
     addChildComponent (pianoRoll);
     addChildComponent (rack);
     addChildComponent (modPanel);
+    addChildComponent (mixReport);
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
                      static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
-                     static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&mixerTab),
+                     static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
+                     static_cast<juce::Component*> (&mixerTab),
                      static_cast<juce::Component*> (&audioButton), static_cast<juce::Component*> (&pluginsButton),
                      static_cast<juce::Component*> (&undoButton), static_cast<juce::Component*> (&redoButton),
                      static_cast<juce::Component*> (&fileButton),
@@ -1140,10 +1144,12 @@ void MainComponent::setView (View v)
     pianoRoll.setVisible (v == View::pianoRoll);
     rack.setVisible (v == View::rack);
     modPanel.setVisible (v == View::modulators);
+    mixReport.setVisible (v == View::mixReport);
     playlistTab.setToggleState (v == View::playlist, juce::dontSendNotification);
     pianoTab.setToggleState (v == View::pianoRoll, juce::dontSendNotification);
     rackTab.setToggleState (v == View::rack, juce::dontSendNotification);
     modTab.setToggleState (v == View::modulators, juce::dontSendNotification);
+    reportTab.setToggleState (v == View::mixReport, juce::dontSendNotification);
 
     if (v == View::rack)
         rack.refresh();
@@ -1263,6 +1269,7 @@ void MainComponent::resized()
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));
     modTab      .setBounds (bar.removeFromLeft (48));
+    reportTab   .setBounds (bar.removeFromLeft (64));
     mixerTab    .setBounds (bar.removeFromLeft (58));
     pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
     audioButton  .setBounds (bar.removeFromRight (104)); bar.removeFromRight (14);
@@ -1287,6 +1294,7 @@ void MainComponent::resized()
     pianoRoll.setBounds (work);
     rack.setBounds (work);
     modPanel.setBounds (work);
+    mixReport.setBounds (work);
 
     piano.setBounds (pianoArea);
     piano.setKeyWidth ((float) pianoArea.getWidth() / 50.0f);
