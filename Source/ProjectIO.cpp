@@ -281,6 +281,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         {
             e->setAttribute ("sample", clip.sample != nullptr ? sampleIds[clip.sample.get()] : 0);
             e->setAttribute ("stretch", clip.stretch);
+            e->setAttribute ("sourceBpm", clip.sourceBpm);
+            e->setAttribute ("followTempo", clip.followTempo);
             e->setAttribute ("pitch", clip.pitch);
         }
         else if (clip.pattern != nullptr)
@@ -484,6 +486,8 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 if (it == samples.end()) continue;
                 clip.sample  = it->second;
                 clip.stretch = juce::jlimit (0.1, 10.0, e->getDoubleAttribute ("stretch", 1.0));
+                clip.sourceBpm = juce::jlimit (0.0, 400.0, e->getDoubleAttribute ("sourceBpm", 0.0));
+                clip.followTempo = e->getBoolAttribute ("followTempo", false);
                 clip.pitch   = juce::jlimit (-24.0, 24.0, e->getDoubleAttribute ("pitch", 0.0));
             }
             else

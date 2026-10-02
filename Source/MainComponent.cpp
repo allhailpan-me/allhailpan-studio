@@ -88,6 +88,13 @@ MainComponent::MainComponent()
     tempo.onValueChange = [this]
     {
         engine.setBpm (tempo.getValue());
+        project.bpm = engine.getBpm();
+
+        // Clips set to follow the tempo are re-stretched before the snapshot
+        // is pushed, so matched audio stays on the grid instead of drifting
+        // when the tempo moves.
+        project.retuneTempoFollowers();
+
         pushArrangement (true);
         playlist.refresh();
         markDirty();

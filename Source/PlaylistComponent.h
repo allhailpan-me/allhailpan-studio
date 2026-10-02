@@ -105,6 +105,10 @@ private:
     void layoutClipBar (juce::Rectangle<int>);
     Clip* singleSelected();
 
+    /** Guesses the tempo a loop was recorded at, assuming it is a whole number
+        of bars. Returns 0 when nothing plausible fits. */
+    double guessSourceBpm (const Clip&) const;
+
     Project&     project;
     AudioEngine& engine;
     SampleCache& cache;
@@ -119,7 +123,9 @@ private:
 
     // clip bar
     juce::Label      clipName, clipStatus, pitchLabel { {}, "Pitch" }, stretchLabel { {}, "Stretch" }, gainLabel { {}, "Gain" };
-    juce::Slider     pitchSlider, stretchSlider, gainSlider;
+    juce::Label      bpmLabel { {}, "Source BPM" };
+    juce::Slider     pitchSlider, stretchSlider, gainSlider, sourceBpmSlider;
+    juce::TextButton syncButton { "Sync to tempo" };
     juce::TextButton resetButton { "Reset" }, openRollButton { "Open piano roll" };
     juce::ComboBox   channelBox;
     bool             sliderDragging = false;

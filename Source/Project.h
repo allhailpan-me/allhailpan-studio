@@ -130,6 +130,13 @@ struct Clip
     double length  = 0.0;    // audio: seconds of source     midi: beats
     double stretch = 1.0;    // audio: output time / source time
     double pitch   = 0.0;    // audio: semitones
+
+    // Tempo matching. sourceBpm is the tempo the audio was recorded at; with
+    // followTempo set, its stretch is kept at sourceBpm/projectBpm, so the clip
+    // stays on the grid at any project tempo. Rubber Band stretches time
+    // without touching pitch, so a vocal matched this way stays in key.
+    double sourceBpm   = 0.0;   // 0 = unknown
+    bool   followTempo = false;
     float  gainDb  = 0.0f;
     bool   muted   = false;
 
@@ -401,6 +408,27 @@ public:
 
     /** Moves a channel's existing rack notes to a new key, so picking a
         different drum does not appear to wipe the row. */
+    /** Re-stretches every clip that follows the tempo. Called when the project
+        tempo changes, so matched audio tracks the grid instead of drifting. */
+    void retuneTempoFollowers()
+    {
+        bool any = false;
+
+        for (auto& c : clips)
+            if (c.isAudio() && c.followTempo && c.sourceBpm > 0.0 && bpm > 0.0)
+            {
+                const double wanted = c.sourceBpm / bpm;
+                if (std::abs (wanted - c.stretch) > 1.0e-9)
+                {
+                    c.stretch = wanted;
+                    any = true;
+                }
+            }
+
+        if (any)
+            changed();
+    }
+
     void setRackNote (int channel, int note)
     {
         auto& info = channels[(size_t) channel];
@@ -586,7 +614,8 @@ private:
     {
         if (a.id != b.id || a.type != b.type || a.sample != b.sample || a.channel != b.channel
             || a.track != b.track || a.start != b.start || a.offset != b.offset || a.length != b.length
-            || a.stretch != b.stretch || a.pitch != b.pitch || a.gainDb != b.gainDb || a.muted != b.muted)
+            || a.stretch != b.stretch || a.pitch != b.pitch || a.gainDb != b.gainDb || a.muted != b.muted
+            || a.sourceBpm != b.sourceBpm || a.followTempo != b.followTempo)
             return false;
         if (a.pattern == b.pattern)
             return true;
