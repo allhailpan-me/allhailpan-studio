@@ -37,12 +37,16 @@ public:
             file.getParentDirectory().createDirectory();
             file.deleteFile();
 
-            auto stream = std::make_unique<juce::FileOutputStream> (file);
-            if (! stream->openedOk())
+            auto fileStream = std::make_unique<juce::FileOutputStream> (file);
+            if (! fileStream->openedOk())
             {
                 problem = "Couldn't write " + file.getFullPathName();
                 return false;
             }
+
+            // Held as the base type, because createWriterFor takes the pointer
+            // by reference and so will not convert from a derived one.
+            std::unique_ptr<juce::OutputStream> stream = std::move (fileStream);
 
             juce::WavAudioFormat wav;
 
