@@ -269,6 +269,15 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("rackNote", info.rackNote);
         e->setAttribute ("rackTrack", info.rackTrack);
         e->setAttribute ("sumOutputs", engine.getChannelSumsOutputs (c));
+        e->setAttribute ("splitBuses", engine.getChannelSplitsBuses (c));
+
+        for (int b = 0; b < kMaxOutBuses; ++b)
+            if (const int to = engine.getBusInsert (c, b); to > 0)
+            {
+                auto* bus = e->createNewChildElement ("BUS");
+                bus->setAttribute ("index", b);
+                bus->setAttribute ("insert", to);
+            }
         writePlugin (*e, engine.getChannelPlugin (c), info.missingPlugin);
     }
 
@@ -497,6 +506,17 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             info.rackTrack = e->getIntAttribute ("rackTrack", -1);
             engine.setChannelInsert (c, info.insert);
 
+            info.splitBuses = e->getBoolAttribute ("splitBuses", false);
+            info.busInsert.fill (0);
+
+            for (auto* bus : e->getChildWithTagNameIterator ("BUS"))
+            {
+                const int b = bus->getIntAttribute ("index", -1);
+                if (juce::isPositiveAndBelow (b, kMaxOutBuses))
+                    info.busInsert[(size_t) b] =
+                        juce::jlimit (0, kNumInserts - 1, bus->getIntAttribute ("insert", 0));
+            }
+
             if (auto* hosted = e->getChildByName (hostedTag))
             {
                 juce::String error;
@@ -506,6 +526,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                     engine.setChannelPlugin (c, std::move (plugin));
                     if (e->hasAttribute ("sumOutputs"))
                         engine.setChannelSumsOutputs (c, e->getBoolAttribute ("sumOutputs"));
+
+                    // After the plugin, not before: loading one discovers the
+                    // bus layout afresh and clears any routing already set.
+                    for (int b = 0; b < kMaxOutBuses; ++b)
+                        if (info.busInsert[(size_t) b] > 0)
+                            engine.setBusInsert (c, b, info.busInsert[(size_t) b]);
+
+                    engine.setChannelSplitsBuses (c, info.splitBuses);
                 }
                 else
                 {

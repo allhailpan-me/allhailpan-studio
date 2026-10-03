@@ -142,6 +142,7 @@ private:
     void loadInstrument (const juce::PluginDescription&);
     void unloadInstrument (int channel);
     void showFxMenu (int insert, int slot);
+    void showBusRouting (int channel);
     void loadFx (int insert, int slot, const juce::PluginDescription&);
     void openPluginWindow (juce::AudioPluginInstance&);
     void closePluginWindow (juce::AudioProcessor*);
@@ -211,6 +212,7 @@ private:
     juce::Label      channelLabel { {}, "Channel" }, insertLabel { {}, "Mixer" }, typingLabel;
     juce::ComboBox   channelBox, instrumentBox, insertBox;
     juce::TextButton showButton { "Show" }, unloadButton { "Unload" }, sumOutsButton { "Mix all outs" };
+    juce::TextButton routeOutsButton { "Route outs..." };
     juce::TextButton browseButton { "Find..." };
     juce::MidiKeyboardComponent piano { engine.keyboard(), juce::MidiKeyboardComponent::horizontalKeyboard };
 

@@ -45,12 +45,22 @@ public:
             }
 
             juce::WavAudioFormat wav;
-            if (auto* writer = wav.createWriterFor (stream.get(), rate, 2, 24, {}, 0))
+
+            // The overload taking loose arguments is deprecated and will
+            // eventually be removed, which would stop exports compiling. This
+            // one takes the stream by reference and claims it on success, so
+            // there is no raw pointer to hand over.
+            const auto options = juce::AudioFormatWriterOptions{}
+                                     .withSampleRate (rate)
+                                     .withNumChannels (2)
+                                     .withBitsPerSample (24);
+
+            if (auto writer = wav.createWriterFor (stream, options))
             {
-                stream.release();          // the writer owns the stream now
-                writers[index].reset (writer);
+                writers[index] = std::move (writer);
                 return true;
             }
+
             problem = "Couldn't write " + file.getFullPathName();
             return false;
         };

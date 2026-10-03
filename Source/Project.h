@@ -2,6 +2,7 @@
 #include <juce_events/juce_events.h>
 #include "SampleData.h"
 #include <set>
+#include <array>
 #include <map>
 
 // ---------------------------------------------------------------------------
@@ -14,6 +15,7 @@ static constexpr int kNumChannels = 16;   // instrument slots
 static constexpr int kNumInserts  = 17;   // 0 = master, 1..16 = inserts
 static constexpr int kNumFxSlots  = 8;
 static constexpr int kNumSends    = 2;   // aux sends per insert
+static constexpr int kMaxOutBuses = 16;  // output buses a plugin may be split across
 
 struct Track
 {
@@ -187,6 +189,13 @@ struct ChannelInfo
 {
     juce::String name;        // plugin name, or empty
     int insert = 1;
+
+    // Multi output plugins. A drum machine like Microtonic puts each of its
+    // eight sounds on its own output, and splitting them gives each drum its
+    // own mixer strip, with its own effects and fader, the way a hardware
+    // machine's individual outs would be patched.
+    bool splitBuses = false;
+    std::array<int, kMaxOutBuses> busInsert {};   // 0 means follow the channel
 
     // Channel rack. rackNote is what a step plays, which matters for drum
     // plugins that put every sound on a different key. rackTrack is the

@@ -90,6 +90,19 @@ public:
     // mixed down to the channel's stereo signal.
     void setChannelSumsOutputs (int channel, bool shouldSum) noexcept;
     bool getChannelSumsOutputs (int channel) const noexcept;
+
+    /** Sends each output bus to its own insert, rather than folding them all
+        into one. */
+    void setChannelSplitsBuses (int channel, bool shouldSplit);
+    bool getChannelSplitsBuses (int channel) const noexcept;
+
+    /** Where one output bus goes. Insert 0 means follow the channel's own. */
+    void setBusInsert (int channel, int bus, int insertIndex);
+    int  getBusInsert (int channel, int bus) const noexcept;
+
+    /** How a bus is laid out in the plugin's buffer, for naming it in the
+        interface. */
+    juce::String getBusName (int channel, int bus) const;
     int  getChannelOutputBuses (int channel) const noexcept;
     void setSelectedChannel (int channel) noexcept { selectedChannel.store (juce::jlimit (0, kNumChannels - 1, channel)); }
     // Stops every sounding note everywhere (the classic DAW panic button)
@@ -267,6 +280,15 @@ private:
         std::atomic<int> insert { 1 };
         std::atomic<bool> sumOutputs { false };
         int outputBuses = 1;
+
+        // Splitting sends each output bus to its own insert instead of folding
+        // them together. Each bus then needs its own compensation, because the
+        // inserts it lands on can run at different latencies.
+        std::atomic<bool> splitBuses { false };
+        std::array<std::atomic<int>, kMaxOutBuses> busInsert {};
+        std::array<LatencyDelay, kMaxOutBuses>     busAlign;
+        std::array<int, kMaxOutBuses>              busFirstChannel {};
+        std::array<int, kMaxOutBuses>              busChannelCount {};
         std::vector<float> lastAuto;
 
         // Modulation rides on top of whatever the parameter is already set to.
@@ -284,6 +306,7 @@ private:
     void updateLatency();
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
+    void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);

@@ -158,6 +158,10 @@ MainComponent::MainComponent()
         engine.setChannelSumsOutputs (engine.getSelectedChannel(), sumOutsButton.getToggleState());
         markDirty();
     };
+    routeOutsButton.setTooltip ("Give each of this instrument's outputs its own mixer insert, "
+                                "so every drum gets its own strip, fader and effects.");
+    routeOutsButton.onClick = [this] { showBusRouting (engine.getSelectedChannel()); };
+
     unloadButton.onClick = [this] { unloadInstrument (engine.getSelectedChannel()); };
 
     typing.onOctaveChanged = [this] { updateTypingLabel(); };
@@ -230,7 +234,7 @@ MainComponent::MainComponent()
                      static_cast<juce::Component*> (&clock), static_cast<juce::Component*> (&channelLabel),
                      static_cast<juce::Component*> (&channelBox), static_cast<juce::Component*> (&instrumentBox),
                      static_cast<juce::Component*> (&insertLabel), static_cast<juce::Component*> (&insertBox),
-                     static_cast<juce::Component*> (&browseButton), static_cast<juce::Component*> (&showButton), static_cast<juce::Component*> (&unloadButton), static_cast<juce::Component*> (&sumOutsButton),
+                     static_cast<juce::Component*> (&browseButton), static_cast<juce::Component*> (&showButton), static_cast<juce::Component*> (&unloadButton), static_cast<juce::Component*> (&sumOutsButton), static_cast<juce::Component*> (&routeOutsButton),
                      static_cast<juce::Component*> (&typingLabel), static_cast<juce::Component*> (&piano) })
     {
         addAndMakeVisible (c);
@@ -808,8 +812,13 @@ void MainComponent::refreshChannelControls()
     const bool loaded = engine.getChannelPlugin (ch) != nullptr;
     showButton.setEnabled (loaded);
     unloadButton.setEnabled (loaded);
-    sumOutsButton.setEnabled (loaded && engine.getChannelOutputBuses (ch) > 1);
+    const bool multiOut = loaded && engine.getChannelOutputBuses (ch) > 1;
+    const bool split = engine.getChannelSplitsBuses (ch);
+
+    sumOutsButton.setEnabled (multiOut && ! split);
     sumOutsButton.setToggleState (engine.getChannelSumsOutputs (ch), juce::dontSendNotification);
+    routeOutsButton.setEnabled (multiOut);
+    routeOutsButton.setButtonText (split ? "Outs: split" : "Route outs...");
     instrumentBox.setEnabled (loadingName.isEmpty());
 }
 
@@ -1137,6 +1146,100 @@ void MainComponent::checkModulationLearn()
     setStatus ("Modulation can only be attached to an instrument's own controls.");
 }
 
+void MainComponent::showBusRouting (int channel)
+{
+    if (! juce::isPositiveAndBelow (channel, kNumChannels))
+        return;
+
+    const int buses = std::min (engine.getChannelOutputBuses (channel), kMaxOutBuses);
+    if (buses <= 1)
+        return;
+
+    const bool split = engine.getChannelSplitsBuses (channel);
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (project.channels[(size_t) channel].name + "   "
+                             + juce::String (buses) + " outputs");
+
+    menu.addItem (1, "Mix every output into one insert", true, ! split);
+    menu.addItem (2, "Give each output its own insert", true, split);
+    menu.addSeparator();
+
+    // The useful default: lay the outputs out across consecutive inserts
+    // starting at this channel's own, which is how a drum machine's individual
+    // outs would normally be patched.
+    menu.addItem (3, "Spread across inserts from here");
+
+    if (split)
+    {
+        menu.addSeparator();
+        menu.addSectionHeader ("Where each output goes");
+
+        for (int b = 0; b < buses; ++b)
+        {
+            juce::PopupMenu destinations;
+            const int current = engine.getBusInsert (channel, b);
+
+            destinations.addItem (1000 + b * 100, "Same as the channel", true, current == 0);
+            for (int to = 1; to < kNumInserts; ++to)
+                destinations.addItem (1000 + b * 100 + to, engine.insert (to).name,
+                                      true, current == to);
+
+            menu.addSubMenu (engine.getBusName (channel, b)
+                               + (current > 0 ? "   " + engine.insert (current).name
+                                              : juce::String()),
+                             destinations);
+        }
+    }
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&routeOutsButton),
+                        [this, channel, buses] (int result)
+    {
+        if (result == 0)
+            return;
+
+        if (result == 1)
+        {
+            engine.setChannelSplitsBuses (channel, false);
+        }
+        else if (result == 2)
+        {
+            engine.setChannelSplitsBuses (channel, true);
+        }
+        else if (result == 3)
+        {
+            const int first = project.channels[(size_t) channel].insert;
+
+            for (int b = 0; b < buses; ++b)
+            {
+                const int to = first + b;
+                engine.setBusInsert (channel, b, to < kNumInserts ? to : 0);
+            }
+
+            engine.setChannelSplitsBuses (channel, true);
+            setStatus ("Outputs spread across inserts " + juce::String (first)
+                         + " to " + juce::String (std::min (first + buses - 1, kNumInserts - 1)));
+        }
+        else if (result >= 1000)
+        {
+            const int bus = (result - 1000) / 100;
+            const int to  = (result - 1000) % 100;
+            engine.setBusInsert (channel, bus, to);
+        }
+
+        // The routing is the engine's, so the project's copy is brought in line
+        // with it before anything is saved.
+        auto& info = project.channels[(size_t) channel];
+        info.splitBuses = engine.getChannelSplitsBuses (channel);
+        for (int b = 0; b < kMaxOutBuses; ++b)
+            info.busInsert[(size_t) b] = engine.getBusInsert (channel, b);
+
+        markDirty();
+        refreshChannelControls();
+        mixer.refresh();
+    });
+}
+
 void MainComponent::setView (View v)
 {
     view = v;
@@ -1283,7 +1386,8 @@ void MainComponent::resized()
     browseButton .setBounds (cb.removeFromLeft (62));  cb.removeFromLeft (6);
     showButton   .setBounds (cb.removeFromLeft (58));  cb.removeFromLeft (4);
     unloadButton .setBounds (cb.removeFromLeft (66));  cb.removeFromLeft (6);
-    sumOutsButton.setBounds (cb.removeFromLeft (100)); cb.removeFromLeft (14);
+    sumOutsButton.setBounds (cb.removeFromLeft (100)); cb.removeFromLeft (6);
+    routeOutsButton.setBounds (cb.removeFromLeft (104)); cb.removeFromLeft (14);
     insertLabel  .setBounds (cb.removeFromLeft (46));
     insertBox    .setBounds (cb.removeFromLeft (130)); cb.removeFromLeft (12);
     typingLabel  .setBounds (cb);
