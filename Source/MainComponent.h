@@ -12,6 +12,8 @@
 #include "ChannelRackComponent.h"
 #include "ModulatorPanel.h"
 #include "MixReportPanel.h"
+#include <array>
+#include <atomic>
 #include "MixerComponent.h"
 #include "PluginPicker.h"
 #include "Logo.h"
@@ -48,39 +50,50 @@ private:
     {
         explicit ParamRecorder (AudioEngine& e) : engine (e) {}
 
+        // A hosted plugin is free to report a parameter change from inside
+        // its own processBlock, which happens on the audio thread. So the
+        // "is this knob being held" question has to be answerable without a
+        // lock: a std::set behind a spin lock meant the audio thread could
+        // spin waiting for a lock the message thread was holding across the
+        // set's own allocation. A flag per parameter answers it with one
+        // atomic read and nothing to allocate.
+        //
+        // Fixed length rather than sized from the plugin, because resizing it
+        // is exactly what must not happen while the audio thread is reading.
+        // No plugin exposes four thousand parameters; anything past the end
+        // is simply not recorded, which is the same as the gesture never
+        // having been seen.
+        static constexpr int maxParams = 4096;
+
         void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor*, int index) override
         {
-            const juce::SpinLock::ScopedLockType lock (gestureLock);
-            held.insert (index);
-            sawGesture = true;
+            if (juce::isPositiveAndBelow (index, maxParams))
+                held[(size_t) index].store (true);
+            sawGesture.store (true);
         }
         void audioProcessorParameterChangeGestureEnd (juce::AudioProcessor*, int index) override
         {
-            const juce::SpinLock::ScopedLockType lock (gestureLock);
-            held.erase (index);
+            if (juce::isPositiveAndBelow (index, maxParams))
+                held[(size_t) index].store (false);
         }
         void audioProcessorParameterChanged (juce::AudioProcessor*, int index, float value) override
         {
-            {
-                const juce::SpinLock::ScopedLockType lock (gestureLock);
-                if (held.count (index) == 0)
-                    return;                      // the plugin moved it, not the user
-            }
+            if (! juce::isPositiveAndBelow (index, maxParams) || ! held[(size_t) index].load())
+                return;                          // the plugin moved it, not the user
             engine.pushRecordedParam (index, value);
         }
         void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
 
         void reset()
         {
-            const juce::SpinLock::ScopedLockType lock (gestureLock);
-            held.clear();
-            sawGesture = false;
+            for (auto& h : held)
+                h.store (false);
+            sawGesture.store (false);
         }
 
         AudioEngine& engine;
-        juce::SpinLock gestureLock;
-        std::set<int>  held;
-        bool sawGesture = false;
+        std::array<std::atomic<bool>, (size_t) maxParams> held {};
+        std::atomic<bool> sawGesture { false };
     };
 
     // Notices when the user tweaks any plugin, so the project counts as changed.
