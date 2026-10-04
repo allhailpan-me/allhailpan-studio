@@ -774,6 +774,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (sequencing)
                 renderAudioClips (numSamples);
 
+            // Input monitoring goes in here, so it is heard through the
+            // insert's effects, but without the compensation delay the other
+            // sources get. That delay exists to line internal paths up with
+            // each other; on a monitor path it would just be latency the
+            // player feels.
+            mixMonitorInput (inputChannelData, numInputChannels, numSamples);
+
             // inserts into master
             auto& master = insertSlots[0].buffer;
             for (int i = 1; i < kNumInserts; ++i)
@@ -1279,6 +1286,63 @@ void AudioEngine::processInsert (int index, int numSamples)
     Shared by playback and export, so a bounce cannot route differently from
     what was heard.
 */
+// ---------------------------------------------------------------------------
+/** Passes the interface's input through to an insert, so the player hears
+    themselves through the studio's own effects.
+
+    Deliberately not delay compensated. That compensation lines internal paths
+    up with each other; on a monitor path it would only add latency the player
+    feels directly, and the recorder already lines the take itself up with the
+    arrangement.
+
+    The level ramps rather than switching, because turning monitoring on or off
+    mid-performance would otherwise click, and a click into a guitar amp
+    simulator is loud.
+*/
+void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int numInputChannels,
+                                   int numSamples)
+{
+    const auto mode = monitorMode.load();
+    const bool wanted = numInputChannels > 0
+                     && (mode == Monitor::always
+                         || (mode == Monitor::armed && (inputArmed.load() || recorder.isActive())));
+
+    // About five milliseconds either way, which is short enough to feel
+    // immediate and long enough not to click.
+    const float step = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
+    const float target = wanted ? 1.0f : 0.0f;
+
+    if (monitorRamp <= 0.0f && target <= 0.0f)
+        return;
+
+    auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, monitorInsert.load())].buffer;
+    const float gain = monitorGain.load();
+
+    const auto* left  = inputChannelData[0];
+    const auto* right = numInputChannels > 1 ? inputChannelData[1] : inputChannelData[0];
+
+    if (left == nullptr)
+        return;
+
+    if (right == nullptr)
+        right = left;
+
+    auto* outL = dest.getWritePointer (0);
+    auto* outR = dest.getWritePointer (1);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        if (monitorRamp < target)      monitorRamp = std::min (target, monitorRamp + step);
+        else if (monitorRamp > target) monitorRamp = std::max (target, monitorRamp - step);
+
+        const float level = monitorRamp * gain;
+        outL[i] += left[i]  * level;
+        outR[i] += right[i] * level;
+    }
+
+    monitoring.store (monitorRamp > 0.0f);
+}
+
 void AudioEngine::mixChannelOutput (ChannelSlot& c, const juce::AudioBuffer<float>& view,
                                     int numSamples)
 {

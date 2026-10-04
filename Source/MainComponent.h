@@ -177,6 +177,7 @@ private:
     void showAudioSettings();
     void setStatus (const juce::String&);
     void updateTypingLabel();
+    void pushArmedState();
     void checkModulationLearn();
     void paintStatus (juce::Graphics&, juce::Rectangle<int>);
 
@@ -200,7 +201,7 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
-    juce::ComboBox   recordMode, countInBox;
+    juce::ComboBox   recordMode, countInBox, monitorBox;
     juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" };
     juce::TextButton modTab { "Mod" }, reportTab { "Report" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };

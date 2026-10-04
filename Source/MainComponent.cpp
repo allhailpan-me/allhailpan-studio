@@ -32,6 +32,26 @@ MainComponent::MainComponent()
     recordButton.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
     recordButton.setTooltip ("Record (Ctrl+R)");
 
+    monitorBox.addItem ("Monitor: off", 1);
+    monitorBox.addItem ("Monitor: armed", 2);
+    monitorBox.addItem ("Monitor: on", 3);
+    monitorBox.setSelectedId (1, juce::dontSendNotification);
+    monitorBox.setTooltip ("Hear your input through this studio's own effects.\n"
+                           "armed = only while a track is armed, on = always.\n"
+                           "Use headphones: monitoring through speakers near a microphone feeds back.");
+    monitorBox.onChange = [this]
+    {
+        const auto mode = (AudioEngine::Monitor) (monitorBox.getSelectedId() - 1);
+        engine.setMonitorMode (mode);
+        plugins.settings().setValue ("monitorMode", monitorBox.getSelectedId());
+
+        if (mode != AudioEngine::Monitor::off)
+            setStatus ("Monitoring through " + engine.insert (engine.getMonitorInsert()).name
+                         + ". Use headphones: speakers near a microphone will feed back.");
+    };
+    monitorBox.setSelectedId (plugins.settings().getIntValue ("monitorMode", 1), juce::dontSendNotification);
+    engine.setMonitorMode ((AudioEngine::Monitor) (monitorBox.getSelectedId() - 1));
+
     recordMode.addItem ("Rec: Auto", recAuto);
     recordMode.addItem ("Rec: Input audio", recAudio);
     recordMode.addItem ("Rec: MIDI + automation", recMidi);
@@ -222,7 +242,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
-                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&countInBox),
+                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
                      static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
@@ -250,6 +270,7 @@ MainComponent::MainComponent()
     pushArrangement (true);
     updateTypingLabel();
     setView (View::playlist);
+    pushArmedState();
     updateUndoButtons();
 
     if (startupError.isNotEmpty())
@@ -750,6 +771,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
                 markDirty();
             updateUndoButtons();
         }
+        pushArmedState();
         playlist.refresh();
         if (view == View::pianoRoll) pianoRoll.refresh();
         if (view == View::rack)      rack.refresh();
@@ -1240,6 +1262,19 @@ void MainComponent::showBusRouting (int channel)
     });
 }
 
+void MainComponent::pushArmedState()
+{
+    bool armed = false;
+    for (const auto& t : project.tracks)
+        if (t.armed)
+        {
+            armed = true;
+            break;
+        }
+
+    engine.setInputArmed (armed);
+}
+
 void MainComponent::setView (View v)
 {
     view = v;
@@ -1363,6 +1398,7 @@ void MainComponent::resized()
     stopButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     recordButton.setBounds (bar.removeFromLeft (50));  bar.removeFromLeft (4);
     recordMode  .setBounds (bar.removeFromLeft (140)); bar.removeFromLeft (4);
+    monitorBox  .setBounds (bar.removeFromLeft (124)); bar.removeFromLeft (4);
     countInBox  .setBounds (bar.removeFromLeft (112)); bar.removeFromLeft (10);
     clock       .setBounds (bar.removeFromLeft (86));  bar.removeFromLeft (10);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
@@ -1442,6 +1478,7 @@ void MainComponent::paintStatus (juce::Graphics& g, juce::Rectangle<int> r)
              // back; it is the amount every track is delayed to stay in time.
              + (plugins > 0 ? "  |  " + juce::String (sr > 0 ? 1000.0 * plugins / sr : 0.0, 1) + " ms compensated"
                             : juce::String())
+             + (engine.isMonitoring() ? juce::String ("  |  MONITORING") : juce::String())
              + "  |  CPU " + juce::String (engine.devices().getCpuUsage() * 100.0, 1) + "%"
              + (stretchCache.isBusy() ? juce::String ("  |  stretching audio...") : juce::String());
     }
