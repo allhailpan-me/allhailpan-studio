@@ -85,6 +85,43 @@ testing and then leaks between projects.
 expose an `isDragging` style method, and `MainComponent::changeListenerCallback`
 uses it to hold off committing while a gesture is in progress.
 
+## Research before building
+
+Do not implement from memory or intuition anything that has an established
+definition in the audio world. Look it up, find the actual specification or the
+reference implementation, and work from that. Then say in the commit or the
+pull request what the source was and how the result was checked against it.
+
+This is not pedantry. A DAW is judged against other DAWs by people who know
+exactly how the real thing behaves, and a plausible approximation is worse than
+useless: it sounds almost right, which is the hardest kind of wrong to
+diagnose. Several features here are correct only because they were built from
+the specification rather than from a guess:
+
+- Loudness follows ITU-R BS.1770-4 and is verified against the EBU Tech 3341
+  compliance test signals, which define the exact reading a given tone must
+  produce. The K-weighting filters are designed from the analogue prototypes
+  rather than copied as 48 kHz coefficients, so they stay correct at any sample
+  rate. Guessing here would have produced numbers that looked reasonable and
+  disagreed with every other meter.
+- Swing is defined as the position of the offbeat within its pair, where fifty
+  percent is straight and sixty-six is a triplet shuffle, which is what
+  hardware samplers have meant by the number since the MPC. Implementing it as
+  "delay every other note a bit" would not match what a drummer or another
+  studio means by a swing percentage.
+- Band limited oscillators exist because naive saw and square waves alias, and
+  aliasing is the single thing that makes a soft synth sound amateur.
+
+When adopting an idea from another studio, read its documentation and model the
+real behaviour, including the parameters it exposes and why. Ableton's grooves,
+for instance, are not a single swing amount: they carry a base resolution, a
+timing amount, a velocity amount and a randomisation amount, and the useful
+part is that a feel can be extracted from one performance and applied to
+another.
+
+Where a standard genuinely does not exist, say so plainly in the comment and
+explain the choice, rather than implying an authority that is not there.
+
 ## Verifying things
 
 JUCE cannot be compiled in the development sandbox, so CI is the compile check.
