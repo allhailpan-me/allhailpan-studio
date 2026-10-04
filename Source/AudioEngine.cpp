@@ -518,23 +518,34 @@ void AudioEngine::pushRecordedParam (int index, float value)
 
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
-    sampleRate = device->getCurrentSampleRate();
-    if (sampleRate <= 0.0)
-        sampleRate = 44100.0;
-    blockSize = std::max (16, device->getCurrentBufferSizeSamples());
+    const double newRate = device->getCurrentSampleRate() > 0.0
+                         ? device->getCurrentSampleRate() : 44100.0;
+    const int newBlockSize = std::max (16, device->getCurrentBufferSizeSamples());
 
+    midiCollector.reset (newRate);
+    recorder.prepare (newRate);
+
+    // Everything from here is behind the graph lock, including the engine's
+    // own block sized buffers and the rate and block size themselves. JUCE
+    // stops the device callback around a restart, so the live path would be
+    // safe either way, but an offline export holds this lock for its whole
+    // run and writes blockBeats every block. Changing the audio device while
+    // a bounce is in flight was therefore reallocating the array that export
+    // was writing through.
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+
+    sampleRate = newRate;
+    blockSize  = newBlockSize;
     clickDecay = std::exp (-1.0 / (sampleRate * 0.008));
-    midiCollector.reset (sampleRate);
     liveMidi.ensureSize (8192);
     fxMidi.ensureSize (2048);
-    recorder.prepare (sampleRate);
 
     const int cap = bufferCapacity();
+    capacity = 0;                 // nothing may run the graph while it is being resized
     blockBeats.assign ((size_t) cap, 0.0);
     clickBuffer.assign ((size_t) cap, 0.0f);
     silence.assign ((size_t) cap, 0.0f);
 
-    const juce::SpinLock::ScopedLockType lock (graphLock);
     for (auto& c : channelSlots)
     {
         c.midi.ensureSize (8192);

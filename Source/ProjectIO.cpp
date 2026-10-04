@@ -835,12 +835,19 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                         clip.folder  = std::move (folder);
                         clip.sample.reset();      // a folder reads its takes
 
-                        // Sizes the clip to its longest pass and puts the comp
-                        // back into the form every lookup assumes, which is
-                        // what makes a hand edited or truncated file safe.
-                        clip.length = clip.folder->longestSeconds();
-                        clip.offset = 0.0;
-                        clip.folder->tidy (clip.length);
+                        // Through the same function every other path to a
+                        // folder goes through, rather than repeating the part
+                        // of it that sizes the clip. This loader was
+                        // repeating three of its lines and leaving out the
+                        // ones that turn warping, stretching and tempo
+                        // following off, so a file that carried both a comp
+                        // and a set of warp markers loaded as a folder with
+                        // live markers on it. This program writes no such
+                        // file, but a hand edited or hand merged one is
+                        // exactly what the normalising here exists for, and
+                        // the renderer deliberately does not guard against
+                        // it: see Project::tidyFolder and CLAUDE.md.
+                        project.tidyFolder (clip);
                     }
                 }
             }
