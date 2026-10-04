@@ -167,6 +167,12 @@ private:
     void showLoadProblems (const ProjectIO::LoadReport&);
     void findMissingSamples();
     void exportAudio (bool stems);
+
+    // MIDI file import and export. The export writes the arrangement, or just
+    // the selected clips, as a standard multi-track file; the import is the
+    // same path a dropped file takes, so there is one set of behaviour.
+    void exportMidi (bool onlySelected);
+    void importMidiDialog();
     void checkExportProgress();
     void clearSession();
     void markDirty();

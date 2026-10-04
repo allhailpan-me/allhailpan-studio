@@ -1,6 +1,7 @@
 #include "PlaylistComponent.h"
 #include "AhpLookAndFeel.h"
 #include "Logo.h"
+#include "MidiFileIO.h"
 #include <cmath>
 
 namespace
@@ -1550,6 +1551,18 @@ void PlaylistComponent::addFiles (const juce::StringArray& paths, double beat, i
     juce::StringArray problems;
     project.selection.clear();
 
+    // MIDI files come in through the same drop, because to a producer dragging
+    // a part in is the same gesture as dragging a sample in. They are taken
+    // first so that the rows they claim are the ones nearest the drop.
+    juce::StringArray midiPaths;
+    for (const auto& path : paths)
+        if (MidiFileIO::isMidiFile (juce::File (path)))
+            midiPaths.add (path);
+
+    juce::String midiReport;
+    if (! midiPaths.isEmpty())
+        midiReport = importMidiFiles (midiPaths, beat, track);   // advances track
+
     for (const auto& path : paths)
     {
         if (track >= (int) project.tracks.size())
@@ -1580,6 +1593,9 @@ void PlaylistComponent::addFiles (const juce::StringArray& paths, double beat, i
     updateClipBar();
     repaint();
 
+    if (midiReport.isNotEmpty() && onStatus)
+        onStatus (midiReport);
+
     if (! problems.isEmpty())
         juce::AlertWindow::showAsync (juce::MessageBoxOptions()
                                           .withIconType (juce::MessageBoxIconType::WarningIcon)
@@ -1587,6 +1603,166 @@ void PlaylistComponent::addFiles (const juce::StringArray& paths, double beat, i
                                           .withMessage (problems.joinIntoString ("\n"))
                                           .withButton ("OK"),
                                       nullptr);
+}
+
+int PlaylistComponent::firstFreeChannel (const std::set<int>& alreadyClaimed) const
+{
+    for (int c = 0; c < kNumChannels; ++c)
+    {
+        if (alreadyClaimed.count (c) != 0)
+            continue;
+        if (project.channels[(size_t) c].name.isNotEmpty())
+            continue;        // a plugin is loaded here
+
+        bool inUse = false;
+        for (const auto& clip : project.clips)
+            if (! clip.isAudio() && clip.channel == c)
+            {
+                inUse = true;
+                break;
+            }
+
+        if (! inUse)
+            return c;
+    }
+
+    return -1;
+}
+
+juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths, double beat, int& track)
+{
+    juce::StringArray problems;
+    std::set<int> claimed;
+
+    int filesRead = 0, clipsMade = 0, notesRead = 0, droppedOverlaps = 0;
+    bool ranOutOfChannels = false, ranOutOfTracks = false;
+    bool sawTempoChanges = false, splitByChannel = false;
+    double adoptedTempo = 0.0;
+
+    for (const auto& path : paths)
+    {
+        const juce::File file (path);
+        const auto read = MidiFileIO::read (file);
+
+        if (! read.ok)
+        {
+            problems.add (read.error);
+            continue;
+        }
+
+        ++filesRead;
+        notesRead       += read.notesRead;
+        droppedOverlaps += read.droppedOverlaps;
+        sawTempoChanges  = sawTempoChanges || read.hasTempoChanges;
+        splitByChannel   = splitByChannel  || read.splitByChannel;
+
+        // The file's own tempo is adopted only while the project is still at
+        // the tempo nobody chose. A producer who has set a tempo means it, and
+        // a dropped file silently moving the whole arrangement underneath them
+        // would be far worse than a part that needs stretching.
+        if (read.bpm > 0.0 && adoptedTempo == 0.0
+            && std::abs (project.bpm - kDefaultBpm) < 1.0e-9 && onSetTempo)
+        {
+            adoptedTempo = read.bpm;   // applied below, once the clips are in
+        }
+
+        for (const auto& imported : read.tracks)
+        {
+            if (track >= (int) project.tracks.size())
+            {
+                ranOutOfTracks = true;
+                break;
+            }
+
+            const int channel = firstFreeChannel (claimed);
+            if (channel < 0)
+            {
+                ranOutOfChannels = true;
+                break;
+            }
+            claimed.insert (channel);
+
+            auto pattern = std::make_shared<MidiPattern>();
+            pattern->notes = imported.notes;
+
+            // The clip has to be long enough to play its last note, and a
+            // whole number of bars so it sits on the grid the way a part drawn
+            // here would. Note positions keep the beats they had in the file,
+            // which is the only thing that keeps the tracks of a multi-track
+            // file lined up with each other.
+            const double needed = pattern->lastBeat();
+            const double bars   = std::max (1.0, std::ceil (needed / 4.0));
+
+            Clip c;
+            c.type    = ClipType::midi;
+            c.pattern = pattern;
+            c.channel = channel;
+            c.track   = track;
+            c.start   = beat;
+            c.offset  = 0.0;
+            c.length  = bars * 4.0;
+
+            project.selection.insert (project.addClip (c));
+            ++clipsMade;
+
+            // The track's name is the right home for the name the file
+            // carried: a channel's name means the plugin loaded in it, and
+            // putting a part's name there would read as an instrument that
+            // is not actually there.
+            if (imported.name.isNotEmpty())
+                project.tracks[(size_t) track].name = imported.name;
+
+            ++track;
+        }
+    }
+
+    // Setting the tempo re-stretches every tempo following clip and pushes a
+    // new arrangement, so it happens once the clips are all in rather than
+    // part way through adding them.
+    if (adoptedTempo > 0.0 && clipsMade > 0 && onSetTempo)
+        onSetTempo (adoptedTempo);
+
+    if (! problems.isEmpty() && clipsMade == 0)
+        return problems[0];
+
+    if (clipsMade == 0)
+        return "Nothing in that file could be imported.";
+
+    juce::String report;
+    report << "Imported " << clipsMade << (clipsMade == 1 ? " track, " : " tracks, ")
+           << notesRead << (notesRead == 1 ? " note" : " notes");
+
+    if (filesRead > 1)
+        report << " from " << filesRead << " files";
+
+    if (adoptedTempo > 0.0)
+        report << ", at the file's tempo of " << juce::String (adoptedTempo, 2) << " bpm";
+
+    report << ".";
+
+    // Everything below is something the producer would otherwise find out by
+    // noticing it was wrong.
+    if (sawTempoChanges)
+        report << "  The file changes tempo, which this studio can't follow yet: its opening tempo was used.";
+
+    if (splitByChannel)
+        report << "  A track carrying several MIDI channels was split, one clip each.";
+
+    if (droppedOverlaps > 0)
+        report << "  " << droppedOverlaps
+               << (droppedOverlaps == 1 ? " note was" : " notes were")
+               << " dropped: one channel can't sound two of the same pitch at once.";
+
+    if (ranOutOfChannels)
+        report << "  Ran out of free instrument channels, so the rest was left out.";
+
+    if (ranOutOfTracks)
+        report << "  Ran out of playlist tracks, so the rest was left out.";
+
+    if (! problems.isEmpty())
+        report << "  " << problems.joinIntoString ("  ");
+
+    return report;
 }
 
 void PlaylistComponent::setDropHint (int x, int y)
@@ -1623,8 +1799,11 @@ void PlaylistComponent::itemDropped (const SourceDetails& d)
 bool PlaylistComponent::isInterestedInFileDrag (const juce::StringArray& files)
 {
     for (auto& f : files)
-        if (cache.isAudioFile (juce::File (f)))
+    {
+        const juce::File file (f);
+        if (cache.isAudioFile (file) || MidiFileIO::isMidiFile (file))
             return true;
+    }
     return false;
 }
 

@@ -3,9 +3,9 @@
 #include "Project.h"
 #include "AudioEngine.h"
 
-// The FL-style playlist: tracks, audio and MIDI clips, a ruler you can click
-// to play from, snapping from bars to free placement, trimming or stretching,
-// marquee selection, copy and paste, and zoom.
+// The playlist: tracks, audio and MIDI clips, a ruler you can click to play
+// from, snapping from bars to free placement, trimming or stretching, marquee
+// selection, copy and paste, and zoom.
 class PlaylistComponent : public juce::Component,
                           public juce::DragAndDropTarget,
                           public juce::FileDragAndDropTarget,
@@ -21,8 +21,15 @@ public:
     std::function<void(int)>           onOpenPianoRoll;   // clip id
     std::function<bool(const Clip&)>   isRendering;       // stretch render in progress?
     std::function<void(int)>           onRouteTrack;      // track index changed its insert
+    std::function<void(const juce::String&)> onStatus;    // say what happened in the status bar
+    std::function<void(double)>        onSetTempo;        // adopt a tempo (goes through the engine)
 
     bool isEditing() const noexcept;   // true while the mouse or a slider is mid-drag
+
+    /** Puts audio and MIDI files on the playlist at a position, the way a
+        drop does. Public because the File menu's MIDI import goes through
+        here rather than having a second path that could drift from it. */
+    void addFiles (const juce::StringArray& paths, double beat, int track);
 
     void deleteSelection();
     void duplicateSelection();
@@ -104,7 +111,16 @@ private:
     void updateScrollBars();
     void scrollBarMoved (juce::ScrollBar*, double newRangeStart) override;
     void setTool (Tool);
-    void addFiles (const juce::StringArray& paths, double beat, int track);
+
+    /** Reads one or more .mid files onto the playlist at a drop position,
+        one clip per track in the file, each on a free instrument channel.
+        Returns what to say about it, so a drop and the File menu say the
+        same thing. */
+    juce::String importMidiFiles (const juce::StringArray& paths, double beat, int& track);
+
+    /** An instrument channel nothing is using: no plugin loaded and no clip
+        playing through it. Returns -1 when they are all taken. */
+    int firstFreeChannel (const std::set<int>& alreadyClaimed) const;
     void setDropHint (int x, int y);
     void paintClip (juce::Graphics&, const Clip&, juce::Rectangle<float>, bool selected);
     void showTrackMenu (int track);

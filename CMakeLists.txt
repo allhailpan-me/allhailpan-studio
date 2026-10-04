@@ -68,6 +68,7 @@ target_sources(AllHailPanStudio PRIVATE
     Source/PianoRollComponent.cpp
     Source/StretchCache.cpp
     Source/ProjectIO.cpp
+    Source/MidiFileIO.cpp
     Source/DarkTitleBarWin.cpp
     ${AHP_RUBBERBAND_SOURCE}
 )
