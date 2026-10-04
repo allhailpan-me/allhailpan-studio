@@ -17,6 +17,36 @@ JUCE is fetched automatically and pinned to a release tag, not master, so the
 build is reproducible. Rubber Band is fetched the same way and compiled from
 its single-file build.
 
+**JUCE 9 moved the plugin hosting base classes.** `AudioPluginFormat`,
+`AudioPluginFormatManager`, `AudioPluginInstance` and `AudioProcessor` are no
+longer in `juce_audio_processors`: they live in a new headless module,
+`juce_audio_processors_headless`, which the former depends on. There is no
+`juce_AudioPluginFormat.h` under `juce_audio_processors` at all any more.
+Anything written from memory of where these were in JUCE 7 or 8 will not
+compile, and since JUCE cannot be built in the sandbox the first sign of it is
+a red CI run twenty minutes later. When working against a JUCE API that
+cannot be compiled here, read the real header first:
+
+```
+git clone --depth 1 --branch 9.0.3 --filter=blob:none --sparse \
+    https://github.com/juce-framework/JUCE.git juce
+cd juce && git sparse-checkout set modules/juce_audio_processors_headless
+```
+
+Fetching raw.githubusercontent.com is blocked and the GitHub contents API is
+limited to this repository, so a sparse clone is the way in.
+
+For the record, `AudioPluginFormat`'s pure virtuals in 9.0.3 are `getName`,
+`findAllTypesForFile`, `fileMightContainThisPluginType`,
+`getNameOfPluginFromIdentifier`, `pluginNeedsRescanning`,
+`doesPluginStillExist`, `canScanForPlugins`, `isTrivialToScan`,
+`searchPathsForPlugins`, `getDefaultLocationsToSearch` and
+`requiresUnblockedMessageThreadDuringCreation`, plus a protected
+`createPluginInstance` taking a
+`std::function<void (std::unique_ptr<AudioPluginInstance>, const String&)>`.
+`AudioPluginInstance` adds one of its own, `fillInPluginDescription`, on top
+of everything `AudioProcessor` already requires.
+
 Every push is built for Windows, macOS and Linux. A failing build echoes its
 compiler errors back as GitHub annotations, so the reason is readable from the
 run summary without downloading the log:
