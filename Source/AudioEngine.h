@@ -393,7 +393,7 @@ private:
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
-    void trackLiveMessage (int slot, const juce::MidiMessage&);
+    void trackLiveMessage (int slot, const juce::uint8* data, int numBytes);
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
     void applyCurve (const AutoCurveRT&, double beat);

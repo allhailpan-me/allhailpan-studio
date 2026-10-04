@@ -206,7 +206,8 @@ void AudioEngine::setChannelPlugin (int channel, std::unique_ptr<juce::AudioPlug
         return;
 
     juce::AudioBuffer<float> buffer;
-    std::vector<float> lastAuto;
+    std::vector<float> lastAuto, modBase, modWritten;
+    std::vector<bool>  modActive;
     int channels = 2, buses = 1;
     bool sum = false;
     if (plugin != nullptr)
@@ -220,7 +221,15 @@ void AudioEngine::setChannelPlugin (int channel, std::unique_ptr<juce::AudioPlug
         preparePlugin (*plugin);
         channels = channelsFor (*plugin);
         buffer.setSize (channels, bufferCapacity());
-        lastAuto.assign ((size_t) plugin->getParameters().size(), -1.0f);
+
+        // Sized here, on the message thread, for the same reason the effect
+        // slots size theirs here: the audio thread indexes these and must not
+        // be the one to grow them.
+        const auto numParams = (size_t) plugin->getParameters().size();
+        lastAuto.assign (numParams, -1.0f);
+        modBase.assign (numParams, 0.0f);
+        modWritten.assign (numParams, -1.0f);
+        modActive.assign (numParams, false);
     }
 
     juce::AudioBuffer<float> mixdown (2, bufferCapacity());
@@ -238,6 +247,13 @@ void AudioEngine::setChannelPlugin (int channel, std::unique_ptr<juce::AudioPlug
         slot.sumOutputs.store (sum);
         slot.splitBuses.store (false);
         slot.lastAuto = std::move (lastAuto);
+
+        // Moved over rather than left alone, so a modulator does not carry
+        // the previous plugin's resting values onto the new one's parameters
+        // when the two happen to expose the same number of them.
+        slot.modBase    = std::move (modBase);
+        slot.modWritten = std::move (modWritten);
+        slot.modActive  = std::move (modActive);
 
         // Where each bus sits in the plugin's buffer. Buses are not always
         // stereo and not always in order, so this is asked rather than assumed.
@@ -965,16 +981,29 @@ void AudioEngine::capturePluginMidi (int slot, const juce::MidiBuffer& produced,
     }
 }
 
-void AudioEngine::trackLiveMessage (int slot, const juce::MidiMessage& m)
+void AudioEngine::trackLiveMessage (int slot, const juce::uint8* data, int numBytes)
 {
-    auto* rows = liveNotes.data() + (size_t) slot * midiChannels * 128;
-    const int ch = juce::jlimit (1, 16, m.getChannel()) - 1;
+    if (data == nullptr || numBytes < 2)
+        return;
 
-    if (m.isNoteOn())
-        rows[ch * 128 + m.getNoteNumber()] = 1;
-    else if (m.isNoteOff())
-        rows[ch * 128 + m.getNoteNumber()] = 0;
-    else if (m.isAllNotesOff() || m.isAllSoundOff())
+    const int  status  = data[0] & 0xf0;
+    const int  channel = (data[0] & 0x0f) + 1;
+    const int  note    = data[1] & 0x7f;
+    // Note on with a velocity of zero means note off, which is how a lot of
+    // hardware sends releases. Three bytes required for both, as a note
+    // message without a velocity is malformed.
+    const bool isNoteOn  = numBytes >= 3 && status == 0x90 && (data[2] & 0x7f) != 0;
+    const bool isNoteOff = numBytes >= 3 && (status == 0x80
+                                             || (status == 0x90 && (data[2] & 0x7f) == 0));
+
+    auto* rows = liveNotes.data() + (size_t) slot * midiChannels * 128;
+    const int ch = juce::jlimit (1, 16, channel) - 1;
+
+    if (isNoteOn)
+        rows[ch * 128 + note] = 1;
+    else if (isNoteOff)
+        rows[ch * 128 + note] = 0;
+    else if (status == 0xb0 && (note == 120 || note == 123))   // all sound off, all notes off
         std::fill_n (rows + ch * 128, 128, (juce::uint8) 0);
 }
 
@@ -1019,8 +1048,13 @@ void AudioEngine::scheduleMidi (int numSamples, bool sendAllOff, bool isRunning)
         liveChannel = selected;
     }
 
+    // meta.data rather than meta.getMessage(): juce::MidiMessage keeps four
+    // bytes inline and mallocs for anything longer, so building one here
+    // would allocate on the audio thread for every system exclusive message
+    // a control surface sends. Nothing below needs more than the first two
+    // bytes anyway.
     for (const auto meta : liveMidi)
-        trackLiveMessage (selected, meta.getMessage());
+        trackLiveMessage (selected, meta.data, meta.numBytes);
     channelSlots[(size_t) selected].midi.addEvents (liveMidi, 0, numSamples, 0);
 
     if (! isRunning || snapshot.midi.empty())
@@ -1234,12 +1268,14 @@ void AudioEngine::applyModulation (double beat)
         const auto& params = slot.plugin->getParameters();
         const auto  count  = (size_t) params.size();
 
-        if (slot.modBase.size() != count)
-        {
-            slot.modBase.assign (count, 0.0f);
-            slot.modWritten.assign (count, -1.0f);
-            slot.modActive.assign (count, false);
-        }
+        // Sized by setChannelPlugin, under the graph lock, because growing a
+        // vector here would be allocating on the audio thread. If it somehow
+        // disagrees, the block is skipped rather than resized: a plugin that
+        // has lost its modulation for one buffer is a far smaller problem
+        // than a malloc inside the device callback.
+        if (slot.modBase.size() != count || slot.modWritten.size() != count
+            || slot.modActive.size() != count)
+            continue;
 
         // Gather this block's offset for every parameter this channel modulates.
         bool anyThisChannel = false;
@@ -1469,6 +1505,18 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int num
 
     if (monitorRamp <= 0.0f && target <= 0.0f)
         return;
+
+    // The ramp outlives the device. Monitoring something and then switching
+    // to an interface with no inputs leaves the ramp up, and the two reads
+    // below would then take element zero of an array that has no elements.
+    // Index one was range checked and index zero was not, which is how this
+    // survived.
+    if (numInputChannels <= 0 || inputChannelData == nullptr)
+    {
+        monitorRamp = 0.0f;
+        monitoring.store (false);
+        return;
+    }
 
     auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, monitorInsert.load())].buffer;
     const float gain = monitorGain.load();
