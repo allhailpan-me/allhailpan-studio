@@ -41,8 +41,19 @@ jobs:
         if: runner.os != 'macOS'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
+      # The build output is echoed back as GitHub error annotations on
+      # failure, so the reason is visible from the run summary and the API
+      # without downloading the whole log.
       - name: Build
-        run: cmake --build build --config Release --parallel
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cmake --build build --config Release --parallel 2>&1 | tee build.log; then
+            grep -iE "error[ :C0-9]" build.log | head -40 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            exit 1
+          fi
 
       # ditto keeps the bundle's symlinks and executable bits intact.
       # Zipping any other way produces an .app that will not launch.

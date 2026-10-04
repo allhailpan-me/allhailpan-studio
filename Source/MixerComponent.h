@@ -52,6 +52,29 @@ public:
             addAndMakeVisible (power);
         }
 
+        sendsTitle.setText ("sends", juce::dontSendNotification);
+        sendsTitle.setColour (juce::Label::textColourId, Ahp::muted);
+        sendsTitle.setFont (juce::FontOptions (11.5f));
+        addAndMakeVisible (sendsTitle);
+
+        for (int k = 0; k < kNumSends; ++k)
+        {
+            auto* dest = sendDest.add (new juce::ComboBox());
+            dest->setWantsKeyboardFocus (false);
+            dest->setTooltip ("Feed a portion of this insert into another one. "
+                              "Only later inserts can be chosen, which is what keeps the mixer free of loops.");
+            dest->onChange = [this, k] { pushSend (k); };
+            addAndMakeVisible (dest);
+
+            auto* amount = sendAmount.add (new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::NoTextBox));
+            amount->setRange (0.0, 1.0, 0.001);
+            amount->setWantsKeyboardFocus (false);
+            amount->setColour (juce::Slider::trackColourId, Ahp::bone);
+            amount->setColour (juce::Slider::backgroundColourId, Ahp::panel3);
+            amount->onValueChange = [this, k] { pushSend (k); };
+            addAndMakeVisible (amount);
+        }
+
         routing.setColour (juce::Label::textColourId, Ahp::muted);
         routing.setFont (juce::FontOptions (11.5f));
         routing.setJustificationType (juce::Justification::topLeft);
@@ -107,6 +130,8 @@ public:
             }
         }
 
+        refreshSends();
+
         juce::StringArray sources;
         for (int c = 0; c < kNumChannels; ++c)
             if (project.channels[(size_t) c].insert == selected && project.channels[(size_t) c].name.isNotEmpty())
@@ -130,6 +155,47 @@ public:
         for (auto* s : strips)
             s->refresh();
         repaint();
+    }
+
+    /** Only inserts after this one can receive a send, so the list offers
+        exactly those. */
+    void refreshSends()
+    {
+        auto& ctl = engine.insert (selected);
+
+        for (int k = 0; k < kNumSends; ++k)
+        {
+            auto* dest = sendDest[k];
+            const int current = ctl.sendTo[(size_t) k].load();
+
+            dest->clear (juce::dontSendNotification);
+            dest->addItem ("no send", 1);
+            for (int to = selected + 1; to < kNumInserts; ++to)
+                dest->addItem (engine.insert (to).name, to + 1);
+
+            const bool valid = current > selected && current < kNumInserts;
+            dest->setSelectedId (valid ? current + 1 : 1, juce::dontSendNotification);
+            dest->setEnabled (selected > 0 && selected + 1 < kNumInserts);
+
+            sendAmount[k]->setValue (ctl.sendLevel[(size_t) k].load(), juce::dontSendNotification);
+            sendAmount[k]->setEnabled (valid);
+        }
+
+        sendsTitle.setText (selected == 0 ? "sends   (the master has nowhere to send to)"
+                                          : "sends",
+                            juce::dontSendNotification);
+    }
+
+    void pushSend (int k)
+    {
+        const int id = sendDest[k]->getSelectedId();
+        const int to = id > 1 ? id - 1 : 0;
+
+        engine.setSend (selected, k, to, (float) sendAmount[k]->getValue());
+        sendAmount[k]->setEnabled (to > selected);
+
+        if (onEdited)
+            onEdited();
     }
 
     void updateMeters()
@@ -158,6 +224,18 @@ public:
             slots[k]->setBounds (row);
             rack.removeFromTop (5);
         }
+        rack.removeFromTop (10);
+        sendsTitle.setBounds (rack.removeFromTop (18));
+        rack.removeFromTop (2);
+        for (int k = 0; k < kNumSends; ++k)
+        {
+            auto row = rack.removeFromTop (26);
+            sendDest[k]->setBounds (row.removeFromLeft (118).reduced (0, 2));
+            row.removeFromLeft (6);
+            sendAmount[k]->setBounds (row);
+            rack.removeFromTop (4);
+        }
+
         rack.removeFromTop (8);
         routing.setBounds (rack);
 
@@ -414,8 +492,10 @@ private:
     juce::OwnedArray<Strip> strips;
     juce::Rectangle<int>    rackArea, masterArea;
 
-    juce::Label rackTitle, routing;
+    juce::Label rackTitle, routing, sendsTitle;
     juce::OwnedArray<juce::TextButton> slots, powers;
+    juce::OwnedArray<juce::ComboBox>   sendDest;
+    juce::OwnedArray<juce::Slider>     sendAmount;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MixerComponent)
 };

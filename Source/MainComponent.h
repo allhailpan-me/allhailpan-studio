@@ -9,6 +9,9 @@
 #include "BrowserPanel.h"
 #include "PlaylistComponent.h"
 #include "PianoRollComponent.h"
+#include "ChannelRackComponent.h"
+#include "ModulatorPanel.h"
+#include "MixReportPanel.h"
 #include "MixerComponent.h"
 #include "PluginPicker.h"
 #include "Logo.h"
@@ -35,7 +38,7 @@ public:
     void requestQuit (std::function<void()> quitNow);
 
 private:
-    enum class View { playlist, pianoRoll };
+    enum class View { playlist, pianoRoll, rack, modulators, mixReport };
 
     // Records parameter moves from the plugin being recorded.
     // Only knobs the user actually grabs are recorded: plugins like Synplant
@@ -80,12 +83,41 @@ private:
         bool sawGesture = false;
     };
 
-    // Notices when the user tweaks any plugin, so the project counts as changed
+    // Notices when the user tweaks any plugin, so the project counts as changed.
+    // It also remembers the last knob actually grabbed, which is how a
+    // modulator learns what to attach to: the user opens the plugin's own
+    // window and moves the control, rather than hunting for it by number.
     struct EditWatcher : public juce::AudioProcessorListener
     {
         std::atomic<bool> touched { false };
+        std::atomic<bool> grabbed { false };
+
+        void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor* p, int index) override
+        {
+            const juce::SpinLock::ScopedLockType lock (grabLock);
+            grabbedProcessor = p;
+            grabbedParam = index;
+            grabbed.store (true);
+        }
+
         void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override { touched.store (true); }
         void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+
+        /** Takes the pending grab, if there is one. */
+        bool takeGrab (juce::AudioProcessor*& processor, int& index)
+        {
+            if (! grabbed.exchange (false))
+                return false;
+
+            const juce::SpinLock::ScopedLockType lock (grabLock);
+            processor = grabbedProcessor;
+            index = grabbedParam;
+            return processor != nullptr && index >= 0;
+        }
+
+        juce::SpinLock grabLock;
+        juce::AudioProcessor* grabbedProcessor = nullptr;
+        int grabbedParam = -1;
     };
 
     void timerCallback() override;
@@ -110,6 +142,7 @@ private:
     void loadInstrument (const juce::PluginDescription&);
     void unloadInstrument (int channel);
     void showFxMenu (int insert, int slot);
+    void showBusRouting (int channel);
     void loadFx (int insert, int slot, const juce::PluginDescription&);
     void openPluginWindow (juce::AudioPluginInstance&);
     void closePluginWindow (juce::AudioProcessor*);
@@ -144,6 +177,7 @@ private:
     void showAudioSettings();
     void setStatus (const juce::String&);
     void updateTypingLabel();
+    void checkModulationLearn();
     void paintStatus (juce::Graphics&, juce::Rectangle<int>);
 
     EditWatcher    editWatcher;      // must outlive every plugin
@@ -158,13 +192,17 @@ private:
     BrowserPanel       browser   { cache, engine, plugins.settings() };
     PlaylistComponent  playlist  { project, engine, cache };
     PianoRollComponent pianoRoll { project, engine };
+    ChannelRackComponent rack { project, engine };
+    ModulatorPanel       modPanel { project, engine };
+    MixReportPanel       mixReport { engine };
     MixerComponent     mixer     { engine, project };
     SpinningLogo       logo;
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
     juce::ComboBox   recordMode, countInBox;
-    juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, mixerTab { "Mixer" };
+    juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" };
+    juce::TextButton modTab { "Mod" }, reportTab { "Report" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };
     juce::TextButton undoButton { "Undo" }, redoButton { "Redo" }, fileButton { "File" };
     juce::Slider     tempo;
@@ -174,6 +212,7 @@ private:
     juce::Label      channelLabel { {}, "Channel" }, insertLabel { {}, "Mixer" }, typingLabel;
     juce::ComboBox   channelBox, instrumentBox, insertBox;
     juce::TextButton showButton { "Show" }, unloadButton { "Unload" }, sumOutsButton { "Mix all outs" };
+    juce::TextButton routeOutsButton { "Route outs..." };
     juce::TextButton browseButton { "Find..." };
     juce::MidiKeyboardComponent piano { engine.keyboard(), juce::MidiKeyboardComponent::horizontalKeyboard };
 

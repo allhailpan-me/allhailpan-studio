@@ -77,7 +77,7 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
     // ---- clip bar ----
     clipName.setFont (juce::FontOptions (13.0f, juce::Font::bold));
     clipStatus.setColour (juce::Label::textColourId, Ahp::muted);
-    for (auto* l : { &pitchLabel, &stretchLabel, &gainLabel })
+    for (auto* l : { &pitchLabel, &stretchLabel, &gainLabel, &bpmLabel })
         l->setColour (juce::Label::textColourId, Ahp::muted);
 
     auto setupSlider = [this] (juce::Slider& s)
@@ -137,6 +137,54 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
         }
     };
 
+    setupSlider (sourceBpmSlider);
+    sourceBpmSlider.setRange (40.0, 240.0, 0.01);
+    sourceBpmSlider.textFromValueFunction = [] (double v) { return juce::String (v, 2); };
+    sourceBpmSlider.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters (".0123456789").getDoubleValue(); };
+    sourceBpmSlider.onValueChange = [this]
+    {
+        if (updatingClipBar) return;
+        if (auto* c = singleSelected(); c != nullptr && c->isAudio())
+        {
+            c->sourceBpm = sourceBpmSlider.getValue();
+            if (c->followTempo && project.bpm > 0.0)
+                c->stretch = c->sourceBpm / project.bpm;
+            project.changed();
+            updateClipBar();
+        }
+    };
+
+    syncButton.setClickingTogglesState (true);
+    syncButton.setTooltip ("Stretch this clip to the project tempo, and keep it there if the tempo changes. "
+                           "Pitch is unaffected.");
+    syncButton.onClick = [this]
+    {
+        if (updatingClipBar) return;
+        auto* c = singleSelected();
+        if (c == nullptr || ! c->isAudio())
+            return;
+
+        c->followTempo = syncButton.getToggleState();
+
+        if (c->followTempo)
+        {
+            // Nothing recorded yet means nothing to match to, so a loop's own
+            // tempo is worked out from its length before falling back to the
+            // project's.
+            if (c->sourceBpm <= 0.0)
+            {
+                const double guessed = guessSourceBpm (*c);
+                c->sourceBpm = guessed > 0.0 ? guessed : project.bpm;
+            }
+
+            if (project.bpm > 0.0)
+                c->stretch = c->sourceBpm / project.bpm;
+        }
+
+        project.changed();
+        updateClipBar();
+    };
+
     resetButton.onClick = [this]
     {
         auto* c = singleSelected();
@@ -148,6 +196,8 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
             c->pitch = 0.0;
             c->stretch = 1.0;
             c->gainDb = 0.0f;
+            c->followTempo = false;
+            c->sourceBpm = 0.0;
         }
         else if (c->pattern != nullptr)
         {
@@ -174,6 +224,7 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
     for (auto* comp : { static_cast<juce::Component*> (&clipName), static_cast<juce::Component*> (&clipStatus),
                         static_cast<juce::Component*> (&pitchLabel), static_cast<juce::Component*> (&stretchLabel),
                         static_cast<juce::Component*> (&gainLabel), static_cast<juce::Component*> (&resetButton),
+                        static_cast<juce::Component*> (&bpmLabel), static_cast<juce::Component*> (&syncButton),
                         static_cast<juce::Component*> (&openRollButton), static_cast<juce::Component*> (&channelBox) })
     {
         quiet (*comp);
@@ -182,6 +233,7 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
     addChildComponent (pitchSlider);
     addChildComponent (stretchSlider);
     addChildComponent (gainSlider);
+    addChildComponent (sourceBpmSlider);
 
     setTool (Tool::draw);
     quiet (*this);
@@ -241,11 +293,14 @@ void PlaylistComponent::layoutClipBar (juce::Rectangle<int> r)
     r.removeFromLeft (8);
 
     pitchLabel  .setBounds (r.removeFromLeft (38));
-    pitchSlider .setBounds (r.removeFromLeft (190));  r.removeFromLeft (10);
+    pitchSlider .setBounds (r.removeFromLeft (150));  r.removeFromLeft (10);
     stretchLabel.setBounds (r.removeFromLeft (52));
-    stretchSlider.setBounds (r.removeFromLeft (190)); r.removeFromLeft (10);
+    stretchSlider.setBounds (r.removeFromLeft (150)); r.removeFromLeft (10);
+    bpmLabel    .setBounds (r.removeFromLeft (74));
+    sourceBpmSlider.setBounds (r.removeFromLeft (110)); r.removeFromLeft (6);
+    syncButton  .setBounds (r.removeFromLeft (104));  r.removeFromLeft (10);
     gainLabel   .setBounds (r.removeFromLeft (34));
-    gainSlider  .setBounds (r.removeFromLeft (170));  r.removeFromLeft (10);
+    gainSlider  .setBounds (r.removeFromLeft (140));  r.removeFromLeft (10);
     resetButton .setBounds (r.removeFromLeft (60));   r.removeFromLeft (10);
 
     // MIDI clip controls reuse the same row
@@ -265,6 +320,43 @@ Clip* PlaylistComponent::singleSelected()
     return project.find (*project.selection.begin());
 }
 
+double PlaylistComponent::guessSourceBpm (const Clip& clip) const
+{
+    // Loops are almost always a whole number of bars, so trying each likely bar
+    // count identifies the tempo of most material without analysing the audio.
+    //
+    // Length alone is ambiguous: the same clip could be four bars at 110 or two
+    // at 55. The project's own tempo breaks the tie, because audio being matched
+    // to a session is nearly always near that session's tempo, or an exact
+    // multiple of it. Comparing in log space judges half and double time
+    // even-handedly rather than favouring the faster reading.
+    if (clip.sample == nullptr || clip.length <= 0.0)
+        return 0.0;
+
+    const double seconds = clip.length;        // source seconds, before stretching
+    const int    barCounts[] { 1, 2, 4, 8, 16, 32, 64 };
+    const double anchor = project.bpm > 0.0 ? project.bpm : 120.0;
+
+    double best = 0.0, bestDistance = 1.0e9;
+
+    for (int bars : barCounts)
+    {
+        const double candidate = bars * 4.0 * 60.0 / seconds;
+
+        if (candidate < 60.0 || candidate > 200.0)
+            continue;
+
+        const double distance = std::abs (std::log (candidate / anchor));
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            best = candidate;
+        }
+    }
+
+    return best;
+}
+
 void PlaylistComponent::updateClipBar()
 {
     const juce::ScopedValueSetter<bool> svs (updatingClipBar, true);
@@ -275,7 +367,9 @@ void PlaylistComponent::updateClipBar()
     clipName.setVisible (c != nullptr);
     clipStatus.setVisible (c != nullptr || project.selection.size() > 1);
     for (auto* comp : { static_cast<juce::Component*> (&pitchLabel), static_cast<juce::Component*> (&pitchSlider),
-                        static_cast<juce::Component*> (&stretchLabel), static_cast<juce::Component*> (&stretchSlider) })
+                        static_cast<juce::Component*> (&stretchLabel), static_cast<juce::Component*> (&stretchSlider),
+                        static_cast<juce::Component*> (&bpmLabel), static_cast<juce::Component*> (&sourceBpmSlider),
+                        static_cast<juce::Component*> (&syncButton) })
         comp->setVisible (audio);
 
     resetButton.setVisible (audio || (midi && c->pattern != nullptr && ! c->pattern->lanes.empty()));
@@ -299,6 +393,10 @@ void PlaylistComponent::updateClipBar()
     {
         pitchSlider.setValue (c->pitch, juce::dontSendNotification);
         stretchSlider.setValue (c->stretch, juce::dontSendNotification);
+
+        sourceBpmSlider.setValue (c->sourceBpm > 0.0 ? c->sourceBpm : project.bpm, juce::dontSendNotification);
+        syncButton.setToggleState (c->followTempo, juce::dontSendNotification);
+        stretchSlider.setEnabled (! c->followTempo);   // the tempo owns it now
         const bool rendering = isRendering && isRendering (*c);
         clipStatus.setText (rendering ? "Rendering high-quality stretch..."
                                       : "Starts " + formatPosition (c->start) + "   Length "

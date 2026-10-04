@@ -155,6 +155,11 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         ctl.volume.store (0.8f);
         ctl.pan.store (0.0f);
         ctl.mute.store (false);
+        for (int k = 0; k < kNumSends; ++k)
+        {
+            ctl.sendTo[(size_t) k].store (0);
+            ctl.sendLevel[(size_t) k].store (0.0f);
+        }
         for (auto& b : ctl.bypass)
             b.store (false);
     }
@@ -173,6 +178,37 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("app", JUCE_APPLICATION_VERSION_STRING);
     root.setAttribute ("bpm", engine.getBpm());
     root.setAttribute ("songStart", engine.getSongStart());
+
+    // ---- channel rack ----
+    root.setAttribute ("rackStart", project.rackStart);
+    root.setAttribute ("rackBars", project.rackBars);
+    root.setAttribute ("rackStepsPerBar", project.rackStepsPerBar);
+
+    // ---- modulators ----
+    if (! project.modulators.empty())
+    {
+        auto* modsXml = root.createNewChildElement ("MODULATORS");
+
+        for (const auto& m : project.modulators)
+        {
+            auto* e = modsXml->createNewChildElement ("MOD");
+            e->setAttribute ("name", m.name);
+            e->setAttribute ("shape", (int) m.shape);
+            e->setAttribute ("rate", m.rateBeats);
+            e->setAttribute ("phase", m.phase);
+            e->setAttribute ("bipolar", m.bipolar);
+            e->setAttribute ("enabled", m.enabled);
+
+            for (const auto& t : m.targets)
+            {
+                auto* target = e->createNewChildElement ("TARGET");
+                target->setAttribute ("channel", t.channel);
+                target->setAttribute ("param", t.paramIndex);
+                target->setAttribute ("depth", (double) t.depth);
+                target->setAttribute ("paramName", t.paramName);
+            }
+        }
+    }
 
     // ---- tracks ----
     auto* tracksXml = root.createNewChildElement ("TRACKS");
@@ -195,6 +231,15 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("volume", (double) ctl.volume.load());
         e->setAttribute ("pan", (double) ctl.pan.load());
         e->setAttribute ("mute", ctl.mute.load());
+
+        for (int k = 0; k < kNumSends; ++k)
+            if (ctl.sendTo[(size_t) k].load() > 0)
+            {
+                auto* send = e->createNewChildElement ("SEND");
+                send->setAttribute ("index", k);
+                send->setAttribute ("to", ctl.sendTo[(size_t) k].load());
+                send->setAttribute ("level", (double) ctl.sendLevel[(size_t) k].load());
+            }
 
         for (int k = 0; k < kNumFxSlots; ++k)
         {
@@ -221,7 +266,18 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("index", c);
         e->setAttribute ("name", info.name);
         e->setAttribute ("insert", info.insert);
+        e->setAttribute ("rackNote", info.rackNote);
+        e->setAttribute ("rackTrack", info.rackTrack);
         e->setAttribute ("sumOutputs", engine.getChannelSumsOutputs (c));
+        e->setAttribute ("splitBuses", engine.getChannelSplitsBuses (c));
+
+        for (int b = 0; b < kMaxOutBuses; ++b)
+            if (const int to = engine.getBusInsert (c, b); to > 0)
+            {
+                auto* bus = e->createNewChildElement ("BUS");
+                bus->setAttribute ("index", b);
+                bus->setAttribute ("insert", to);
+            }
         writePlugin (*e, engine.getChannelPlugin (c), info.missingPlugin);
     }
 
@@ -274,6 +330,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         {
             e->setAttribute ("sample", clip.sample != nullptr ? sampleIds[clip.sample.get()] : 0);
             e->setAttribute ("stretch", clip.stretch);
+            e->setAttribute ("sourceBpm", clip.sourceBpm);
+            e->setAttribute ("followTempo", clip.followTempo);
             e->setAttribute ("pitch", clip.pitch);
         }
         else if (clip.pattern != nullptr)
@@ -339,6 +397,35 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.clearAll();
 
     report.bpm       = root->getDoubleAttribute ("bpm", 128.0);
+
+    project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
+    project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));
+    project.rackStepsPerBar = juce::jlimit (1, 32, root->getIntAttribute ("rackStepsPerBar", 16));
+
+    project.modulators.clear();
+    if (auto* modsXml = root->getChildByName ("MODULATORS"))
+        for (auto* e : modsXml->getChildWithTagNameIterator ("MOD"))
+        {
+            Modulator m;
+            m.name      = e->getStringAttribute ("name", "LFO");
+            m.shape     = (ModShape) juce::jlimit (0, 6, e->getIntAttribute ("shape", 0));
+            m.rateBeats = juce::jlimit (0.0625, 128.0, e->getDoubleAttribute ("rate", 4.0));
+            m.phase     = juce::jlimit (0.0, 1.0, e->getDoubleAttribute ("phase", 0.0));
+            m.bipolar   = e->getBoolAttribute ("bipolar", true);
+            m.enabled   = e->getBoolAttribute ("enabled", true);
+
+            for (auto* t : e->getChildWithTagNameIterator ("TARGET"))
+            {
+                ModTarget target;
+                target.channel    = juce::jlimit (0, kNumChannels - 1, t->getIntAttribute ("channel"));
+                target.paramIndex = std::max (0, t->getIntAttribute ("param"));
+                target.depth      = (float) juce::jlimit (-1.0, 1.0, t->getDoubleAttribute ("depth", 0.5));
+                target.paramName  = t->getStringAttribute ("paramName");
+                m.targets.push_back (std::move (target));
+            }
+
+            project.modulators.push_back (std::move (m));
+        }
     report.songStart = root->getDoubleAttribute ("songStart", 0.0);
     engine.setBpm (report.bpm);
     engine.setSongStart (report.songStart);
@@ -372,6 +459,18 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             ctl.pan.store ((float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0)));
             ctl.mute.store (e->getBoolAttribute ("mute"));
 
+            for (auto* send : e->getChildWithTagNameIterator ("SEND"))
+            {
+                const int k = send->getIntAttribute ("index", -1);
+                if (! juce::isPositiveAndBelow (k, kNumSends))
+                    continue;
+
+                // Routed through the engine so it is validated and the delay
+                // compensation is recomputed.
+                engine.setSend (i, k, send->getIntAttribute ("to", 0),
+                                (float) send->getDoubleAttribute ("level", 0.0));
+            }
+
             for (auto* fx : e->getChildWithTagNameIterator ("FX"))
             {
                 const int k = fx->getIntAttribute ("slot", -1);
@@ -403,7 +502,20 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
             auto& info = project.channels[(size_t) c];
             info.insert = juce::jlimit (0, kNumInserts - 1, e->getIntAttribute ("insert", c + 1));
+            info.rackNote  = juce::jlimit (0, 127, e->getIntAttribute ("rackNote", 60));
+            info.rackTrack = e->getIntAttribute ("rackTrack", -1);
             engine.setChannelInsert (c, info.insert);
+
+            info.splitBuses = e->getBoolAttribute ("splitBuses", false);
+            info.busInsert.fill (0);
+
+            for (auto* bus : e->getChildWithTagNameIterator ("BUS"))
+            {
+                const int b = bus->getIntAttribute ("index", -1);
+                if (juce::isPositiveAndBelow (b, kMaxOutBuses))
+                    info.busInsert[(size_t) b] =
+                        juce::jlimit (0, kNumInserts - 1, bus->getIntAttribute ("insert", 0));
+            }
 
             if (auto* hosted = e->getChildByName (hostedTag))
             {
@@ -414,6 +526,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                     engine.setChannelPlugin (c, std::move (plugin));
                     if (e->hasAttribute ("sumOutputs"))
                         engine.setChannelSumsOutputs (c, e->getBoolAttribute ("sumOutputs"));
+
+                    // After the plugin, not before: loading one discovers the
+                    // bus layout afresh and clears any routing already set.
+                    for (int b = 0; b < kMaxOutBuses; ++b)
+                        if (info.busInsert[(size_t) b] > 0)
+                            engine.setBusInsert (c, b, info.busInsert[(size_t) b]);
+
+                    engine.setChannelSplitsBuses (c, info.splitBuses);
                 }
                 else
                 {
@@ -471,6 +591,8 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 if (it == samples.end()) continue;
                 clip.sample  = it->second;
                 clip.stretch = juce::jlimit (0.1, 10.0, e->getDoubleAttribute ("stretch", 1.0));
+                clip.sourceBpm = juce::jlimit (0.0, 400.0, e->getDoubleAttribute ("sourceBpm", 0.0));
+                clip.followTempo = e->getBoolAttribute ("followTempo", false);
                 clip.pitch   = juce::jlimit (-24.0, 24.0, e->getDoubleAttribute ("pitch", 0.0));
             }
             else

@@ -8,14 +8,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ---------------------------------------------------------------------------
 # JUCE is downloaded automatically the first time you configure.
-# For reproducible builds, change GIT_TAG to a specific release tag
-# from https://github.com/juce-framework/JUCE/releases
+#
+# Pinned to a release rather than tracking master, so that this builds the same
+# way today and in a year. On master, a JUCE change could break the build
+# without anyone here touching anything, and two people cloning a month apart
+# would get different versions.
 # ---------------------------------------------------------------------------
 include(FetchContent)
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        master
+    GIT_TAG        9.0.3
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(JUCE)

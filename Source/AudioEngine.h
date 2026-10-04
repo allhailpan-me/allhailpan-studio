@@ -6,6 +6,7 @@
 #include "Project.h"
 #include "Recorder.h"
 #include "LatencyDelay.h"
+#include "LoudnessMeter.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -60,6 +61,21 @@ public:
     int    getBlockSize() const noexcept         { return blockSize; }
     int    getRoundTripLatencySamples();
 
+    // ---- mix analysis ----
+    // Measured on the master, after every effect, so it is what actually
+    // leaves the studio.
+    struct MixReading
+    {
+        double integratedLufs = -200.0, shortTermLufs = -200.0, momentaryLufs = -200.0;
+        double loudnessRange = 0.0;
+        float  truePeak = 0.0f;
+        float  correlation = 1.0f;   // +1 in phase, 0 wide, negative cancels in mono
+        bool   measuring = false;
+    };
+
+    MixReading getMixReading() const;
+    void resetMixAnalysis() { analysisReset.store (true); }
+
     /** How far the mixer runs behind the playhead because of look ahead
         plugins. Added to the interface's own round trip, this is the delay
         between a note being triggered and it leaving the outputs. */
@@ -68,12 +84,25 @@ public:
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);
     juce::AudioPluginInstance* getChannelPlugin (int channel) const noexcept;
-    void setChannelInsert (int channel, int insert) noexcept;
+    void setChannelInsert (int channel, int insert);
     // Multi-output instruments (Microtonic Multi, drum plugins, samplers) put
     // their sounds on separate output buses. With this on, every output bus is
     // mixed down to the channel's stereo signal.
     void setChannelSumsOutputs (int channel, bool shouldSum) noexcept;
     bool getChannelSumsOutputs (int channel) const noexcept;
+
+    /** Sends each output bus to its own insert, rather than folding them all
+        into one. */
+    void setChannelSplitsBuses (int channel, bool shouldSplit);
+    bool getChannelSplitsBuses (int channel) const noexcept;
+
+    /** Where one output bus goes. Insert 0 means follow the channel's own. */
+    void setBusInsert (int channel, int bus, int insertIndex);
+    int  getBusInsert (int channel, int bus) const noexcept;
+
+    /** How a bus is laid out in the plugin's buffer, for naming it in the
+        interface. */
+    juce::String getBusName (int channel, int bus) const;
     int  getChannelOutputBuses (int channel) const noexcept;
     void setSelectedChannel (int channel) noexcept { selectedChannel.store (juce::jlimit (0, kNumChannels - 1, channel)); }
     // Stops every sounding note everywhere (the classic DAW panic button)
@@ -92,6 +121,13 @@ public:
         std::atomic<bool>  mute   { false };
         std::atomic<float> peakL  { 0.0f }, peakR { 0.0f };
         std::array<std::atomic<bool>, kNumFxSlots> bypass {};
+
+        // Aux sends. sendTo is the destination insert, or 0 for off (sending
+        // to the master is what the direct path already does). A send may only
+        // feed a higher numbered insert, which is what keeps the mixer free of
+        // feedback loops and lets one pass over the inserts resolve everything.
+        std::array<std::atomic<int>,   kNumSends> sendTo {};
+        std::array<std::atomic<float>, kNumSends> sendLevel {};
     };
     InsertControls& insert (int index) noexcept { return controls[(size_t) juce::jlimit (0, kNumInserts - 1, index)]; }
 
@@ -101,6 +137,10 @@ public:
         here rather than the atomic directly: delay compensation is recomputed
         straight afterwards. */
     void setFxBypass (int insert, int slot, bool shouldBypass);
+
+    /** Routes a portion of one insert into another. A send may only feed a
+        higher numbered insert; anything else is treated as off. */
+    void setSend (int insert, int sendIndex, int destination, float level);
     juce::AudioPluginInstance* getFx (int insert, int slot) const noexcept;
 
     template <typename Fn> void forEachPlugin (Fn&& fn) const
@@ -137,6 +177,7 @@ public:
     {
         std::vector<AudioClipRT> audio;
         std::vector<MidiClipRT>  midi;
+        std::vector<Modulator>   modulators;   // copied whole; they are small
         double songEnd = 0.0;
     };
     void setSnapshot (Snapshot&&);
@@ -225,7 +266,9 @@ private:
     {
         std::array<FxSlot, kNumFxSlots> fx;
         juce::AudioBuffer<float> buffer;
-        LatencyDelay align;          // holds this insert back to match the longest one
+        juce::AudioBuffer<float> sendScratch;              // one send's copy, mid flight
+        LatencyDelay align;                                // levels this insert against the others
+        std::array<LatencyDelay, kNumSends> sendAlign;     // levels each send against its destination's other inputs
     };
     struct ChannelSlot
     {
@@ -237,7 +280,23 @@ private:
         std::atomic<int> insert { 1 };
         std::atomic<bool> sumOutputs { false };
         int outputBuses = 1;
+
+        // Splitting sends each output bus to its own insert instead of folding
+        // them together. Each bus then needs its own compensation, because the
+        // inserts it lands on can run at different latencies.
+        std::atomic<bool> splitBuses { false };
+        std::array<std::atomic<int>, kMaxOutBuses> busInsert {};
+        std::array<LatencyDelay, kMaxOutBuses>     busAlign;
+        std::array<int, kMaxOutBuses>              busFirstChannel {};
+        std::array<int, kMaxOutBuses>              busChannelCount {};
         std::vector<float> lastAuto;
+
+        // Modulation rides on top of whatever the parameter is already set to.
+        // modBase is that underlying value and modWritten is what was last
+        // sent, so a knob moved by hand or by automation can be told apart
+        // from the engine's own writing and becomes the new base.
+        std::vector<float> modBase, modWritten;
+        std::vector<bool>  modActive;
         LatencyDelay align;          // holds this instrument back to match the longest one
     };
 
@@ -246,6 +305,9 @@ private:
     int  bufferCapacity() const noexcept { return std::max (blockSize * 2, 8192); }
     void updateLatency();
     void processInsert (int index, int numSamples);
+    void routeSends (int index, int numSamples);
+    void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
+    void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
@@ -253,6 +315,7 @@ private:
     void trackLiveMessage (int slot, const juce::MidiMessage&);
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
+    void applyModulation (double beat);
     void renderPreview (float* left, float* right, int numSamples);
 
     juce::AudioDeviceManager   deviceManager;
@@ -270,8 +333,25 @@ private:
 
     // Delay compensation. clipDelay holds playlist audio back to match the
     // slowest instrument; totalLatency is what the whole mixer runs behind.
-    std::atomic<int> clipDelaySamples { 0 };
+    // Playlist audio has no plugin in front of it, so it is held back to match
+    // whatever else arrives at the same insert. Per insert, because a send can
+    // make one bus run later than another.
+    std::array<std::atomic<int>, kNumInserts> clipDelaySamples {};
     std::atomic<int> totalLatency { 0 };
+
+    // Modulators follow the song while it plays, so a project sounds the
+    // same every time and matches its export. While stopped they run off
+    // this free clock instead, so a sound can still be dialled in.
+    double modFreeClock = 0.0;
+
+    // Mix analysis. Measured on the audio thread, read by the interface.
+    LoudnessMeter      loudness;
+    std::atomic<bool>  analysisReset { false };
+    std::atomic<double> analysisIntegrated { -200.0 }, analysisShortTerm { -200.0 };
+    std::atomic<double> analysisMomentary { -200.0 }, analysisRange { 0.0 };
+    std::atomic<float>  analysisTruePeak { 0.0f }, analysisCorrelation { 1.0f };
+    std::atomic<bool>   analysisRunning { false };
+    double corrLR = 0.0, corrLL = 0.0, corrRR = 0.0;
 
     std::shared_ptr<SampleData> previewHold;
     const SampleData* previewData = nullptr;
