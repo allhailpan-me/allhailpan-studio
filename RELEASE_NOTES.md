@@ -1,20 +1,53 @@
-Everything since v0.1.2, which was ten features ago. The engine changed more in this release than the interface did.
+Everything since v0.2.0. The engine changed more in this release than the interface did, and most of the second half of these notes is about things that were quietly wrong rather than things that are new.
 
 ## Since v0.2.0
 
+**Loop recording, take folders and comping.** Set a loop range by dragging in the ruler and record over it, and each time round is kept as its own take rather than recorded over the pass before. The passes arrive as one take folder on the track: one clip holding several alternatives, each still written to its own WAV in `Recordings`. Recording the same loop again adds to the folder already there.
+
+A take folder draws one lane per pass, with the part that is being heard lit and the parts you have not chosen dimmed but still present. Drag across a lane to give that stretch of the song to that pass, so the first line can come from pass three and the next from pass seven. Double-click a lane to give it the whole folder, Alt-click to throw a pass away. The strip along the bottom shows the comp itself.
+
+Every join is crossfaded, ten milliseconds by default, with an equal-power curve. Cutting at a zero crossing is not enough between two different performances: the waveform is continuous at the join but its slope is not, and a voice clicks on that. Equal power is the right shape because two takes of one singer are not the same waveform, so their powers add rather than their amplitudes, and a linear fade dips audibly at every join. The comp is held in seconds into the folder rather than in beats, so changing the tempo moves the folder on the grid without moving the joins through the performance.
+
+The takes are never touched, so a choice can be remade at any time, including after the project has been closed and reopened, and the export reads the comp the same way playback does rather than through a second code path. A comp swipe is one undo step.
+
 **Automation on the playlist, and on the mixer.** Automation could only live inside a MIDI clip, which left two things impossible to move at all: anything on a mixer insert, and anything that needs to run across a section rather than within one pattern. Both work now. Right-click a playlist track header, choose Automate, and pick an insert's volume or pan, a parameter of any effect on it, or a parameter of any instrument you have loaded. What appears is a clip: drag it, copy it, trim it, mute it and delete it like audio or MIDI, drawn as the curve rather than as a block. It starts at the value the control is already sitting at, so drawing one on a mix you have balanced does not throw the balance away, and the mixer's own fader follows the curve as it plays.
 
-Every segment has a bend, dragged from the circle between two points, because a straight line is the wrong shape for most of what automation is asked to do: a filter that should sit closed for four bars and then open over one is two points with a bend, not a dozen points that are then impossible to move as a gesture. The bend warps the position along the segment rather than the value, which is what guarantees it can never take the value outside the two points it joins, so what you hear is the line on the screen rather than a spline bulging past it. Two points on one beat is an instant jump. The curve arithmetic has no JUCE in it and is checked on every push: exact at every point, never outside its own segment, monotonic, continuous at the joins, held flat beyond both ends, and mirror-image symmetric when bent equally either way, with every one of those properties confirmed by reintroducing the bug it is meant to catch.
+Every segment has a bend, dragged from the circle between two points, because a straight line is the wrong shape for most of what automation is asked to do: a filter that should sit closed for four bars and then open over one is two points with a bend, not a dozen points that are then impossible to move as a gesture. The bend warps the position along the segment rather than the value, which is what guarantees it can never take the value outside the two points it joins, so what you hear is the line on the screen rather than a spline bulging past it. Two points on one beat is an instant jump.
 
 **MIDI file import and export.** A part written here can now be taken somewhere else, and a part written anywhere else can be brought in. Drop a `.mid` file on the playlist and you get one clip per track in the file, placed where you dropped it and routed to free instrument channels, with the playlist tracks named after the tracks in the file; a single track carrying several MIDI channels is split by channel rather than flattened into one unplayable pile. The file's own tempo is adopted while the project is still at the tempo nobody chose, and left alone once you have set one. Export writes the arrangement, or just the selected clips, as a standard multi-track file with the tempo and the track names. The round trip is exact for notes: a file exported and imported again gives back the same starts, lengths, pitches and velocities. Automation is not exported, because a MIDI file has no way to say which plugin parameter a lane belongs to, and the export says so rather than pretending.
 
-**Warp markers.** Tempo matching fixes audio played at one steady tempo. A warp marker fixes audio that drifts inside the take, which is the normal case for a live performance or a vocal. Pin a point in the audio to a position on the grid and everything between two markers is stretched to fit: put a marker on the snare that landed late, drag it onto the beat, and the bar either side comes with it. Select an audio clip and double-click it to add one. A warped clip always follows the project tempo, and the waveform is drawn through the warp, so a transient appears under the grid line you pinned it to.
+**Warp markers.** Tempo matching fixes audio played at one steady tempo. A warp marker fixes audio that drifts inside the take, which is the normal case for a live performance or a vocal. Pin a point in the audio to a position on the grid and everything between two markers is stretched to fit: put a marker on the snare that landed late, drag it onto the beat, and the bar either side comes with it. Select an audio clip and double-click it to add one. A warped clip always follows the project tempo, and the waveform is drawn through the warp, so a transient appears under the grid line you pinned it to. Trimming and splitting understand markers; cutting a warped clip in two is inaudible.
+
+**True peak, measured the way the standard defines it.** The peak meter now oversamples four times through the interpolator ITU-R BS.1770-4 Annex 2 tabulates, because the peak of the waveform your converter reconstructs is not the largest sample in the file. The meter here used to report the largest sample, which reads around three decibels low on exactly the material where it matters: a limited master that measures clean and then distorts after encoding. If a mix you measured before this release looked safe at -0.3 dB, measure it again.
+
+**Loudness range now follows EBU Tech 3342.** It was the plain spread between the 95th and the 10th percentile of the short term readings, with no gating, so a quiet intro or a fade out became the bottom of the distribution and a track that never changes level could report tens of LU of dynamic range. It is now gated at -70 LUFS and then at 20 LU below the mean of what survives that, which is what the standard specifies and what other meters report.
+
+**Groove.** Swing in the channel rack sets where the offbeat sits inside its pair: 50 is straight, 66 lands it on the third triplet, which is a full shuffle. That is the definition hardware samplers established, so the number means the same thing here as it does to a drummer or another studio. Feel goes further, because swing on its own still sounds programmed: a played pattern has offbeats that are slightly quieter and slightly early or late, and played and loose soften and drift them by increasing amounts. The drift comes from each note's own position rather than from a live random source, so a pattern plays the same way twice and an export matches what you heard.
+
+Groove never changes the stored notes. It is applied as the arrangement is handed to the engine, so it can be dialled while playing and turned off without having lost the original timing, and notes played off the grid are left where you played them.
+
+**Per-step velocity.** How full a step is drawn in the channel rack shows its velocity, and Shift+drag up or down on a lit step sets it directly, which is how hardware step sequencers do accents.
 
 **Input monitoring.** Hear the interface input through the studio's own effects while you play. Off, armed only, or always, with a level control and a choice of insert. Deliberately not delay compensated: that compensation lines internal paths up with each other, and on a monitor path it would only be latency you feel directly. Lining the take up with the arrangement is still the recorder's job.
 
-**Groove, and per-step velocity in the channel rack.** A feel applied to playback rather than written into the notes, so it can be changed or turned off without having lost the original timing.
+**A test suite, run on every push.** JUCE takes minutes to compile, but most of what would be silently wrong in a studio is arithmetic that does not need it: where a warped clip reads from, how a comp crossfades, what a swing percentage means, what a loudness figure is. That arithmetic now lives in headers with no JUCE in them, with checks over it that run in about a minute with address and undefined behaviour sanitizers on, as their own CI job that reports before the platform builds have finished fetching their dependencies. A red test does not stop the build; it does stop a release from publishing. `./Tests/run.sh` runs the same thing locally.
 
-## The big ones
+## Fixed in this release
+
+All of these were found by reviewing the work above rather than by anything going visibly wrong, which is the point: every one of them is the kind of fault that leaves the program running.
+
+- **Picking a shuffle did nothing until you made another edit.** Groove is applied where the arrangement is handed to the engine, and the control set the value without telling anything, so the swing was stored, saved to the file and shown in the box while the pattern kept playing straight.
+- **And it was not an undo step.** A groove change recorded no step, so the next Ctrl+Z undid the edit before it instead.
+- **The loudness meter was allocating on the audio thread.** Reading the loudness range copied and sorted the entire short term history on every audio block, and the history grew for as long as the session stayed open: after an hour of playback that was a six-figure allocation and sort inside every five millisecond buffer, which is a dropout. The history is now kept as fixed histograms and reading a figure costs nothing.
+- **Modulation allocated on the audio thread too**, on the first block after any plugin was loaded, and carried the previous plugin's resting values onto the new one when the two exposed the same number of parameters.
+- **Monitoring then switching to an interface with no inputs** read past the end of the input array.
+- **A plugin reporting a knob move from its own process call** could leave the audio thread spinning on a lock the message thread was holding across an allocation.
+- **Changing the audio device during an export** could reallocate a buffer the export was writing through.
+- **Every system exclusive message from a control surface** allocated on the audio thread.
+- **File > New kept the old tempo**, so a MIDI file dropped into a fresh project decided the tempo had been chosen deliberately and arrived at the wrong speed without saying so.
+- **A project file carrying both a comp and warp markers** loaded as a take folder with live markers on it, which nothing downstream expects.
+
+## Before this release
 
 **Plugin delay compensation.** Plugins that look ahead (mastering processors, look-ahead limiters, spectral effects) hold audio back. Nothing accounted for that, so a track carrying one played late against the others, by an amount that changed every time a plugin was loaded. Every path is now levelled, including sends and playlist audio, so everything reaches the master on the same sample. The status bar reports the compensation when it is not zero.
 
@@ -30,11 +63,7 @@ Every segment has a bend, dragged from the circle between two points, because a 
 
 **Tempo matching.** Tell an audio clip the tempo it was recorded at and it stays on the grid at any project tempo, and follows if you change the tempo later. Pitch is unaffected, so a vocal stays in key.
 
-## Also
-
-- Plugins are scanned in a separate process, so one that crashes on load can no longer take the studio down with it
-- Denormal protection, which is the CPU spiking seconds after sound stops
-- JUCE pinned to 9.0.3 rather than tracking master, so this builds the same way in a year
+**Also:** plugins are scanned in a separate process, so one that crashes on load can no longer take the studio down with it; denormal protection, which is the CPU spiking seconds after sound stops; and JUCE pinned to a release tag rather than tracking master, so this builds the same way in a year.
 
 ## Downloads
 
@@ -58,6 +87,10 @@ Not code-signed, so every operating system will complain. Nothing is wrong with 
 
 - **No ASIO in these builds.** Steinberg's licence does not allow redistributing the SDK, so the downloadable Windows build uses Windows Audio only. For ASIO, download the SDK yourself and build with `-DAHP_ASIO_SDK_DIR=` pointing at it.
 - **No instruments are bundled**, so you need your own VST3s to make sound.
+- **4/4 only, and one tempo for the whole song.** A MIDI file that changes tempo part way through is read at its opening tempo, and the status bar says so.
+- **Loading a plugin and dragging a mixer fader are not undo steps.** Everything else that edits the arrangement is.
+- **An instrument with 32 or more output channels** (sixteen stereo buses, which is the most this studio will route) makes the engine allocate once per block on the audio thread. Instruments with eight buses or fewer, which is all of the ones tested, are unaffected.
 - **macOS and Linux builds are lightly tested.** Please report anything broken.
+- **Nothing here has been through a long session on real hardware yet.** The arithmetic is tested; the feel is not. If something sounds wrong, that is worth a bug report even if you cannot say exactly what.
 
 Licensed under AGPL-3.0. The name and logo are excluded, see TRADEMARKS.md.
