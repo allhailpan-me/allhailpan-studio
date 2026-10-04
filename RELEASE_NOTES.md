@@ -1,5 +1,13 @@
 Everything since v0.1.2, which was ten features ago. The engine changed more in this release than the interface did.
 
+## Since v0.2.0
+
+**Warp markers.** Tempo matching fixes audio played at one steady tempo. A warp marker fixes audio that drifts inside the take, which is the normal case for a live performance or a vocal. Pin a point in the audio to a position on the grid and everything between two markers is stretched to fit: put a marker on the snare that landed late, drag it onto the beat, and the bar either side comes with it. Select an audio clip and double-click it to add one. A warped clip always follows the project tempo, and the waveform is drawn through the warp, so a transient appears under the grid line you pinned it to.
+
+**Input monitoring.** Hear the interface input through the studio's own effects while you play. Off, armed only, or always, with a level control and a choice of insert. Deliberately not delay compensated: that compensation lines internal paths up with each other, and on a monitor path it would only be latency you feel directly. Lining the take up with the arrangement is still the recorder's job.
+
+**Groove, and per-step velocity in the channel rack.** A feel applied to playback rather than written into the notes, so it can be changed or turned off without having lost the original timing.
+
 ## The big ones
 
 **Plugin delay compensation.** Plugins that look ahead (mastering processors, look-ahead limiters, spectral effects) hold audio back. Nothing accounted for that, so a track carrying one played late against the others, by an amount that changed every time a plugin was loaded. Every path is now levelled, including sends and playlist audio, so everything reaches the master on the same sample. The status bar reports the compensation when it is not zero.
@@ -44,8 +52,6 @@ Not code-signed, so every operating system will complain. Nothing is wrong with 
 
 - **No ASIO in these builds.** Steinberg's licence does not allow redistributing the SDK, so the downloadable Windows build uses Windows Audio only. For ASIO, download the SDK yourself and build with `-DAHP_ASIO_SDK_DIR=` pointing at it.
 - **No instruments are bundled**, so you need your own VST3s to make sound.
-- **No input monitoring.** Use your interface's direct monitoring.
-- **No warp markers** for audio that drifts within a take. Clip tempo matching handles audio recorded at a steady tempo.
 - **macOS and Linux builds are lightly tested.** Please report anything broken.
 
 Licensed under AGPL-3.0. The name and logo are excluded, see TRADEMARKS.md.
