@@ -184,6 +184,14 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("rackBars", project.rackBars);
     root.setAttribute ("rackStepsPerBar", project.rackStepsPerBar);
 
+    // ---- groove ----
+    root.setAttribute ("grooveOn", project.groove.enabled);
+    root.setAttribute ("grooveBase", (int) project.groove.base);
+    root.setAttribute ("grooveSwing", project.groove.swing);
+    root.setAttribute ("grooveAmount", project.groove.amount);
+    root.setAttribute ("grooveVelocity", project.groove.velocity);
+    root.setAttribute ("grooveRandom", project.groove.random);
+
     // ---- modulators ----
     if (! project.modulators.empty())
     {
@@ -401,6 +409,13 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
     project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));
     project.rackStepsPerBar = juce::jlimit (1, 32, root->getIntAttribute ("rackStepsPerBar", 16));
+
+    project.groove.enabled  = root->getBoolAttribute ("grooveOn", false);
+    project.groove.base     = (Groove::Base) juce::jlimit (0, 2, root->getIntAttribute ("grooveBase", 1));
+    project.groove.swing    = juce::jlimit (0.3, 0.8, root->getDoubleAttribute ("grooveSwing", 0.5));
+    project.groove.amount   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveAmount", 1.0));
+    project.groove.velocity = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveVelocity", 0.0));
+    project.groove.random   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveRandom", 0.0));
 
     project.modulators.clear();
     if (auto* modsXml = root->getChildByName ("MODULATORS"))

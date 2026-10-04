@@ -729,14 +729,24 @@ void MainComponent::pushArrangement (bool allowRenders)
 
             for (const auto& n : c.pattern->notes)
             {
-                const double on = origin + n.start;
+                // Groove is applied here rather than to the stored notes, so
+                // it can be changed or turned off without having lost the
+                // original timing, and rather than in the audio callback, so
+                // it costs nothing per sample and an export inherits it
+                // without a second code path.
+                const double placed = project.groove.place (n.start, n.note);
+                const double on = origin + placed;
+
                 if (on < m.start || on >= m.end)
                     continue;
+
+                const float shaded = project.groove.shade (n.start, n.velocity);
+
                 AudioEngine::NoteRT note;
                 note.on       = on;
                 note.off      = std::min (on + n.length, m.end);
                 note.note     = n.note;
-                note.velocity = (juce::uint8) juce::jlimit (1, 127, juce::roundToInt (n.velocity * 127.0f));
+                note.velocity = (juce::uint8) juce::jlimit (1, 127, juce::roundToInt (shaded * 127.0f));
                 m.notes.push_back (note);
             }
 
