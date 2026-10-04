@@ -133,12 +133,34 @@ void AudioEngine::updateLatency()
         }
     }
 
+    // The insert a player is monitoring through is not held back.
+    //
+    // That compensation exists to line internal paths up with each other, and
+    // on everything else it is right. On the signal a player is listening to
+    // while playing it, it is latency they feel in their hands: put a
+    // lookahead limiter on the master and the compensation that keeps the
+    // tracks together would also push the guitar back by the limiter's whole
+    // lookahead, which makes the instrument unplayable. The engine said in a
+    // comment that monitoring skipped this, and it did not: the monitored
+    // audio is mixed into an insert's buffer, and that buffer was delayed
+    // along with everything else in it.
+    //
+    // The cost is that anything else landing on that insert plays early by
+    // the same amount while monitoring is on. That is the right trade for a
+    // take: the player has to be able to play.
+    const bool lowLatencyMonitoring = monitorMode.load() != Monitor::off;
+    const int  monitoredInsert = lowLatencyMonitoring
+                               ? juce::jlimit (0, kNumInserts - 1, monitorInsert.load())
+                               : -1;
+
     for (int i = 1; i < kNumInserts; ++i)
     {
         auto& slot = insertSlots[(size_t) i];
 
         slot.align.prepare (2, widest, block);
-        slot.align.setDelay (std::max (0, masterIn - outLat[(size_t) i]));
+        slot.align.setDelay (i == monitoredInsert
+                                 ? 0
+                                 : std::max (0, masterIn - outLat[(size_t) i]));
 
         for (int s = 0; s < kNumSends; ++s)
         {
@@ -169,6 +191,35 @@ void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, floa
     controls[(size_t) insertIndex].sendTo[(size_t) sendIndex].store (to);
     controls[(size_t) insertIndex].sendLevel[(size_t) sendIndex].store (juce::jlimit (0.0f, 1.0f, level));
 
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateLatency();
+}
+
+void AudioEngine::setMonitorMode (Monitor m)
+{
+    if (monitorMode.load() == m)
+        return;
+
+    monitorMode.store (m);
+
+    // Turning monitoring on takes the compensation delay off the monitored
+    // insert, and turning it off puts it back, so the graph has to be redone
+    // either way. See the note in updateLatency.
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateLatency();
+}
+
+void AudioEngine::setMonitorInsert (int insertIndex)
+{
+    const int wanted = juce::jlimit (0, kNumInserts - 1, insertIndex);
+
+    if (monitorInsert.load() == wanted)
+        return;
+
+    monitorInsert.store (wanted);
+
+    // The insert that skips compensation has moved, so the one it left has to
+    // be held back again.
     const juce::SpinLock::ScopedLockType lock (graphLock);
     updateLatency();
 }

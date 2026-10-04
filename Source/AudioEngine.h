@@ -244,15 +244,14 @@ public:
     // already does it.
     enum class Monitor { off = 0, armed, always };
 
-    void setMonitorMode (Monitor m) noexcept   { monitorMode.store (m); }
+    /** Both of these change which insert skips delay compensation, so both
+        have to recompute the latency graph rather than only store a value. */
+    void setMonitorMode (Monitor m);
     Monitor getMonitorMode() const noexcept    { return monitorMode.load(); }
 
     /** Which insert the input is heard through, so it can be monitored with
         the amp simulator or reverb it is going to be recorded alongside. */
-    void setMonitorInsert (int insertIndex) noexcept
-    {
-        monitorInsert.store (juce::jlimit (0, kNumInserts - 1, insertIndex));
-    }
+    void setMonitorInsert (int insertIndex);
     int getMonitorInsert() const noexcept      { return monitorInsert.load(); }
 
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
