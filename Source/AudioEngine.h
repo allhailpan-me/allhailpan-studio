@@ -167,6 +167,14 @@ public:
         // is the case for every clip that is not warped and for every warped
         // one whose stretched copy has finished rendering.
         int warpFirst = 0, warpCount = 0;
+
+        // The equal-power ramps at the two ends of a comp span, in absolute
+        // beats. One take folder becomes one of these per comped stretch, so
+        // the comp costs the render loop a gain shape and nothing else, and
+        // the export path inherits it without a second implementation. Empty
+        // windows, which is every clip that is not comped, cost two
+        // comparisons per sample. See CompModel.h.
+        CompFade fade;
     };
     struct NoteRT  { double on = 0.0, off = 0.0; int note = 60; juce::uint8 velocity = 100; };
     struct LaneRT
@@ -200,6 +208,24 @@ public:
         double songEnd = 0.0;
     };
     void setSnapshot (Snapshot&&);
+
+    // ---- loop range ----
+    // The span the transport repeats over. An empty range means none is set,
+    // and playback then loops at the end of the last clip as it always has.
+    // Unlike that one, this range loops while recording too: recording round
+    // a loop is the whole point of setting one.
+    void setLoopRange (double start, double end) noexcept
+    {
+        loopRangeStart.store (start);
+        loopRangeEnd.store (end);
+    }
+    void clearLoopRange() noexcept { setLoopRange (0.0, 0.0); }
+    bool hasLoopRange() const noexcept { return loopRangeEnd.load() - loopRangeStart.load() >= kMinLoopBeats; }
+
+    /** How many times the transport has come back round since recording
+        started. The recorder splits its audio on these, which is what turns
+        one continuous pass of the input into one take per time round. */
+    int getLoopPassCount() const noexcept { return recorder.passCount(); }
 
     // ---- browser preview ----
     void preview (std::shared_ptr<SampleData> sample);
@@ -241,7 +267,7 @@ public:
     bool isMonitoring() const noexcept         { return monitoring.load(); }
     int  getRecordSource() const noexcept       { return recordSource.load(); }
     void startAudioRecording()                         { recorder.begin(); }
-    std::optional<Recorder::Take> stopAudioRecording() { return recorder.end(); }
+    std::vector<Recorder::Take> stopAudioRecording()   { return recorder.end(); }
     bool isRecordingAudio() const noexcept             { return recorder.isActive(); }
 
     void startMidiRecording (int channel);
@@ -439,6 +465,7 @@ private:
     std::atomic<bool>   offlineActive { false };
     std::atomic<double> countInEnd { -1.0e9 };
     std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0e9 }, songEnd { 0.0 };
+    std::atomic<double> loopRangeStart { 0.0 }, loopRangeEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
     std::atomic<int>    selectedChannel { 0 }, recordSource { -1 };
 
@@ -457,6 +484,11 @@ private:
 
     double position = 0.0;
     juce::int64 lastBeat = -1;
+    // Where the transport came back round inside the block being processed.
+    // Audio-thread only, and fixed size: the loop range has a floor of a
+    // sixteenth note, so more than one wrap in a block is already impossible
+    // at any sane buffer size, and the few spare slots are insurance.
+    std::array<Recorder::LoopWrap, 16> blockWraps {};
     bool   wasRunning = false;
     std::vector<double> blockBeats;
     std::vector<float>  clickBuffer, silence;

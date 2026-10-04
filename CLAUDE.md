@@ -71,6 +71,17 @@ send, or splitting a channel's buses. Forget it and tracks drift apart by an
 amount that depends on which plugins happen to be loaded, which is maddening to
 diagnose from a bug report.
 
+**A take folder reads its takes directly, and its comp is in seconds.** A
+folder clip has no `sample`: `Clip::compSpans` turns its comp into one read per
+comped stretch, and `pushArrangement` turns each of those into one
+`AudioClipRT` with the crossfade ramps converted to beats. That is why the
+export gets the comp for free, which for a comp matters more than for anything
+else: the comp is the performance. The comp itself stays in source seconds so
+that changing the tempo moves the folder on the grid without moving the joins
+through the performance. Warping, stretching, trimming and slicing are turned
+off on a folder rather than half supported, in `Project::tidyFolder` and at the
+three call sites that could reach them.
+
 **A warped clip's markers are kept normalised, always.** `WarpMap.h`'s lookups
 assume the marker list is sorted and strictly increasing in both beat and source
 position, and that everything in it is after the clip's left edge, which is an
@@ -231,6 +242,7 @@ braces on their own line.
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
+| `CompModel.h` | Take folders: which take is heard where, and the equal-power crossfade at each join. In seconds, not beats, so a comp survives a tempo change. No JUCE |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 

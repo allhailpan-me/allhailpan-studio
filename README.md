@@ -79,7 +79,8 @@ cmake --build build --parallel
 ### Transport
 - **Space** plays and pauses. **Stop** returns to the start marker. Pressing **Stop** again when already stopped does three things: silences every note, resets the instruments (which also stops plugins that drone on regardless of note-offs), and sends the start marker back to the beginning, so the next **Play** starts from bar 1. Clicking the ruler or an empty spot afterwards sets a new start point as usual.
 - **Click the ruler** to play from that point. Click empty playlist space to move the playhead there; double-click it to play from there.
-- Playback **loops at the end of the last clip**, not the end of the grid. The faint line in the playlist marks that point.
+- **Drag in the ruler** to set a **loop range**. Playback repeats over it, and it is drawn as a red bar along the ruler with its edges carried down over the arrangement. Double-click the ruler to clear it; a drag shorter than a sixteenth note clears it too.
+- With no loop range set, playback **loops at the end of the last clip**, not the end of the grid. The faint line in the playlist marks that point.
 
 ### Projects
 - **File** menu (top left): New (**Ctrl+N**), Open (**Ctrl+O**), Open recent, Save (**Ctrl+S**), Save as (**Ctrl+Shift+S**).
@@ -140,6 +141,17 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - Press **Rec** (**Ctrl+R**). It records onto the armed track, or the first empty one.
 - MIDI recording captures the notes you play **and every knob you grab in the plugin's window**. Only knobs you actually move are recorded: plugins that animate their own controls (Synplant, for one) would otherwise fill the clip with noise. Some plugins don't report knob grabs at all, and the status bar says so after recording. The result is a MIDI clip; double-click it to open the piano roll.
 - Audio takes are saved as 24-bit WAV in `Documents/ALLHAILPAN Studio/Recordings`, lined up for your interface's latency.
+- **Recording over a loop range keeps every pass.** Recording starts at the loop, playback repeats over it while you record, and each time round is kept as its own take rather than recording over the one before. The passes arrive as one **take folder** on the track: one clip holding several alternatives. Each pass still gets its own WAV in `Recordings`. Recording over the same loop again adds to the folder already there.
+
+### Comping
+Building one good performance out of several passes.
+
+- A take folder draws one **lane** per pass. The part of each lane that is being heard is lit; the parts you have not chosen are dimmed but still there. The strip along the bottom of the clip shows the comp itself: which pass is heard where.
+- **Drag across a lane** to give that stretch of the song to that pass. The choice is per section, so the first line can come from pass three and the next from pass seven.
+- **Double-click a lane**, or click it without dragging, to give it the whole folder. **Alt-click** throws a pass away; the comp keeps pointing at the passes that remain.
+- Every join between two passes is **crossfaded**, ten milliseconds by default, with an equal-power curve. Cutting at a zero crossing is not enough between two different performances: the waveform is continuous at the join but its slope is not, and a voice clicks on that. Equal power is the right shape here because two takes of one singer are not the same waveform, so their powers add rather than their amplitudes, and a linear fade would dip audibly at every join.
+- **The comp is what plays and what exports.** The takes are untouched, so a choice can be remade at any point, including after the project has been closed and reopened. Comp edits are undoable, one step per swipe.
+- A take folder cannot be trimmed, stretched, warped or sliced: its length is its longest pass, and its comp is measured from its start. Comping is already the way to say which part of it you want.
 
 ### Input monitoring
 - The **Monitor** box next to the record mode passes your input through the studio so you hear it with your own effects: an amp simulator on a guitar, reverb on a vocal. **armed** only passes it through while a track is armed, **on** always does.
@@ -268,10 +280,10 @@ Done:
 - Warp markers, for audio that drifts inside a take
 - MIDI file import and export, exact for notes
 - Automation clips on the playlist, with bendable segments, and automation of mixer volume, pan and effect parameters
+- A loop range on the playlist, loop recording that keeps every pass as a take, and comping with equal-power crossfades at the joins
 
 Next:
 
-- Loop recording with take comping
 - A bundle of open-source instruments, so a fresh install makes sound on its own
 - Sampler channels, and a built-in synth
 - A preferences window

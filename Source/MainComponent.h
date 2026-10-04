@@ -134,6 +134,7 @@ private:
 
     // arrangement
     void pushArrangement (bool allowRenders);
+    void finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface);
 
     // channels, instruments, effects
     void refreshPluginLists();
@@ -176,6 +177,9 @@ private:
     void checkExportProgress();
     void clearSession();
     void markDirty();
+    /** Takes the loop range as it stands to be the saved one, so that opening
+        or saving a project does not leave it looking modified. */
+    void noteLoopRange() { lastLoopStart = project.loopStart; lastLoopEnd = project.loopEnd; }
     void updateTitle();
     void ignoreEditsForAWhile() { ignoreEditsUntil = juce::Time::getMillisecondCounter() + 2000; }
     std::unique_ptr<juce::AudioPluginInstance> createPluginForProject (const juce::PluginDescription&, juce::String& error);
@@ -236,6 +240,9 @@ private:
     // project file state
     juce::File currentFile;
     bool dirty = false;
+    // What the loop range was when it was last noticed, so that moving it
+    // marks the project as worth saving without becoming an undo step.
+    double lastLoopStart = 0.0, lastLoopEnd = 0.0;
     juce::uint32 ignoreEditsUntil = 0;
     int autosaveTicks = 0;
     std::unique_ptr<juce::FileChooser> chooser;

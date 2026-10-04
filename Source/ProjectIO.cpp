@@ -4,10 +4,11 @@ namespace
 {
     const juce::String rootTag  { "ALLHAILPAN_PROJECT" };
     const juce::String hostedTag { "HOSTED" };
-    // Version 2 added automation clips on the playlist. Version 1 files load
-    // unchanged: they simply have no AUTO clips in them, and their in-clip
-    // automation lanes are read exactly as before.
-    constexpr int formatVersion = 2;
+    // Version 2 added automation clips on the playlist. Version 3 added take
+    // folders, the comp over them, and the playlist loop range. Older files
+    // load unchanged: they simply have no TAKES or LOOP in them, and an audio
+    // clip without a folder is still an ordinary audio clip.
+    constexpr int formatVersion = 3;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -135,6 +136,33 @@ namespace
             markers.push_back ({ f[0].getDoubleValue(), f[1].getDoubleValue() });
         }
         return markers;
+    }
+
+    // ---- comps ----
+    //
+    // A comp is a short list of "from here, this take", so it is written the
+    // way the warp markers above are rather than as an element each: a vocal
+    // comped bar by bar has a few dozen of them and an element apiece would
+    // be most of the file.
+
+    juce::String compToText (const std::vector<CompSegment>& segments)
+    {
+        juce::StringArray parts;
+        for (auto& c : segments)
+            parts.add (num (c.at) + "," + juce::String (c.take));
+        return parts.joinIntoString (";");
+    }
+
+    std::vector<CompSegment> compFromText (const juce::String& text)
+    {
+        std::vector<CompSegment> segments;
+        for (auto& part : juce::StringArray::fromTokens (text, ";", {}))
+        {
+            auto f = juce::StringArray::fromTokens (part, ",", {});
+            if (f.size() < 2) continue;
+            segments.push_back ({ f[0].getDoubleValue(), f[1].getIntValue() });
+        }
+        return segments;
     }
 
     // ---- automation targets and curves ----
@@ -278,6 +306,12 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("bpm", engine.getBpm());
     root.setAttribute ("songStart", engine.getSongStart());
 
+    // ---- loop range ----
+    // Where you were working. Not part of the undo history, for the same
+    // reason arming is not, but worth coming back to.
+    root.setAttribute ("loopStart", project.loopStart);
+    root.setAttribute ("loopEnd", project.loopEnd);
+
     // ---- channel rack ----
     root.setAttribute ("rackStart", project.rackStart);
     root.setAttribute ("rackBars", project.rackBars);
@@ -391,12 +425,26 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     const auto samplesDir = projectDir.getChildFile (file.getFileNameWithoutExtension() + " Samples");
     auto* samplesXml = root.createNewChildElement ("SAMPLES");
 
+    // Every take in a folder has its own file, so the list of audio a project
+    // depends on is the clips' samples plus the folders' takes. Missing one
+    // here is how a project collected into a folder loses nine of its ten
+    // passes and keeps the comp that points at them.
+    std::vector<std::shared_ptr<SampleData>> audioInUse;
     for (auto& clip : project.clips)
     {
-        if (! clip.isAudio() || clip.sample == nullptr || sampleIds.count (clip.sample.get()))
+        if (clip.folder != nullptr)
+            for (auto& take : clip.folder->takes)
+                audioInUse.push_back (take.sample);
+        if (clip.isAudio() && clip.sample != nullptr)
+            audioInUse.push_back (clip.sample);
+    }
+
+    for (auto& held : audioInUse)
+    {
+        if (held == nullptr || sampleIds.count (held.get()))
             continue;
 
-        auto& sample = *clip.sample;
+        auto& sample = *held;
         if (options.collectSamples && ! options.isAutosave && ! sample.isMissing()
             && sample.file.existsAsFile() && ! sample.file.isAChildOf (projectDir))
         {
@@ -408,7 +456,7 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         }
 
         const int id = (int) sampleIds.size() + 1;
-        sampleIds[clip.sample.get()] = id;
+        sampleIds[held.get()] = id;
 
         auto* e = samplesXml->createNewChildElement ("SAMPLE");
         e->setAttribute ("id", id);
@@ -441,6 +489,23 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
             e->setAttribute ("pitch", clip.pitch);
             if (! clip.warp.empty())
                 e->createNewChildElement ("WARP")->addTextElement (warpToText (clip.warp));
+
+            if (clip.folder != nullptr && ! clip.folder->takes.empty())
+            {
+                auto* takesXml = e->createNewChildElement ("TAKES");
+                takesXml->setAttribute ("crossfadeMs", clip.folder->crossfadeMs);
+                takesXml->setAttribute ("comp", compToText (clip.folder->comp));
+
+                for (auto& take : clip.folder->takes)
+                {
+                    auto* t = takesXml->createNewChildElement ("TAKE");
+                    t->setAttribute ("name", take.name);
+                    t->setAttribute ("sample", take.sample != nullptr ? sampleIds[take.sample.get()] : 0);
+                    t->setAttribute ("start", take.start);
+                    t->setAttribute ("offset", take.offset);
+                    t->setAttribute ("length", take.length);
+                }
+            }
         }
         else if (clip.pattern != nullptr)
         {
@@ -511,6 +576,9 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.clearAll();
 
     report.bpm       = root->getDoubleAttribute ("bpm", 128.0);
+
+    project.setLoopRange (root->getDoubleAttribute ("loopStart", 0.0),
+                          root->getDoubleAttribute ("loopEnd", 0.0));
 
     project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
     project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));
@@ -709,9 +777,15 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
             if (clip.isAudio())
             {
-                auto it = samples.find (e->getIntAttribute ("sample"));
-                if (it == samples.end()) continue;
-                clip.sample  = it->second;
+                // A take folder has no sample of its own: its audio is in its
+                // takes. Skipping the clip for want of one would drop the
+                // whole folder and everything comped from it.
+                auto* takesXml = e->getChildByName ("TAKES");
+                auto  it = samples.find (e->getIntAttribute ("sample"));
+                if (it == samples.end() && takesXml == nullptr)
+                    continue;
+                if (it != samples.end())
+                    clip.sample = it->second;
                 clip.stretch = juce::jlimit (0.1, 10.0, e->getDoubleAttribute ("stretch", 1.0));
                 clip.sourceBpm = juce::jlimit (0.0, 400.0, e->getDoubleAttribute ("sourceBpm", 0.0));
                 clip.followTempo = e->getBoolAttribute ("followTempo", false);
@@ -723,6 +797,52 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 if (auto* warp = e->getChildByName ("WARP"))
                     clip.warp = warpFromText (warp->getAllSubText());
                 clip.tidyWarp();
+
+                if (takesXml != nullptr)
+                {
+                    auto folder = std::make_shared<TakeFolder>();
+                    folder->crossfadeMs = juce::jlimit (0.0, 250.0,
+                                                        takesXml->getDoubleAttribute ("crossfadeMs", 10.0));
+
+                    for (auto* t : takesXml->getChildWithTagNameIterator ("TAKE"))
+                    {
+                        Take take;
+                        take.name   = t->getStringAttribute ("name");
+                        take.start  = std::max (0.0, t->getDoubleAttribute ("start"));
+                        take.offset = std::max (0.0, t->getDoubleAttribute ("offset"));
+                        take.length = std::max (0.0, t->getDoubleAttribute ("length"));
+
+                        // A take whose audio could not be found still has a
+                        // placeholder behind it, exactly as a missing clip
+                        // does, so the comp survives the file coming back.
+                        if (auto found = samples.find (t->getIntAttribute ("sample")); found != samples.end())
+                            take.sample = found->second;
+                        if (take.sample == nullptr)
+                            continue;
+
+                        if (take.name.isEmpty())
+                            take.name = "Take " + juce::String (folder->size() + 1);
+
+                        folder->takes.push_back (std::move (take));
+
+                        if ((size_t) folder->size() >= kMaxCompTakes)
+                            break;
+                    }
+
+                    if (! folder->takes.empty())
+                    {
+                        folder->comp = compFromText (takesXml->getStringAttribute ("comp"));
+                        clip.folder  = std::move (folder);
+                        clip.sample.reset();      // a folder reads its takes
+
+                        // Sizes the clip to its longest pass and puts the comp
+                        // back into the form every lookup assumes, which is
+                        // what makes a hand edited or truncated file safe.
+                        clip.length = clip.folder->longestSeconds();
+                        clip.offset = 0.0;
+                        clip.folder->tidy (clip.length);
+                    }
+                }
             }
             else if (clip.isAutomation())
             {
@@ -772,42 +892,66 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
 // ---------------------------------------------------------------------------
 
+// Every piece of audio a project points at, clips and takes alike. Both of
+// the functions below used to walk the clips only, which would have reported
+// nine of a folder's ten passes as present and relinked none of them.
+namespace
+{
+    template <typename ProjectRef, typename Fn>
+    void forEachHeldSample (ProjectRef& project, Fn&& fn)
+    {
+        for (auto& c : project.clips)
+        {
+            if (c.folder != nullptr)
+                for (auto& take : c.folder->takes)
+                    if (take.sample != nullptr)
+                        fn (take.sample);
+
+            if (c.isAudio() && c.sample != nullptr)
+                fn (c.sample);
+        }
+    }
+}
+
 juce::StringArray ProjectIO::missingSampleNames (const Project& project)
 {
     juce::StringArray names;
-    for (auto& c : project.clips)
-        if (c.isAudio() && c.sample != nullptr && c.sample->isMissing())
-            names.addIfNotAlreadyThere (c.sample->file.getFileName());
+    forEachHeldSample (project, [&names] (auto& s)
+    {
+        if (s->isMissing())
+            names.addIfNotAlreadyThere (s->file.getFileName());
+    });
     return names;
 }
 
 int ProjectIO::relinkMissing (Project& project, SampleCache& cache, const juce::File& folder)
 {
     std::map<SampleData*, std::shared_ptr<SampleData>> replacements;
-    for (auto& c : project.clips)
+    forEachHeldSample (project, [&] (auto& s)
     {
-        if (! c.isAudio() || c.sample == nullptr || ! c.sample->isMissing() || replacements.count (c.sample.get()))
-            continue;
+        if (! s->isMissing() || replacements.count (s.get()))
+            return;
 
         std::shared_ptr<SampleData> found;
-        const auto f = findByName (folder, c.sample->file.getFileName());
+        const auto f = findByName (folder, s->file.getFileName());
         if (f.existsAsFile())
         {
             juce::String error;
             found = cache.load (f, error);
         }
-        replacements[c.sample.get()] = found;
-    }
+        replacements[s.get()] = found;
+    });
 
     int count = 0;
     for (auto& [missing, found] : replacements)
         if (found != nullptr)
             ++count;
 
-    for (auto& c : project.clips)
-        if (c.isAudio() && c.sample != nullptr)
-            if (auto it = replacements.find (c.sample.get()); it != replacements.end() && it->second != nullptr)
-                c.sample = it->second;
+    forEachHeldSample (project, [&replacements] (auto& s)
+    {
+        if (auto it = replacements.find (s.get()); it != replacements.end() && it->second != nullptr)
+            s = it->second;
+    });
 
     if (count > 0)
         project.changed();
