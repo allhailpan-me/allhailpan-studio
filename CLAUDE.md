@@ -120,6 +120,13 @@ the specification rather than from a guess:
   studio means by a swing percentage.
 - Band limited oscillators exist because naive saw and square waves alias, and
   aliasing is the single thing that makes a soft synth sound amateur.
+- True peak is measured by oversampling four times through the interpolator
+  BS.1770-4 Annex 2 tabulates, because the peak of the waveform a converter
+  reconstructs is not the largest sample in the file. The meter here once used
+  the largest sample, which read three decibels low on exactly the material
+  where it matters and told the user a clipping master was safe. That is the
+  shape of the failure this section is about: a number that is present,
+  plausible, and wrong.
 
 When adopting an idea from another studio, read its documentation and model the
 real behaviour, including the parameters it exposes and why. Ableton's grooves,
@@ -221,6 +228,7 @@ braces on their own line.
 | `ModulatorPanel.h` | Shapes wired to plugin parameters |
 | `MixReportPanel.h` | What the finished master measures |
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
+| `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |

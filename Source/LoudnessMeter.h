@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
+#include "TruePeak.h"
 #include <cmath>
 #include <vector>
 #include <algorithm>
@@ -19,7 +20,11 @@
       integrated  the whole measurement, gated so that silence and quiet
                   passages do not drag the average down
 
-    Verified against EBU Tech 3341 compliance test cases 1 and 2.
+    Peak is measured as true peak, to BS.1770-4 Annex 2, not as the largest
+    stored sample. See TruePeak.h for why those are not the same number.
+
+    Verified against EBU Tech 3341 compliance test cases 1 and 2, and cases 15
+    to 19 for the peak reading.
 */
 class LoudnessMeter
 {
@@ -38,6 +43,7 @@ public:
     void reset()
     {
         for (auto& s : states) s = {};
+        for (auto& d : peakDetectors) d.reset();
 
         squaredSum.assign ((size_t) std::max (1, blockSamples), 0.0);
         writePos = 0;
@@ -74,7 +80,11 @@ public:
                 const double weighted = states[(size_t) ch].highpass.process (shelved, highpass);
 
                 sum += weighted * weighted;      // both stereo channels weigh 1.0
-                truePeak = std::max (truePeak, std::abs ((float) x));
+
+                // Measured from the unweighted signal: K-weighting is about
+                // how loud something sounds, and a converter clips on what
+                // the waveform actually does.
+                truePeak = std::max (truePeak, peakDetectors[(size_t) ch].process ((float) x));
             }
 
             // A rolling 400 ms window of mean square.
@@ -99,6 +109,9 @@ public:
     double getMomentaryLufs()  const noexcept { return momentary; }
     double getShortTermLufs()  const noexcept { return shortTerm; }
     double getIntegratedLufs() const noexcept { return integrated; }
+    /** The highest level the reconstructed waveform reaches, as a linear
+        amplitude. Can exceed 1.0, and routinely does on a limited master:
+        that is the point of measuring it. */
     float  getTruePeak()       const noexcept { return truePeak; }
 
     /** How far the loudest moments sit above the average: a rough stand in for
@@ -139,6 +152,8 @@ private:
     };
 
     struct ChannelState { Biquad shelf, highpass; };
+
+    TruePeakDetector peakDetectors[2];
 
     void designFilters()
     {
