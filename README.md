@@ -1,6 +1,6 @@
 # ALLHAILPAN Studio
 
-A free, open-source digital audio workstation with an FL Studio style workflow: channel rack, step sequencer, piano roll, pattern-based playlist, mixer with inserts and sends, audio recording, and VST3 plugin hosting.
+A free, open-source digital audio workstation built around patterns: a channel rack and step sequencer for building them, a piano roll for writing them out, a playlist for arranging them, and a mixer with inserts and sends to finish. It records audio and MIDI, hosts VST3 plugins, and exports stems.
 
 Built for the people. Free forever, source included.
 

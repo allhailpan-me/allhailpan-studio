@@ -157,6 +157,20 @@ Test the arithmetic that would be silently wrong, not the code that would fail
 loudly. Randomised testing over thousands of generated configurations has been
 more useful here than hand-picked cases, especially for the latency graph.
 
+## How to talk about this project
+
+This is its own tool, not a clone or a reimplementation of another one. Do not
+describe it as having "an FL Studio workflow", as an FL Studio alternative, or
+as anything-like-something-else, in the README, in release notes, in commit
+messages or in the repository description. Other studios are inspiration and
+sometimes a reference for how an established behaviour should work, which is
+worth citing in a comment or a pull request where it explains a decision. That
+is different from borrowing another product's name to say what this one is.
+
+Describe it by what it does: patterns, a channel rack and step sequencer, a
+piano roll, a playlist, a mixer with sends, plugin hosting, and an engine that
+gets delay compensation and loudness right.
+
 ## Conventions
 
 Comments explain **why**, not what. A comment restating the code is noise; a

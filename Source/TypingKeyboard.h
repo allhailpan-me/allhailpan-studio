@@ -3,7 +3,9 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <array>
 
-// Turns the computer keyboard into a two-octave piano, laid out like FL Studio:
+// Turns the computer keyboard into a two-octave piano. The rows are laid out
+// the way trackers and step sequencers have long done it, so the keyboard
+// reads as two octaves of black and white keys:
 //
 //   upper octave:   2 3   5 6 7   9 0          (black keys)
 //                  Q W E R T Y U I O P         (white keys)
