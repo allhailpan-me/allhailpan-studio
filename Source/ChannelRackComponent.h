@@ -34,11 +34,13 @@ public:
             const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
             const int index = juce::jlimit (0, 4, swingBox.getSelectedId() - 1);
 
-            project.groove.swing   = swings[index];
-            project.groove.enabled = index > 0;
-            project.groove.base    = project.rackStepsPerBar >= 32 ? Groove::Base::thirtySecond
-                                   : project.rackStepsPerBar >= 16 ? Groove::Base::sixteenth
-                                                                   : Groove::Base::eighth;
+            Groove g = project.groove;
+            g.swing   = swings[index];
+            g.enabled = index > 0;
+            g.base    = project.rackStepsPerBar >= 32 ? Groove::Base::thirtySecond
+                      : project.rackStepsPerBar >= 16 ? Groove::Base::sixteenth
+                                                      : Groove::Base::eighth;
+            project.setGroove (g);
             commit();
         };
         addAndMakeVisible (swingBox);
@@ -55,8 +57,10 @@ public:
             const double randoms[]    { 0.0, 0.15, 0.4 };
             const int index = juce::jlimit (0, 2, feelBox.getSelectedId() - 1);
 
-            project.groove.velocity = velocities[index];
-            project.groove.random   = randoms[index];
+            Groove g = project.groove;
+            g.velocity = velocities[index];
+            g.random   = randoms[index];
+            project.setGroove (g);
             commit();
         };
         addAndMakeVisible (feelBox);
