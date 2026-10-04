@@ -691,6 +691,13 @@ void MainComponent::pushArrangement (bool allowRenders)
             rt.start  = c.start;
             rt.gain   = juce::Decibels::decibelsToGain (c.gainDb);
 
+            // A warped clip reads along the piecewise line its markers
+            // describe. Which audio that line is measured against depends on
+            // whether the stretched copy is ready, so it is worked out below
+            // and the segments are built from it.
+            double     warpScale = 1.0;
+            const bool warped    = c.isWarped();
+
             if (StretchCache::needsRender (c.stretch, c.pitch))
             {
                 keysInUse.insert (StretchCache::keyFor (*c.sample, c.stretch, c.pitch));
@@ -700,6 +707,11 @@ void MainComponent::pushArrangement (bool allowRenders)
                     rt.readOffset = c.offset * c.stretch;
                     rt.playLength = c.length * c.stretch;
                     rt.rate       = 1.0;
+
+                    // The markers describe positions in the file, and this is a
+                    // copy already stretched by the clip's ratio, so the line
+                    // has to be measured in the copy's own seconds.
+                    warpScale = c.stretch;
                 }
                 else
                 {
@@ -717,6 +729,17 @@ void MainComponent::pushArrangement (bool allowRenders)
                 rt.playLength = c.length;
                 rt.rate       = 1.0;
             }
+
+            if (warped)
+            {
+                const double beats = c.lengthBeats (project.bpm);
+                rt.playLength = beats * 60.0 / project.bpm;
+                rt.warpFirst  = (int) snap.warp.size();
+                buildWarpSegments (c.warp, c.offset, c.fallbackSlope (project.bpm), c.start,
+                                   snap.warp, warpScale);
+                rt.warpCount  = (int) snap.warp.size() - rt.warpFirst;
+            }
+
             snap.audio.push_back (rt);
         }
         else if (c.pattern != nullptr)

@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_events/juce_events.h>
 #include "SampleData.h"
+#include "WarpMap.h"
 #include <set>
 #include <array>
 #include <map>
@@ -349,15 +350,60 @@ struct Clip
     // without touching pitch, so a vocal matched this way stays in key.
     double sourceBpm   = 0.0;   // 0 = unknown
     bool   followTempo = false;
+
+    // Warp markers, for a performance that drifts within the take rather than
+    // sitting at one steady tempo. Each pins a point in the source audio to a
+    // beat after the clip's start, and the audio between two of them is
+    // stretched to fit. Empty means the single `stretch` ratio governs the whole
+    // clip, which is the behaviour every project had before warping existed, so
+    // old projects load unchanged. Kept normalised at all times: sorted, and
+    // strictly increasing in both coordinates. See WarpMap.h.
+    std::vector<WarpMarker> warp;
+
     float  gainDb  = 0.0f;
     bool   muted   = false;
 
     bool   isAudio() const noexcept { return type == ClipType::audio; }
+    bool   isWarped() const noexcept { return isAudio() && ! warp.empty(); }
+
+    // Source seconds per beat for an unwarped clip, and for the stretch of a
+    // warped one that runs before its first marker.
+    double fallbackSlope (double bpm) const noexcept { return warpFallbackSlope (bpm, stretch); }
+
+    /** Source seconds read at a beat measured from the clip's start. */
+    double sourceAtBeat (double bpm, double beatsIn) const noexcept
+    {
+        return warpSourceAtBeat (warp, offset, fallbackSlope (bpm), beatsIn);
+    }
+
+    /** The beat, measured from the clip's start, at which a source position is
+        read. The inverse of the above, which is what the clip's own length in
+        beats is: how far into the arrangement its last source sample lands.
+    */
+    double beatAtSource (double bpm, double sourceSeconds) const noexcept
+    {
+        return warpBeatAtSource (warp, offset, fallbackSlope (bpm), sourceSeconds);
+    }
+
+    /** The rate the clip reads at around a beat, in source seconds per beat. */
+    double slopeAtBeat (double bpm, double beatsIn) const noexcept
+    {
+        return warpSlopeAtBeat (warp, offset, fallbackSlope (bpm), beatsIn);
+    }
+
     double lengthBeats (double bpm) const noexcept
     {
-        return isAudio() ? length * stretch * bpm / 60.0 : length;
+        if (! isAudio())
+            return length;
+        if (warp.empty())
+            return length * stretch * bpm / 60.0;   // unchanged for every unwarped clip
+        return beatAtSource (bpm, offset + length);
     }
     double endBeat (double bpm) const noexcept { return start + lengthBeats (bpm); }
+
+    /** Drops markers that the clip's current edges cannot honour, and puts the
+        rest back in order. Call after anything that moves `offset`. */
+    void tidyWarp() { normaliseWarpMarkers (warp, offset); }
 
     // Copies share nothing editable with the original
     Clip deepCopy() const
@@ -682,22 +728,162 @@ public:
         changed();
     }
 
+    // ---- warp markers ----------------------------------------------------
+    //
+    // Editing rules worth knowing, all of them chosen to match what Live does,
+    // because that is what a producer coming from Live will expect:
+    //
+    //  - Adding a marker does not change the sound. It pins whatever the clip
+    //    is already reading at that beat, so the line it describes is the same
+    //    line as before, just with one more point on it. Only dragging it
+    //    afterwards warps anything.
+    //  - A marker cannot be dragged past its neighbours. It stops just short
+    //    instead, because crossing would make the clip read backwards.
+    //  - Removing one merges the two segments either side of it.
+
+    /** Pins whatever the clip reads at `beatsIn` to that beat. Returns the new
+        marker's index, or -1 if it was too close to an existing one to be
+        usable. */
+    int addWarpMarker (int id, double beatsIn)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! c->isAudio() || beatsIn <= 0.0)
+            return -1;
+
+        const WarpMarker m { c->sourceAtBeat (bpm, beatsIn), beatsIn };
+        c->warp.push_back (m);
+        c->tidyWarp();
+        retuneWarpRatio (id);
+        changed();
+
+        for (size_t i = 0; i < c->warp.size(); ++i)
+            if (c->warp[i].beat == m.beat && c->warp[i].source == m.source)
+                return (int) i;
+
+        return -1;
+    }
+
+    /** Moves a marker along the grid, keeping it on the same point in the
+        audio. Returns where it ended up, which may be short of where it was
+        asked to go: a marker stops before its neighbours rather than crossing
+        them. */
+    double moveWarpMarker (int id, int index, double beatsIn)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! juce::isPositiveAndBelow (index, (int) c->warp.size()))
+            return 0.0;
+
+        const int last = (int) c->warp.size() - 1;
+        const double lo = (index == 0 ? 0.0 : c->warp[(size_t) index - 1].beat) + kMinWarpBeatSpan;
+        double wanted = std::max (lo, beatsIn);
+        if (index < last)
+            wanted = std::min (wanted, c->warp[(size_t) index + 1].beat - kMinWarpBeatSpan);
+
+        if (c->warp[(size_t) index].beat != wanted)
+        {
+            c->warp[(size_t) index].beat = wanted;
+            changed();
+        }
+        return wanted;
+    }
+
+    void removeWarpMarker (int id, int index)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! juce::isPositiveAndBelow (index, (int) c->warp.size()))
+            return;
+        c->warp.erase (c->warp.begin() + index);
+        retuneWarpRatio (id);
+        changed();
+    }
+
+    /** Puts a warped clip's stretch ratio back to the clip's own average rate.
+
+        The markers set the timing; the ratio only decides how much of the work
+        Rubber Band does, and therefore how much is left to plain interpolation.
+        At the average rate the stretched copy is read at close to real time, so
+        only the drift the markers correct is repitched, and by very little.
+
+        Called when a marker edit has finished rather than while one is in
+        progress: the ratio is part of what keys the rendered copy, so changing
+        it mid-drag would start a fresh render on every mouse move.
+    */
+    void retuneWarpRatio (int id)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! c->isWarped() || c->length <= 1.0e-9 || bpm <= 0.0)
+            return;
+
+        const double wanted = juce::jlimit (0.1, 10.0, c->lengthBeats (bpm) * 60.0 / bpm / c->length);
+        if (std::abs (wanted - c->stretch) > 1.0e-9)
+        {
+            c->stretch = wanted;
+            changed();
+        }
+    }
+
+    /** Turns warping off, leaving the clip on its single stretch ratio.
+
+        The ratio is set so the clip keeps the length it had while warped,
+        rather than snapping back to whatever the ratio happened to be before
+        the first marker was placed.
+    */
+    void clearWarp (int id)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! c->isWarped())
+            return;
+
+        const double beats = c->lengthBeats (bpm);
+        c->warp.clear();
+        if (c->length > 1.0e-9 && beats > 1.0e-9)
+            c->stretch = juce::jlimit (0.1, 10.0, beats * 60.0 / bpm / c->length);
+        c->followTempo = false;   // its length no longer came from a source tempo
+        changed();
+    }
+
     /** Re-stretches every clip that follows the tempo. Called when the project
         tempo changes, so matched audio tracks the grid instead of drifting. */
     void retuneTempoFollowers()
     {
         bool any = false;
+        if (bpm <= 0.0)
+            return;
+
+        auto retune = [&any] (Clip& c, double wanted)
+        {
+            wanted = juce::jlimit (0.1, 10.0, wanted);
+            if (std::abs (wanted - c.stretch) > 1.0e-9)
+            {
+                c.stretch = wanted;
+                any = true;
+            }
+        };
 
         for (auto& c : clips)
-            if (c.isAudio() && c.followTempo && c.sourceBpm > 0.0 && bpm > 0.0)
+        {
+            if (! c.isAudio())
+                continue;
+
+            if (c.isWarped())
             {
-                const double wanted = c.sourceBpm / bpm;
-                if (std::abs (wanted - c.stretch) > 1.0e-9)
-                {
-                    c.stretch = wanted;
-                    any = true;
-                }
+                // A warped clip always follows the tempo, whether or not it was
+                // asked to: its markers are in beats, so they hold their grid
+                // positions on their own and the clip's length in beats does not
+                // change. What does need recomputing is the stretch ratio, which
+                // is no longer what sets the timing but is still what decides how
+                // much of the work Rubber Band does. Keeping it at the clip's own
+                // average rate means the stretched copy is read at close to real
+                // time, so the pitch stays where it was instead of rising with
+                // the tempo.
+                if (c.length > 1.0e-9)
+                    retune (c, c.lengthBeats (bpm) * 60.0 / bpm / c.length);
             }
+            else if (c.followTempo && c.sourceBpm > 0.0)
+            {
+                retune (c, c.sourceBpm / bpm);
+            }
+        }
 
         if (any)
             changed();
@@ -790,10 +976,26 @@ public:
 
         if (c->isAudio())
         {
-            const double cutSource = cutBeats * 60.0 / bpm / c->stretch;
+            // Cut where the clip is actually reading at that beat, which is the
+            // warp map's answer and reduces to the old one when there are no
+            // markers.
+            const double cutSource = c->sourceAtBeat (bpm, cutBeats) - c->offset;
+
+            // The right hand piece reads at the rate the original was reading
+            // at the cut, so splitting a warped clip is inaudible. That matters
+            // when the cut lands after the last marker, where the right piece
+            // keeps no markers at all and has only its stretch ratio to go on.
+            right.stretch = warpStretchForSlope (bpm, c->slopeAtBeat (bpm, cutBeats));
+
             right.offset = c->offset + cutSource;
             right.length = c->length - cutSource;
             c->length    = cutSource;
+
+            rebaseWarpMarkers (right.warp, cutBeats, right.offset);
+
+            // The left piece keeps every marker, including any past its new
+            // end: they do not affect the audio before them, and they are worth
+            // keeping in case the edge is dragged back out again.
         }
         else
         {
@@ -889,7 +1091,8 @@ private:
         if (a.id != b.id || a.type != b.type || a.sample != b.sample || a.channel != b.channel
             || a.track != b.track || a.start != b.start || a.offset != b.offset || a.length != b.length
             || a.stretch != b.stretch || a.pitch != b.pitch || a.gainDb != b.gainDb || a.muted != b.muted
-            || a.sourceBpm != b.sourceBpm || a.followTempo != b.followTempo)
+            || a.sourceBpm != b.sourceBpm || a.followTempo != b.followTempo
+            || a.warp != b.warp)
             return false;
         if (a.pattern == b.pattern)
             return true;

@@ -1219,13 +1219,28 @@ void AudioEngine::renderAudioClips (int numSamples)
         const auto*  srcR    = data->audio.getReadPointer (std::min (1, data->audio.getNumChannels() - 1));
         const double srcRate = data->sampleRate;
 
+        // Warped clips read along the piecewise line their markers describe.
+        // The segment table is precomputed on the message thread, so the cost
+        // here is one comparison and one multiply-add per sample, and the cursor
+        // means a block that plays forward does not search at all. It is
+        // corrected rather than trusted, so looping back is safe.
+        // The range is checked rather than trusted. It costs one test per clip
+        // per block, and the alternative is reading off the end of the table on
+        // the audio thread, which takes the whole studio down.
+        const bool warpOk = clip.warpCount > 0 && clip.warpFirst >= 0
+                         && (size_t) clip.warpFirst + (size_t) clip.warpCount <= snapshot.warp.size();
+        const WarpSegment* warp = warpOk ? snapshot.warp.data() + clip.warpFirst : nullptr;
+        int warpCursor = 0;
+
         for (int i = 0; i < numSamples; ++i)
         {
             const double beat = blockBeats[(size_t) i] - shift;
             if (beat < clip.start || beat >= clipEnd)
                 continue;
 
-            const double seconds = clip.readOffset + (beat - clip.start) * secondsPerBeat * clip.rate;
+            const double seconds = warp != nullptr
+                                 ? warpSourceAtSegment (warp, clip.warpCount, warpCursor, beat)
+                                 : clip.readOffset + (beat - clip.start) * secondsPerBeat * clip.rate;
             const double frame   = seconds * srcRate;
             const int    f0      = (int) frame;
             if (f0 < 0 || f0 >= frames)

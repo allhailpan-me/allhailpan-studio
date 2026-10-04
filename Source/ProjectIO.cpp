@@ -111,6 +111,29 @@ namespace
         return notes;
     }
 
+    // Warp markers, as source seconds and beats, in the same compact form the
+    // notes and automation points use, and to the same precision, which is far
+    // finer than a sample: a marker reloads exactly where it was put.
+    juce::String warpToText (const std::vector<WarpMarker>& markers)
+    {
+        juce::StringArray parts;
+        for (auto& m : markers)
+            parts.add (num (m.source) + "," + num (m.beat));
+        return parts.joinIntoString (";");
+    }
+
+    std::vector<WarpMarker> warpFromText (const juce::String& text)
+    {
+        std::vector<WarpMarker> markers;
+        for (auto& part : juce::StringArray::fromTokens (text, ";", {}))
+        {
+            auto f = juce::StringArray::fromTokens (part, ",", {});
+            if (f.size() < 2) continue;
+            markers.push_back ({ f[0].getDoubleValue(), f[1].getDoubleValue() });
+        }
+        return markers;
+    }
+
     juce::String pointsToText (const std::vector<AutoPoint>& points)
     {
         juce::StringArray parts;
@@ -341,6 +364,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
             e->setAttribute ("sourceBpm", clip.sourceBpm);
             e->setAttribute ("followTempo", clip.followTempo);
             e->setAttribute ("pitch", clip.pitch);
+            if (! clip.warp.empty())
+                e->createNewChildElement ("WARP")->addTextElement (warpToText (clip.warp));
         }
         else if (clip.pattern != nullptr)
         {
@@ -609,6 +634,13 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 clip.sourceBpm = juce::jlimit (0.0, 400.0, e->getDoubleAttribute ("sourceBpm", 0.0));
                 clip.followTempo = e->getBoolAttribute ("followTempo", false);
                 clip.pitch   = juce::jlimit (-24.0, 24.0, e->getDoubleAttribute ("pitch", 0.0));
+
+                // Markers are normalised on the way in rather than trusted, so
+                // a hand edited or truncated project cannot produce a map that
+                // reads backwards.
+                if (auto* warp = e->getChildByName ("WARP"))
+                    clip.warp = warpFromText (warp->getAllSubText());
+                clip.tidyWarp();
             }
             else
             {

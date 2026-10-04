@@ -198,6 +198,7 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
             c->gainDb = 0.0f;
             c->followTempo = false;
             c->sourceBpm = 0.0;
+            c->warp.clear();
         }
         else if (c->pattern != nullptr)
         {
@@ -206,6 +207,17 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
         project.changed();
         updateClipBar();
     };
+    clearWarpButton.setTooltip ("Remove every warp marker from this clip, keeping the length it has now.");
+    clearWarpButton.onClick = [this]
+    {
+        if (auto* c = singleSelected(); c != nullptr && c->isWarped())
+        {
+            project.clearWarp (c->id);
+            updateClipBar();
+            repaint();
+        }
+    };
+
     openRollButton.onClick = [this]
     {
         if (auto* c = singleSelected(); c != nullptr && ! c->isAudio() && onOpenPianoRoll)
@@ -225,7 +237,8 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
                         static_cast<juce::Component*> (&pitchLabel), static_cast<juce::Component*> (&stretchLabel),
                         static_cast<juce::Component*> (&gainLabel), static_cast<juce::Component*> (&resetButton),
                         static_cast<juce::Component*> (&bpmLabel), static_cast<juce::Component*> (&syncButton),
-                        static_cast<juce::Component*> (&openRollButton), static_cast<juce::Component*> (&channelBox) })
+                        static_cast<juce::Component*> (&openRollButton), static_cast<juce::Component*> (&channelBox),
+                        static_cast<juce::Component*> (&clearWarpButton) })
     {
         quiet (*comp);
         addChildComponent (comp);
@@ -250,7 +263,8 @@ bool PlaylistComponent::isEditing() const noexcept
     return sliderDragging
         || drag.mode == DragState::Mode::move
         || drag.mode == DragState::Mode::trimLeft  || drag.mode == DragState::Mode::trimRight
-        || drag.mode == DragState::Mode::stretchLeft || drag.mode == DragState::Mode::stretchRight;
+        || drag.mode == DragState::Mode::stretchLeft || drag.mode == DragState::Mode::stretchRight
+        || drag.mode == DragState::Mode::warp;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +316,11 @@ void PlaylistComponent::layoutClipBar (juce::Rectangle<int> r)
     gainLabel   .setBounds (r.removeFromLeft (34));
     gainSlider  .setBounds (r.removeFromLeft (140));  r.removeFromLeft (10);
     resetButton .setBounds (r.removeFromLeft (60));   r.removeFromLeft (10);
+    if (clearWarpButton.isVisible())
+    {
+        clearWarpButton.setBounds (r.removeFromLeft (86));
+        r.removeFromLeft (10);
+    }
 
     // MIDI clip controls reuse the same row
     auto midiRow = pitchLabel.getBounds().getUnion (pitchSlider.getBounds());
@@ -372,6 +391,7 @@ void PlaylistComponent::updateClipBar()
                         static_cast<juce::Component*> (&syncButton) })
         comp->setVisible (audio);
 
+    clearWarpButton.setVisible (audio && c->isWarped());
     resetButton.setVisible (audio || (midi && c->pattern != nullptr && ! c->pattern->lanes.empty()));
     resetButton.setButtonText (audio ? "Reset" : "Clear auto");
     gainLabel.setVisible (c != nullptr);
@@ -396,12 +416,25 @@ void PlaylistComponent::updateClipBar()
 
         sourceBpmSlider.setValue (c->sourceBpm > 0.0 ? c->sourceBpm : project.bpm, juce::dontSendNotification);
         syncButton.setToggleState (c->followTempo, juce::dontSendNotification);
-        stretchSlider.setEnabled (! c->followTempo);   // the tempo owns it now
+
+        // Warp markers and a single ratio describe the same thing two ways, and
+        // the markers win: a clip with markers has its timing set by them, so
+        // the ratio and the tempo match are not the clip's own any more.
+        const bool warped = c->isWarped();
+        stretchSlider.setEnabled (! c->followTempo && ! warped);
+        sourceBpmSlider.setEnabled (! warped);
+        syncButton.setEnabled (! warped);
+
         const bool rendering = isRendering && isRendering (*c);
-        clipStatus.setText (rendering ? "Rendering high-quality stretch..."
-                                      : "Starts " + formatPosition (c->start) + "   Length "
-                                            + juce::String (c->lengthBeats (project.bpm) / 4.0, 3) + " bars",
-                            juce::dontSendNotification);
+        juce::String status = rendering
+            ? juce::String ("Rendering high-quality stretch...")
+            : "Starts " + formatPosition (c->start) + "   Length "
+                  + juce::String (c->lengthBeats (project.bpm) / 4.0, 3) + " bars";
+        if (warped)
+            status << "   " << (int) c->warp.size() << (c->warp.size() == 1 ? " warp marker" : " warp markers");
+        else if (audio)
+            status << "   Double-click the clip to add a warp marker";
+        clipStatus.setText (status, juce::dontSendNotification);
     }
     else
     {
@@ -416,6 +449,10 @@ void PlaylistComponent::updateClipBar()
                                 + juce::String ((int) c->pattern->lanes.size()) + " automation lanes.  Double-click the clip to edit.",
                             juce::dontSendNotification);
     }
+
+    // Which controls are on the row has just changed, so the row has to be
+    // laid out again rather than waiting for the next resize.
+    layoutClipBar (clipBar);
 }
 
 void PlaylistComponent::updateScrollBars()
@@ -695,7 +732,8 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
     juce::String label = c.displayName (project.channels);
     if (c.isAudio())
     {
-        if (std::abs (c.stretch - 1.0) > 1e-4) label << "   x" << juce::String (c.stretch, 2);
+        if (c.isWarped())                          label << "   warped";
+        else if (std::abs (c.stretch - 1.0) > 1e-4) label << "   x" << juce::String (c.stretch, 2);
         if (std::abs (c.pitch) > 1e-4)         label << "   " << (c.pitch > 0 ? "+" : "") << juce::String (c.pitch, 2) << " st";
         if (isRendering && isRendering (c))    label << "   rendering...";
     }
@@ -710,15 +748,20 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
         const auto& peaks = c.sample->peaks;
         const float midY  = bodyTop + bodyH / 2.0f;
         const float amp   = bodyH / 2.0f - 1.0f;
-        const double sourceSecondsPerPixel = 60.0 / project.bpm / ppb / c.stretch;
+        const double beatsPerPixel = 1.0 / ppb;
         const double peaksPerSecond = c.sample->sampleRate / SampleData::peakBlock;
         const float gain = juce::Decibels::decibelsToGain (c.gainDb);
+        const double fallback = c.fallbackSlope (project.bpm);
 
         g.setColour (Ahp::bone.withAlpha (dim ? 0.35f : 0.9f));
         for (int x = x0; x < x1; ++x)
         {
-            const double t0 = c.offset + (x - r.getX()) * sourceSecondsPerPixel;
-            const double t1 = t0 + sourceSecondsPerPixel;
+            // Drawn through the warp map, so a transient appears under the grid
+            // line it has been pinned to. A waveform that disagreed with what
+            // is heard would make markers impossible to place.
+            const double b0 = (x - r.getX()) * beatsPerPixel;
+            const double t0 = warpSourceAtBeat (c.warp, c.offset, fallback, b0);
+            const double t1 = warpSourceAtBeat (c.warp, c.offset, fallback, b0 + beatsPerPixel);
             size_t i0 = (size_t) std::max (0.0, t0 * peaksPerSecond);
             size_t i1 = std::max (i0 + 1, (size_t) std::max (0.0, t1 * peaksPerSecond));
             float v = 0.0f;
@@ -756,11 +799,41 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
                     juce::Justification::topRight);
     }
 
+    // Warp markers, on top of the waveform they pin.
+    if (warpVisible (c))
+    {
+        for (size_t i = 0; i < c.warp.size(); ++i)
+        {
+            const float mx = warpMarkerX (c, (int) i);
+            if (mx < r.getX() || mx > r.getRight())
+                continue;
+
+            g.setColour (Ahp::rec);
+            g.fillRect (mx - 0.5f, bodyTop, 1.0f, bodyH);
+
+            // A grab handle at the top of the body, wide enough to hit without
+            // aiming, and clear of the clip's name in the head.
+            g.fillRect (mx - 3.5f, bodyTop, 7.0f, 5.0f);
+        }
+    }
+
     if (selected)
     {
         g.setColour (Ahp::bone);
         g.drawRect (r.reduced (1.0f, 0.0f), 1.5f);
     }
+}
+
+bool PlaylistComponent::warpVisible (const Clip& c) const
+{
+    return c.isWarped() && project.selection.count (c.id) > 0;
+}
+
+float PlaylistComponent::warpMarkerX (const Clip& c, int index) const
+{
+    if (! juce::isPositiveAndBelow (index, (int) c.warp.size()))
+        return 0.0f;
+    return beatToX (c.start + c.warp[(size_t) index].beat);
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +857,18 @@ PlaylistComponent::Hit PlaylistComponent::hitTest (juce::Point<float> p) const
         if (p.x >= r.getX() && p.x < r.getRight())
         {
             h.clipId = it->id;
-            if (r.getWidth() > 18.0f)
+
+            // A marker takes precedence over the trim edges, because one sitting
+            // near the end of a clip would otherwise be impossible to grab.
+            if (warpVisible (*it))
+                for (size_t i = 0; i < it->warp.size(); ++i)
+                    if (std::abs (p.x - warpMarkerX (*it, (int) i)) < 5.0f)
+                    {
+                        h.warpIndex = (int) i;
+                        break;
+                    }
+
+            if (h.warpIndex < 0 && r.getWidth() > 18.0f)
             {
                 if (r.getRight() - p.x < 7.0f)  h.edge = Edge::right;
                 else if (p.x - r.getX() < 7.0f) h.edge = Edge::left;
@@ -823,6 +907,7 @@ void PlaylistComponent::mouseMove (const juce::MouseEvent& e)
     {
         if (tool == Tool::slice)             cursor = juce::MouseCursor::CrosshairCursor;
         else if (tool == Tool::erase)        cursor = juce::MouseCursor::NormalCursor;
+        else if (h.warpIndex >= 0)           cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.edge != Edge::none)       cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.clipId != 0)              cursor = juce::MouseCursor::DraggingHandCursor;
     }
@@ -918,6 +1003,27 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
     if (clip == nullptr)
         return;
 
+    // A warp marker is grabbed before anything else, so dragging one never
+    // moves or duplicates the clip by accident. Only a selected clip shows its
+    // markers, so the clip is already selected here. Alt-click removes one,
+    // which leaves double-click free for adding one.
+    if (h.warpIndex >= 0)
+    {
+        if (e.mods.isAltDown())
+        {
+            project.removeWarpMarker (clip->id, h.warpIndex);
+            updateClipBar();
+            repaint();
+            return;
+        }
+
+        drag.mode      = DragState::Mode::warp;
+        drag.clipId    = clip->id;
+        drag.warpIndex = h.warpIndex;
+        repaint();
+        return;
+    }
+
     if (e.mods.isShiftDown() && h.edge == Edge::none)
     {
         // Shift+drag duplicates the selection
@@ -963,11 +1069,38 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
     repaint();
 }
 
+/** Stretches a clip to a length in beats, from the state it had when the drag
+    began.
+
+    A warped clip has no single ratio to set, so the whole map is scaled: every
+    marker's beat and the ratio move by the same factor, which stretches the
+    performance without disturbing the feel that the markers describe. With no
+    markers this is exactly the old one line calculation.
+*/
+void PlaylistComponent::stretchClipTo (Clip& c, const Clip& original, double wantedBeats)
+{
+    const double wasBeats = original.lengthBeats (project.bpm);
+    if (wasBeats <= 1.0e-9 || wantedBeats <= 1.0e-9)
+        return;
+
+    const double wanted = juce::jlimit (0.1, 10.0, original.stretch * (wantedBeats / wasBeats));
+    const double factor = wanted / std::max (1.0e-9, original.stretch);
+
+    c.stretch = wanted;
+    c.warp    = original.warp;
+    for (auto& m : c.warp)
+        m.beat *= factor;
+
+    // Squeezing hard enough can bring two markers onto the same beat. They are
+    // taken from the drag's starting state every time, so dragging back out
+    // brings them back.
+    c.tidyWarp();
+}
+
 void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
 {
     const auto h = hitTest (e.position);
     hoverBeat = std::max (0.0, snap (h.beat, e.mods, true));
-    const double spb = 60.0 / project.bpm;
 
     auto original = [this] (int id) -> const Clip*
     {
@@ -1025,6 +1158,16 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             break;
         }
 
+        case DragState::Mode::warp:
+        {
+            auto* c = project.find (drag.clipId);
+            if (c == nullptr) return;
+            project.moveWarpMarker (c->id, drag.warpIndex,
+                                    snap (h.beat, e.mods) - c->start);
+            drag.moved = true;
+            break;
+        }
+
         case DragState::Mode::trimRight:
         {
             auto* c = project.find (drag.clipId);
@@ -1035,7 +1178,12 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             if (c->isAudio())
             {
                 if (c->sample == nullptr) return;
-                c->length = juce::jlimit (0.005, c->sample->durationSeconds() - o->offset, (end - o->start) * spb / o->stretch);
+
+                // Through the warp map, so dragging the end of a warped clip
+                // takes in exactly the audio that reaches that beat. With no
+                // markers this is the same arithmetic as before.
+                const double wanted = o->sourceAtBeat (project.bpm, end - o->start) - o->offset;
+                c->length = juce::jlimit (0.005, c->sample->durationSeconds() - o->offset, wanted);
             }
             else
             {
@@ -1055,12 +1203,31 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
 
             if (c->isAudio())
             {
-                const double beatsPerSourceSecond = o->stretch / spb;
-                newStart = std::max ({ newStart, o->start - o->offset * beatsPerSourceSecond, 0.0 });
-                const double shiftSource = (newStart - o->start) / beatsPerSourceSecond;
+                // The beat at which the very start of the file would be read is
+                // as far left as the edge can go.
+                newStart = std::max ({ newStart, o->start + o->beatAtSource (project.bpm, 0.0), 0.0 });
+
+                const double shiftBeats  = newStart - o->start;
+                const double shiftSource = o->sourceAtBeat (project.bpm, shiftBeats) - o->offset;
                 c->start  = newStart;
                 c->offset = o->offset + shiftSource;
                 c->length = o->length - shiftSource;
+
+                if (o->isWarped())
+                {
+                    // The edge becomes the clip's new anchor, so the markers are
+                    // measured from it. Those the edge has passed are gone, and
+                    // if that leaves none at all the ratio has to take over the
+                    // rate the clip was reading at there, or the trim would
+                    // change its speed.
+                    c->warp = o->warp;
+                    rebaseWarpMarkers (c->warp, shiftBeats, c->offset);
+
+                    if (c->warp.empty())
+                        c->stretch = juce::jlimit (0.1, 10.0,
+                                                   warpStretchForSlope (project.bpm,
+                                                                        o->slopeAtBeat (project.bpm, shiftBeats)));
+                }
             }
             else
             {
@@ -1080,7 +1247,7 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             if (c == nullptr || o == nullptr || o->length <= 0.0) return;
             const double minBeats = std::max (snapValue (e.mods), 1.0 / 64.0);
             const double end = std::max (o->start + minBeats, snap (h.beat, e.mods));
-            c->stretch = juce::jlimit (0.1, 10.0, (end - o->start) * spb / o->length);
+            stretchClipTo (*c, *o, end - o->start);
             drag.moved = true;
             break;
         }
@@ -1093,8 +1260,8 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             const double originalEnd = o->endBeat (project.bpm);
             const double minBeats = std::max (snapValue (e.mods), 1.0 / 64.0);
             const double newStart = std::max (0.0, std::min (snap (h.beat, e.mods), originalEnd - minBeats));
-            c->stretch = juce::jlimit (0.1, 10.0, (originalEnd - newStart) * spb / o->length);
-            c->start   = originalEnd - c->lengthBeats (project.bpm);
+            stretchClipTo (*c, *o, originalEnd - newStart);
+            c->start = originalEnd - c->lengthBeats (project.bpm);
             drag.moved = true;
             break;
         }
@@ -1132,6 +1299,14 @@ void PlaylistComponent::mouseUp (const juce::MouseEvent& e)
         project.selection = { drag.clipId };
     }
 
+    // A finished drag is the point at which a warped clip's stretch ratio can
+    // be put back to its own average rate, and so a fresh render started.
+    // Doing it during the drag would re-render on every mouse move. This covers
+    // dragging a marker, trimming and stretching alike, and does nothing to a
+    // clip that is not warped.
+    if (drag.moved && drag.clipId != 0)
+        project.retuneWarpRatio (drag.clipId);
+
     const bool edited = drag.moved;
     drag = {};
     if (edited)
@@ -1147,8 +1322,34 @@ void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
 
     if (h.zone == Zone::grid && h.clipId != 0)
     {
-        if (auto* c = project.find (h.clipId); c != nullptr && ! c->isAudio() && onOpenPianoRoll)
-            onOpenPianoRoll (c->id);
+        auto* c = project.find (h.clipId);
+        if (c == nullptr)
+            return;
+
+        if (! c->isAudio())
+        {
+            if (onOpenPianoRoll)
+                onOpenPianoRoll (c->id);
+            return;
+        }
+
+        // Double-clicking an audio clip works on its warp markers: on a marker
+        // it removes it, anywhere else it adds one. Adding one does not change
+        // the sound, it only pins what is already there, so this is safe to do
+        // by accident.
+        if (tool != Tool::draw)
+            return;
+
+        if (project.selection.count (c->id) == 0)
+            project.selection = { c->id };
+
+        if (h.warpIndex >= 0)
+            project.removeWarpMarker (c->id, h.warpIndex);
+        else
+            project.addWarpMarker (c->id, snap (h.beat, e.mods) - c->start);
+
+        updateClipBar();
+        repaint();
         return;
     }
 
