@@ -74,12 +74,22 @@ private:
         int    clipId = 0;
         Edge   edge   = Edge::none;
         int    warpIndex = -1;   // a warp marker under the mouse, on a selected clip
+
+        // A curve's handles, on a selected automation clip. A point is a value
+        // at a beat; a bend handle sits on the curve between two points and
+        // shapes the segment between them.
+        int    autoPoint = -1;
+        int    autoBend  = -1;
     };
 
     struct DragState
     {
-        enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee, warp } mode = Mode::none;
+        enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee, warp,
+                          autoPoint, autoBend } mode = Mode::none;
         int    warpIndex = -1;
+        int    pointIndex = -1;
+        double bend0 = 0.0;      // the bend the segment had when the drag began
+        float  bendY0 = 0.0f;    // and where the mouse was, so the drag is relative
         int    clipId  = 0;
         double grab    = 0.0;
         int    track0  = 0;
@@ -106,6 +116,33 @@ private:
     float  warpMarkerX (const Clip&, int index) const;
     bool   warpVisible (const Clip&) const;
     void   stretchClipTo (Clip&, const Clip& original, double wantedBeats);
+
+    // ---- automation curves ----
+    //
+    // The part of a clip the curve is drawn in, which is everything below the
+    // name strip. Handles are only shown and only grabbable on a selected
+    // clip, the same rule the warp markers follow, so that they never get in
+    // the way of moving an unselected one.
+    juce::Rectangle<float> curveBody (juce::Rectangle<float> clipRect) const;
+    bool   curveVisible (const Clip&) const;
+    float  curveValueToY (juce::Rectangle<float> body, double value) const;
+    double curveYToValue (juce::Rectangle<float> body, float y) const;
+
+    /** Where a point sits on screen. Points are in beats from the curve's own
+        origin, which the clip's offset moves, exactly as a pattern's notes
+        are. */
+    float  curvePointX (const Clip&, int index) const;
+    juce::Point<float> curveBendHandle (const Clip&, juce::Rectangle<float> body, int segment) const;
+    void   paintCurve (juce::Graphics&, const Clip&, juce::Rectangle<float> body, bool selected, bool dim);
+
+    /** Offers everything on this track's route that can be automated, and puts
+        a curve on the track for whichever is chosen. */
+    void   showAutomationMenu (int track);
+    void   addAutomationFor (int track, const AutoTarget&);
+
+    /** Where the control a target points at is sitting right now, in the
+        curve's own 0..1, so a new curve starts from the mix as it stands. */
+    double currentValueFor (const AutoTarget&) const;
 
     void zoom (double factor, float anchorX);
     void updateScrollBars();
@@ -176,6 +213,11 @@ private:
 
     std::vector<Clip> clipboard;     // positions relative to the first clip
     int clipboardFirstTrack = 0;
+
+    // What the automation menu last offered, so its asynchronous callback has
+    // something to look the chosen item up in rather than an integer with the
+    // whole target packed into it.
+    std::vector<AutoTarget> automationMenu;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PlaylistComponent)
 };

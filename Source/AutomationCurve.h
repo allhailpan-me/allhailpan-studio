@@ -68,6 +68,65 @@
 // and run under sanitizers on its own. See Tests/AutomationCurveTest.cpp.
 // ---------------------------------------------------------------------------
 
+// The mixer fader's travel. Named because automation has to map a curve onto
+// it and the interface has to draw the same travel, and the two disagreeing
+// would mean a fader that automation could not reach the top of.
+inline constexpr float kUnityFaderGain = 0.8f;    // 0 dB
+inline constexpr float kMaxFaderGain   = 1.25f;
+
+// What kind of thing a moving value is pointed at. Here rather than beside the
+// rest of the target, because which range a reading means is arithmetic and
+// the arithmetic is what the tests can reach.
+//
+// An insert is not a plugin in a channel slot, so its own controls have to be
+// named rather than indexed: a fader and a pan are not parameters of anything.
+// An effect inside an insert does have indexed parameters, like an instrument,
+// but needs the slot as well as the insert to find it.
+enum class AutoTargetKind
+{
+    channelParam = 0,   // a parameter of the plugin in an instrument channel
+    insertVolume,       // a mixer insert's fader
+    insertPan,          // a mixer insert's pan
+    insertFxParam       // a parameter of an effect in one of an insert's slots
+};
+
+/** The control value a curve reading means, for a target of this kind. A curve
+    is always stored 0..1, because that is what a plugin parameter is and what
+    a drawn height is; the fader and the pan have their own travel and are
+    mapped onto it here, in one place, so that the engine and the interface
+    cannot disagree about where the top of a fader is. */
+inline float autoControlValue (AutoTargetKind kind, double curveValue) noexcept
+{
+    const double v = std::clamp (std::isfinite (curveValue) ? curveValue : 0.0, 0.0, 1.0);
+
+    switch (kind)
+    {
+        case AutoTargetKind::insertVolume: return (float) (v * (double) kMaxFaderGain);
+        case AutoTargetKind::insertPan:    return (float) (v * 2.0 - 1.0);
+        case AutoTargetKind::channelParam:
+        case AutoTargetKind::insertFxParam: break;
+    }
+    return (float) v;   // a plugin parameter is already normalised
+}
+
+/** The inverse, so that a new curve can start from wherever the control is
+    sitting now rather than from zero, which is what makes drawing one on a mix
+    that is already balanced not throw the balance away. */
+inline double autoCurveValueFor (AutoTargetKind kind, double controlValue) noexcept
+{
+    if (! std::isfinite (controlValue))
+        return 0.0;
+
+    switch (kind)
+    {
+        case AutoTargetKind::insertVolume: return std::clamp (controlValue / (double) kMaxFaderGain, 0.0, 1.0);
+        case AutoTargetKind::insertPan:    return std::clamp ((controlValue + 1.0) * 0.5, 0.0, 1.0);
+        case AutoTargetKind::channelParam:
+        case AutoTargetKind::insertFxParam: break;
+    }
+    return std::clamp (controlValue, 0.0, 1.0);
+}
+
 struct AutoCurvePoint
 {
     double beat  = 0.0;    // beats from the curve's own origin

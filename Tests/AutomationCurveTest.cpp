@@ -507,6 +507,83 @@ static void testFarOut()
     }
 }
 
+// ---------------------------------------------------------------------------
+// What a curve reading means for each kind of target.
+//
+// This is the quietest arithmetic in the feature. A fader whose automation
+// cannot reach the top, or a pan whose automation is off centre by a hair,
+// produces a mix that is subtly wrong and a number that looks reasonable,
+// which is the failure this codebase has been bitten by before.
+
+static void testControlRanges()
+{
+    std::printf ("the range each kind of target has\n");
+
+    const AutoTargetKind kinds[] = { AutoTargetKind::channelParam, AutoTargetKind::insertVolume,
+                                     AutoTargetKind::insertPan,    AutoTargetKind::insertFxParam };
+
+    for (auto kind : kinds)
+    {
+        const std::string k = "kind " + std::to_string ((int) kind);
+
+        // A curve reading and the control value it means are the same journey
+        // in both directions, or a new curve would not start where the control
+        // it is aimed at is already sitting.
+        for (int i = 0; i <= 1000; ++i)
+        {
+            const double v = i / 1000.0;
+            checkClose (autoCurveValueFor (kind, (double) autoControlValue (kind, v)), v, 1.0e-6,
+                        k + ": the round trip through the control range moved the value");
+        }
+
+        // The ends of the curve are the ends of the control's travel.
+        checkClose (autoCurveValueFor (kind, (double) autoControlValue (kind, 0.0)), 0.0, 1.0e-9,
+                    k + ": the bottom of the curve is not the bottom of the travel");
+        checkClose (autoCurveValueFor (kind, (double) autoControlValue (kind, 1.0)), 1.0, 1.0e-9,
+                    k + ": the top of the curve is not the top of the travel");
+
+        // Nothing out of range survives in either direction, since a damaged
+        // project file reaches both of these.
+        for (double wild : { -5.0, -1.0e9, 2.0, 1.0e9 })
+        {
+            const double back = autoCurveValueFor (kind, wild);
+            check (back >= 0.0 && back <= 1.0, k + ": an out of range control value was not clamped");
+        }
+
+        check (std::isfinite (autoControlValue (kind, std::nan (""))),
+               k + ": a NaN reading was not contained");
+        checkClose (autoCurveValueFor (kind, std::nan ("")), 0.0, 0.0,
+                    k + ": a NaN control value was not contained");
+    }
+
+    // The named positions, so that changing a range has to be a decision
+    // rather than an accident.
+    checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 1.0),
+                (double) kMaxFaderGain, 1.0e-9, "a curve at the top does not reach the top of the fader");
+    checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 0.0),
+                0.0, 0.0, "a curve at the bottom does not silence the fader");
+    checkClose (autoCurveValueFor (AutoTargetKind::insertVolume, (double) kUnityFaderGain),
+                (double) kUnityFaderGain / (double) kMaxFaderGain, 1.0e-9,
+                "0 dB is not where the fader's own unity is");
+
+    checkClose ((double) autoControlValue (AutoTargetKind::insertPan, 0.5), 0.0, 1.0e-9,
+                "the middle of a pan curve is not centre");
+    checkClose ((double) autoControlValue (AutoTargetKind::insertPan, 0.0), -1.0, 1.0e-9,
+                "the bottom of a pan curve is not hard left");
+    checkClose ((double) autoControlValue (AutoTargetKind::insertPan, 1.0), 1.0, 1.0e-9,
+                "the top of a pan curve is not hard right");
+
+    // A plugin parameter is already normalised, so the mapping is the identity
+    // and must stay exactly that rather than approximately.
+    for (auto kind : { AutoTargetKind::channelParam, AutoTargetKind::insertFxParam })
+        for (int i = 0; i <= 1000; ++i)
+        {
+            const double v = i / 1000.0;
+            checkClose ((double) autoControlValue (kind, v), v, 1.0e-7,
+                        "a plugin parameter is not passed through unchanged");
+        }
+}
+
 int main()
 {
     std::printf ("automation curve\n");
@@ -515,6 +592,7 @@ int main()
     testSharedBeats();
     testNormalise();
     testFarOut();
+    testControlRanges();
     testRandom();
 
     if (failures == 0)

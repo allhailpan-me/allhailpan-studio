@@ -19,12 +19,6 @@ static constexpr int kNumFxSlots  = 8;
 static constexpr int kNumSends    = 2;   // aux sends per insert
 static constexpr int kMaxOutBuses = 16;  // output buses a plugin may be split across
 
-// The mixer fader's travel. Named because automation has to map a curve onto
-// it and the interface has to draw the same travel, and the two disagreeing
-// would mean a fader that automation could not reach the top of.
-static constexpr float kUnityFaderGain = 0.8f;    // 0 dB
-static constexpr float kMaxFaderGain   = 1.25f;
-
 // The tempo a new project starts at. Named because more than one place needs
 // to ask whether the tempo is still the one nobody chose: importing a MIDI
 // file adopts the file's own tempo only in that case, since overriding a
@@ -124,18 +118,9 @@ inline const char* modShapeName (ModShape s)
 // a second scheme would mean two places to extend every time something else
 // becomes automatable, and two places for them to disagree.
 //
-// An insert is not a plugin in a channel slot, so its own controls have to be
-// named rather than indexed: a fader and a pan are not parameters of anything.
-// An effect inside an insert does have indexed parameters, like an instrument,
-// but needs the slot as well as the insert to find it.
-enum class AutoTargetKind
-{
-    channelParam = 0,   // a parameter of the plugin in an instrument channel
-    insertVolume,       // a mixer insert's fader
-    insertPan,          // a mixer insert's pan
-    insertFxParam       // a parameter of an effect in one of an insert's slots
-};
-
+// The kind itself, and which range a reading means for each kind, live in
+// AutomationCurve.h, because that part is arithmetic and arithmetic belongs
+// somewhere the tests can reach it.
 struct AutoTarget
 {
     AutoTargetKind kind = AutoTargetKind::channelParam;
@@ -153,43 +138,6 @@ struct AutoTarget
 
     bool isInsert() const noexcept { return kind != AutoTargetKind::channelParam; }
 };
-
-/** The control value a curve reading means, for a target of this kind. A curve
-    is always stored 0..1, because that is what a plugin parameter is and what
-    a drawn height is; the fader and the pan have their own travel and are
-    mapped onto it here, in one place, so that the engine and the interface
-    cannot disagree about where the top of a fader is. */
-inline float autoControlValue (AutoTargetKind kind, double curveValue) noexcept
-{
-    const double v = std::clamp (std::isfinite (curveValue) ? curveValue : 0.0, 0.0, 1.0);
-
-    switch (kind)
-    {
-        case AutoTargetKind::insertVolume: return (float) (v * (double) kMaxFaderGain);
-        case AutoTargetKind::insertPan:    return (float) (v * 2.0 - 1.0);
-        case AutoTargetKind::channelParam:
-        case AutoTargetKind::insertFxParam: break;
-    }
-    return (float) v;   // a plugin parameter is already normalised
-}
-
-/** The inverse, so that a new curve can start from wherever the control is
-    sitting now rather than from zero, which is what makes drawing one on a mix
-    that is already balanced not throw the balance away. */
-inline double autoCurveValueFor (AutoTargetKind kind, double controlValue) noexcept
-{
-    if (! std::isfinite (controlValue))
-        return 0.0;
-
-    switch (kind)
-    {
-        case AutoTargetKind::insertVolume: return std::clamp (controlValue / (double) kMaxFaderGain, 0.0, 1.0);
-        case AutoTargetKind::insertPan:    return std::clamp ((controlValue + 1.0) * 0.5, 0.0, 1.0);
-        case AutoTargetKind::channelParam:
-        case AutoTargetKind::insertFxParam: break;
-    }
-    return std::clamp (controlValue, 0.0, 1.0);
-}
 
 struct ModTarget : AutoTarget
 {
@@ -864,22 +812,26 @@ public:
         return addClip (std::move (c));
     }
 
-    /** An automation clip already aimed at this target, so that automating the
-        same control twice reuses the clip rather than stacking a second one
-        nobody can see behind the first. Prefers one that covers `beat`. */
-    Clip* automationClipFor (const AutoTarget& target, double beat)
+    /** An automation clip aimed at this target that overlaps a span, if there
+        is one.
+
+        Two curves aiming at one control at the same time is a mix that cannot
+        be reasoned about, and the one underneath would be invisible, so a
+        caller about to put a curve somewhere asks this first. Two curves on
+        one control at different points in the arrangement are ordinary and
+        wanted, which is why this asks about a span rather than about the
+        target alone.
+    */
+    Clip* automationClipFor (const AutoTarget& target, double fromBeat, double toBeat)
     {
-        Clip* any = nullptr;
         for (auto& c : clips)
         {
             if (! c.isAutomation() || c.curve == nullptr || ! (c.curve->target == target))
                 continue;
-            if (beat >= c.start && beat < c.start + c.length)
+            if (c.start < toBeat && c.start + c.length > fromBeat)
                 return &c;
-            if (any == nullptr)
-                any = &c;
         }
-        return any;
+        return nullptr;
     }
 
     /** Adds a point, or moves the one already at that beat. Returns its index,
