@@ -670,6 +670,15 @@ public:
         modulators.clear();
         groove = {};
 
+        // The tempo too. It is not new state, but something now depends on
+        // its reset: a dropped MIDI file adopts its own tempo only while the
+        // project is still at the tempo nobody chose, so a project left at
+        // 140 silently refused to take an imported file's tempo after File >
+        // New. Whoever sets this has to move the engine and the displayed
+        // number with it, which is why MainComponent::newProject goes through
+        // the tempo control rather than writing this back.
+        bpm = kDefaultBpm;
+
         loopStart = loopEnd = 0.0;
 
         rackStart       = 0.0;
