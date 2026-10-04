@@ -18,6 +18,12 @@ static constexpr int kNumFxSlots  = 8;
 static constexpr int kNumSends    = 2;   // aux sends per insert
 static constexpr int kMaxOutBuses = 16;  // output buses a plugin may be split across
 
+// The tempo a new project starts at. Named because more than one place needs
+// to ask whether the tempo is still the one nobody chose: importing a MIDI
+// file adopts the file's own tempo only in that case, since overriding a
+// tempo the producer set would be worse than ignoring the file's.
+static constexpr double kDefaultBpm = 128.0;
+
 struct Track
 {
     juce::String name;
@@ -453,7 +459,7 @@ public:
     std::set<int>            selection;
     std::vector<Modulator>   modulators;
     Groove                   groove;
-    double bpm = 128.0;
+    double bpm = kDefaultBpm;
 
     // ---- channel rack ----
     // The rack edits a region of the arrangement rather than owning its own

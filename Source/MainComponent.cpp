@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "MidiFileIO.h"
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
 #include "Recorder.h"
@@ -212,6 +213,16 @@ MainComponent::MainComponent()
             && stretchCache.isPending (*c.sample, c.stretch, c.pitch);
     };
     playlist.onRouteTrack    = [this] (int) { mixer.refresh(); };
+    playlist.onStatus        = [this] (const juce::String& m) { setStatus (m); };
+
+    // A dropped MIDI file adopts its own tempo only when the project is still
+    // at the default, and it goes through the tempo control rather than
+    // writing project.bpm, so the engine, the displayed number and every
+    // tempo following clip all move together.
+    playlist.onSetTempo      = [this] (double bpm)
+    {
+        tempo.setValue (bpm, juce::sendNotificationSync);
+    };
 
     pianoRoll.onInteraction = [this] { grabKeyboardFocus(); };
     pianoRoll.onSetPosition = [this] (double b) { setPosition (b); };
@@ -1619,6 +1630,16 @@ void MainComponent::showFileMenu()
 
     const auto missing = ProjectIO::missingSampleNames (project);
 
+    bool anyMidi = false, anyMidiSelected = false;
+    for (const auto& c : project.clips)
+    {
+        if (c.isAudio() || c.pattern == nullptr || c.pattern->notes.empty())
+            continue;
+        anyMidi = true;
+        if (project.selection.count (c.id) != 0)
+            anyMidiSelected = true;
+    }
+
     juce::PopupMenu menu;
     menu.addItem (item (1, "New project", "Ctrl+N"));
     menu.addItem (item (2, "Open...", "Ctrl+O"));
@@ -1630,6 +1651,10 @@ void MainComponent::showFileMenu()
     menu.addSeparator();
     menu.addItem (item (8, "Export song to WAV...", "", project.songEndBeats() > 0.0));
     menu.addItem (item (9, "Export stems (one file per mixer insert)...", "", project.songEndBeats() > 0.0));
+    menu.addSeparator();
+    menu.addItem (item (10, "Import MIDI file...", {}));
+    menu.addItem (item (11, "Export MIDI (notes, one track per channel)...", {}, anyMidi));
+    menu.addItem (item (12, "Export selected clips as MIDI...", {}, anyMidiSelected));
     menu.addSeparator();
     menu.addItem (item (6, "Find missing samples" + (missing.isEmpty() ? juce::String() : " (" + juce::String (missing.size()) + ")"),
                         {}, ! missing.isEmpty()));
@@ -1667,6 +1692,9 @@ void MainComponent::showFileMenu()
             case 8: self.exportAudio (false); break;
             case 9: self.exportAudio (true); break;
             case 7: self.currentFile.revealToUser(); break;
+            case 10: self.importMidiDialog(); break;
+            case 11: self.exportMidi (false); break;
+            case 12: self.exportMidi (true); break;
             default: break;
         }
     });
@@ -2040,6 +2068,132 @@ void MainComponent::requestQuit (std::function<void()> quitNow)
 
 // ---------------------------------------------------------------------------
 // Export
+
+// ---------------------------------------------------------------------------
+// MIDI files
+//
+// This is how a part written here is taken somewhere else and how a part
+// written elsewhere is brought in, so both sides go through MidiFileIO and
+// report what actually happened rather than succeeding quietly. Automation is
+// not exported: a MIDI file can only carry it as controller numbers, and these
+// lanes are plugin parameters by index, so any mapping would be a guess a
+// receiving studio would read as something else. The dialog says so.
+
+void MainComponent::exportMidi (bool onlySelected)
+{
+    auto tracks = MidiFileIO::gather (project, onlySelected);
+
+    if (tracks.empty())
+    {
+        setStatus (onlySelected ? "Select a MIDI clip first: there are no notes in the selection."
+                                : "There are no MIDI notes in the playlist to export.");
+        return;
+    }
+
+    // Whether anything would be left behind, so the export can say so rather
+    // than letting a producer find out in the other studio.
+    bool hadAutomation = false;
+    for (const auto& c : project.clips)
+    {
+        if (c.isAudio() || c.pattern == nullptr || c.pattern->lanes.empty())
+            continue;
+        if (onlySelected && project.selection.count (c.id) == 0)
+            continue;
+        hadAutomation = true;
+        break;
+    }
+
+    const auto songName = currentFile != juce::File() ? currentFile.getFileNameWithoutExtension()
+                                                      : juce::String ("Untitled");
+    const auto folder   = currentFile != juce::File() ? currentFile.getParentDirectory() : projectsFolder();
+    const auto initial  = folder.getChildFile (songName + (onlySelected ? " selection.mid" : ".mid"));
+
+    chooser = std::make_unique<juce::FileChooser> (onlySelected ? "Export the selected clips as MIDI"
+                                                               : "Export the arrangement as MIDI",
+                                                   initial, MidiFileIO::wildcard);
+
+    const int flags = juce::FileBrowserComponent::saveMode
+                        | juce::FileBrowserComponent::canSelectFiles
+                        | juce::FileBrowserComponent::warnAboutOverwriting;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    chooser->launchAsync (flags, [safeThis, tracks, hadAutomation, songName] (const juce::FileChooser& fc)
+    {
+        auto chosen = fc.getResult();
+        if (safeThis == nullptr || chosen == juce::File())
+            return;
+
+        auto& self = *safeThis;
+
+        if (chosen.getFileExtension().isEmpty())
+            chosen = chosen.withFileExtension (".mid");
+
+        const auto result = MidiFileIO::write (chosen, tracks, self.project.bpm, songName, hadAutomation);
+
+        if (! result.ok)
+        {
+            juce::AlertWindow::showAsync (juce::MessageBoxOptions()
+                                              .withIconType (juce::MessageBoxIconType::WarningIcon)
+                                              .withTitle ("Couldn't export the MIDI file")
+                                              .withMessage (result.error)
+                                              .withButton ("OK"),
+                                          nullptr);
+            return;
+        }
+
+        juce::String message;
+        message << "Exported " << result.notesWritten
+                << (result.notesWritten == 1 ? " note on " : " notes on ")
+                << result.tracksWritten << (result.tracksWritten == 1 ? " track" : " tracks")
+                << " to " << chosen.getFileName() << ".";
+
+        if (result.droppedOverlaps > 0)
+            message << "  " << result.droppedOverlaps
+                    << (result.droppedOverlaps == 1 ? " note was" : " notes were")
+                    << " left out: one channel can't sound two of the same pitch at once.";
+
+        if (result.hadAutomation)
+            message << "  Notes only: automation lanes aren't written, since a MIDI file has no "
+                       "way to say which plugin parameter they belong to.";
+
+        self.setStatus (message);
+    });
+}
+
+void MainComponent::importMidiDialog()
+{
+    const auto folder = currentFile != juce::File() ? currentFile.getParentDirectory() : projectsFolder();
+
+    chooser = std::make_unique<juce::FileChooser> ("Import a MIDI file", folder, MidiFileIO::wildcard);
+
+    const int flags = juce::FileBrowserComponent::openMode
+                        | juce::FileBrowserComponent::canSelectFiles
+                        | juce::FileBrowserComponent::canSelectMultipleItems;
+
+    juce::Component::SafePointer<MainComponent> safeThis (this);
+    chooser->launchAsync (flags, [safeThis] (const juce::FileChooser& fc)
+    {
+        if (safeThis == nullptr)
+            return;
+
+        const auto files = fc.getResults();
+        if (files.isEmpty())
+            return;
+
+        auto& self = *safeThis;
+
+        juce::StringArray paths;
+        for (const auto& f : files)
+            paths.add (f.getFullPathName());
+
+        // The same path a dropped file takes, so the menu and the drop cannot
+        // behave differently. The start marker is where "here" is when the
+        // position did not come from a mouse.
+        self.setView (View::playlist);
+        self.playlist.addFiles (paths, self.engine.getSongStart(),
+                                self.project.firstEmptyTrackFrom (0));
+    });
+}
 
 void MainComponent::exportAudio (bool stems)
 {

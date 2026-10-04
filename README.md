@@ -99,6 +99,18 @@ cmake --build build --parallel
 - Exports include everything: instruments, audio clips, automation, mixer levels and all effects, with four seconds of tail so reverbs ring out.
 - The app goes quiet while rendering and a progress window lets you cancel. Your playback position is left where it was.
 
+### MIDI files
+A part written here can be taken to another studio, and a part written anywhere else can be brought in.
+
+- **Import:** drop a `.mid` file on the playlist, or use **File > Import MIDI file...**. You get one clip per track in the file, placed where you dropped it and routed to free instrument channels, with each playlist track named after the track in the file. Multi-track files are the normal case and are kept apart rather than flattened; a single-track file carrying several MIDI channels (which is what a format 0 file is) is split by channel, one clip each.
+- If your project is still at the tempo it started with, the file's own tempo is adopted. If you have set a tempo yourself it is left alone, since a dropped file moving your whole arrangement would be worse than a part that needs stretching. A file that changes tempo part way through is read at its opening tempo, and the status bar says so.
+- **Export:** **File > Export MIDI** writes the arrangement as a standard multi-track file, one track per instrument channel, with the tempo and the track names, so it opens sensibly elsewhere. **Export selected clips as MIDI** writes just what you have selected, brought to the start of the file.
+- The status bar reports what went in or out: how many tracks, how many notes, and anything that could not be carried.
+- **Notes, exactly.** A file exported and imported again gives back the same notes: the same starts, lengths, pitches and velocities. Positions are written at 960 ticks per quarter note, which every division this studio can produce lands on exactly.
+- **Notes only.** Automation lanes are not exported. A MIDI file can only carry automation as controller numbers, and these lanes are plugin parameters by index, so any mapping would be a guess that the receiving studio would read as something else. The export says so rather than pretending.
+- **Groove is not baked in.** What is written is the notes as you drew them, not the swung timing, so the feel stays something you can change or turn off. Export an already-swung part by exporting the audio.
+- Two notes of the same pitch overlapping on one channel is something a piano roll will draw and a MIDI file cannot describe, so the earlier one is shortened to where the later one starts. If they begin on the same tick, one has to go, and you are told how many.
+
 ### Undo and redo
 - **Ctrl+Z** undoes, **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes. The **Undo** and **Redo** buttons are at the top right.
 - There is no step limit. Every finished edit is one step: moving, trimming, stretching, pasting, deleting, recording, note and automation edits, clip settings, track names, mutes and routing.
@@ -137,7 +149,7 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - Your interface's own direct monitoring is still the lowest latency route, and is worth using if your buffer size is large.
 
 ### Playlist
-- Drop audio from the browser or Explorer/Finder. Drag clips to move them. **Shift+drag** duplicates.
+- Drop audio or `.mid` files from the browser or Explorer/Finder. Drag clips to move them. **Shift+drag** duplicates.
 - **Edges:** with **Stretch** off, dragging an edge trims (cuts off) the clip. With **Stretch** on, it time-stretches instead. **Shift** does the opposite of the button.
 - **Selecting:** click a clip; **Ctrl+click** adds or removes one; **Ctrl+drag** draws a selection box (add **Shift** to keep the current selection); **Ctrl+A** selects all.
 - **Editing:** **Ctrl+C** copy, **Ctrl+X** cut, **Ctrl+V** paste at the mouse (or at the playhead), **Ctrl+B** duplicate, **Delete** removes. Right-click also deletes.
@@ -237,6 +249,7 @@ Done:
 - Out-of-process plugin scanning, so a plugin that crashes cannot take the studio with it
 - Input monitoring
 - Warp markers, for audio that drifts inside a take
+- MIDI file import and export, exact for notes
 
 Next:
 
@@ -244,7 +257,6 @@ Next:
 - A bundle of open-source instruments, so a fresh install makes sound on its own
 - Sampler channels, and a built-in synth
 - Standalone automation clips
-- MIDI file import and export
 
 ## Project layout
 
