@@ -23,6 +23,12 @@ public:
         centreWithSize (getWidth(), getHeight());
         setVisible (true);
         Ahp::applyDarkTitleBar (*this);
+
+        // Without this the window can open behind the one that was clicked to
+        // open it, which reads as the plugin having failed to load rather than
+        // as a window in the wrong place. MainComponent is what keeps it in
+        // front afterwards, in updateFloatingWindows.
+        toFront (true);
     }
 
     ~PluginWindow() override

@@ -1300,12 +1300,54 @@ void MainComponent::openPluginWindow (juce::AudioPluginInstance& plugin)
         });
     });
     window->addKeyListener (&typing);
+    window->setAlwaysOnTop (windowsFloat);
     pluginWindows[key] = std::move (window);
 }
 
 void MainComponent::closePluginWindow (juce::AudioProcessor* plugin)
 {
     pluginWindows.erase (plugin);
+}
+
+/** Keeps the mixer and every plugin editor above the main window.
+
+    They are separate top level windows, so by default clicking the playlist
+    puts the main window over them. That is wrong for a mixer deliberately
+    opened over the arrangement, and worse for a plugin editor opened from an
+    insert: it can land behind everything, which reads as the plugin having
+    failed to open rather than as a window in the wrong place.
+
+    They float only while this application is the one in front. Pinning them
+    on top permanently would leave them hovering over the browser or the file
+    manager as soon as you switched away, which is a more annoying bug than
+    the one being fixed here.
+
+    Windows cannot be given an owner after they are created, which is the
+    other way to get this behaviour, so this is done by following the
+    foreground process instead. Checked on the existing timer rather than with
+    one of its own, and only acted on when the answer changes, since setting
+    the flag sixty times a second would make the windows flicker.
+*/
+void MainComponent::updateFloatingWindows()
+{
+    // Dropped while a dialog is up, because a floating window beats a plain
+    // one in the stack whatever opened it, and a plugin editor sitting over
+    // the plugin chooser or a "save changes?" box would be its own bug. This
+    // only covers dialogs this program puts up: a native file chooser is the
+    // operating system's window, not ours to reason about.
+    const bool shouldFloat = juce::Process::isForegroundProcess()
+                          && juce::Component::getCurrentlyModalComponent() == nullptr;
+
+    if (shouldFloat == windowsFloat)
+        return;
+
+    windowsFloat = shouldFloat;
+
+    if (mixerWindow != nullptr)
+        mixerWindow->setAlwaysOnTop (shouldFloat);
+
+    for (auto& entry : pluginWindows)
+        entry.second->setAlwaysOnTop (shouldFloat);
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,6 +1408,7 @@ void MainComponent::toggleMixerWindow()
     if (saved.isNotEmpty())
         mixerWindow->restoreWindowStateFromString (saved);
     Ahp::applyDarkTitleBar (*mixerWindow);
+    mixerWindow->setAlwaysOnTop (windowsFloat);
     mixerWindow->toFront (true);
     mixerTab.setToggleState (true, juce::dontSendNotification);
 }
@@ -1764,6 +1807,7 @@ void MainComponent::timerCallback()
         markDirty();
 
     checkModulationLearn();
+    updateFloatingWindows();
 
     if (++autosaveTicks >= 60 * 120)        // every two minutes
     {
