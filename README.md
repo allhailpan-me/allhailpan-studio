@@ -1,17 +1,19 @@
 # ALLHAILPAN Studio
 
-A free, open-source digital audio workstation built around patterns: a channel rack and step sequencer for building them, a piano roll for writing them out, a playlist for arranging them, and a mixer with inserts and sends to finish. It records audio and MIDI, hosts VST3 plugins, and exports stems.
+A free, open-source digital audio workstation built around patterns: a channel rack and step sequencer for building them, a piano roll for writing them out, a playlist for arranging them, and a mixer with inserts and sends to finish. It records audio and MIDI, hosts VST3 plugins, warps and comps takes, imports and exports MIDI files, and exports stems.
 
 Built for the people. Free forever, source included.
 
-> Early development, but the engine is real. Plugin delay compensation, tempo-locked modulators on any plugin parameter, broadcast-standard loudness metering, and per-output routing for multi-output drum machines all work today.
+> Early development, but the engine is real. Plugin delay compensation that understands sends, tempo-locked modulators on any plugin parameter, automation clips on the playlist and the mixer, loop recording with take folders and comping, warp markers, broadcast-standard loudness and true peak metering, and per-output routing for multi-output drum machines all work today.
 
 ## What makes it different
 
 - **Modulators on anything.** A tempo-locked shape wired to any parameter of any plugin you host, assigned by grabbing the knob rather than hunting through a list. Several can stack on one parameter, and they ride on top of whatever the knob is already set to.
-- **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Verified against EBU Tech 3341 compliance test cases to within 0.011 LU. A plugin only hears its own insert; the studio hears the whole thing.
+- **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Loudness is verified against EBU Tech 3341 compliance test cases to within 0.011 LU, true peak against the interpolator the standard tabulates, and loudness range follows EBU Tech 3342 including its gates. A plugin only hears its own insert; the studio hears the whole thing.
 - **Delay compensation that understands sends.** Look-ahead plugins hold audio back, and a bus fed by another insert cannot be ready before its source. Every path is levelled so instruments, audio clips and sends reach the master on the same sample.
 - **Curves you can bend.** Automation lives on the playlist as a clip you move, copy and trim like any other, and every segment has a bend, so a sweep that sits still and then opens is two points rather than a dozen. A bend can never take the value outside the points it joins, so what you hear is the line you drew.
+- **Every pass kept, then comped.** Record round a loop range and each time round is its own take, in one folder on the track rather than recorded over the pass before. Swipe across the lanes to say which pass is heard where; every join is crossfaded with an equal-power curve, and the comp is what exports.
+- **Warp markers.** Pin a point in the audio to a position on the grid and the bars either side are stretched to fit, for a performance that drifts inside the take rather than one played at a steady wrong tempo.
 - **Each drum on its own strip.** Multi-output instruments like Microtonic Multi can send every output bus to its own mixer insert, with its own fader and effects.
 
 ## Runs on
@@ -115,8 +117,8 @@ A part written here can be taken to another studio, and a part written anywhere 
 
 ### Undo and redo
 - **Ctrl+Z** undoes, **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes. The **Undo** and **Redo** buttons are at the top right.
-- There is no step limit. Every finished edit is one step: moving, trimming, stretching, pasting, deleting, recording, note and automation edits, clip settings, track names, mutes and routing.
-- Loading plugins and moving mixer faders are not undo steps yet.
+- There is no step limit. Every finished edit is one step: moving, trimming, stretching, pasting, deleting, recording, note and automation edits, comp swipes, warp marker edits, clip settings, track names, mutes, routing, and the groove.
+- Loading plugins and moving mixer faders by hand are not undo steps yet. Nor is the loop range, deliberately: it is where you are working rather than part of the arrangement, and having **Ctrl+Z** move the loop instead of undoing your last edit would be maddening.
 
 ### Instruments (channel bar)
 - 16 instrument channels. Pick one in **Channel**, then load an instrument into it. **Show** reopens its window, **Unload** removes it. **Mixer** chooses which insert it plays through.
@@ -233,7 +235,9 @@ Two kinds, for the two different things automation is asked to do.
 
 - Measures the master **after every effect on it**, which is what actually leaves the studio.
 - **Loudness** in LUFS to ITU-R BS.1770-4, the standard Spotify, Apple Music and YouTube normalise to. Pick your target and it tells you how far off you are and what that costs.
-- **True peak**, **loudness range** (how much dynamic life is left), and **mono compatibility** (whether parts of the mix will cancel on a club system).
+- **True peak**, measured the way BS.1770-4 Annex 2 defines it: four times oversampled through the interpolator the standard tabulates, because the peak of the waveform your converter reconstructs is not the largest sample in the file. A sample peak meter reads several decibels low on exactly the material where it matters, and would tell you a clipping master was safe.
+- **Loudness range** to EBU Tech 3342: the spread between the loud and quiet parts of the song, gated so that a fade or a silent bar counts as neither. A rough measure of how much dynamic life is left.
+- **Mono compatibility**, whether parts of the mix will cancel on a club system.
 - Each reading comes with what it means in plain language: that being louder than streaming wants buys nothing because they turn you down, that a true peak above -1 dB can distort after MP3 encoding even though it measures clean now, that a very small loudness range is what a limiter doing too much looks like.
 - Verified against EBU Tech 3341 compliance test cases 1 and 2 at 44.1, 48 and 96 kHz, within 0.011 LU of the required reading against a tolerance of 0.1.
 
@@ -257,6 +261,9 @@ Two kinds, for the two different things automation is asked to do.
 
 ### Not yet
 - No instruments are bundled yet, so you need your own VST3s to make sound.
+- **4/4 only**, and one tempo for the whole song. A tempo change part way through a MIDI file is read at its opening tempo and the status bar says so.
+- Loading a plugin and dragging a mixer fader are not undo steps.
+- The downloadable Windows build has no ASIO: see **Known limitations** in the release notes for why, and how to build it with ASIO yourself.
 
 ## Roadmap
 
@@ -281,21 +288,28 @@ Done:
 - MIDI file import and export, exact for notes
 - Automation clips on the playlist, with bendable segments, and automation of mixer volume, pan and effect parameters
 - A loop range on the playlist, loop recording that keeps every pass as a take, and comping with equal-power crossfades at the joins
+- True peak to BS.1770-4 Annex 2, and loudness range to EBU Tech 3342
+- Groove: swing at the resolution you choose, with a velocity and a randomise amount
+- A test suite over the arithmetic that fails quietly, run on every push before the platform builds finish fetching their dependencies
 
-Next:
+Next, roughly in the order they are worth doing:
 
 - A bundle of open-source instruments, so a fresh install makes sound on its own
+- Undo for loading a plugin and for moving a mixer fader, which are the two obvious gaps left in the history
+- Time signatures other than 4/4, and a tempo that can change during a song. Both are assumed to be fixed in more than one place, so this is engine work rather than an interface
+- A preferences window, so the settings currently spread across the interface have somewhere to live
 - Sampler channels, and a built-in synth
-- A preferences window
-- Spectral editing
+- Groove taken from one performance and applied to another, which is the useful half of what a groove pool is for
 
 ## Project layout
 
 ```
 Source/        C++ application code
+Tests/         Standalone checks on the arithmetic, run by ./Tests/run.sh
 Assets/        Logos baked into the app
 prototype/     Browser prototype, the design reference for the native app
-.github/       Automatic builds for Windows, macOS and Linux
+.github/       Automatic builds for Windows, macOS and Linux, and the test job
+CLAUDE.md      How the engine fits together, and the rules that are easy to break
 ```
 
 ## License
@@ -321,6 +335,18 @@ The Debug build is for development. For a program you can keep or share, build R
 That .exe is self-contained: the C++ runtime is linked in, so it runs on a machine with no Visual Studio installed. Copy it anywhere, pin it to the taskbar, and it will find your audio device and plugin list through the settings it stores in your user folder.
 
 If you share the .exe, AGPLv3 requires the matching source to be available to whoever receives it. Publishing it from this repository's Releases page satisfies that.
+
+## Running the tests
+
+JUCE takes minutes to compile, so the checks that matter most here do not use it. Most of the logic that would be silently wrong in a studio is arithmetic: where a warped clip reads from, how a comp crossfades at a join, what a swing percentage means, what a loudness figure is. That arithmetic lives in headers with no JUCE in them, and the checks over it build and run in about a minute:
+
+```
+./Tests/run.sh
+```
+
+Address and undefined behaviour sanitizers are on, and the script halts on the first undefined behaviour so the exit code means something. CI runs the same script on every push, as its own job that reports before the three platform builds have finished fetching their dependencies.
+
+A red test does not stop the build, because knowing whether the code still compiles everywhere is useful while a test is red. It does stop a release from publishing.
 
 ## Contributing
 
