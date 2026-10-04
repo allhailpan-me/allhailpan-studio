@@ -2,6 +2,7 @@
 #include <juce_events/juce_events.h>
 #include "SampleData.h"
 #include "WarpMap.h"
+#include "AutomationCurve.h"
 #include <set>
 #include <array>
 #include <map>
@@ -17,6 +18,12 @@ static constexpr int kNumInserts  = 17;   // 0 = master, 1..16 = inserts
 static constexpr int kNumFxSlots  = 8;
 static constexpr int kNumSends    = 2;   // aux sends per insert
 static constexpr int kMaxOutBuses = 16;  // output buses a plugin may be split across
+
+// The mixer fader's travel. Named because automation has to map a curve onto
+// it and the interface has to draw the same travel, and the two disagreeing
+// would mean a fader that automation could not reach the top of.
+static constexpr float kUnityFaderGain = 0.8f;    // 0 dB
+static constexpr float kMaxFaderGain   = 1.25f;
 
 // The tempo a new project starts at. Named because more than one place needs
 // to ask whether the tempo is still the one nobody chose: importing a MIDI
@@ -110,14 +117,121 @@ inline const char* modShapeName (ModShape s)
     return "Sine";
 }
 
-struct ModTarget
+// What a moving value is pointed at. One scheme for both of the things that
+// move values: a modulator, which generates its own shape, and an automation
+// curve, which is drawn. They used to be separate because only instrument
+// channel parameters could be reached; now that the mixer can be reached too,
+// a second scheme would mean two places to extend every time something else
+// becomes automatable, and two places for them to disagree.
+//
+// An insert is not a plugin in a channel slot, so its own controls have to be
+// named rather than indexed: a fader and a pan are not parameters of anything.
+// An effect inside an insert does have indexed parameters, like an instrument,
+// but needs the slot as well as the insert to find it.
+enum class AutoTargetKind
 {
-    int   channel    = 0;      // instrument channel the parameter belongs to
-    int   paramIndex = 0;
-    float depth      = 0.5f;   // -1..1, added to the parameter's own value
-    juce::String paramName;    // remembered for display when the plugin is absent
+    channelParam = 0,   // a parameter of the plugin in an instrument channel
+    insertVolume,       // a mixer insert's fader
+    insertPan,          // a mixer insert's pan
+    insertFxParam       // a parameter of an effect in one of an insert's slots
+};
+
+struct AutoTarget
+{
+    AutoTargetKind kind = AutoTargetKind::channelParam;
+
+    int channel    = 0;   // channelParam: which instrument slot
+    int insert     = 0;   // insert*: which mixer insert, 0 being the master
+    int fxSlot     = 0;   // insertFxParam: which of the insert's effect slots
+    int paramIndex = 0;   // channelParam and insertFxParam
+
+    // Remembered for display, so a curve still says what it was aimed at when
+    // the plugin it pointed into is not on this computer.
+    juce::String paramName;
+
+    bool operator== (const AutoTarget&) const = default;
+
+    bool isInsert() const noexcept { return kind != AutoTargetKind::channelParam; }
+};
+
+/** The control value a curve reading means, for a target of this kind. A curve
+    is always stored 0..1, because that is what a plugin parameter is and what
+    a drawn height is; the fader and the pan have their own travel and are
+    mapped onto it here, in one place, so that the engine and the interface
+    cannot disagree about where the top of a fader is. */
+inline float autoControlValue (AutoTargetKind kind, double curveValue) noexcept
+{
+    const double v = std::clamp (std::isfinite (curveValue) ? curveValue : 0.0, 0.0, 1.0);
+
+    switch (kind)
+    {
+        case AutoTargetKind::insertVolume: return (float) (v * (double) kMaxFaderGain);
+        case AutoTargetKind::insertPan:    return (float) (v * 2.0 - 1.0);
+        case AutoTargetKind::channelParam:
+        case AutoTargetKind::insertFxParam: break;
+    }
+    return (float) v;   // a plugin parameter is already normalised
+}
+
+/** The inverse, so that a new curve can start from wherever the control is
+    sitting now rather than from zero, which is what makes drawing one on a mix
+    that is already balanced not throw the balance away. */
+inline double autoCurveValueFor (AutoTargetKind kind, double controlValue) noexcept
+{
+    if (! std::isfinite (controlValue))
+        return 0.0;
+
+    switch (kind)
+    {
+        case AutoTargetKind::insertVolume: return std::clamp (controlValue / (double) kMaxFaderGain, 0.0, 1.0);
+        case AutoTargetKind::insertPan:    return std::clamp ((controlValue + 1.0) * 0.5, 0.0, 1.0);
+        case AutoTargetKind::channelParam:
+        case AutoTargetKind::insertFxParam: break;
+    }
+    return std::clamp (controlValue, 0.0, 1.0);
+}
+
+struct ModTarget : AutoTarget
+{
+    float depth = 0.5f;   // -1..1, added to the parameter's own value
 
     bool operator== (const ModTarget&) const = default;
+};
+
+//=============================================================================
+// An automation curve on the playlist.
+//
+// Automation used to live only inside a MIDI clip, as a lane beside its notes.
+// That ties a movement to a pattern, which is the wrong place for most of
+// them: a filter opening over an eight bar section is a property of the
+// section, not of whichever part happens to be playing through it, and a
+// movement on a mixer insert has no pattern to live in at all.
+//
+// So a curve is a clip in its own right. It sits on a playlist track and is
+// moved, copied, trimmed and deleted with the same gestures as any other clip,
+// which means the arrangement is edited as an arrangement rather than through
+// a separate automation mode. The in-clip lanes still work exactly as they
+// did, because a movement that genuinely belongs to a part should travel with
+// the part when it is dragged elsewhere.
+//=============================================================================
+
+struct AutoCurve
+{
+    AutoTarget target;
+    std::vector<AutoCurvePoint> points;   // kept normalised: see AutomationCurve.h
+
+    bool operator== (const AutoCurve&) const = default;
+
+    /** Puts the points back into the form every lookup assumes. Call after
+        anything that moves, adds or removes one, including loading. */
+    void tidy() { normaliseAutoCurve (points); }
+
+    double lastBeat() const noexcept { return autoCurveLastBeat (points); }
+
+    double valueAt (double beatsIn) const noexcept
+    {
+        return autoCurveValueAt (points, beatsIn);
+    }
 };
 
 struct Modulator
@@ -332,7 +446,34 @@ struct ChannelInfo
     std::shared_ptr<juce::XmlElement> missingPlugin;
 };
 
-enum class ClipType { audio, midi };
+/** What a target is called, for a clip label and for the mixer's own display.
+    Insert zero is the master, which is worth naming as such rather than as
+    "insert 0", since that is not what it is called anywhere else. */
+inline juce::String autoTargetName (const AutoTarget& t, const std::vector<ChannelInfo>& channels)
+{
+    const auto param = t.paramName.isNotEmpty() ? t.paramName
+                                                : "Parameter " + juce::String (t.paramIndex + 1);
+    const auto insertName = t.insert == 0 ? juce::String ("Master")
+                                          : "Insert " + juce::String (t.insert);
+
+    switch (t.kind)
+    {
+        case AutoTargetKind::insertVolume:  return insertName + "  Volume";
+        case AutoTargetKind::insertPan:     return insertName + "  Pan";
+        case AutoTargetKind::insertFxParam: return insertName + "  FX " + juce::String (t.fxSlot + 1) + "  " + param;
+
+        case AutoTargetKind::channelParam:
+        {
+            const int c = juce::jlimit (0, kNumChannels - 1, t.channel);
+            const auto& name = channels[(size_t) c].name;
+            return juce::String (c + 1) + "  " + (name.isNotEmpty() ? name : juce::String ("Empty channel"))
+                     + "  " + param;
+        }
+    }
+    return param;
+}
+
+enum class ClipType { audio, midi, automation };
 
 struct Clip
 {
@@ -341,6 +482,7 @@ struct Clip
 
     std::shared_ptr<SampleData>  sample;    // audio
     std::shared_ptr<MidiPattern> pattern;   // midi
+    std::shared_ptr<AutoCurve>   curve;     // automation
     int channel = 0;                        // midi: which instrument slot
 
     int    track   = 0;
@@ -369,8 +511,10 @@ struct Clip
     float  gainDb  = 0.0f;
     bool   muted   = false;
 
-    bool   isAudio() const noexcept { return type == ClipType::audio; }
-    bool   isWarped() const noexcept { return isAudio() && ! warp.empty(); }
+    bool   isAudio() const noexcept      { return type == ClipType::audio; }
+    bool   isMidi() const noexcept       { return type == ClipType::midi; }
+    bool   isAutomation() const noexcept { return type == ClipType::automation; }
+    bool   isWarped() const noexcept     { return isAudio() && ! warp.empty(); }
 
     // Source seconds per beat for an unwarped clip, and for the stretch of a
     // warped one that runs before its first marker.
@@ -417,6 +561,8 @@ struct Clip
         Clip c = *this;
         if (pattern != nullptr)
             c.pattern = std::make_shared<MidiPattern> (*pattern);
+        if (curve != nullptr)
+            c.curve = std::make_shared<AutoCurve> (*curve);
         return c;
     }
 
@@ -424,6 +570,9 @@ struct Clip
     {
         if (isAudio())
             return sample != nullptr ? sample->name : juce::String ("Missing audio");
+        if (isAutomation())
+            return curve != nullptr ? autoTargetName (curve->target, channels)
+                                    : juce::String ("Automation");
         const auto& ch = channels[(size_t) juce::jlimit (0, kNumChannels - 1, channel)];
         return juce::String (channel + 1) + "  " + (ch.name.isNotEmpty() ? ch.name : juce::String ("Empty channel"));
     }
@@ -677,6 +826,146 @@ public:
 
     /** Moves a channel's existing rack notes to a new key, so picking a
         different drum does not appear to wipe the row. */
+    // ---- automation clips -------------------------------------------------
+    //
+    // Everything here goes through find() and leaves the clip list alone
+    // otherwise, so an automation clip is moved, trimmed, copied and deleted
+    // by the playlist's existing code rather than by a parallel set of
+    // operations that could drift from it.
+
+    /** The curve a clip holds, or null if it does not hold one. */
+    AutoCurve* curveFor (int id)
+    {
+        auto* c = find (id);
+        return (c != nullptr && c->isAutomation()) ? c->curve.get() : nullptr;
+    }
+
+    /** Puts a new automation clip on a track, aimed at a target, holding a
+        single point at `startValue` so it reads as a flat offset until
+        something is drawn on it. Starting from where the control already sits
+        rather than from zero is what keeps drawing a curve on a balanced mix
+        from throwing the balance away.
+
+        `startValue` is in the curve's own 0..1, so callers go through
+        autoCurveValueFor to convert whatever the control reads.
+    */
+    int addAutomationClip (const AutoTarget& target, int track, double start,
+                           double lengthBeats, double startValue)
+    {
+        Clip c;
+        c.type   = ClipType::automation;
+        c.track  = juce::jlimit (0, (int) tracks.size() - 1, track);
+        c.start  = std::max (0.0, start);
+        c.length = std::max (0.25, lengthBeats);
+        c.curve  = std::make_shared<AutoCurve>();
+        c.curve->target = target;
+        c.curve->points.push_back ({ 0.0, std::clamp (startValue, 0.0, 1.0), 0.0 });
+
+        return addClip (std::move (c));
+    }
+
+    /** An automation clip already aimed at this target, so that automating the
+        same control twice reuses the clip rather than stacking a second one
+        nobody can see behind the first. Prefers one that covers `beat`. */
+    Clip* automationClipFor (const AutoTarget& target, double beat)
+    {
+        Clip* any = nullptr;
+        for (auto& c : clips)
+        {
+            if (! c.isAutomation() || c.curve == nullptr || ! (c.curve->target == target))
+                continue;
+            if (beat >= c.start && beat < c.start + c.length)
+                return &c;
+            if (any == nullptr)
+                any = &c;
+        }
+        return any;
+    }
+
+    /** Adds a point, or moves the one already at that beat. Returns its index,
+        or -1 if there was no curve to add it to.
+
+        Points are addressed by index rather than by identity, and the index is
+        only valid until the next edit, because normalising re-sorts the list.
+        That is deliberate: a drag re-reads the index it is given back each
+        time it moves a point, so a point dragged past its neighbour swaps with
+        it and keeps being dragged rather than being left behind.
+    */
+    int setCurvePoint (int id, double beatsIn, double value, double bend)
+    {
+        auto* curve = curveFor (id);
+        if (curve == nullptr || ! std::isfinite (beatsIn))
+            return -1;
+
+        const AutoCurvePoint wanted { beatsIn, std::clamp (value, 0.0, 1.0),
+                                      std::clamp (bend, -1.0, 1.0) };
+        curve->points.push_back (wanted);
+        curve->tidy();
+        changed();
+
+        for (size_t i = 0; i < curve->points.size(); ++i)
+            if (curve->points[i] == wanted)
+                return (int) i;
+
+        return -1;
+    }
+
+    /** Moves an existing point. Returns where it ended up, which may not be
+        the index it started at once the list is back in order. */
+    int moveCurvePoint (int id, int index, double beatsIn, double value)
+    {
+        auto* curve = curveFor (id);
+        if (curve == nullptr || ! juce::isPositiveAndBelow (index, (int) curve->points.size())
+            || ! std::isfinite (beatsIn))
+            return index;
+
+        auto moved = curve->points[(size_t) index];
+        moved.beat  = beatsIn;
+        moved.value = std::clamp (value, 0.0, 1.0);
+
+        curve->points.erase (curve->points.begin() + index);
+        curve->points.push_back (moved);
+        curve->tidy();
+        changed();
+
+        for (size_t i = 0; i < curve->points.size(); ++i)
+            if (curve->points[i] == moved)
+                return (int) i;
+
+        return index;
+    }
+
+    /** Bends the segment leaving a point. The last point's bend shapes
+        nothing, which is checked here rather than left to the caller so that
+        dragging the handle off the end of a curve does nothing rather than
+        something invisible. */
+    void setCurveBend (int id, int index, double bend)
+    {
+        auto* curve = curveFor (id);
+        if (curve == nullptr || ! juce::isPositiveAndBelow (index, (int) curve->points.size()))
+            return;
+        if ((size_t) index + 1 >= curve->points.size())
+            return;
+
+        curve->points[(size_t) index].bend = std::clamp (bend, -1.0, 1.0);
+        changed();
+    }
+
+    /** Removes a point, except the last one standing: a curve with no points
+        at all would read as nothing automated, which is indistinguishable from
+        the clip not being there and leaves the producer with a clip they
+        cannot see the effect of. Deleting the clip is how to mean that. */
+    void removeCurvePoint (int id, int index)
+    {
+        auto* curve = curveFor (id);
+        if (curve == nullptr || curve->points.size() <= 1
+            || ! juce::isPositiveAndBelow (index, (int) curve->points.size()))
+            return;
+
+        curve->points.erase (curve->points.begin() + index);
+        changed();
+    }
+
     // ---- modulators ----
 
     Modulator* modulator (int index)
@@ -713,7 +1002,8 @@ public:
             return;
 
         for (auto& t : m->targets)
-            if (t.channel == channel && t.paramIndex == paramIndex)
+            if (t.kind == AutoTargetKind::channelParam
+                && t.channel == channel && t.paramIndex == paramIndex)
             {
                 t.depth = depth;
                 t.paramName = paramName;
@@ -721,7 +1011,13 @@ public:
                 return;
             }
 
-        m->targets.push_back ({ channel, paramIndex, depth, paramName });
+        ModTarget t;
+        t.kind       = AutoTargetKind::channelParam;
+        t.channel    = channel;
+        t.paramIndex = paramIndex;
+        t.paramName  = paramName;
+        t.depth      = depth;
+        m->targets.push_back (std::move (t));
         changed();
     }
 
@@ -1107,6 +1403,9 @@ private:
             || a.sourceBpm != b.sourceBpm || a.followTempo != b.followTempo
             || a.warp != b.warp)
             return false;
+        if (a.curve != b.curve
+            && ! (a.curve != nullptr && b.curve != nullptr && *a.curve == *b.curve))
+            return false;
         if (a.pattern == b.pattern)
             return true;
         return a.pattern != nullptr && b.pattern != nullptr && *a.pattern == *b.pattern;
@@ -1143,6 +1442,15 @@ private:
                         if (old.id == c.id && old.pattern != nullptr && *old.pattern == *c.pattern)
                             reuse = old.pattern;
                 copy.pattern = reuse != nullptr ? reuse : std::make_shared<MidiPattern> (*c.pattern);
+            }
+            if (c.curve != nullptr)
+            {
+                std::shared_ptr<AutoCurve> reuse;
+                if (previous != nullptr)
+                    for (const auto& old : previous->clips)
+                        if (old.id == c.id && old.curve != nullptr && *old.curve == *c.curve)
+                            reuse = old.curve;
+                copy.curve = reuse != nullptr ? reuse : std::make_shared<AutoCurve> (*c.curve);
             }
             s.clips.push_back (std::move (copy));
         }

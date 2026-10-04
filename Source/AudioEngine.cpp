@@ -382,12 +382,17 @@ void AudioEngine::setFx (int insertIndex, int slotIndex, std::unique_ptr<juce::A
         return;
 
     juce::AudioBuffer<float> scratch;
+    std::vector<float> lastAuto;
     int channels = 2;
     if (plugin != nullptr)
     {
         preparePlugin (*plugin);
         channels = channelsFor (*plugin);
         scratch.setSize (channels, bufferCapacity());
+
+        // Allocated here, on the message thread, because the audio thread
+        // indexes it and must not be the one to grow it.
+        lastAuto.assign ((size_t) plugin->getParameters().size(), -1.0f);
     }
 
     std::unique_ptr<juce::AudioPluginInstance> old;
@@ -397,6 +402,7 @@ void AudioEngine::setFx (int insertIndex, int slotIndex, std::unique_ptr<juce::A
         old = std::move (slot.plugin);
         slot.plugin   = std::move (plugin);
         slot.scratch  = std::move (scratch);
+        slot.lastAuto = std::move (lastAuto);
         slot.channels = channels;
 
         // Bypass is cleared before the recount, so the new plugin's delay is
@@ -1072,6 +1078,109 @@ void AudioEngine::applyAutomation (double beat)
             last = v;
         }
     }
+
+    // Curves that live on the playlist rather than inside a pattern. They are
+    // applied after the in-clip lanes, so that where both aim at the same
+    // parameter the standalone curve is what is heard: it is the one drawn
+    // against the arrangement, which is what a producer reaching for it means
+    // by automating a section.
+    for (const auto& curve : snapshot.automation)
+    {
+        if (beat < curve.start || beat >= curve.end || curve.points.empty())
+            continue;
+        if (recordingMidi && curve.target.kind == AutoTargetKind::channelParam
+            && curve.target.channel == recordChannel)
+            continue;   // don't fight the user while they record
+
+        applyCurve (curve, beat);
+    }
+}
+
+// A mixer insert is not a plugin in a channel slot, so it needs its own way in:
+// a fader and a pan are controls of the mixer itself, and an effect's
+// parameters are reached through the insert and the slot rather than through a
+// channel. Hence a second resolution path beside the one above rather than a
+// wider index.
+void AudioEngine::applyCurve (const AutoCurveRT& curve, double beat)
+{
+    const auto& target = curve.target;
+    const double reading = autoCurveValueAt (curve.points, beat);
+    const float  wanted  = autoControlValue (target.kind, reading);
+
+    // A parameter write has to be compared against what was written last
+    // block, not merely stored: a plugin is free to quantise or ignore what it
+    // is given, so reading the parameter back and comparing with that would
+    // write every block forever. The controls below are plain atomics, so
+    // comparing with the live value is enough for them.
+    const auto writeParam = [&] (juce::AudioPluginInstance* plugin, std::vector<float>& last)
+    {
+        if (plugin == nullptr)
+            return;
+
+        const auto& params = plugin->getParameters();
+        if (! juce::isPositiveAndBelow (target.paramIndex, params.size())
+            || (size_t) params.size() != last.size())
+            return;
+        if (! params[target.paramIndex]->isAutomatable())
+            return;
+
+        auto& written = last[(size_t) target.paramIndex];
+        if (std::abs (wanted - written) < 1.0e-4f)
+            return;
+
+        params[target.paramIndex]->setValue (juce::jlimit (0.0f, 1.0f, wanted));
+        written = wanted;
+    };
+
+    switch (target.kind)
+    {
+        case AutoTargetKind::channelParam:
+        {
+            if (! juce::isPositiveAndBelow (target.channel, kNumChannels))
+                return;
+            auto& slot = channelSlots[(size_t) target.channel];
+            writeParam (slot.plugin.get(), slot.lastAuto);
+            return;
+        }
+
+        case AutoTargetKind::insertVolume:
+        {
+            if (! juce::isPositiveAndBelow (target.insert, kNumInserts))
+                return;
+            auto& volume = controls[(size_t) target.insert].volume;
+            if (std::abs (volume.load() - wanted) > 1.0e-5f)
+                volume.store (juce::jlimit (0.0f, kMaxFaderGain, wanted));
+            return;
+        }
+
+        case AutoTargetKind::insertPan:
+        {
+            if (! juce::isPositiveAndBelow (target.insert, kNumInserts))
+                return;
+            auto& pan = controls[(size_t) target.insert].pan;
+            if (std::abs (pan.load() - wanted) > 1.0e-5f)
+                pan.store (juce::jlimit (-1.0f, 1.0f, wanted));
+            return;
+        }
+
+        case AutoTargetKind::insertFxParam:
+        {
+            if (! juce::isPositiveAndBelow (target.insert, kNumInserts)
+                || ! juce::isPositiveAndBelow (target.fxSlot, kNumFxSlots))
+                return;
+
+            // Bypassing an effect takes it out of the signal path, so moving
+            // its parameters would be writing into something nothing is
+            // hearing. Left alone rather than written, so unbypassing it finds
+            // the automation where the curve says it should be.
+            if (controls[(size_t) target.insert].bypass[(size_t) target.fxSlot].load())
+                return;
+
+            auto& slot = insertSlots[(size_t) target.insert].fx[(size_t) target.fxSlot];
+            writeParam (slot.plugin.get(), slot.lastAuto);
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,7 +1225,8 @@ void AudioEngine::applyModulation (double beat)
                 continue;
 
             for (const auto& t : m.targets)
-                if (t.channel == channel && juce::isPositiveAndBelow (t.paramIndex, (int) count))
+                if (t.kind == AutoTargetKind::channelParam && t.channel == channel
+                    && juce::isPositiveAndBelow (t.paramIndex, (int) count))
                 {
                     const size_t p = (size_t) t.paramIndex;
 
@@ -1156,7 +1266,8 @@ void AudioEngine::applyModulation (double beat)
                     continue;
 
                 for (const auto& t : m.targets)
-                    if (t.channel == channel && (size_t) t.paramIndex == p)
+                    if (t.kind == AutoTargetKind::channelParam
+                        && t.channel == channel && (size_t) t.paramIndex == p)
                         offset += m.valueAt (beat) * t.depth;
             }
 

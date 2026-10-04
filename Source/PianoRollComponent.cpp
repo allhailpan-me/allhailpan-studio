@@ -84,7 +84,7 @@ PianoRollComponent::~PianoRollComponent()
 Clip* PianoRollComponent::clip()
 {
     auto* c = project.find (clipId);
-    return (c != nullptr && ! c->isAudio() && c->pattern != nullptr) ? c : nullptr;
+    return (c != nullptr && c->isMidi() && c->pattern != nullptr) ? c : nullptr;
 }
 
 MidiPattern* PianoRollComponent::pattern()

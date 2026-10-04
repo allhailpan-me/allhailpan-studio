@@ -221,13 +221,13 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
 
     openRollButton.onClick = [this]
     {
-        if (auto* c = singleSelected(); c != nullptr && ! c->isAudio() && onOpenPianoRoll)
+        if (auto* c = singleSelected(); c != nullptr && c->isMidi() && onOpenPianoRoll)
             onOpenPianoRoll (c->id);
     };
     channelBox.onChange = [this]
     {
         if (updatingClipBar) return;
-        if (auto* c = singleSelected(); c != nullptr && ! c->isAudio())
+        if (auto* c = singleSelected(); c != nullptr && c->isMidi())
         {
             c->channel = channelBox.getSelectedId() - 1;
             project.changed();
@@ -382,7 +382,7 @@ void PlaylistComponent::updateClipBar()
     const juce::ScopedValueSetter<bool> svs (updatingClipBar, true);
     auto* c = singleSelected();
     const bool audio = c != nullptr && c->isAudio();
-    const bool midi  = c != nullptr && ! c->isAudio();
+    const bool midi  = c != nullptr && c->isMidi();
 
     clipName.setVisible (c != nullptr);
     clipStatus.setVisible (c != nullptr || project.selection.size() > 1);
@@ -1346,12 +1346,15 @@ void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
         if (c == nullptr)
             return;
 
-        if (! c->isAudio())
+        if (c->isMidi())
         {
             if (onOpenPianoRoll)
                 onOpenPianoRoll (c->id);
             return;
         }
+
+        if (c->isAutomation())
+            return;   // a curve is edited in place, so there is nothing to open
 
         // Double-clicking an audio clip works on its warp markers: on a marker
         // it removes it, anywhere else it adds one. Adding one does not change
@@ -1616,7 +1619,7 @@ int PlaylistComponent::firstFreeChannel (const std::set<int>& alreadyClaimed) co
 
         bool inUse = false;
         for (const auto& clip : project.clips)
-            if (! clip.isAudio() && clip.channel == c)
+            if (clip.isMidi() && clip.channel == c)
             {
                 inUse = true;
                 break;

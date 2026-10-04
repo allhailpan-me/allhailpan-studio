@@ -4,7 +4,10 @@ namespace
 {
     const juce::String rootTag  { "ALLHAILPAN_PROJECT" };
     const juce::String hostedTag { "HOSTED" };
-    constexpr int formatVersion = 1;
+    // Version 2 added automation clips on the playlist. Version 1 files load
+    // unchanged: they simply have no AUTO clips in them, and their in-clip
+    // automation lanes are read exactly as before.
+    constexpr int formatVersion = 2;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -134,6 +137,79 @@ namespace
         return markers;
     }
 
+    // ---- automation targets and curves ----
+    //
+    // The kind is written as a word rather than as the enumeration's number so
+    // that a project file stays readable and so that reordering the enumeration
+    // cannot silently re-aim every curve in every saved project.
+
+    const char* targetKindName (AutoTargetKind k)
+    {
+        switch (k)
+        {
+            case AutoTargetKind::channelParam:  return "channelParam";
+            case AutoTargetKind::insertVolume:  return "insertVolume";
+            case AutoTargetKind::insertPan:     return "insertPan";
+            case AutoTargetKind::insertFxParam: return "insertFxParam";
+        }
+        return "channelParam";
+    }
+
+    void writeTarget (juce::XmlElement& e, const AutoTarget& t)
+    {
+        e.setAttribute ("kind", targetKindName (t.kind));
+        e.setAttribute ("channel", t.channel);
+        e.setAttribute ("insert", t.insert);
+        e.setAttribute ("fxSlot", t.fxSlot);
+        e.setAttribute ("param", t.paramIndex);
+        e.setAttribute ("paramName", t.paramName);
+    }
+
+    AutoTarget readTarget (const juce::XmlElement& e)
+    {
+        AutoTarget t;
+
+        // Missing means a file written before anything but a channel parameter
+        // could be automated, which is exactly what that default is.
+        const auto kind = e.getStringAttribute ("kind", "channelParam");
+        if      (kind == "insertVolume")  t.kind = AutoTargetKind::insertVolume;
+        else if (kind == "insertPan")     t.kind = AutoTargetKind::insertPan;
+        else if (kind == "insertFxParam") t.kind = AutoTargetKind::insertFxParam;
+        else                              t.kind = AutoTargetKind::channelParam;
+
+        t.channel    = juce::jlimit (0, kNumChannels - 1, e.getIntAttribute ("channel"));
+        t.insert     = juce::jlimit (0, kNumInserts - 1, e.getIntAttribute ("insert"));
+        t.fxSlot     = juce::jlimit (0, kNumFxSlots - 1, e.getIntAttribute ("fxSlot"));
+        t.paramIndex = std::max (0, e.getIntAttribute ("param"));
+        t.paramName  = e.getStringAttribute ("paramName");
+        return t;
+    }
+
+    juce::String curveToText (const std::vector<AutoCurvePoint>& points)
+    {
+        juce::StringArray parts;
+        for (auto& p : points)
+            parts.add (num (p.beat) + "," + juce::String (p.value, 6) + "," + juce::String (p.bend, 6));
+        return parts.joinIntoString (";");
+    }
+
+    std::vector<AutoCurvePoint> curveFromText (const juce::String& text)
+    {
+        std::vector<AutoCurvePoint> points;
+        for (auto& part : juce::StringArray::fromTokens (text, ";", {}))
+        {
+            auto f = juce::StringArray::fromTokens (part, ",", {});
+            if (f.size() < 2) continue;
+
+            // A missing bend is a straight line, which is what a point written
+            // by anything that does not know about bends would have meant.
+            points.push_back ({ f[0].getDoubleValue(),
+                                f[1].getDoubleValue(),
+                                f.size() > 2 ? f[2].getDoubleValue() : 0.0 });
+        }
+        return points;
+    }
+
     juce::String pointsToText (const std::vector<AutoPoint>& points)
     {
         juce::StringArray parts;
@@ -233,10 +309,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
             for (const auto& t : m.targets)
             {
                 auto* target = e->createNewChildElement ("TARGET");
-                target->setAttribute ("channel", t.channel);
-                target->setAttribute ("param", t.paramIndex);
+                writeTarget (*target, t);
                 target->setAttribute ("depth", (double) t.depth);
-                target->setAttribute ("paramName", t.paramName);
             }
         }
     }
@@ -349,7 +423,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     for (auto& clip : project.clips)
     {
         auto* e = clipsXml->createNewChildElement ("CLIP");
-        e->setAttribute ("type", clip.isAudio() ? "audio" : "midi");
+        e->setAttribute ("type", clip.isAudio() ? "audio"
+                                 : clip.isAutomation() ? "automation" : "midi");
         e->setAttribute ("track", clip.track);
         e->setAttribute ("start", clip.start);
         e->setAttribute ("offset", clip.offset);
@@ -378,6 +453,12 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
                 l->setAttribute ("name", lane.name);
                 l->addTextElement (pointsToText (lane.points));
             }
+        }
+        else if (clip.isAutomation() && clip.curve != nullptr)
+        {
+            auto* a = e->createNewChildElement ("AUTO");
+            writeTarget (*a, clip.curve->target);
+            a->addTextElement (curveToText (clip.curve->points));
         }
     }
 
@@ -457,10 +538,8 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             for (auto* t : e->getChildWithTagNameIterator ("TARGET"))
             {
                 ModTarget target;
-                target.channel    = juce::jlimit (0, kNumChannels - 1, t->getIntAttribute ("channel"));
-                target.paramIndex = std::max (0, t->getIntAttribute ("param"));
-                target.depth      = (float) juce::jlimit (-1.0, 1.0, t->getDoubleAttribute ("depth", 0.5));
-                target.paramName  = t->getStringAttribute ("paramName");
+                static_cast<AutoTarget&> (target) = readTarget (*t);
+                target.depth = (float) juce::jlimit (-1.0, 1.0, t->getDoubleAttribute ("depth", 0.5));
                 m.targets.push_back (std::move (target));
             }
 
@@ -617,7 +696,10 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
         for (auto* e : clipsXml->getChildWithTagNameIterator ("CLIP"))
         {
             Clip clip;
-            clip.type   = e->getStringAttribute ("type") == "midi" ? ClipType::midi : ClipType::audio;
+            const auto typeWord = e->getStringAttribute ("type");
+            clip.type   = typeWord == "midi"       ? ClipType::midi
+                        : typeWord == "automation" ? ClipType::automation
+                                                   : ClipType::audio;
             clip.track  = juce::jlimit (0, (int) project.tracks.size() - 1, e->getIntAttribute ("track"));
             clip.start  = std::max (0.0, e->getDoubleAttribute ("start"));
             clip.offset = std::max (0.0, e->getDoubleAttribute ("offset"));
@@ -641,6 +723,26 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 if (auto* warp = e->getChildByName ("WARP"))
                     clip.warp = warpFromText (warp->getAllSubText());
                 clip.tidyWarp();
+            }
+            else if (clip.isAutomation())
+            {
+                clip.curve = std::make_shared<AutoCurve>();
+                if (auto* a = e->getChildByName ("AUTO"))
+                {
+                    clip.curve->target = readTarget (*a);
+                    clip.curve->points = curveFromText (a->getAllSubText());
+                }
+
+                // Normalised on the way in rather than trusted, so a hand
+                // edited or truncated project cannot hand the audio thread a
+                // list that is out of order or out of range.
+                clip.curve->tidy();
+
+                // A curve with nothing in it reads as nothing automated, which
+                // is a clip whose effect cannot be seen. One point at the
+                // bottom is at least honest about what it is doing.
+                if (clip.curve->points.empty())
+                    clip.curve->points.push_back ({ 0.0, 0.0, 0.0 });
             }
             else
             {

@@ -795,6 +795,24 @@ void MainComponent::pushArrangement (bool allowRenders)
             }
             snap.midi.push_back (std::move (m));
         }
+        else if (c.isAutomation() && c.curve != nullptr)
+        {
+            AudioEngine::AutoCurveRT a;
+            a.target = c.curve->target;
+            a.start  = c.start;
+            a.end    = c.start + c.length;
+
+            // Shifted into absolute beats here, as the in-clip lanes above
+            // are, so the audio thread never has to know where a clip starts.
+            // Adding the same number to every beat cannot reorder them, so the
+            // list stays in the form the lookup needs without re-sorting.
+            const double origin = c.start - c.offset;
+            a.points = c.curve->points;
+            for (auto& p : a.points)
+                p.beat += origin;
+
+            snap.automation.push_back (std::move (a));
+        }
     }
 
     snap.songEnd    = project.songEndBeats();
@@ -1342,7 +1360,7 @@ void MainComponent::setView (View v)
     {
         if (pianoRoll.getClipId() == 0 || project.find (pianoRoll.getClipId()) == nullptr)
             for (auto& c : project.clips)
-                if (! c.isAudio() && project.selection.count (c.id))
+                if (c.isMidi() && project.selection.count (c.id))
                     pianoRoll.setClip (c.id);
         pianoRoll.refresh();
     }
@@ -2095,7 +2113,10 @@ void MainComponent::exportMidi (bool onlySelected)
     bool hadAutomation = false;
     for (const auto& c : project.clips)
     {
-        if (c.isAudio() || c.pattern == nullptr || c.pattern->lanes.empty())
+        // Either kind of automation: a lane inside a pattern, or a curve on the
+        // playlist. Neither travels, so neither should go unmentioned.
+        const bool hasLanes = c.isMidi() && c.pattern != nullptr && ! c.pattern->lanes.empty();
+        if (! hasLanes && ! c.isAutomation())
             continue;
         if (onlySelected && project.selection.count (c.id) == 0)
             continue;
