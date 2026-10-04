@@ -95,7 +95,13 @@ public:
         drain();
 
         const juce::ScopedLock sl (dataLock);
-        const int total = (int) takeL.size();
+
+        // The two channels are appended together and are always the same
+        // length, but the shorter of them is what the slicing below is
+        // allowed to read: one of these is indexed with a number the audio
+        // thread supplied, and a take with one channel truncated is a
+        // disappointment where reading past the end of a buffer is a crash.
+        const int total = (int) std::min (takeL.size(), takeR.size());
         if (total == 0)
             return takes;
 
