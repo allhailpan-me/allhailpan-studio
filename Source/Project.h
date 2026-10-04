@@ -750,6 +750,13 @@ public:
         if (c == nullptr || ! c->isAudio() || beatsIn <= 0.0)
             return -1;
 
+        // Not past the clip's own end either. Snapping can round a click near
+        // a short clip's edge beyond it, and a marker out there could never be
+        // seen or grabbed again. Adding one does not move the line, so the
+        // length measured here is the length afterwards too.
+        if (beatsIn >= c->lengthBeats (bpm))
+            return -1;
+
         const WarpMarker m { c->sourceAtBeat (bpm, beatsIn), beatsIn };
         c->warp.push_back (m);
         c->tidyWarp();

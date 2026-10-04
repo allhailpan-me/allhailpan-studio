@@ -753,15 +753,33 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
         const float gain = juce::Decibels::decibelsToGain (c.gainDb);
         const double fallback = c.fallbackSlope (project.bpm);
 
+        // The waveform is drawn through the warp map, so a transient appears
+        // under the grid line it has been pinned to. A waveform that disagreed
+        // with what is heard would make markers impossible to place.
+        //
+        // Through the same segment table the audio thread reads, walked with
+        // the same cursor, rather than the marker list: a wide clip with a
+        // marker on every beat would otherwise search the whole list once per
+        // pixel, on every repaint, which the playhead does constantly. An
+        // unwarped clip builds no table and allocates nothing.
+        std::vector<WarpSegment> segments;
+        if (c.isWarped())
+            buildWarpSegments (c.warp, c.offset, fallback, 0.0, segments);
+
+        int cursor = 0;
+        auto sourceAt = [&] (double beatsIn)
+        {
+            return segments.empty()
+                 ? c.offset + beatsIn * fallback
+                 : warpSourceAtSegment (segments.data(), (int) segments.size(), cursor, beatsIn);
+        };
+
         g.setColour (Ahp::bone.withAlpha (dim ? 0.35f : 0.9f));
+        double t0 = sourceAt ((x0 - r.getX()) * beatsPerPixel);
+
         for (int x = x0; x < x1; ++x)
         {
-            // Drawn through the warp map, so a transient appears under the grid
-            // line it has been pinned to. A waveform that disagreed with what
-            // is heard would make markers impossible to place.
-            const double b0 = (x - r.getX()) * beatsPerPixel;
-            const double t0 = warpSourceAtBeat (c.warp, c.offset, fallback, b0);
-            const double t1 = warpSourceAtBeat (c.warp, c.offset, fallback, b0 + beatsPerPixel);
+            const double t1 = sourceAt ((x + 1 - r.getX()) * beatsPerPixel);
             size_t i0 = (size_t) std::max (0.0, t0 * peaksPerSecond);
             size_t i1 = std::max (i0 + 1, (size_t) std::max (0.0, t1 * peaksPerSecond));
             float v = 0.0f;
@@ -769,6 +787,7 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
                 v = std::max (v, peaks[i]);
             v = std::min (1.0f, v * gain);
             g.fillRect ((float) x, midY - v * amp, 1.0f, std::max (1.0f, v * amp * 2.0f));
+            t0 = t1;
         }
     }
     else if (! c.isAudio() && c.pattern != nullptr && ! c.pattern->notes.empty())
