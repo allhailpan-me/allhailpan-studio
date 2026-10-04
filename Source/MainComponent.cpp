@@ -922,7 +922,7 @@ void MainComponent::showFxMenu (int insertIndex, int slot)
         else if (result == 2)
         {
             auto& b = self.engine.insert (insertIndex).bypass[(size_t) slot];
-            b.store (! b.load());
+            self.engine.setFxBypass (insertIndex, slot, ! b.load());
             self.markDirty();
         }
         else if (result == 3)
@@ -1245,10 +1245,16 @@ void MainComponent::paintStatus (juce::Graphics& g, juce::Rectangle<int> r)
     {
         const double sr      = d->getCurrentSampleRate();
         const int    latency = d->getInputLatencyInSamples() + d->getOutputLatencyInSamples();
+        const int    plugins = engine.getPluginLatencySamples();
+
         info = d->getTypeName() + "  |  " + d->getName()
              + "  |  " + juce::String ((int) sr) + " Hz"
              + "  |  " + juce::String (d->getCurrentBufferSizeSamples()) + " samples"
              + "  |  " + juce::String (sr > 0 ? 1000.0 * latency / sr : 0.0, 1) + " ms round trip"
+             // Only worth mentioning when a plugin is actually holding things
+             // back; it is the amount every track is delayed to stay in time.
+             + (plugins > 0 ? "  |  " + juce::String (sr > 0 ? 1000.0 * plugins / sr : 0.0, 1) + " ms compensated"
+                            : juce::String())
              + "  |  CPU " + juce::String (engine.devices().getCpuUsage() * 100.0, 1) + "%"
              + (stretchCache.isBusy() ? juce::String ("  |  stretching audio...") : juce::String());
     }

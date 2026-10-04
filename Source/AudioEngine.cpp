@@ -39,6 +39,83 @@ int AudioEngine::getRoundTripLatencySamples()
 }
 
 // ---------------------------------------------------------------------------
+// Delay compensation
+//
+// Plugins that look ahead report how many samples they hold back. Left alone,
+// a track carrying one plays late against the others, and by a different
+// amount every time a plugin is loaded. Signals merge in two places here, so
+// each is levelled in turn:
+//
+//   instruments and playlist audio -> insert buffer   (levelled to the slowest
+//                                                      instrument)
+//   inserts 1..16                  -> master          (levelled to the insert
+//                                                      with the most FX delay)
+//
+// Everything therefore arrives at the master the same distance behind the
+// playhead, which is what getPluginLatencySamples() reports.
+//
+// Must be called with graphLock held.
+// ---------------------------------------------------------------------------
+void AudioEngine::updateLatency()
+{
+    auto latencyOf = [] (const juce::AudioPluginInstance* p)
+    {
+        return p != nullptr ? std::max (0, p->getLatencySamples()) : 0;
+    };
+
+    int slowestInstrument = 0;
+    for (auto& c : channelSlots)
+        if (c.plugin != nullptr)
+            slowestInstrument = std::max (slowestInstrument, latencyOf (c.plugin.get()));
+
+    std::array<int, kNumInserts> insertLatency {};
+    for (int i = 0; i < kNumInserts; ++i)
+    {
+        int sum = 0;
+        for (int k = 0; k < kNumFxSlots; ++k)
+            if (! controls[(size_t) i].bypass[(size_t) k].load())
+                sum += latencyOf (insertSlots[(size_t) i].fx[(size_t) k].plugin.get());
+
+        insertLatency[(size_t) i] = sum;
+    }
+
+    int slowestInsert = 0;
+    for (int i = 1; i < kNumInserts; ++i)
+        slowestInsert = std::max (slowestInsert, insertLatency[(size_t) i]);
+
+    const int block = std::max (blockSize, 1);
+
+    for (auto& c : channelSlots)
+    {
+        const int wanted = slowestInstrument - latencyOf (c.plugin.get());
+        c.align.prepare (2, slowestInstrument, block);
+        c.align.setDelay (wanted);
+    }
+
+    for (int i = 1; i < kNumInserts; ++i)
+    {
+        const int wanted = slowestInsert - insertLatency[(size_t) i];
+        insertSlots[(size_t) i].align.prepare (2, slowestInsert, block);
+        insertSlots[(size_t) i].align.setDelay (wanted);
+    }
+
+    clipDelaySamples.store (slowestInstrument);
+    totalLatency.store (slowestInstrument + slowestInsert + insertLatency[0]);
+}
+
+void AudioEngine::setFxBypass (int insertIndex, int slotIndex, bool shouldBypass)
+{
+    if (! juce::isPositiveAndBelow (insertIndex, kNumInserts)
+        || ! juce::isPositiveAndBelow (slotIndex, kNumFxSlots))
+        return;
+
+    controls[(size_t) insertIndex].bypass[(size_t) slotIndex].store (shouldBypass);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateLatency();
+}
+
+// ---------------------------------------------------------------------------
 // Plugins
 
 void AudioEngine::preparePlugin (juce::AudioPluginInstance& plugin)
@@ -76,6 +153,8 @@ void AudioEngine::setChannelPlugin (int channel, std::unique_ptr<juce::AudioPlug
         lastAuto.assign ((size_t) plugin->getParameters().size(), -1.0f);
     }
 
+    juce::AudioBuffer<float> mixdown (2, bufferCapacity());
+
     std::unique_ptr<juce::AudioPluginInstance> old;
     {
         const juce::SpinLock::ScopedLockType lock (graphLock);
@@ -83,10 +162,12 @@ void AudioEngine::setChannelPlugin (int channel, std::unique_ptr<juce::AudioPlug
         old = std::move (slot.plugin);
         slot.plugin   = std::move (plugin);
         slot.buffer   = std::move (buffer);
+        slot.mixdown  = std::move (mixdown);
         slot.channels = channels;
         slot.outputBuses = buses;
         slot.sumOutputs.store (sum);
         slot.lastAuto = std::move (lastAuto);
+        updateLatency();
     }
 
     if (old != nullptr)
@@ -159,8 +240,12 @@ void AudioEngine::setFx (int insertIndex, int slotIndex, std::unique_ptr<juce::A
         slot.plugin   = std::move (plugin);
         slot.scratch  = std::move (scratch);
         slot.channels = channels;
+
+        // Bypass is cleared before the recount, so the new plugin's delay is
+        // included rather than measured as though it were switched off.
+        controls[(size_t) insertIndex].bypass[(size_t) slotIndex].store (false);
+        updateLatency();
     }
-    controls[(size_t) insertIndex].bypass[(size_t) slotIndex].store (false);
 
     if (old != nullptr)
         old->releaseResources();
@@ -260,6 +345,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     for (auto& c : channelSlots)
     {
         c.midi.ensureSize (8192);
+        c.mixdown.setSize (2, cap, false, true, true);
         if (c.plugin != nullptr)
         {
             c.plugin->releaseResources();
@@ -279,6 +365,10 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
             }
     }
     capacity = cap;
+
+    // Plugins report their latency only once prepared, and the block size just
+    // changed, so the delay lines are sized and set here.
+    updateLatency();
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -295,6 +385,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                                                     int numSamples,
                                                     const juce::AudioIODeviceCallbackContext&)
 {
+    // Reverb and delay tails decay toward zero and become denormal floats,
+    // which some CPUs handle in microcode at around a hundred times the cost.
+    // Without this the CPU meter spikes seconds after the sound has stopped.
+    juce::ScopedNoDenormals noDenormals;
+
     // ---- input meter ----
     float inPeak = 0.0f;
     for (int ch = 0; ch < numInputChannels; ++ch)
@@ -445,6 +540,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             for (auto& ins : insertSlots)
                 ins.buffer.clear (0, numSamples);
 
+            // After a locate, whatever is sitting in the compensation buffers
+            // belongs to the old position, so it is dropped rather than played
+            // over the new one. A loop wrap is left alone: that audio really is
+            // the continuation of what was just heard.
+            if (jumped)
+            {
+                for (auto& c : channelSlots)
+                    c.align.reset();
+                for (auto& ins : insertSlots)
+                    ins.align.reset();
+            }
+
             scheduleMidi (numSamples, sendAllOff, sequencing);
             if (sequencing)
                 applyAutomation (blockStartBeat);
@@ -478,17 +585,28 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, c.insert.load())].buffer;
                 const int outs = juce::jlimit (1, c.channels, c.plugin->getTotalNumOutputChannels());
 
+                // Fold to stereo in the channel's own buffer first, so delay
+                // compensation can hold this instrument back before it merges
+                // with anything else.
+                juce::AudioBuffer<float> folded (c.mixdown.getArrayOfWritePointers(), 2, numSamples);
+                folded.clear();
+
                 if (c.sumOutputs.load() && outs > 2)
                 {
                     // Fold every output bus down into stereo
                     for (int ch = 0; ch < outs; ++ch)
-                        dest.addFrom (ch & 1, 0, view, ch, 0, numSamples);
+                        folded.addFrom (ch & 1, 0, view, ch, 0, numSamples);
                 }
                 else
                 {
-                    dest.addFrom (0, 0, view, 0, 0, numSamples);
-                    dest.addFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
+                    folded.addFrom (0, 0, view, 0, 0, numSamples);
+                    folded.addFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
                 }
+
+                c.align.process (folded, 2, numSamples);
+
+                dest.addFrom (0, 0, folded, 0, 0, numSamples);
+                dest.addFrom (1, 0, folded, 1, 0, numSamples);
             }
 
             // Recording an instrument's own output: tap it before the mixer
@@ -511,8 +629,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             for (int i = 1; i < kNumInserts; ++i)
             {
                 processInsert (i, numSamples);
-                master.addFrom (0, 0, insertSlots[(size_t) i].buffer, 0, 0, numSamples);
-                master.addFrom (1, 0, insertSlots[(size_t) i].buffer, 1, 0, numSamples);
+
+                // Hold this insert back to match whichever has the most FX
+                // delay, so the inserts sum in time with each other.
+                auto& slot = insertSlots[(size_t) i];
+                slot.align.process (slot.buffer, 2, numSamples);
+
+                master.addFrom (0, 0, slot.buffer, 0, 0, numSamples);
+                master.addFrom (1, 0, slot.buffer, 1, 0, numSamples);
             }
             processInsert (0, numSamples);
 
@@ -790,13 +914,20 @@ void AudioEngine::renderAudioClips (int numSamples)
     if (snapshot.audio.empty() || numSamples <= 0)
         return;
 
-    const double secondsPerBeat = 60.0 / bpm.load();
+    const double currentBpm     = bpm.load();
+    const double secondsPerBeat = 60.0 / currentBpm;
 
-    double lo = blockBeats[0], hi = blockBeats[0];
+    // Playlist audio has no plugin in front of it, so it would otherwise run
+    // ahead of any instrument that looks ahead. Reading this far back in the
+    // arrangement delays it by the same amount, without a delay line.
+    const double shift = clipDelaySamples.load() * (currentBpm / 60.0 / sampleRate);
+
+    double lo = blockBeats[0] - shift, hi = lo;
     for (int i = 1; i < numSamples; ++i)
     {
-        lo = std::min (lo, blockBeats[(size_t) i]);
-        hi = std::max (hi, blockBeats[(size_t) i]);
+        const double beat = blockBeats[(size_t) i] - shift;
+        lo = std::min (lo, beat);
+        hi = std::max (hi, beat);
     }
 
     for (const auto& clip : snapshot.audio)
@@ -820,7 +951,7 @@ void AudioEngine::renderAudioClips (int numSamples)
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const double beat = blockBeats[(size_t) i];
+            const double beat = blockBeats[(size_t) i] - shift;
             if (beat < clip.start || beat >= clipEnd)
                 continue;
 
@@ -914,6 +1045,10 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     if (capacity <= 0 || blockSize <= 0 || sampleRate <= 0.0)
         return false;
 
+    // Same reason as the live callback: decaying tails would otherwise make an
+    // export crawl on CPUs that trap denormals.
+    juce::ScopedNoDenormals noDenormals;
+
     offlineActive.store (true);
     juce::Thread::sleep (60);                 // let the device callback fall quiet
 
@@ -929,6 +1064,13 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     lastBeat = -1;
     liveMidi.clear();
     panicRequest.store (true);                // start from silence
+
+    // Compensation buffers hold audio from the live session; an export starts
+    // clean.
+    for (auto& c : channelSlots)
+        c.align.reset();
+    for (auto& ins : insertSlots)
+        ins.align.reset();
 
     const int    n              = std::min (blockSize, capacity);
     const double beatsPerSample = bpm.load() / 60.0 / sampleRate;
@@ -983,16 +1125,27 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
 
             auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, c.insert.load())].buffer;
             const int outs = juce::jlimit (1, c.channels, c.plugin->getTotalNumOutputChannels());
+
+            juce::AudioBuffer<float> folded (c.mixdown.getArrayOfWritePointers(), 2, n);
+            folded.clear();
+
             if (c.sumOutputs.load() && outs > 2)
             {
                 for (int ch = 0; ch < outs; ++ch)
-                    dest.addFrom (ch & 1, 0, view, ch, 0, n);
+                    folded.addFrom (ch & 1, 0, view, ch, 0, n);
             }
             else
             {
-                dest.addFrom (0, 0, view, 0, 0, n);
-                dest.addFrom (1, 0, view, std::min (1, outs - 1), 0, n);
+                folded.addFrom (0, 0, view, 0, 0, n);
+                folded.addFrom (1, 0, view, std::min (1, outs - 1), 0, n);
             }
+
+            // The export must line signals up exactly as playback does, or a
+            // mix would not match what was heard.
+            c.align.process (folded, 2, n);
+
+            dest.addFrom (0, 0, folded, 0, 0, n);
+            dest.addFrom (1, 0, folded, 1, 0, n);
         }
 
         if (sequencing)
@@ -1002,11 +1155,15 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         for (int i = 1; i < kNumInserts; ++i)
         {
             processInsert (i, n);
-            master.addFrom (0, 0, insertSlots[(size_t) i].buffer, 0, 0, n);
-            master.addFrom (1, 0, insertSlots[(size_t) i].buffer, 1, 0, n);
+
+            auto& slot = insertSlots[(size_t) i];
+            slot.align.process (slot.buffer, 2, n);
+
+            master.addFrom (0, 0, slot.buffer, 0, 0, n);
+            master.addFrom (1, 0, slot.buffer, 1, 0, n);
 
             if (std::find (stemInserts.begin(), stemInserts.end(), i) != stemInserts.end())
-                sink (i, insertSlots[(size_t) i].buffer.getArrayOfReadPointers(), n);
+                sink (i, slot.buffer.getArrayOfReadPointers(), n);
         }
         processInsert (0, n);
         sink (-1, master.getArrayOfReadPointers(), n);

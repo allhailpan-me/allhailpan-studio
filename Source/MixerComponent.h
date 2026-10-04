@@ -45,7 +45,7 @@ public:
             power->onClick = [this, k]
             {
                 auto& b = engine.insert (selected).bypass[(size_t) k];
-                b.store (! b.load());
+                engine.setFxBypass (selected, k, ! b.load());
                 refresh();
                 if (onEdited) onEdited();
             };
