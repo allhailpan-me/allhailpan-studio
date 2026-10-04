@@ -181,10 +181,20 @@ public:
         std::vector<NoteRT> notes;
         std::vector<LaneRT> lanes;
     };
+    // A curve that sits on the playlist in its own right, rather than inside a
+    // pattern. Points are in absolute beats, as the lanes above are, so the
+    // audio thread never has to know where the clip starts.
+    struct AutoCurveRT
+    {
+        AutoTarget target;
+        double start = 0.0, end = 0.0;         // the span of arrangement it governs
+        std::vector<AutoCurvePoint> points;
+    };
     struct Snapshot
     {
         std::vector<AudioClipRT> audio;
         std::vector<MidiClipRT>  midi;
+        std::vector<AutoCurveRT> automation;   // playlist automation clips
         std::vector<Modulator>   modulators;   // copied whole; they are small
         std::vector<WarpSegment> warp;         // every warped clip's segments, end to end
         double songEnd = 0.0;
@@ -300,6 +310,11 @@ private:
         std::unique_ptr<juce::AudioPluginInstance> plugin;
         juce::AudioBuffer<float> scratch;
         int channels = 2;
+
+        // What automation last wrote to each of this effect's parameters, so
+        // that a curve sitting still does not write the same value every
+        // block. The instrument channels keep the same thing in lastAuto.
+        std::vector<float> lastAuto;
     };
     struct InsertSlot
     {
@@ -355,6 +370,7 @@ private:
     void trackLiveMessage (int slot, const juce::MidiMessage&);
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
+    void applyCurve (const AutoCurveRT&, double beat);
     void applyModulation (double beat);
     void renderPreview (float* left, float* right, int numSamples);
 

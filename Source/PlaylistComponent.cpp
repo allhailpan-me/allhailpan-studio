@@ -221,13 +221,13 @@ PlaylistComponent::PlaylistComponent (Project& p, AudioEngine& e, SampleCache& c
 
     openRollButton.onClick = [this]
     {
-        if (auto* c = singleSelected(); c != nullptr && ! c->isAudio() && onOpenPianoRoll)
+        if (auto* c = singleSelected(); c != nullptr && c->isMidi() && onOpenPianoRoll)
             onOpenPianoRoll (c->id);
     };
     channelBox.onChange = [this]
     {
         if (updatingClipBar) return;
-        if (auto* c = singleSelected(); c != nullptr && ! c->isAudio())
+        if (auto* c = singleSelected(); c != nullptr && c->isMidi())
         {
             c->channel = channelBox.getSelectedId() - 1;
             project.changed();
@@ -265,7 +265,8 @@ bool PlaylistComponent::isEditing() const noexcept
         || drag.mode == DragState::Mode::move
         || drag.mode == DragState::Mode::trimLeft  || drag.mode == DragState::Mode::trimRight
         || drag.mode == DragState::Mode::stretchLeft || drag.mode == DragState::Mode::stretchRight
-        || drag.mode == DragState::Mode::warp;
+        || drag.mode == DragState::Mode::warp
+        || drag.mode == DragState::Mode::autoPoint || drag.mode == DragState::Mode::autoBend;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +383,7 @@ void PlaylistComponent::updateClipBar()
     const juce::ScopedValueSetter<bool> svs (updatingClipBar, true);
     auto* c = singleSelected();
     const bool audio = c != nullptr && c->isAudio();
-    const bool midi  = c != nullptr && ! c->isAudio();
+    const bool midi  = c != nullptr && c->isMidi();
 
     clipName.setVisible (c != nullptr);
     clipStatus.setVisible (c != nullptr || project.selection.size() > 1);
@@ -791,7 +792,7 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
             t0 = t1;
         }
     }
-    else if (! c.isAudio() && c.pattern != nullptr && ! c.pattern->notes.empty())
+    else if (c.isMidi() && c.pattern != nullptr && ! c.pattern->notes.empty())
     {
         int lo = 127, hi = 0;
         for (auto& n : c.pattern->notes) { lo = std::min (lo, n.note); hi = std::max (hi, n.note); }
@@ -810,8 +811,12 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
             g.fillRect (nx, ny, std::max (1.0f, nw - 1.0f), rowH);
         }
     }
+    else if (c.isAutomation())
+    {
+        paintCurve (g, c, curveBody (r), selected, dim);
+    }
 
-    if (! c.isAudio() && c.pattern != nullptr && ! c.pattern->lanes.empty())
+    if (c.isMidi() && c.pattern != nullptr && ! c.pattern->lanes.empty())
     {
         g.setColour (Ahp::bone.withAlpha (0.5f));
         g.setFont (juce::FontOptions (9.5f));
@@ -847,6 +852,329 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
 bool PlaylistComponent::warpVisible (const Clip& c) const
 {
     return c.isWarped() && project.selection.count (c.id) > 0;
+}
+
+// A point dragged outside its own clip's window would be off the part of the
+// curve that is drawn, so it could never be seen or grabbed again. The window
+// is where points stay, and trimming the clip is how to change which part of
+// the curve is on show.
+static double clampToCurveWindow (const Clip& c, double beatsIn)
+{
+    return juce::jlimit (c.offset, c.offset + std::max (0.0, c.length), beatsIn);
+}
+
+// ---------------------------------------------------------------------------
+// Automation curves on the playlist.
+//
+// A curve clip is drawn as the curve itself rather than as a block, because
+// the shape is the content: a producer reads a filter sweep by its slope, and
+// a rectangle with a name in it would say nothing about what the parameter is
+// doing.
+//
+// Its handles only appear once the clip is selected. That is the same rule the
+// warp markers follow, and it is what keeps the clip draggable: an unselected
+// curve behaves like any other clip, and the body only becomes an editing
+// surface once the producer has said which clip they mean. The name strip
+// stays a grab handle either way, so a selected curve can still be moved.
+
+juce::Rectangle<float> PlaylistComponent::curveBody (juce::Rectangle<float> clipRect) const
+{
+    return clipRect.withTrimmedTop (15.0f).reduced (1.0f, 1.0f);
+}
+
+bool PlaylistComponent::curveVisible (const Clip& c) const
+{
+    return c.isAutomation() && c.curve != nullptr && project.selection.count (c.id) > 0;
+}
+
+float PlaylistComponent::curveValueToY (juce::Rectangle<float> body, double value) const
+{
+    const double v = juce::jlimit (0.0, 1.0, value);
+    return body.getBottom() - (float) v * body.getHeight();
+}
+
+double PlaylistComponent::curveYToValue (juce::Rectangle<float> body, float y) const
+{
+    if (body.getHeight() <= 0.0f)
+        return 0.0;
+    return juce::jlimit (0.0, 1.0, (double) ((body.getBottom() - y) / body.getHeight()));
+}
+
+float PlaylistComponent::curvePointX (const Clip& c, int index) const
+{
+    if (c.curve == nullptr || ! juce::isPositiveAndBelow (index, (int) c.curve->points.size()))
+        return 0.0f;
+
+    // The clip's offset moves the window onto the curve, exactly as it moves
+    // the window onto a pattern, so trimming the left edge scrolls the curve
+    // rather than rewriting its points.
+    return beatToX (c.start - c.offset + c.curve->points[(size_t) index].beat);
+}
+
+juce::Point<float> PlaylistComponent::curveBendHandle (const Clip& c, juce::Rectangle<float> body, int segment) const
+{
+    if (c.curve == nullptr || segment < 0 || (size_t) segment + 1 >= c.curve->points.size())
+        return {};
+
+    const auto& a = c.curve->points[(size_t) segment];
+    const auto& b = c.curve->points[(size_t) segment + 1];
+
+    // Halfway along in beats, and on the curve rather than on the chord
+    // between the points, so the handle is always somewhere the curve actually
+    // goes and dragging it looks like bending the line under the mouse.
+    const double midBeat = (a.beat + b.beat) * 0.5;
+    const double value   = c.curve->valueAt (midBeat);
+
+    return { beatToX (c.start - c.offset + midBeat), curveValueToY (body, value) };
+}
+
+void PlaylistComponent::paintCurve (juce::Graphics& g, const Clip& c, juce::Rectangle<float> body,
+                                    bool selected, bool dim)
+{
+    if (c.curve == nullptr || body.getWidth() <= 0.0f || body.getHeight() <= 0.0f)
+        return;
+
+    const auto& points = c.curve->points;
+    const float alpha  = dim ? 0.35f : 1.0f;
+
+    // A horizontal rule where the control's own resting position is: 0 dB on a
+    // fader, centre on a pan. Without it a fader curve cannot be drawn back to
+    // where it started, since nothing on the clip says which height that is.
+    // A plugin parameter has no such position, so it gets no rule rather than
+    // a meaningless one at the top of the clip.
+    const auto kind = c.curve->target.kind;
+    if (kind == AutoTargetKind::insertVolume || kind == AutoTargetKind::insertPan)
+    {
+        const double rest = autoCurveValueFor (kind, kind == AutoTargetKind::insertVolume
+                                                       ? (double) kUnityFaderGain : 0.0);
+        g.setColour (Ahp::muted.withAlpha (0.3f * alpha));
+        g.fillRect (body.getX(), curveValueToY (body, rest) - 0.5f, body.getWidth(), 1.0f);
+    }
+
+    // The curve itself, a pixel at a time, read through the same function the
+    // engine plays it with. Drawing it from anything else would let the picture
+    // and the sound disagree, which is the one thing a curve must not do.
+    const int x0 = (int) std::max (body.getX(), (float) grid.getX());
+    const int x1 = (int) std::min (body.getRight(), (float) grid.getRight());
+    const double origin = c.start - c.offset;
+
+    if (x1 > x0)
+    {
+        juce::Path path;
+        for (int x = x0; x <= x1; ++x)
+        {
+            const double beat = xToBeat ((float) x) - origin;
+            const float  y    = curveValueToY (body, autoCurveValueAt (points, beat));
+            if (x == x0) path.startNewSubPath ((float) x, y);
+            else         path.lineTo ((float) x, y);
+        }
+
+        // Filled under the line as well as stroked, because at this height a
+        // one pixel line is hard to follow across a busy arrangement.
+        auto filled = path;
+        filled.lineTo ((float) x1, body.getBottom());
+        filled.lineTo ((float) x0, body.getBottom());
+        filled.closeSubPath();
+
+        g.setColour (Ahp::bone.withAlpha (0.12f * alpha));
+        g.fillPath (filled);
+
+        g.setColour (Ahp::bone.withAlpha (0.9f * alpha));
+        g.strokePath (path, juce::PathStrokeType (1.4f));
+    }
+
+    if (! curveVisible (c))
+        return;
+
+    // Bend handles first, so a point sitting on top of one stays grabbable.
+    g.setColour (Ahp::rec.withAlpha (0.75f));
+    for (size_t i = 0; i + 1 < points.size(); ++i)
+    {
+        const auto h = curveBendHandle (c, body, (int) i);
+        if (h.x < body.getX() - 4.0f || h.x > body.getRight() + 4.0f)
+            continue;
+        g.drawEllipse (h.x - 3.0f, h.y - 3.0f, 6.0f, 6.0f, 1.2f);
+    }
+
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+        const float px = curvePointX (c, (int) i);
+        if (px < body.getX() - 4.0f || px > body.getRight() + 4.0f)
+            continue;
+
+        const float py = curveValueToY (body, points[i].value);
+        g.setColour (Ahp::rec);
+        g.fillRect (px - 3.0f, py - 3.0f, 6.0f, 6.0f);
+    }
+
+    juce::ignoreUnused (selected);
+}
+
+double PlaylistComponent::currentValueFor (const AutoTarget& t) const
+{
+    switch (t.kind)
+    {
+        case AutoTargetKind::insertVolume:
+            return autoCurveValueFor (t.kind, (double) engine.insert (t.insert).volume.load());
+
+        case AutoTargetKind::insertPan:
+            return autoCurveValueFor (t.kind, (double) engine.insert (t.insert).pan.load());
+
+        case AutoTargetKind::insertFxParam:
+            if (auto* fx = engine.getFx (t.insert, t.fxSlot))
+            {
+                const auto& params = fx->getParameters();
+                if (juce::isPositiveAndBelow (t.paramIndex, params.size()))
+                    return (double) params[t.paramIndex]->getValue();
+            }
+            return 0.0;
+
+        case AutoTargetKind::channelParam:
+            if (auto* plugin = engine.getChannelPlugin (t.channel))
+            {
+                const auto& params = plugin->getParameters();
+                if (juce::isPositiveAndBelow (t.paramIndex, params.size()))
+                    return (double) params[t.paramIndex]->getValue();
+            }
+            return 0.0;
+    }
+    return 0.0;
+}
+
+void PlaylistComponent::addAutomationFor (int track, const AutoTarget& target)
+{
+    if (! juce::isPositiveAndBelow (track, (int) project.tracks.size()))
+        return;
+
+    // Put at the left of what is on screen, rounded down to a bar, because
+    // that is the part of the arrangement the producer is looking at. Four
+    // bars long, which is long enough to draw a gesture in and short enough to
+    // trim rather than having to cut down.
+    const double start  = std::max (0.0, std::floor (scrollBeats / 4.0) * 4.0);
+    const double length = 16.0;
+
+    // A curve already covering this stretch of the arrangement for the same
+    // control is selected rather than buried under a second one. Another curve
+    // for the same control somewhere else is fine and expected, which is why
+    // this asks about the span and not just the target.
+    if (auto* existing = project.automationClipFor (target, start, start + length))
+    {
+        project.selection = { existing->id };
+        if (onStatus)
+            onStatus (autoTargetName (target, project.channels) + " is already automated here, on "
+                        + project.tracks[(size_t) existing->track].name);
+        updateClipBar();
+        repaint();
+        return;
+    }
+
+    const int id = project.addAutomationClip (target, track, start, length, currentValueFor (target));
+    project.selection = { id };
+
+    if (onStatus)
+        onStatus ("Automating " + autoTargetName (target, project.channels)
+                    + ". Click the curve to add points, drag the circles to bend it.");
+
+    updateClipBar();
+    repaint();
+}
+
+void PlaylistComponent::showAutomationMenu (int track)
+{
+    automationMenu.clear();
+
+    // Named parameters are capped: a synth with a thousand of them would make
+    // a menu nobody can use, and the ones worth automating are near the front
+    // in every plugin that bothers to order them.
+    constexpr int maxParams = 48;
+
+    const auto parameterSubMenu = [this, maxParams] (juce::AudioPluginInstance* plugin, AutoTarget base)
+    {
+        juce::PopupMenu sub;
+        if (plugin == nullptr)
+            return sub;
+
+        const auto& params = plugin->getParameters();
+        for (int i = 0; i < std::min (params.size(), maxParams); ++i)
+        {
+            if (! params[i]->isAutomatable())
+                continue;
+            base.paramIndex = i;
+            base.paramName  = params[i]->getName (28);
+            if (base.paramName.isEmpty())
+                base.paramName = "Parameter " + juce::String (i + 1);
+
+            automationMenu.push_back (base);
+            sub.addItem (2000 + (int) automationMenu.size() - 1, base.paramName);
+        }
+        return sub;
+    };
+
+    const int insertIndex = juce::jlimit (0, kNumInserts - 1, project.tracks[(size_t) track].insert);
+
+    juce::PopupMenu mixer;
+    {
+        AutoTarget volume;
+        volume.kind   = AutoTargetKind::insertVolume;
+        volume.insert = insertIndex;
+        automationMenu.push_back (volume);
+        mixer.addItem (2000 + (int) automationMenu.size() - 1, "Volume");
+
+        AutoTarget pan;
+        pan.kind   = AutoTargetKind::insertPan;
+        pan.insert = insertIndex;
+        automationMenu.push_back (pan);
+        mixer.addItem (2000 + (int) automationMenu.size() - 1, "Pan");
+
+        for (int slot = 0; slot < kNumFxSlots; ++slot)
+        {
+            auto* fx = engine.getFx (insertIndex, slot);
+            if (fx == nullptr)
+                continue;
+
+            AutoTarget base;
+            base.kind   = AutoTargetKind::insertFxParam;
+            base.insert = insertIndex;
+            base.fxSlot = slot;
+
+            auto sub = parameterSubMenu (fx, base);
+            if (sub.containsAnyActiveItems())
+                mixer.addSubMenu (fx->getName(), sub);
+        }
+    }
+
+    juce::PopupMenu instruments;
+    for (int channel = 0; channel < kNumChannels; ++channel)
+    {
+        auto* plugin = engine.getChannelPlugin (channel);
+        if (plugin == nullptr)
+            continue;
+
+        AutoTarget base;
+        base.kind    = AutoTargetKind::channelParam;
+        base.channel = channel;
+
+        auto sub = parameterSubMenu (plugin, base);
+        if (sub.containsAnyActiveItems())
+            instruments.addSubMenu (juce::String (channel + 1) + "  " + project.channels[(size_t) channel].name, sub);
+    }
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (insertIndex == 0 ? juce::String ("Master")
+                                            : engine.insert (insertIndex).name);
+    menu.addSubMenu ("Mixer", mixer, mixer.containsAnyActiveItems());
+    menu.addSubMenu ("Instruments", instruments, instruments.containsAnyActiveItems());
+
+    juce::Component::SafePointer<PlaylistComponent> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options(), [safeThis, track] (int result)
+    {
+        if (safeThis == nullptr || result < 2000)
+            return;
+
+        const size_t index = (size_t) (result - 2000);
+        if (index < safeThis->automationMenu.size())
+            safeThis->addAutomationFor (track, safeThis->automationMenu[index]);
+    });
 }
 
 float PlaylistComponent::warpMarkerX (const Clip& c, int index) const
@@ -888,7 +1216,35 @@ PlaylistComponent::Hit PlaylistComponent::hitTest (juce::Point<float> p) const
                         break;
                     }
 
-            if (h.warpIndex < 0 && r.getWidth() > 18.0f)
+            // A curve's handles, likewise, take precedence over the trim
+            // edges, and only on a selected clip. The name strip is left out
+            // so that it stays a grab handle for moving the clip.
+            if (curveVisible (*it) && p.y > r.getY() + 15.0f)
+            {
+                const auto body = curveBody (r);
+                const auto& points = it->curve->points;
+
+                for (size_t i = 0; i < points.size(); ++i)
+                    if (std::abs (p.x - curvePointX (*it, (int) i)) < 5.0f
+                        && std::abs (p.y - curveValueToY (body, points[i].value)) < 6.0f)
+                    {
+                        h.autoPoint = (int) i;
+                        break;
+                    }
+
+                if (h.autoPoint < 0)
+                    for (size_t i = 0; i + 1 < points.size(); ++i)
+                    {
+                        const auto handle = curveBendHandle (*it, body, (int) i);
+                        if (p.getDistanceFrom (handle) < 6.0f)
+                        {
+                            h.autoBend = (int) i;
+                            break;
+                        }
+                    }
+            }
+
+            if (h.warpIndex < 0 && h.autoPoint < 0 && h.autoBend < 0 && r.getWidth() > 18.0f)
             {
                 if (r.getRight() - p.x < 7.0f)  h.edge = Edge::right;
                 else if (p.x - r.getX() < 7.0f) h.edge = Edge::left;
@@ -928,6 +1284,8 @@ void PlaylistComponent::mouseMove (const juce::MouseEvent& e)
         if (tool == Tool::slice)             cursor = juce::MouseCursor::CrosshairCursor;
         else if (tool == Tool::erase)        cursor = juce::MouseCursor::NormalCursor;
         else if (h.warpIndex >= 0)           cursor = juce::MouseCursor::LeftRightResizeCursor;
+        else if (h.autoPoint >= 0)           cursor = juce::MouseCursor::DraggingHandCursor;
+        else if (h.autoBend >= 0)            cursor = juce::MouseCursor::UpDownResizeCursor;
         else if (h.edge != Edge::none)       cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.clipId != 0)              cursor = juce::MouseCursor::DraggingHandCursor;
     }
@@ -1040,6 +1398,64 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
         drag.mode      = DragState::Mode::warp;
         drag.clipId    = clip->id;
         drag.warpIndex = h.warpIndex;
+        repaint();
+        return;
+    }
+
+    // A curve's handles, on the same principle: the clip is already selected
+    // here, since nothing else shows them. Alt-click removes a point, which
+    // leaves plain clicking free for drawing one.
+    if (h.autoPoint >= 0)
+    {
+        if (e.mods.isAltDown())
+        {
+            project.removeCurvePoint (clip->id, h.autoPoint);
+            repaint();
+            return;
+        }
+
+        drag.mode       = DragState::Mode::autoPoint;
+        drag.clipId     = clip->id;
+        drag.pointIndex = h.autoPoint;
+        repaint();
+        return;
+    }
+
+    if (h.autoBend >= 0)
+    {
+        drag.mode       = DragState::Mode::autoBend;
+        drag.clipId     = clip->id;
+        drag.pointIndex = h.autoBend;
+        drag.bendY0     = e.position.y;
+        drag.bend0      = clip->curve != nullptr
+                            ? clip->curve->points[(size_t) h.autoBend].bend : 0.0;
+        repaint();
+        return;
+    }
+
+    // Clicking the body of a selected curve draws a point there and starts
+    // dragging it, so adding one and placing it are a single gesture rather
+    // than a click followed by a drag. The name strip is excluded, which is
+    // what keeps a selected curve movable.
+    // Shift is left out so that shift+drag still duplicates a selection from
+    // anywhere on the clip, rather than only from its name strip.
+    if (clip->isAutomation() && curveVisible (*clip) && h.edge == Edge::none
+        && tool == Tool::draw && ! e.mods.isPopupMenu() && ! e.mods.isShiftDown()
+        && e.position.y > clipBounds (*clip).getY() + 15.0f)
+    {
+        const auto body = curveBody (clipBounds (*clip));
+        const int index = project.setCurvePoint (clip->id,
+                                                 clampToCurveWindow (*clip, snap (h.beat, e.mods)
+                                                                              - (clip->start - clip->offset)),
+                                                 curveYToValue (body, e.position.y),
+                                                 0.0);
+        if (index >= 0)
+        {
+            drag.mode       = DragState::Mode::autoPoint;
+            drag.clipId     = clip->id;
+            drag.pointIndex = index;
+            drag.moved      = true;
+        }
         repaint();
         return;
     }
@@ -1184,6 +1600,52 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             if (c == nullptr) return;
             project.moveWarpMarker (c->id, drag.warpIndex,
                                     snap (h.beat, e.mods) - c->start);
+            drag.moved = true;
+            break;
+        }
+
+        case DragState::Mode::autoPoint:
+        {
+            auto* c = project.find (drag.clipId);
+            if (c == nullptr || c->curve == nullptr) return;
+
+            // The index is re-read from what the move returns, so a point
+            // dragged past its neighbour swaps with it and carries on being
+            // dragged rather than being left behind.
+            const auto body = curveBody (clipBounds (*c));
+            drag.pointIndex = project.moveCurvePoint (c->id, drag.pointIndex,
+                                                      clampToCurveWindow (*c, snap (h.beat, e.mods)
+                                                                                - (c->start - c->offset)),
+                                                      curveYToValue (body, e.position.y));
+            drag.moved = true;
+            break;
+        }
+
+        case DragState::Mode::autoBend:
+        {
+            auto* c = project.find (drag.clipId);
+            if (c == nullptr || c->curve == nullptr) return;
+
+            // Vertical travel, measured against where the handle was grabbed,
+            // with the full range reached over about a track's height.
+            //
+            // The sign follows the segment's own direction, so the curve always
+            // moves the way the mouse does. A positive bend holds the value
+            // near the point it is leaving, which sags a rising segment
+            // downwards but holds a falling one up, so taking the direction
+            // into account is what stops the handle running away from the
+            // mouse on half the segments in a curve.
+            const auto& points = c->curve->points;
+            if (! juce::isPositiveAndBelow (drag.pointIndex, (int) points.size())
+                || (size_t) drag.pointIndex + 1 >= points.size())
+                return;
+
+            const double rise = points[(size_t) drag.pointIndex + 1].value
+                                  - points[(size_t) drag.pointIndex].value;
+            const double sign = rise >= 0.0 ? 1.0 : -1.0;
+
+            const double travel = (double) (e.position.y - drag.bendY0) / (double) trackH;
+            project.setCurveBend (c->id, drag.pointIndex, drag.bend0 + sign * travel * 2.0);
             drag.moved = true;
             break;
         }
@@ -1346,10 +1808,28 @@ void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
         if (c == nullptr)
             return;
 
-        if (! c->isAudio())
+        if (c->isMidi())
         {
             if (onOpenPianoRoll)
                 onOpenPianoRoll (c->id);
+            return;
+        }
+
+        if (c->isAutomation())
+        {
+            // A curve is edited in place, so there is nothing to open. Double
+            // clicking works on its handles instead: on a point it removes it,
+            // on a bend handle it puts the segment back to a straight line,
+            // which is the one thing a bend drag cannot reliably land on.
+            if (project.selection.count (c->id) == 0)
+                project.selection = { c->id };
+
+            if (h.autoPoint >= 0)       project.removeCurvePoint (c->id, h.autoPoint);
+            else if (h.autoBend >= 0)   project.setCurveBend (c->id, h.autoBend, 0.0);
+            else                        return;
+
+            updateClipBar();
+            repaint();
             return;
         }
 
@@ -1420,6 +1900,8 @@ void PlaylistComponent::showTrackMenu (int track)
     menu.addSubMenu ("Send audio to", route);
     menu.addItem (1, project.tracks[(size_t) track].armed ? "Disarm recording" : "Arm for recording");
     menu.addItem (2, project.tracks[(size_t) track].muted ? "Unmute" : "Mute");
+    menu.addSeparator();
+    menu.addItem (3, "Automate...");
 
     juce::Component::SafePointer<PlaylistComponent> safeThis (this);
     menu.showMenuAsync (juce::PopupMenu::Options(), [safeThis, track] (int result)
@@ -1435,6 +1917,15 @@ void PlaylistComponent::showTrackMenu (int track)
         }
         else if (result == 1) tr.armed = ! tr.armed;
         else if (result == 2) tr.muted = ! tr.muted;
+        else if (result == 3)
+        {
+            // Shown from here rather than nested in the menu above, because
+            // what is automatable depends on the plugins loaded and building
+            // the whole tree every time the track menu opens would walk every
+            // plugin's parameter list for a menu nobody had asked for.
+            safeThis->showAutomationMenu (track);
+            return;
+        }
         safeThis->project.changed();
         safeThis->repaint();
     });
@@ -1616,7 +2107,7 @@ int PlaylistComponent::firstFreeChannel (const std::set<int>& alreadyClaimed) co
 
         bool inUse = false;
         for (const auto& clip : project.clips)
-            if (! clip.isAudio() && clip.channel == c)
+            if (clip.isMidi() && clip.channel == c)
             {
                 inUse = true;
                 break;

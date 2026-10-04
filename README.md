@@ -11,6 +11,7 @@ Built for the people. Free forever, source included.
 - **Modulators on anything.** A tempo-locked shape wired to any parameter of any plugin you host, assigned by grabbing the knob rather than hunting through a list. Several can stack on one parameter, and they ride on top of whatever the knob is already set to.
 - **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Verified against EBU Tech 3341 compliance test cases to within 0.011 LU. A plugin only hears its own insert; the studio hears the whole thing.
 - **Delay compensation that understands sends.** Look-ahead plugins hold audio back, and a bus fed by another insert cannot be ready before its source. Every path is levelled so instruments, audio clips and sends reach the master on the same sample.
+- **Curves you can bend.** Automation lives on the playlist as a clip you move, copy and trim like any other, and every segment has a bend, so a sweep that sits still and then opens is two points rather than a dozen. A bend can never take the value outside the points it joins, so what you hear is the line you drew.
 - **Each drum on its own strip.** Multi-output instruments like Microtonic Multi can send every output bus to its own mixer insert, with its own fader and effects.
 
 ## Runs on
@@ -200,6 +201,22 @@ A marker pins one point in the audio to one position on the grid, and everything
 - While the transport rolls they follow the song, so a project sounds the same every time and matches its export. While stopped they free-run, so you can dial a sound in.
 - The random shapes are repeatable: the same beat gives the same value on every play.
 
+### Automation
+
+Two kinds, for the two different things automation is asked to do.
+
+**Lanes inside a MIDI clip**, in the piano roll's bottom lane, for a movement that belongs to the part: it travels with the clip when you drag it somewhere else.
+
+**Automation clips on the playlist**, for a movement that belongs to the arrangement, and for anything on the mixer, which has no pattern to live in:
+
+- **Right-click a playlist track header, choose Automate**, then pick what to move: that track's insert volume or pan, a parameter of any effect on it, or a parameter of any instrument you have loaded. A four bar clip appears, starting at the value the control is already sitting at, so drawing one on a balanced mix does not throw the balance away.
+- The clip is a clip. Drag it, copy it, trim it, mute it, delete it, exactly like audio or MIDI. It is drawn as the curve rather than as a block, because the shape is the content.
+- **Click it once to select it**, which is when its handles appear. Then **click anywhere on the curve to add a point** and drag it into place in one gesture. **Alt-click** a point to remove it, or double-click it. The clip's name strip stays a grab handle, so a selected curve can still be moved.
+- **Drag the small circle between two points to bend the segment.** A bend holds the value near the point it is leaving and then runs it quickly to the next, or the other way round, which is what a filter that should sit closed for four bars and then open over one actually needs. Double-click the circle to put the segment back to a straight line.
+- A bend can never take the value outside the two points it joins, so what you hear is the line you drew. Two points on the same beat is an instant jump.
+- A fader or pan curve shows a rule at its resting position, so you can always draw it back to 0 dB or to centre.
+- Automation moves the mixer's own controls, so you can watch the fader follow it.
+
 ### Mix report
 
 - Measures the master **after every effect on it**, which is what actually leaves the studio.
@@ -210,7 +227,7 @@ A marker pins one point in the audio to one position on the grid, and everything
 
 ### Piano roll
 - Click to draw notes, drag to move, drag the right edge to resize, right-click (or **Delete** tool) to erase. Click the keys to hear notes.
-- The bottom lane shows **Velocity**, or any **automation** you recorded. Click to add points, drag them, right-click to delete. **Clear lane** removes a lane.
+- The bottom lane shows **Velocity**, or any **automation** you recorded. Click to add points, drag them, right-click to delete. **Clear lane** removes a lane These lanes belong to the clip; for a movement across a whole section, or anything on the mixer, use an automation clip on the playlist instead.
 
 ### Mixer
 - The **Mixer** button (or **F9**) opens the mixer in its own window, so you can keep the playlist behind it. It remembers its size and position.
@@ -250,13 +267,15 @@ Done:
 - Input monitoring
 - Warp markers, for audio that drifts inside a take
 - MIDI file import and export, exact for notes
+- Automation clips on the playlist, with bendable segments, and automation of mixer volume, pan and effect parameters
 
 Next:
 
 - Loop recording with take comping
 - A bundle of open-source instruments, so a fresh install makes sound on its own
 - Sampler channels, and a built-in synth
-- Standalone automation clips
+- A preferences window
+- Spectral editing
 
 ## Project layout
 
