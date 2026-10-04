@@ -19,6 +19,9 @@
 // Sources:
 //   ITU-R BS.1770-4, Tables 1 and 2 (K-weighting coefficients at 48 kHz)
 //   EBU Tech 3341, Table 1, cases 1, 2, 3 and 9
+//   EBU Tech 3342, for the loudness range: the spread between the 95th and
+//     the 10th percentile of the short term readings, gated at -70 LUFS
+//     absolutely and then 20 LU below the mean of what survives that
 // ---------------------------------------------------------------------------
 
 #include <algorithm>
@@ -384,6 +387,127 @@ static void truePeakIsWiredUp()
            "true peak and sample peak differed by only " + std::to_string (measured - sampled));
 }
 
+/** Loudness range, to EBU Tech 3342.
+
+    Three cases, because the gating is the part that is easy to get wrong and
+    impossible to spot from the number. A programme with a silent lead in is
+    the one that matters: ungated, the quiet end of the distribution is the
+    silence rather than the quietest music, and the meter reports an enormous
+    range for a track that is actually squashed flat. That is the shape of
+    failure this program has had before: a figure that is present, plausible
+    and wrong.
+*/
+static void loudnessRangeFollowsTech3342()
+{
+    std::printf ("EBU Tech 3342 loudness range\n");
+
+    const auto rangeOf = [] (const std::vector<Tone>& tones)
+    {
+        LoudnessMeter meter;
+        meter.prepare (48000.0);
+        feed (meter, tones, 48000.0);
+        return meter.getLoudnessRange();
+    };
+
+    // Something that never changes level has no range. Not exactly zero,
+    // because the window still slides over the start of the tone, but close.
+    const double flat = rangeOf ({ { 1000.0, -23.0, 30.0 } });
+    std::printf ("    %-34s %5.2f LU\n", "steady tone", flat);
+    check (flat < 1.0, "a steady tone read a loudness range of " + std::to_string (flat));
+
+    // Alternating ten decibels apart, in passages long enough for the three
+    // second window to settle on each. The 95th and 10th percentiles then sit
+    // on the two levels, so the answer is the ten decibels between them.
+    std::vector<Tone> alternating;
+    for (int i = 0; i < 5; ++i)
+    {
+        alternating.push_back ({ 1000.0, -18.0, 6.0 });
+        alternating.push_back ({ 1000.0, -28.0, 6.0 });
+    }
+    const double tenApart = rangeOf (alternating);
+    std::printf ("    %-34s %5.2f LU\n", "two levels 10 LU apart", tenApart);
+    check (std::abs (tenApart - 10.0) <= 1.0,
+           "two levels ten decibels apart read a range of " + std::to_string (tenApart));
+
+    // The gating case, and the reason the gates are in the standard. A steady
+    // passage with a quiet fade either side of it, thirty LU down but nowhere
+    // near silent, which is what the top and tail of a real track look like.
+    // The relative gate is what has to remove it: at -53 LUFS the fade is far
+    // above the absolute gate, so nothing else can. Ungated, the quiet end of
+    // the distribution is the fade rather than the quietest music and this
+    // reads about thirty LU for a track that never changes level at all.
+    const double withFades = rangeOf ({ { 1000.0, -50.0, 10.0 },
+                                        { 1000.0, -20.0, 40.0 },
+                                        { 1000.0, -50.0, 10.0 } });
+    std::printf ("    %-34s %5.2f LU\n", "steady, with quiet fades either end", withFades);
+    check (withFades < 3.0,
+           "a quiet fade either side of a steady passage inflated the range to "
+               + std::to_string (withFades));
+
+    // Digital silence either end has to go the same way, since a rendered
+    // track usually has some. The bound is looser here because the three
+    // second window necessarily straddles the edge of the silence, so a
+    // couple of LU of the answer is the window smearing across a 100 dB step
+    // rather than the gate failing. Ungated this reads around fifty.
+    const double withSilence = rangeOf ({ { 1000.0, -120.0, 8.0 },
+                                          { 1000.0, -20.0, 30.0 },
+                                          { 1000.0, -120.0, 8.0 } });
+    std::printf ("    %-34s %5.2f LU\n", "steady, with silence either end", withSilence);
+    check (withSilence < 4.0,
+           "silence either side of a steady passage inflated the range to "
+               + std::to_string (withSilence));
+
+    // And a quiet passage that is only 8 LU down is music, not silence, so it
+    // stays in: the relative gate is at 20 LU, and a gate that swallowed this
+    // would flatter every mix.
+    std::vector<Tone> gentle;
+    for (int i = 0; i < 5; ++i)
+    {
+        gentle.push_back ({ 1000.0, -16.0, 6.0 });
+        gentle.push_back ({ 1000.0, -24.0, 6.0 });
+    }
+    const double eightApart = rangeOf (gentle);
+    std::printf ("    %-34s %5.2f LU\n", "two levels 8 LU apart", eightApart);
+    check (eightApart > 5.0,
+           "a passage 8 LU down was gated out: the range read " + std::to_string (eightApart));
+}
+
+/** The readings must not depend on how long the meter has been running.
+
+    This is here because of how the history is stored. The integrated reading
+    and the percentiles come out of fixed histograms rather than a growing
+    list of every block, which is what keeps the audio thread free of
+    allocation, and the risk that buys is quantisation: a bin is a hundredth
+    of an LU wide, and a reading that drifted as bins filled would show up as
+    a figure that slowly disagreed with every other meter.
+*/
+static void theReadingsDoNotDriftWithLength()
+{
+    std::printf ("a longer programme at the same level reads the same\n");
+
+    double first = 0.0;
+
+    for (double seconds : { 20.0, 60.0, 150.0 })
+    {
+        LoudnessMeter meter;
+        meter.prepare (48000.0);
+        feed (meter, { { 1000.0, -23.0, seconds } }, 48000.0);
+
+        const double got = meter.getIntegratedLufs();
+        std::printf ("    %6.0f s   I %+7.2f LUFS\n", seconds, got);
+
+        if (first == 0.0)
+            first = got;
+
+        check (std::abs (got - (-23.0)) <= 0.1,
+               "after " + std::to_string ((int) seconds) + " s the integrated reading is "
+                   + std::to_string (got));
+        check (std::abs (got - first) <= 0.02,
+               "the integrated reading drifted by " + std::to_string (std::abs (got - first))
+                   + " LU between a 20 s and a " + std::to_string ((int) seconds) + " s programme");
+    }
+}
+
 int main()
 {
     std::printf ("loudness meter\n");
@@ -396,6 +520,8 @@ int main()
     blockSizeDoesNotChangeTheReading();
     silenceDoesNotReadAsLoud();
     truePeakIsWiredUp();
+    loudnessRangeFollowsTech3342();
+    theReadingsDoNotDriftWithLength();
 
     if (failures > 0)
     {

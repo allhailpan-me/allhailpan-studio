@@ -2,6 +2,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "TruePeak.h"
 #include <cmath>
+#include <array>
 #include <vector>
 #include <algorithm>
 
@@ -23,6 +24,21 @@
     Peak is measured as true peak, to BS.1770-4 Annex 2, not as the largest
     stored sample. See TruePeak.h for why those are not the same number.
 
+    Loudness range follows EBU Tech 3342: the spread between the 95th and the
+    10th percentile of the short term readings, gated absolutely at -70 LUFS
+    and then relatively at 20 LU below the mean of what is left. The gates are
+    the whole point of the measure: without them a fade in or a silent bar at
+    the top of a song reads as enormous dynamic range.
+
+    Everything here runs on the audio thread, which cannot allocate, so the
+    history is kept as fixed histograms rather than as growing lists. That is
+    not only about allocation: a plain list means the integrated reading
+    rescans an hour of blocks every hundred milliseconds and the percentiles
+    copy and sort that list on every single block, so the cost of metering
+    would grow for as long as the session stayed open. Histograms make both
+    bounded, and are how the reference implementations do it for the same
+    reason.
+
     Verified against EBU Tech 3341 compliance test cases 1 and 2, and cases 15
     to 19 for the peak reading.
 */
@@ -37,6 +53,13 @@ public:
         blockSamples = (int) std::round (sampleRate * 0.4);     // 400 ms
         hopSamples   = (int) std::round (sampleRate * 0.1);     // 75% overlap
 
+        // Allocated here, on the message thread. reset() is reachable from
+        // the audio thread, so it may only clear these, never resize them.
+        squaredSum.assign ((size_t) std::max (1, blockSamples), 0.0);
+        blockEnergy.assign ((size_t) numBins, 0.0);
+        blockCount.assign ((size_t) numBins, 0);
+        shortCount.assign ((size_t) numBins, 0);
+
         reset();
     }
 
@@ -45,16 +68,28 @@ public:
         for (auto& s : states) s = {};
         for (auto& d : peakDetectors) d.reset();
 
-        squaredSum.assign ((size_t) std::max (1, blockSamples), 0.0);
+        std::fill (squaredSum.begin(), squaredSum.end(), 0.0);
+        runningSum = 0.0;
         writePos = 0;
         filled = 0;
         sinceHop = 0;
 
-        blockLoudness.clear();
-        shortTermHistory.clear();
+        std::fill (blockEnergy.begin(), blockEnergy.end(), 0.0);
+        std::fill (blockCount.begin(), blockCount.end(), 0);
+        std::fill (shortCount.begin(), shortCount.end(), 0);
+        blockRing.fill (0.0);
+        blockRingPos = 0;
+        blockRingSum = 0.0;
+        blocksSeen = 0;
+
+        gatedEnergy = 0.0;
+        gatedBlocks = 0;
+        shortGatedEnergy = 0.0;
+        shortGatedCount = 0;
 
         truePeak = 0.0f;
         momentary = shortTerm = integrated = -200.0;
+        range = 0.0;
     }
 
     /** Feeds one block. Only the first two channels are measured, which is
@@ -114,25 +149,14 @@ public:
         that is the point of measuring it. */
     float  getTruePeak()       const noexcept { return truePeak; }
 
-    /** How far the loudest moments sit above the average: a rough stand in for
-        how much life is left in the dynamics. */
-    double getLoudnessRange() const
-    {
-        if (shortTermHistory.size() < 4)
-            return 0.0;
+    /** Loudness range to EBU Tech 3342, in LU: how far the loudest moments sit
+        above the quiet ones once silence and fades have been gated out. A
+        rough stand in for how much life is left in the dynamics.
 
-        auto sorted = shortTermHistory;
-        std::sort (sorted.begin(), sorted.end());
-
-        const auto at = [&sorted] (double fraction)
-        {
-            const auto index = (size_t) juce::jlimit (0.0, (double) sorted.size() - 1.0,
-                                                      fraction * (sorted.size() - 1));
-            return sorted[index];
-        };
-
-        return at (0.95) - at (0.10);
-    }
+        Computed when a new short term reading appears rather than when this
+        is called, because this is called from the audio callback and the work
+        is a histogram scan. */
+    double getLoudnessRange() const noexcept { return range; }
 
 private:
     //==========================================================================
@@ -199,64 +223,162 @@ private:
         return meanSquare > 0.0 ? -0.691 + 10.0 * std::log10 (meanSquare) : -200.0;
     }
 
+    // ---- the history, as histograms -------------------------------------
+    //
+    // A gated measurement cannot be made incremental: the relative gate
+    // depends on the average of everything measured so far, so a block that
+    // was included an hour ago can fall below the gate now. What can be
+    // bounded is how the distribution is stored. A hundredth of an LU per bin
+    // is finer than the tolerance the standard is specified to by a factor of
+    // ten, and the bins hold the exact energies rather than the bin's own
+    // value, so the only approximation left is which side of a gate the one
+    // bin containing it falls on.
+    //
+    // The range runs from -70, which is the absolute gate and therefore the
+    // quietest value that can ever count, to +30, which no mix reaches
+    // because a converter would have clipped forty decibels earlier.
+    static constexpr double binsPerLu = 100.0;
+    static constexpr double lowestLufs = -70.0;
+    static constexpr double highestLufs = 30.0;
+    static constexpr int    numBins = (int) ((highestLufs - lowestLufs) * binsPerLu);
+
+    static int binFor (double loudness) noexcept
+    {
+        const int bin = (int) std::floor ((loudness - lowestLufs) * binsPerLu);
+        return bin < 0 ? 0 : (bin >= numBins ? numBins - 1 : bin);
+    }
+
+    static double loudnessAtBin (int bin) noexcept
+    {
+        return lowestLufs + (bin + 0.5) / binsPerLu;
+    }
+
     void takeBlock()
     {
         const double meanSquare = runningSum / blockSamples;
         const double l = loudnessOf (meanSquare);
 
         momentary = l;
-        blockLoudness.push_back (l);
 
         // Short term is the same measure over three seconds, which is thirty
-        // of these blocks.
-        const size_t window = 30;
-        if (blockLoudness.size() >= window)
-        {
-            double sum = 0.0;
-            for (size_t i = blockLoudness.size() - window; i < blockLoudness.size(); ++i)
-                sum += std::pow (10.0, (blockLoudness[i] + 0.691) / 10.0);
+        // of these blocks. Kept as a ring of the mean squares rather than of
+        // the loudnesses, which is the same number: converting each one to a
+        // level and back again only costs two logarithms and a little
+        // accuracy.
+        blockRingSum -= blockRing[blockRingPos];
+        blockRing[blockRingPos] = meanSquare;
+        blockRingSum += meanSquare;
+        if (++blockRingPos >= blockRing.size())
+            blockRingPos = 0;
+        ++blocksSeen;
 
-            shortTerm = loudnessOf (sum / window);
-            shortTermHistory.push_back (shortTerm);
+        // The absolute gate throws silence away. It is applied as the block
+        // goes in, so the running total below is the ungated mean the
+        // relative gate is measured from.
+        if (l > -70.0)
+        {
+            const int bin = binFor (l);
+            blockEnergy[(size_t) bin] += meanSquare;
+            ++blockCount[(size_t) bin];
+            gatedEnergy += meanSquare;
+            ++gatedBlocks;
         }
 
         updateIntegrated();
+
+        if (blocksSeen >= blockRing.size())
+        {
+            const double shortMeanSquare = blockRingSum / (double) blockRing.size();
+            shortTerm = loudnessOf (shortMeanSquare);
+
+            if (shortTerm > -70.0)
+            {
+                ++shortCount[(size_t) binFor (shortTerm)];
+                shortGatedEnergy += shortMeanSquare;
+                ++shortGatedCount;
+            }
+
+            updateRange();
+        }
     }
 
     void updateIntegrated()
     {
-        // Two gates. The absolute one throws away silence; the relative one
-        // throws away anything more than 10 LU below the average of what is
-        // left, so quiet passages do not drag a programme's figure down.
-        double sum = 0.0;
-        int    count = 0;
-
-        for (double l : blockLoudness)
-            if (l > -70.0)
-            {
-                sum += std::pow (10.0, (l + 0.691) / 10.0);
-                ++count;
-            }
-
-        if (count == 0)
+        if (gatedBlocks == 0)
         {
             integrated = -200.0;
             return;
         }
 
-        const double relativeGate = loudnessOf (sum / count) - 10.0;
+        // The relative gate throws away anything more than 10 LU below the
+        // average of what the absolute gate left, so quiet passages do not
+        // drag a programme's figure down.
+        const double relativeGate = loudnessOf (gatedEnergy / gatedBlocks) - 10.0;
+        const int    from = binFor (relativeGate);
 
-        sum = 0.0;
-        count = 0;
+        double sum = 0.0;
+        int    count = 0;
 
-        for (double l : blockLoudness)
-            if (l > -70.0 && l > relativeGate)
-            {
-                sum += std::pow (10.0, (l + 0.691) / 10.0);
-                ++count;
-            }
+        for (int bin = from; bin < numBins; ++bin)
+        {
+            // The bin holding the gate is taken as in or out by its centre.
+            // At a hundredth of an LU per bin that decides the fate of blocks
+            // within five thousandths of the threshold.
+            if (bin == from && loudnessAtBin (bin) <= relativeGate)
+                continue;
+            sum   += blockEnergy[(size_t) bin];
+            count += blockCount[(size_t) bin];
+        }
 
         integrated = count > 0 ? loudnessOf (sum / count) : -200.0;
+    }
+
+    void updateRange()
+    {
+        // Tech 3342: gate the short term readings absolutely at -70 LUFS and
+        // then at 20 LU below the mean of what is left, and take the spread
+        // between the 95th and the 10th percentile of the rest.
+        if (shortGatedCount < 4)
+        {
+            range = 0.0;
+            return;
+        }
+
+        const double relativeGate = loudnessOf (shortGatedEnergy / shortGatedCount) - 20.0;
+        const int    from = binFor (relativeGate);
+
+        int total = 0;
+        for (int bin = from; bin < numBins; ++bin)
+        {
+            if (bin == from && loudnessAtBin (bin) <= relativeGate)
+                continue;
+            total += shortCount[(size_t) bin];
+        }
+
+        if (total < 4)
+        {
+            range = 0.0;
+            return;
+        }
+
+        const auto percentile = [this, from, relativeGate, total] (double fraction)
+        {
+            // The rank the fraction asks for, counted from the quiet end.
+            const int wanted = (int) std::floor (fraction * (total - 1)) + 1;
+            int seen = 0;
+
+            for (int bin = from; bin < numBins; ++bin)
+            {
+                if (bin == from && loudnessAtBin (bin) <= relativeGate)
+                    continue;
+                seen += shortCount[(size_t) bin];
+                if (seen >= wanted)
+                    return loudnessAtBin (bin);
+            }
+            return loudnessAtBin (numBins - 1);
+        };
+
+        range = std::max (0.0, percentile (0.95) - percentile (0.10));
     }
 
     double sampleRate = 48000.0;
@@ -267,8 +389,21 @@ private:
     double runningSum = 0.0;
     int blockSamples = 0, hopSamples = 0, writePos = 0, filled = 0, sinceHop = 0;
 
-    std::vector<double> blockLoudness, shortTermHistory;
+    // The thirty 400 ms blocks the three second reading spans.
+    std::array<double, 30> blockRing {};
+    size_t blockRingPos = 0;
+    double blockRingSum = 0.0;
+    size_t blocksSeen = 0;
+
+    std::vector<double> blockEnergy;      // exact energy per bin, blocks past the absolute gate
+    std::vector<int>    blockCount;
+    std::vector<int>    shortCount;       // short term readings past the absolute gate
+    double gatedEnergy = 0.0;
+    int    gatedBlocks = 0;
+    double shortGatedEnergy = 0.0;
+    int    shortGatedCount = 0;
 
     float  truePeak = 0.0f;
     double momentary = -200.0, shortTerm = -200.0, integrated = -200.0;
+    double range = 0.0;
 };

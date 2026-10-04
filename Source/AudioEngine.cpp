@@ -1560,7 +1560,11 @@ void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSam
 {
     if (analysisReset.exchange (false))
     {
-        loudness.prepare (sampleRate);
+        // reset() rather than prepare(): this is the audio thread, and
+        // prepare() is where the meter's buffers are sized. Nothing it would
+        // redo has changed, because the sample rate only moves in
+        // audioDeviceAboutToStart, which prepares the meter itself.
+        loudness.reset();
         corrLR = corrLL = corrRR = 0.0;
     }
 
