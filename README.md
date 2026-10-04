@@ -145,9 +145,23 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - **Clip bar** (bottom), for one selected clip:
   - Audio clips: **Pitch** (plus or minus 24 semitones), **Stretch**, **Source BPM**, **Sync to tempo**, **Gain**, **Reset**.
   - **Sync to tempo** matches audio recorded elsewhere to your project. Tell the clip the tempo it was recorded at and it stays on the grid at any project tempo, and follows if you change the tempo later. Time-stretching does not touch pitch, so a vocal stays in key. Leave the tempo blank and it works one out from the clip's length.
+  - **Clear warp** appears once a clip has warp markers, and removes them all without changing the length the clip has now.
   - MIDI clips: which channel the clip plays, a button to open it, and **Clear auto** to delete recorded knob moves.
 - Stretching and pitch use Rubber Band's highest-quality engine. It renders in the background, and a quick preview plays until the render is done.
 - Right-click a track name to send its audio to a mixer insert, arm it, or mute it.
+
+### Warp markers
+Sync to tempo fixes audio that was played at one steady tempo. A warp marker fixes audio that drifts inside the take, which is the normal case for a live performance or a vocal.
+
+A marker pins one point in the audio to one position on the grid, and everything between two markers is stretched to fit. So you put a marker on the snare that landed late, drag it onto the beat, and the bar either side of it is pulled into place with it.
+
+- **Add:** select an audio clip, then double-click it where you want the marker. Adding a marker never changes the sound: it pins what is already playing there. Only dragging it afterwards warps anything.
+- **Move:** drag the marker. It snaps like everything else, and holding **Alt** ignores snapping. A marker will not cross its neighbours; it stops just short.
+- **Remove:** **Alt+click** it, or double-click it again.
+- Markers are drawn as red lines with a handle at the top, on the selected clip only, so they are out of the way the rest of the time. The waveform is drawn through the warp, so a transient appears under the grid line you pinned it to.
+- A warped clip always follows the project tempo, because its markers are positions on the grid. **Stretch**, **Source BPM** and **Sync to tempo** switch off while a clip is warped, since the markers now decide its timing.
+- Trimming, splitting and stretching all understand warp markers. Cutting a warped clip in two is inaudible: both halves carry on reading from the same place at the same speed.
+- Warping is saved with the project, and a marker edit is one undo step.
 
 ### Channel rack
 
@@ -201,7 +215,6 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - The status bar shows your device, latency, CPU load, and input and output levels.
 
 ### Not yet
-- Warp markers, for audio that drifts within a single take. Clip-level tempo matching handles audio recorded at a steady tempo.
 - No instruments are bundled yet, so you need your own VST3s to make sound.
 
 ## Roadmap
@@ -222,11 +235,12 @@ Done:
 - Loudness metering and the mix report
 - Per-output bus routing for multi-output plugins
 - Out-of-process plugin scanning, so a plugin that crashes cannot take the studio with it
+- Input monitoring
+- Warp markers, for audio that drifts inside a take
 
 Next:
 
-- Input monitoring, and loop recording
-- Warp markers
+- Loop recording with take comping
 - A bundle of open-source instruments, so a fresh install makes sound on its own
 - Sampler channels, and a built-in synth
 - Standalone automation clips

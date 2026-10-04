@@ -71,6 +71,15 @@ send, or splitting a channel's buses. Forget it and tracks drift apart by an
 amount that depends on which plugins happen to be loaded, which is maddening to
 diagnose from a bug report.
 
+**A warped clip's markers are kept normalised, always.** `WarpMap.h`'s lookups
+assume the marker list is sorted and strictly increasing in both beat and source
+position, and that everything in it is after the clip's left edge, which is an
+implicit marker. That invariant is what makes the mapping monotonic and
+invertible. Every path that changes markers or moves `Clip::offset` has to go
+back through `normaliseWarpMarkers` (`Clip::tidyWarp`), including loading a
+project. A list that breaks it makes a clip read backwards, which sounds like a
+stutter, and it makes the clip's own length in beats meaningless.
+
 **Sends may only feed a higher numbered insert.** That one rule is what keeps
 the mixer free of feedback loops and lets a single pass over the inserts
 resolve every route. Do not relax it without replacing it with a real cycle
@@ -179,6 +188,7 @@ braces on their own line.
 | `MixReportPanel.h` | What the finished master measures |
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
+| `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 
 ## Things worth knowing about the design

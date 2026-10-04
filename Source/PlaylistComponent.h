@@ -66,11 +66,13 @@ private:
         int    track  = -1;
         int    clipId = 0;
         Edge   edge   = Edge::none;
+        int    warpIndex = -1;   // a warp marker under the mouse, on a selected clip
     };
 
     struct DragState
     {
-        enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee } mode = Mode::none;
+        enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee, warp } mode = Mode::none;
+        int    warpIndex = -1;
         int    clipId  = 0;
         double grab    = 0.0;
         int    track0  = 0;
@@ -90,6 +92,13 @@ private:
     float  trackToY (int t) const       { return (float) grid.getY() + (float) (t * trackH) - scrollY; }
     int    yToTrack (float y) const     { return (int) std::floor ((y - (float) grid.getY() + scrollY) / trackH); }
     juce::Rectangle<float> clipBounds (const Clip&) const;
+
+    /** Where a warp marker sits on screen, or 0 when the clip is not warped.
+        Markers are only shown and only grabbable on a selected audio clip, so
+        that they never get in the way of moving an unselected one. */
+    float  warpMarkerX (const Clip&, int index) const;
+    bool   warpVisible (const Clip&) const;
+    void   stretchClipTo (Clip&, const Clip& original, double wantedBeats);
 
     void zoom (double factor, float anchorX);
     void updateScrollBars();
@@ -127,6 +136,7 @@ private:
     juce::Slider     pitchSlider, stretchSlider, gainSlider, sourceBpmSlider;
     juce::TextButton syncButton { "Sync to tempo" };
     juce::TextButton resetButton { "Reset" }, openRollButton { "Open piano roll" };
+    juce::TextButton clearWarpButton { "Clear warp" };
     juce::ComboBox   channelBox;
     bool             sliderDragging = false;
     bool             updatingClipBar = false;

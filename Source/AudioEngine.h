@@ -159,6 +159,14 @@ public:
         double playLength = 0.0;    // output seconds
         double rate = 1.0;          // data seconds per output second
         float  gain = 1.0f;
+
+        // A warped clip reads along a piecewise line instead of at one rate.
+        // These index Snapshot::warp rather than pointing into it, so that
+        // building the snapshot cannot leave a dangling pointer behind. Zero
+        // segments means the single `rate` above governs the whole clip, which
+        // is the case for every clip that is not warped and for every warped
+        // one whose stretched copy has finished rendering.
+        int warpFirst = 0, warpCount = 0;
     };
     struct NoteRT  { double on = 0.0, off = 0.0; int note = 60; juce::uint8 velocity = 100; };
     struct LaneRT
@@ -178,6 +186,7 @@ public:
         std::vector<AudioClipRT> audio;
         std::vector<MidiClipRT>  midi;
         std::vector<Modulator>   modulators;   // copied whole; they are small
+        std::vector<WarpSegment> warp;         // every warped clip's segments, end to end
         double songEnd = 0.0;
     };
     void setSnapshot (Snapshot&&);
