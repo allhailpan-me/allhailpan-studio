@@ -1976,6 +1976,12 @@ void MainComponent::newProject()
         self.clearSession();
         ProjectIO::resetEngine (self.engine);
         self.project.clearAll();
+
+        // clearAll put the tempo back to the default; this is what carries
+        // that to the engine, the displayed number and any tempo following
+        // clip, the same way a tempo change typed in by hand does.
+        self.tempo.setValue (self.project.bpm, juce::sendNotificationSync);
+
         self.engine.setSongStart (0.0);
         self.engine.stopAndRewind();
 
