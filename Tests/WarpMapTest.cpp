@@ -2,10 +2,8 @@
 // Checks the beat to source mapping that warp markers describe.
 //
 // WarpMap.h has no JUCE in it precisely so this can be built and run on its
-// own, with sanitizers, in a few seconds:
-//
-//   g++ -std=c++20 -O1 -fsanitize=address,undefined -I../Source \
-//       -o warptest WarpMapTest.cpp && ./warptest
+// own, with sanitizers, in a few seconds. CI runs it on every push, and
+// ./Tests/run.sh runs it the same way here.
 //
 // The mapping is the kind of arithmetic that goes wrong quietly. A warp that is
 // a hair off at one marker does not fail, it drifts, and a producer only finds

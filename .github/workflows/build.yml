@@ -24,9 +24,31 @@ permissions:
   contents: write
 
 jobs:
+  # The arithmetic that would be silently wrong, checked before anything is
+  # compiled. This finishes in seconds because the headers it covers are
+  # deliberately free of JUCE, so a broken warp mapping or latency sum is
+  # reported long before the three platform builds have fetched their
+  # dependencies, and it reads as its own failure rather than as a build error.
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run standalone tests
+        run: ./Tests/run.sh
+
   build:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+
+    # The build still runs when a test fails, because knowing whether the code
+    # compiles on all three platforms is useful even while a test is red. What
+    # a red test does stop is the release below: a bounce that does not line up
+    # must not reach anyone as a download.
+    needs: tests
+    if: ${{ !cancelled() }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -108,7 +130,9 @@ jobs:
       # RELEASE_NOTES.md in the repository, so they are written and reviewed
       # alongside the code they describe.
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        if: >
+          needs.tests.result == 'success'
+          && (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
