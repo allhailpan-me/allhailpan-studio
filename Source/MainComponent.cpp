@@ -1639,8 +1639,7 @@ void MainComponent::updateTypingLabel()
 
 void MainComponent::showAudioSettings()
 {
-    auto* selector = new juce::AudioDeviceSelectorComponent (engine.devices(), 0, 8, 0, 8, true, false, true, false);
-    selector->setSize (560, 480);
+    auto* selector = new AudioSettingsPanel (engine.devices());
 
     juce::DialogWindow::LaunchOptions o;
     o.content.setOwned (selector);

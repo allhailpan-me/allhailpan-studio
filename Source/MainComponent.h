@@ -16,6 +16,7 @@
 #include <atomic>
 #include "MixerComponent.h"
 #include "PluginPicker.h"
+#include "AudioSettingsPanel.h"
 #include "Logo.h"
 #include "ProjectIO.h"
 #include "ExportJob.h"
