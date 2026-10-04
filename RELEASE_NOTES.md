@@ -1,4 +1,16 @@
-Everything since v0.2.0. The engine changed more in this release than the interface did, and most of the second half of these notes is about things that were quietly wrong rather than things that are new.
+Two fixes found by playing v0.3.0, followed by everything that went into v0.3.0 itself.
+
+## Since v0.3.0
+
+**Monitoring is no longer delayed by plugin delay compensation.** Playing a guitar through the studio was pushed back by an amount that had nothing to do with the audio interface, and that changed whenever a plugin was loaded or bypassed. Monitored input is mixed into an insert, and that insert was then held back along with everything else to keep the tracks lined up with each other. A lookahead limiter or a linear phase EQ anywhere in the project was enough on its own to make the instrument unplayable.
+
+The insert being monitored through is no longer held back. Anything else landing on that insert plays early by the same amount while monitoring is on, which is the right trade while tracking: the player has to be able to play, and lining the take up with the arrangement afterwards is the recorder's job and already happens.
+
+**The audio settings window now says what your latency actually is.** A buffer size in samples does not tell you what you have chosen until it is divided by the sample rate and added to the driver's own buffering either side. The round trip is now printed in milliseconds, split into input, output and buffer, taken from what the driver reports rather than inferred.
+
+If the number is high on Windows, the buffer size is often not the lever. Shared mode Windows Audio and DirectSound buffer heavily whatever is asked of them. Changing **Audio device type** to Windows Audio (Exclusive Mode) is usually a large improvement. ASIO is better still, but note that these downloads are built without it: `JUCE_ASIO` only compiles in when the Steinberg SDK is present, which the build machine does not have. Building locally with `AHP_ASIO_SDK_DIR` set enables it.
+
+**Plugin editors and the mixer stay in front.** Opening the mixer over the playlist and clicking an insert appeared to do nothing: the editor opened behind the main window with no sign it had opened at all. Editors now come to the front when opened, and both they and the mixer float above the main window while the studio is the application in front. They drop back when you switch to something else, so they will not sit over your browser, and while a dialog is open so nothing covers it.
 
 ## Since v0.2.0
 
