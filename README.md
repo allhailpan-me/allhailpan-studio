@@ -1,10 +1,17 @@
 # ALLHAILPAN Studio
 
-A free, open-source digital audio workstation with an FL Studio–style workflow: channel rack, step sequencer, piano roll, pattern-based playlist, mixer with inserts, audio recording, and VST3 plugin hosting.
+A free, open-source digital audio workstation with an FL Studio style workflow: channel rack, step sequencer, piano roll, pattern-based playlist, mixer with inserts and sends, audio recording, and VST3 plugin hosting.
 
 Built for the people. Free forever, source included.
 
-> Early development. Working today: audio engine, VST3 instruments, MIDI and typing keyboard, sample browser, playlist with audio clips, and recording. The channel rack, piano roll and mixer are being ported from the browser prototype in `prototype/`.
+> Early development, but the engine is real. Plugin delay compensation, tempo-locked modulators on any plugin parameter, broadcast-standard loudness metering, and per-output routing for multi-output drum machines all work today.
+
+## What makes it different
+
+- **Modulators on anything.** A tempo-locked shape wired to any parameter of any plugin you host, assigned by grabbing the knob rather than hunting through a list. Several can stack on one parameter, and they ride on top of whatever the knob is already set to.
+- **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Verified against EBU Tech 3341 compliance test cases to within 0.011 LU. A plugin only hears its own insert; the studio hears the whole thing.
+- **Delay compensation that understands sends.** Look-ahead plugins hold audio back, and a bus fed by another insert cannot be ready before its source. Every path is levelled so instruments, audio clips and sends reach the master on the same sample.
+- **Each drum on its own strip.** Multi-output instruments like Microtonic Multi can send every output bus to its own mixer insert, with its own fader and effects.
 
 ## Runs on
 
@@ -23,7 +30,7 @@ Every push is built automatically for all three systems. Download the latest bui
 3. Open **Developer PowerShell for Visual Studio** and run:
 
 ```powershell
-git clone https://github.com/YOUR-NAME/allhailpan-studio.git
+git clone https://github.com/allhailpan-me/allhailpan-studio.git
 cd allhailpan-studio
 cmake -B build
 cmake --build build --config Release
@@ -66,7 +73,7 @@ cmake --build build --parallel
 
 ## Using it
 
-**Views:** Playlist (**F5**), Piano roll (**F7**), Mixer (**F9**), switched with the tabs at the top.
+**Views:** Playlist (**F5**), Channel rack (**F6**), Piano roll (**F7**), Modulators (**F8**), Mixer (**F9**), and the mix report, switched with the tabs at the top.
 
 ### Transport
 - **Space** plays and pauses. **Stop** returns to the start marker. Pressing **Stop** again when already stopped does three things: silences every note, resets the instruments (which also stops plugins that drone on regardless of note-offs), and sends the start marker back to the beginning, so the next **Play** starts from bar 1. Clicking the ruler or an empty spot afterwards sets a new start point as usual.
@@ -106,7 +113,9 @@ Drum machines and sequencer plugins (Microtonic, arpeggiators, loop players) don
 
 **Multi-output plugins:** some instruments put each sound on its own output bus instead of one stereo mix. **Microtonic Multi** does this: its A/B selector is switched off and each of the 8 drum channels goes to a separate stereo output, so a host reading only the first output hears one drum, or nothing.
 
-When a plugin has more than one output bus, ALLHAILPAN Studio switches them all on and mixes them into the channel. The **Mix all outs** button in the channel bar turns that off if you'd rather hear only the first stereo output. (If you want each drum on its own mixer insert, use the regular Microtonic on several channels for now; per-bus routing is on the roadmap.)
+When a plugin has more than one output bus, ALLHAILPAN Studio switches them all on and mixes them into the channel. The **Mix all outs** button in the channel bar turns that off if you'd rather hear only the first stereo output.
+
+To give each drum its own mixer strip, use **Route outs...** in the channel bar and choose **Spread across inserts from here**. Every output lands on its own insert in order, each with its own fader, effects and metering, the way a hardware drum machine's individual outs would be patched. Delay compensation follows the split, so a plugin with latency on one drum's strip does not pull that drum out of time with the rest of the kit.
 
 ### Recording
 - Choose the mode next to **Rec**:
@@ -126,10 +135,38 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 - **Editing:** **Ctrl+C** copy, **Ctrl+X** cut, **Ctrl+V** paste at the mouse (or at the playhead), **Ctrl+B** duplicate, **Delete** removes. Right-click also deletes.
 - **Snap** runs from Bar down to 1/6 step or None; hold **Alt** to ignore it. **Ctrl+scroll** zooms.
 - **Clip bar** (bottom), for one selected clip:
-  - Audio clips: **Pitch** (±24 semitones), **Stretch**, **Gain**, **Reset**.
+  - Audio clips: **Pitch** (plus or minus 24 semitones), **Stretch**, **Source BPM**, **Sync to tempo**, **Gain**, **Reset**.
+  - **Sync to tempo** matches audio recorded elsewhere to your project. Tell the clip the tempo it was recorded at and it stays on the grid at any project tempo, and follows if you change the tempo later. Time-stretching does not touch pitch, so a vocal stays in key. Leave the tempo blank and it works one out from the clip's length.
   - MIDI clips: which channel the clip plays, a button to open it, and **Clear auto** to delete recorded knob moves.
 - Stretching and pitch use Rubber Band's highest-quality engine. It renders in the background, and a quick preview plays until the render is done.
 - Right-click a track name to send its audio to a mixer insert, arm it, or mute it.
+
+### Channel rack
+
+- **F6.** One row per instrument channel, one column per step. Click to draw, drag across to paint, right-click a row for fills on the beat, every other step, or every fourth.
+- Steps are not a separate kind of data: each one is an ordinary note in an ordinary MIDI clip, so a pattern drawn here opens in the piano roll and can be edited there.
+- Each channel remembers which **key** its steps play, which matters for drum plugins that put every sound on a different note. Changing that key moves the row's notes rather than appearing to wipe them.
+- Pattern length (1, 2 or 4 bars) and resolution (8, 16 or 32 steps to the bar) are per project, with **<** and **>** to move to another bar.
+- How full a block is drawn shows its velocity.
+
+### Modulators
+
+- **F8.** A modulator is a shape that runs in time, wired to any number of plugin parameters. It is the difference between drawing a filter sweep by hand every eight bars and saying "this moves".
+- Because modulators drive ordinary parameters, they work on **any plugin you host**, not only on built-in devices.
+- **Add a modulator, click Learn, then grab the knob you want** inside the plugin's own window. No hunting through a list of several hundred numbered parameters.
+- Seven shapes: sine, triangle, saw, ramp, square, random, and sample and hold. Rates are musical divisions from 1/16 to 8 bars, so everything stays locked to the tempo.
+- **Bipolar** swings either side of the knob's own value; **unipolar** only moves it upward. Depth is per target, and can be negative to invert.
+- Modulation rides on top of whatever the parameter is already set to, so the knob still means what it means. Turn it by hand and the modulator moves around the new value. Several modulators on one parameter add up.
+- While the transport rolls they follow the song, so a project sounds the same every time and matches its export. While stopped they free-run, so you can dial a sound in.
+- The random shapes are repeatable: the same beat gives the same value on every play.
+
+### Mix report
+
+- Measures the master **after every effect on it**, which is what actually leaves the studio.
+- **Loudness** in LUFS to ITU-R BS.1770-4, the standard Spotify, Apple Music and YouTube normalise to. Pick your target and it tells you how far off you are and what that costs.
+- **True peak**, **loudness range** (how much dynamic life is left), and **mono compatibility** (whether parts of the mix will cancel on a club system).
+- Each reading comes with what it means in plain language: that being louder than streaming wants buys nothing because they turn you down, that a true peak above -1 dB can distort after MP3 encoding even though it measures clean now, that a very small loudness range is what a limiter doing too much looks like.
+- Verified against EBU Tech 3341 compliance test cases 1 and 2 at 44.1, 48 and 96 kHz, within 0.011 LU of the required reading against a tolerance of 0.1.
 
 ### Piano roll
 - Click to draw notes, drag to move, drag the right edge to resize, right-click (or **Delete** tool) to erase. Click the keys to hear notes.
@@ -142,6 +179,7 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 - Click a strip to show its **effect rack** on the right: 8 slots, each with an on/off button for bypass.
 - Clicking an empty slot opens a **search window**: type a few letters, use Up/Down, then Enter to load. Works the same for replacing an effect.
 - **Find...** in the channel bar searches your instruments the same way.
+- **Sends:** each insert has two, below the effect rack. Pick a destination and a level to feed part of this insert into another one, so a reverb or delay can be shared instead of loaded on every track. A send can only feed a later insert, which is what keeps the mixer free of feedback loops, so the destination list offers only those.
 - For mastering, select **Master** and add LANDR there. The metronome and browser previews skip the master rack, so your chain never processes the click.
 
 ### Other
@@ -150,19 +188,36 @@ When a plugin has more than one output bus, ALLHAILPAN Studio switches them all 
 
 ### Not yet
 - Input monitoring through the app: use your interface's direct monitor.
+- Warp markers, for audio that drifts within a single take. Clip-level tempo matching handles audio recorded at a steady tempo.
+- No instruments are bundled yet, so you need your own VST3s to make sound.
 
 ## Roadmap
 
-1. ~~Audio engine, transport, metronome, device settings, plugin scanning~~
-2. ~~Playlist with audio clips, snapping, trim, copy/paste, marquee select~~
-3. Channel rack and step sequencer, sampler channels, per-output-bus routing for multi-out plugins
-4. ~~Piano roll~~ Built-in synth
-5. ~~VST3 instruments in 16 channels, effects in mixer inserts~~
-6. ~~Mixer with inserts, FX slots and metering~~ Sends
-7. ~~Audio and MIDI recording, parameter automation recording~~ Input monitoring, loop recording
-8. ~~Time-stretching and pitch-shifting with Rubber Band~~
-9. ~~Project save and load (including plugin state), autosave, WAV and stem export~~
-10. ~~Automation lanes in MIDI clips~~ Standalone automation clips
+Done:
+
+- Audio engine, transport, metronome, device settings, plugin scanning
+- Playlist with audio clips, snapping, trim, copy and paste, marquee select
+- Piano roll, and automation lanes inside MIDI clips
+- VST3 instruments in 16 channels, effects in mixer inserts
+- Mixer with inserts, FX slots, metering and sends
+- Audio and MIDI recording, including parameter automation and notes played inside a plugin's own window
+- Time-stretching and pitch-shifting with Rubber Band, and per-clip tempo matching
+- Project save and load including plugin state, autosave, crash recovery, WAV and stem export
+- Channel rack and step sequencer
+- Plugin delay compensation, and denormal protection
+- Modulators on any plugin parameter
+- Loudness metering and the mix report
+- Per-output bus routing for multi-output plugins
+- Out-of-process plugin scanning, so a plugin that crashes cannot take the studio with it
+
+Next:
+
+- Input monitoring, and loop recording
+- Warp markers
+- A bundle of open-source instruments, so a fresh install makes sound on its own
+- Sampler channels, and a built-in synth
+- Standalone automation clips
+- MIDI file import and export
 
 ## Project layout
 
