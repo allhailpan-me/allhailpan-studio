@@ -88,7 +88,7 @@ public:
                 std::abs (offset) <= 1.0 ? Ahp::bone : Ahp::rec);
 
         number (row.removeFromLeft (w).reduced (4, 0), "TRUE PEAK",
-                juce::String (truePeakDb, 1) + " dB",
+                juce::String (truePeakDb, 1) + " dBTP",
                 truePeakDb > -1.0 ? Ahp::rec : Ahp::bone);
 
         number (row.removeFromLeft (w).reduced (4, 0), "DYNAMICS (RANGE)",
@@ -116,10 +116,16 @@ public:
                           + " LU. Streaming will turn it up, so nothing is lost, but it will sit "
                             "quietly beside other material until it does.");
 
-        if (truePeakDb > -1.0)
-            findings.add ("True peak is above -1 dB. Converting to MP3 or AAC adds peaks that are "
-                          "not in the file, so this can distort after encoding even though it "
-                          "measures clean now. Set the limiter ceiling to -1 dB.");
+        if (truePeakDb > 0.0)
+            findings.add ("True peak is above 0 dBTP (" + juce::String (truePeakDb, 1)
+                          + "). The waveform a converter reconstructs between the samples goes "
+                            "higher than anything stored in the file, and this much of it is "
+                            "already clipping on playback, before any encoding. Pull the ceiling "
+                            "down to -1 dBTP.");
+        else if (truePeakDb > -1.0)
+            findings.add ("True peak is above -1 dBTP. Converting to MP3 or AAC moves peaks "
+                          "slightly, so this can clip after encoding even though it plays clean "
+                          "now. Set the limiter ceiling to -1 dBTP.");
 
         if (r.loudnessRange > 0.0 && r.loudnessRange < 3.0)
             findings.add ("Very little dynamic range left (" + juce::String (r.loudnessRange, 1)
