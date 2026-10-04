@@ -155,7 +155,13 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - Steps are not a separate kind of data: each one is an ordinary note in an ordinary MIDI clip, so a pattern drawn here opens in the piano roll and can be edited there.
 - Each channel remembers which **key** its steps play, which matters for drum plugins that put every sound on a different note. Changing that key moves the row's notes rather than appearing to wipe them.
 - Pattern length (1, 2 or 4 bars) and resolution (8, 16 or 32 steps to the bar) are per project, with **<** and **>** to move to another bar.
-- How full a block is drawn shows its velocity.
+- How full a block is drawn shows its velocity. **Shift+drag** up or down on a lit step sets that velocity directly, which is how hardware step sequencers do accents. Without varied velocity a programmed beat sounds like a machine.
+
+### Groove
+- **Swing** in the channel rack sets where the offbeat sits inside its pair. 50 is straight, 66 lands it on the third triplet, which is a full shuffle. That is the definition hardware samplers established, so a swing number means the same thing here as it does to a drummer or another studio. Most records sit between 54 and 62.
+- **Feel** goes further than swing, which on its own still sounds programmed. A played pattern has offbeats that are slightly quieter and slightly early or late, so **played** and **loose** soften and drift them by increasing amounts.
+- The drift is derived from each note's own position rather than drawn fresh, so a pattern plays the same way twice and an export matches what you heard. A groove that wandered on every pass would be unusable.
+- Groove never changes the stored notes. It is applied as the arrangement is handed to the engine, so it can be dialled while playing and turned off without having lost the original timing, and notes you played off the grid are left where you played them.
 
 ### Modulators
 

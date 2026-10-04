@@ -21,6 +21,46 @@ public:
             addAndMakeVisible (b);
         };
 
+        swingBox.addItem ("Straight", 1);
+        swingBox.addItem ("Swing 54", 2);
+        swingBox.addItem ("Swing 58", 3);
+        swingBox.addItem ("Swing 62", 4);
+        swingBox.addItem ("Shuffle 66", 5);
+        swingBox.setTooltip ("Where the offbeat sits inside its pair. 50 is straight, "
+                             "66 lands it on the third triplet, which is a full shuffle. "
+                             "Most records sit between 54 and 62.");
+        swingBox.onChange = [this]
+        {
+            const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
+            const int index = juce::jlimit (0, 4, swingBox.getSelectedId() - 1);
+
+            project.groove.swing   = swings[index];
+            project.groove.enabled = index > 0;
+            project.groove.base    = project.rackStepsPerBar >= 32 ? Groove::Base::thirtySecond
+                                   : project.rackStepsPerBar >= 16 ? Groove::Base::sixteenth
+                                                                   : Groove::Base::eighth;
+            commit();
+        };
+        addAndMakeVisible (swingBox);
+
+        feelBox.addItem ("Feel: tight", 1);
+        feelBox.addItem ("Feel: played", 2);
+        feelBox.addItem ("Feel: loose", 3);
+        feelBox.setTooltip ("How much the offbeats soften and drift. Swing on its own still "
+                            "sounds programmed; a played pattern is quieter and slightly "
+                            "early or late on the offbeats.");
+        feelBox.onChange = [this]
+        {
+            const double velocities[] { 0.0, 0.35, 0.6 };
+            const double randoms[]    { 0.0, 0.15, 0.4 };
+            const int index = juce::jlimit (0, 2, feelBox.getSelectedId() - 1);
+
+            project.groove.velocity = velocities[index];
+            project.groove.random   = randoms[index];
+            commit();
+        };
+        addAndMakeVisible (feelBox);
+
         addButton (clearAll, "Clear", "Erase every step in this pattern");
         clearAll.onClick = [this]
         {
@@ -88,6 +128,16 @@ public:
 
         positionLabel.setText ("Bar " + juce::String ((int) (project.rackStart / 4.0) + 1),
                                juce::dontSendNotification);
+
+        const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
+        int swingIndex = 0;
+        for (int i = 1; i < 5; ++i)
+            if (project.groove.enabled && std::abs (project.groove.swing - swings[i]) < 0.005)
+                swingIndex = i;
+        swingBox.setSelectedId (swingIndex + 1, juce::dontSendNotification);
+
+        const int feelIndex = project.groove.random >= 0.3 ? 2 : project.groove.velocity > 0.0 ? 1 : 0;
+        feelBox.setSelectedId (feelIndex + 1, juce::dontSendNotification);
         repaint();
     }
 
@@ -190,6 +240,10 @@ public:
 
         clearAll.setBounds (top.removeFromRight (64));
         top.removeFromRight (6);
+        feelBox.setBounds (top.removeFromRight (104));
+        top.removeFromRight (6);
+        swingBox.setBounds (top.removeFromRight (110));
+        top.removeFromRight (6);
         barsBox.setBounds (top.removeFromRight (90));
         top.removeFromRight (6);
         stepsBox.setBounds (top.removeFromRight (120));
@@ -221,10 +275,23 @@ public:
         if (step < 0)
             return;
 
+        // Holding shift on a lit step sets its velocity by how high in the
+        // cell you drag, which is how hardware step sequencers have always
+        // done accents. Without varied velocity a programmed beat sounds like
+        // a machine, so this wants to be as quick as drawing the step itself.
+        if (e.mods.isShiftDown() && project.rackStepOn (row, step))
+        {
+            shading = true;
+            dragging = true;
+            shadeAt (row, step, e.position);
+            return;
+        }
+
         // Painting: the first cell decides whether this gesture draws or
         // erases, so dragging across a row does one thing rather than
         // flipping every step it crosses.
         painting = ! project.rackStepOn (row, step) && ! e.mods.isRightButtonDown();
+        shading = false;
         dragging = true;
         applyTo (row, step);
     }
@@ -236,7 +303,12 @@ public:
 
         const int row  = rowAt (e.position);
         const int step = stepAt (e.position);
-        if (row >= 0 && step >= 0)
+        if (row < 0 || step < 0)
+            return;
+
+        if (shading)
+            shadeAt (row, step, e.position);
+        else
             applyTo (row, step);
     }
 
@@ -245,6 +317,7 @@ public:
         if (dragging)
         {
             dragging = false;
+            shading = false;
             commit();
         }
     }
@@ -276,6 +349,22 @@ private:
             return -1;
         const float stepW = grid.getWidth() / (float) steps;
         return juce::jlimit (0, steps - 1, (int) ((p.x - grid.getX()) / stepW));
+    }
+
+    /** Velocity from how high in the row the pointer is, so dragging up and
+        down a lit step shapes the accent directly. */
+    void shadeAt (int row, int step, juce::Point<float> p)
+    {
+        if (! project.rackStepOn (row, step))
+            return;
+
+        const auto grid = gridArea();
+        const float rowH = grid.getHeight() / (float) kNumChannels;
+        const float top  = grid.getY() + row * rowH;
+        const float amount = juce::jlimit (0.05f, 1.0f, 1.0f - (p.y - top) / rowH);
+
+        project.setRackStep (row, step, true, amount);
+        repaint();
     }
 
     void applyTo (int row, int step)
@@ -356,10 +445,10 @@ private:
     AudioEngine& engine;
 
     juce::TextButton clearAll, prevBar { "<" }, nextBar { ">" };
-    juce::ComboBox   stepsBox, barsBox;
+    juce::ComboBox   stepsBox, barsBox, swingBox, feelBox;
     juce::Label      positionLabel;
 
-    bool painting = false, dragging = false;
+    bool painting = false, dragging = false, shading = false;
     int  playingStep = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChannelRackComponent)
