@@ -128,6 +128,14 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - MIDI recording captures the notes you play **and every knob you grab in the plugin's window**. Only knobs you actually move are recorded: plugins that animate their own controls (Synplant, for one) would otherwise fill the clip with noise. Some plugins don't report knob grabs at all, and the status bar says so after recording. The result is a MIDI clip; double-click it to open the piano roll.
 - Audio takes are saved as 24-bit WAV in `Documents/ALLHAILPAN Studio/Recordings`, lined up for your interface's latency.
 
+### Input monitoring
+- The **Monitor** box next to the record mode passes your input through the studio so you hear it with your own effects: an amp simulator on a guitar, reverb on a vocal. **armed** only passes it through while a track is armed, **on** always does.
+- It is heard through a mixer insert, so put the effects you want to hear on that insert. By default it is insert 1.
+- **Use headphones.** Monitoring through speakers with a microphone open feeds back, and an amp simulator makes that loud. The status bar shows **MONITORING** whenever input is passing through.
+- The monitor path deliberately skips delay compensation. That compensation lines internal paths up with each other, and on a monitor path it would only be latency you feel while playing. Lining the take up with the arrangement is handled separately, when the take is recorded.
+- Turning it on and off fades over about five milliseconds rather than switching, so it cannot click.
+- Your interface's own direct monitoring is still the lowest latency route, and is worth using if your buffer size is large.
+
 ### Playlist
 - Drop audio from the browser or Explorer/Finder. Drag clips to move them. **Shift+drag** duplicates.
 - **Edges:** with **Stretch** off, dragging an edge trims (cuts off) the clip. With **Stretch** on, it time-stretches instead. **Shift** does the opposite of the button.
@@ -187,7 +195,6 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - The status bar shows your device, latency, CPU load, and input and output levels.
 
 ### Not yet
-- Input monitoring through the app: use your interface's direct monitor.
 - Warp markers, for audio that drifts within a single take. Clip-level tempo matching handles audio recorded at a steady tempo.
 - No instruments are bundled yet, so you need your own VST3s to make sound.
 

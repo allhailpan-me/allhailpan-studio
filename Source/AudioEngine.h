@@ -190,6 +190,36 @@ public:
     // Records either the interface input (-1) or an instrument channel's own
     // output, which is the only way to capture plugins you play with the mouse.
     void setRecordSource (int channel) noexcept { recordSource.store (channel); }
+
+    // ---- input monitoring ----
+    // Hearing the input through the studio's own effects while playing. The
+    // monitor path deliberately skips delay compensation: it exists for the
+    // performer's ears, and every sample of delay there is felt directly.
+    // Lining the take up with the arrangement is the recorder's job, and it
+    // already does it.
+    enum class Monitor { off = 0, armed, always };
+
+    void setMonitorMode (Monitor m) noexcept   { monitorMode.store (m); }
+    Monitor getMonitorMode() const noexcept    { return monitorMode.load(); }
+
+    /** Which insert the input is heard through, so it can be monitored with
+        the amp simulator or reverb it is going to be recorded alongside. */
+    void setMonitorInsert (int insertIndex) noexcept
+    {
+        monitorInsert.store (juce::jlimit (0, kNumInserts - 1, insertIndex));
+    }
+    int getMonitorInsert() const noexcept      { return monitorInsert.load(); }
+
+    void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
+    float getMonitorGain() const noexcept      { return monitorGain.load(); }
+
+    /** Whether any track is armed. Arming lives in the project, so it is
+        pushed down here for the "while armed" monitoring mode to use. */
+    void setInputArmed (bool armed) noexcept   { inputArmed.store (armed); }
+
+    /** True while input is actually being passed through, so the interface can
+        show it and warn about feedback. */
+    bool isMonitoring() const noexcept         { return monitoring.load(); }
     int  getRecordSource() const noexcept       { return recordSource.load(); }
     void startAudioRecording()                         { recorder.begin(); }
     std::optional<Recorder::Take> stopAudioRecording() { return recorder.end(); }
@@ -307,6 +337,7 @@ private:
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
+    void mixMonitorInput (const float* const* inputChannelData, int numInputChannels, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
@@ -343,6 +374,13 @@ private:
     // same every time and matches its export. While stopped they run off
     // this free clock instead, so a sound can still be dialled in.
     double modFreeClock = 0.0;
+
+    std::atomic<Monitor> monitorMode { Monitor::off };
+    std::atomic<int>     monitorInsert { 1 };
+    std::atomic<float>   monitorGain { 1.0f };
+    std::atomic<bool>    monitoring { false };
+    std::atomic<bool>    inputArmed { false };
+    float                monitorRamp = 0.0f;   // fades in and out, so toggling does not click
 
     // Mix analysis. Measured on the audio thread, read by the interface.
     LoudnessMeter      loudness;
