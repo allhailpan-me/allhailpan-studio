@@ -466,11 +466,15 @@ void AudioEngine::preview (std::shared_ptr<SampleData> sample)
 void AudioEngine::startMidiRecording (int channel)
 {
     midiRecording.store (false);
-    midiFifo.reset();
-    {
-        const juce::SpinLock::ScopedLockType lock (paramWriteLock);
-        paramFifo.reset();
-    }
+
+    // Discarded by reading rather than by reset(). juce::AbstractFifo::reset
+    // writes both indices and is not safe against a writer still inside a
+    // write, which the audio thread can be: it checked midiRecording a few
+    // instructions ago. A read is the one side this thread is allowed to
+    // touch, and leaves the FIFO empty just the same.
+    { const auto discard = midiFifo.read (midiFifo.getNumReady()); juce::ignoreUnused (discard); }
+    { const auto discard = paramFifo.read (paramFifo.getNumReady()); juce::ignoreUnused (discard); }
+
     midiRecordChannel.store (juce::jlimit (0, kNumChannels - 1, channel));
     pluginMidiCaptured.store (0);
     midiRecordStart.store (-1.0);
@@ -489,13 +493,22 @@ void AudioEngine::drainRecordedParams (std::vector<RecordedParam>& out)
     scope.forEach ([&] (int index) { out.push_back (paramRing[(size_t) index]); });
 }
 
+// Called from whichever thread the plugin reports its parameter moves on,
+// which can be the audio thread: a plugin is free to report from inside its
+// own processBlock. The lock is therefore tried rather than taken, and the
+// move is dropped if another thread is mid-write. A parameter stream arrives
+// dozens of times a second while a knob is turning, so losing one of them is
+// inaudible, and the alternative is the audio thread spinning.
 void AudioEngine::pushRecordedParam (int index, float value)
 {
     if (! midiRecording.load() || ! playing.load())
         return;
 
     const double beat = beatPosition.load();
-    const juce::SpinLock::ScopedLockType lock (paramWriteLock);
+    const juce::SpinLock::ScopedTryLockType lock (paramWriteLock);
+    if (! lock.isLocked())
+        return;
+
     const auto scope = paramFifo.write (1);
     scope.forEach ([&] (int i) { paramRing[(size_t) i] = { beat, index, value }; });
 }

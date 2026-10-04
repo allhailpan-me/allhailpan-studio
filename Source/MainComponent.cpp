@@ -624,7 +624,7 @@ void MainComponent::finishRecording()
             {
                 message << "  (" + juce::String (engine.getPluginMidiCaptured()) + " of those came from the plugin itself.)";
             }
-            if (pattern->lanes.empty() && ! paramRecorder.sawGesture)
+            if (pattern->lanes.empty() && ! paramRecorder.sawGesture.load())
                 message << "  (This plugin doesn't tell the app when you grab a knob, so its moves weren't recorded.)";
             setStatus (message);
         }
