@@ -2,6 +2,7 @@
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
 #include "PluginScanner.h"
+#include "InternalPluginFormat.h"
 
 PluginManager::PluginManager()
 {
@@ -16,8 +17,22 @@ PluginManager::PluginManager()
     // (VST3 everywhere, AU on macOS, LV2 on Linux).
     juce::addDefaultFormatsToManager (formats);
 
+    // And the instruments compiled into the studio, which are a plugin
+    // format of their own so that everything else can treat them as
+    // ordinary plugins.
+    formats.addFormat (std::make_unique<InternalPluginFormat>());
+
     if (auto xml = settings().getXmlValue ("pluginList"))
         knownPlugins.recreateFromXml (*xml);
+
+    // Added after the saved list is restored, and every time, rather than
+    // left to a scan. A built-in instrument that only appears once the user
+    // has thought to scan for plugins is no better than not shipping one,
+    // since the whole point is that a fresh install makes sound. addType
+    // refuses duplicates by identifier, so doing this on every launch costs
+    // nothing and repairs a list saved before the instrument existed.
+    for (const auto& description : InternalPluginFormat::descriptions())
+        knownPlugins.addType (description);
 
     // Plugins are examined in a child process, so one that crashes on load
     // cannot take the studio down with it.
