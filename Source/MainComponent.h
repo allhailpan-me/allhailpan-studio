@@ -160,6 +160,7 @@ private:
     void loadFx (int insert, int slot, const juce::PluginDescription&);
     void openPluginWindow (juce::AudioPluginInstance&);
     void closePluginWindow (juce::AudioProcessor*);
+    void updateFloatingWindows();
 
     // views and misc
     void undoRedo (bool redo);
@@ -242,6 +243,7 @@ private:
 
     juce::Array<juce::PluginDescription> instrumentTypes, effectTypes;
     std::map<juce::AudioProcessor*, std::unique_ptr<PluginWindow>> pluginWindows;
+    bool windowsFloat = false;      // see updateFloatingWindows
 
     juce::Rectangle<int> topBar, channelBar, workArea, pianoArea, statusBar;
     juce::String startupError, statusMessage;
