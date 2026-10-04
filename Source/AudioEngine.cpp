@@ -602,27 +602,31 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     const double beatsPerSample = currentBpm / 60.0 / sampleRate;
     const bool   recording      = recorder.isActive() || midiRecording.load();
     const bool   sequencing     = isRunning && ! counting;   // clips stay quiet during the count
-    const double loopEnd        = songEnd.load();
+    const double songTail       = songEnd.load();
     const int    slots          = (int) blockBeats.size();
     const int    n              = std::min (numSamples, slots);
     const double blockStartBeat = position;
+
+    // A loop range set on the playlist repeats over itself, and it does so
+    // while recording as well, because recording round a loop is the only
+    // reason to set one. With no range, playback still loops at the end of the
+    // last clip the way it always has, which is a different thing: it is for
+    // auditioning an arrangement, and looping it while recording would record
+    // over the take just played.
+    const double rangeStart = loopRangeStart.load();
+    const double rangeEnd   = loopRangeEnd.load();
+    const bool   ranged     = rangeEnd - rangeStart >= kMinLoopBeats;
+    const double loopFrom   = ranged ? rangeStart : 0.0;
+    const double loopTo     = ranged ? rangeEnd : ((! recording && songTail > 0.0) ? songTail : 0.0);
 
     // ---- live MIDI (hardware, on-screen piano, typing keyboard) ----
     liveMidi.clear();
     midiCollector.removeNextBlockOfMessages (liveMidi, numSamples);
     keyboardState.processNextMidiBuffer (liveMidi, 0, numSamples, true);
 
-    // ---- audio recording tap ----
-    const int recordFrom = recordSource.load();
-    bool recordingTapped = false;
-    if (sequencing && recordFrom < 0 && numInputChannels > 0)
-    {
-        recorder.push (inputChannelData[0], numInputChannels > 1 ? inputChannelData[1] : nullptr, numSamples, position);
-        recordingTapped = true;
-    }
-
     // ---- playhead, loop, metronome ----
     bool wrapped = false;
+    int  blockWrapCount = 0;
     if (n > 0)
         std::fill_n (clickBuffer.begin(), n, 0.0f);
 
@@ -630,12 +634,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     {
         if (isRunning)
         {
-            // Loop at the end of the last clip (not while recording)
-            if (! recording && ! counting && loopEnd > 0.0 && position >= loopEnd)
+            if (! counting && loopTo > loopFrom && position >= loopTo)
             {
-                position = 0.0;
+                position = loopFrom;
                 lastBeat = -1;
                 wrapped  = true;
+
+                // Where the recorder splits one continuous capture into one
+                // take per time round. Noted here rather than acted on,
+                // because the audio for this block has not been handed over
+                // yet and the offset is into that block.
+                if (blockWrapCount < (int) blockWraps.size())
+                    blockWraps[(size_t) blockWrapCount++] = { i, position };
             }
             if (i < slots)
                 blockBeats[(size_t) i] = position;
@@ -666,6 +676,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     const bool sendAllOff = jumped || wrapped || (wasRunning && ! isRunning);
     wasRunning = isRunning;
+
+    // ---- audio recording tap ----
+    // After the transport loop rather than before it, so that a pass boundary
+    // found in this block is handed over with the block it falls inside.
+    const int recordFrom = recordSource.load();
+    bool recordingTapped = false;
+    if (sequencing && recordFrom < 0 && numInputChannels > 0)
+    {
+        recorder.push (inputChannelData[0], numInputChannels > 1 ? inputChannelData[1] : nullptr,
+                       numSamples, blockStartBeat, blockWraps.data(), blockWrapCount);
+        recordingTapped = true;
+    }
 
     // ---- MIDI recording tap ----
     if (midiRecording.load() && sequencing && n > 0)
@@ -701,9 +723,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             playHead.samples   = (juce::int64) (playHead.seconds * sampleRate);
             playHead.playing   = isRunning;
             playHead.recording = recording;
-            playHead.looping   = ! recording && loopEnd > 0.0;
-            playHead.loopStart = 0.0;
-            playHead.loopEnd   = loopEnd;
+            playHead.looping   = loopTo > loopFrom;
+            playHead.loopStart = loopFrom;
+            playHead.loopEnd   = loopTo;
 
             for (auto& ins : insertSlots)
                 ins.buffer.clear (0, numSamples);
@@ -772,7 +794,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 auto& source = channelSlots[(size_t) recordFrom].buffer;
                 if (source.getNumChannels() >= 2 && source.getNumSamples() >= numSamples)
                 {
-                    recorder.push (source.getReadPointer (0), source.getReadPointer (1), numSamples, blockStartBeat);
+                    recorder.push (source.getReadPointer (0), source.getReadPointer (1),
+                                   numSamples, blockStartBeat, blockWraps.data(), blockWrapCount);
                     recordingTapped = true;
                 }
             }
@@ -819,7 +842,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // If the graph was skipped this block, keep the take in time
     if (sequencing && recordFrom >= 0 && recorder.isActive() && ! recordingTapped
         && numSamples <= (int) silence.size())
-        recorder.push (silence.data(), silence.data(), numSamples, blockStartBeat);
+        recorder.push (silence.data(), silence.data(), numSamples, blockStartBeat,
+                       blockWraps.data(), blockWrapCount);
 
     // ---- preview and metronome (after the master, so mastering FX don't touch them) ----
     if (outL != nullptr)
@@ -1359,8 +1383,13 @@ void AudioEngine::renderAudioClips (int numSamples)
             const int   f1   = std::min (f0 + 1, frames - 1);
             const float frac = (float) (frame - f0);
 
-            left[i]  += (srcL[f0] + (srcL[f1] - srcL[f0]) * frac) * clip.gain;
-            right[i] += (srcR[f0] + (srcR[f1] - srcR[f0]) * frac) * clip.gain;
+            // A comped stretch is ramped at its joins. Two comparisons for
+            // every clip that is not comped, and a quarter cycle of sine only
+            // inside the few milliseconds of an actual join.
+            const float gain = clip.gain * (float) compFadeGain (clip.fade, beat);
+
+            left[i]  += (srcL[f0] + (srcL[f1] - srcL[f0]) * frac) * gain;
+            right[i] += (srcR[f0] + (srcR[f1] - srcR[f0]) * frac) * gain;
         }
     }
 }

@@ -1,13 +1,21 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+#include <algorithm>
+#include <array>
 #include <atomic>
-#include <optional>
 #include <vector>
 
 // Captures input audio without ever blocking the audio thread.
 // The audio thread writes into a ring buffer; a background thread
 // moves that audio into growing memory.
+//
+// Recording round a loop produces several takes rather than one. Rather than
+// starting and stopping a recording at every wrap, which would mean a gap at
+// each one and a race between the audio thread and whoever restarts it, the
+// capture runs straight through and the audio thread simply notes where the
+// transport came back round. The split happens at the end, on the message
+// thread, where splitting a buffer is free and nothing is waiting on it.
 class Recorder : private juce::Thread
 {
 public:
@@ -17,6 +25,18 @@ public:
         double startBeat = 0.0;
         int    droppedFrames = 0;
     };
+
+    /** A point at which the transport jumped back to the start of the loop:
+        how far into the capture it happened, and the beat it landed on. */
+    struct LoopWrap
+    {
+        int    frame = 0;
+        double beat  = 0.0;
+    };
+
+    // Far more passes than anyone comps from, and fixed so that the audio
+    // thread never allocates to record one.
+    static constexpr int maxPasses = 512;
 
     Recorder() : juce::Thread ("ALLHAILPAN recorder") {}
     ~Recorder() override { stopThread (2000); }
@@ -46,36 +66,86 @@ public:
         }
         dropped.store (0);
         startBeat.store (-1.0);
+        framesPushed.store (0);
+        wrapCount.store (0);
         active.store (true);
         startThread();
     }
 
-    std::optional<Take> end()
+    /** How many times round the loop the capture has been so far, which is
+        one less than the number of takes it will produce. */
+    int passCount() const noexcept { return wrapCount.load(); }
+
+    /** Every pass, in the order they were played. One take for a recording
+        that did not loop, which is exactly what this returned before loop
+        recording existed.
+
+        A pass with no audio in it is dropped rather than returned empty: that
+        happens when the transport wraps twice inside one block, which a loop
+        shorter than the buffer size does.
+    */
+    std::vector<Take> end()
     {
+        std::vector<Take> takes;
+
         if (! active.exchange (false))
-            return std::nullopt;
+            return takes;
 
         stopThread (2000);
         drain();
 
         const juce::ScopedLock sl (dataLock);
-        if (takeL.empty())
-            return std::nullopt;
+        const int total = (int) takeL.size();
+        if (total == 0)
+            return takes;
 
-        Take take;
-        take.audio.setSize (2, (int) takeL.size());
-        take.audio.copyFrom (0, 0, takeL.data(), (int) takeL.size());
-        take.audio.copyFrom (1, 0, takeR.data(), (int) takeR.size());
-        take.startBeat     = std::max (0.0, startBeat.load());
-        take.droppedFrames = dropped.load();
+        // The dropped count belongs to the capture as a whole rather than to
+        // any one pass, so it is reported on each of them: the producer needs
+        // to know the buffer was too small, and which pass it happened on is
+        // not something this can say.
+        const int droppedFrames = dropped.load();
+        const int wraps = std::min (wrapCount.load(), maxPasses);
+
+        int    from     = 0;
+        double fromBeat = std::max (0.0, startBeat.load());
+
+        auto emit = [&] (int first, int last, double beat)
+        {
+            const int frames = last - first;
+            if (frames <= 0)
+                return;
+
+            Take take;
+            take.audio.setSize (2, frames);
+            take.audio.copyFrom (0, 0, takeL.data() + first, frames);
+            take.audio.copyFrom (1, 0, takeR.data() + first, frames);
+            take.startBeat     = beat;
+            take.droppedFrames = droppedFrames;
+            takes.push_back (std::move (take));
+        };
+
+        for (int i = 0; i < wraps; ++i)
+        {
+            const int at = std::clamp (wrapFrames[(size_t) i].frame, from, total);
+            emit (from, at, fromBeat);
+            from     = at;
+            fromBeat = wrapFrames[(size_t) i].beat;
+        }
+        emit (from, total, fromBeat);
 
         takeL.clear(); takeL.shrink_to_fit();
         takeR.clear(); takeR.shrink_to_fit();
-        return take;
+        return takes;
     }
 
     // ---- audio thread ----
-    void push (const float* left, const float* right, int numFrames, double beatAtBlockStart) noexcept
+    /** Adds a block to the capture. `wraps` lists the points inside this block
+        at which the transport jumped back to the start of the loop, as offsets
+        into the block, which is how the capture is later split into passes.
+        They are offsets into the block rather than absolute positions because
+        only this knows how much of the block the ring buffer actually took. */
+    void push (const float* left, const float* right, int numFrames, double beatAtBlockStart,
+               const LoopWrap* wraps = nullptr, int numWraps = 0) noexcept
     {
         if (! active.load() || left == nullptr)
             return;
@@ -97,6 +167,23 @@ public:
         copy (scope.startIndex2, scope.blockSize2, scope.blockSize1);
 
         const int written = scope.blockSize1 + scope.blockSize2;
+        const int base    = framesPushed.load();
+
+        // A wrap is placed against the audio that was actually kept. If the
+        // ring overran, the split drifts by however much was dropped, which is
+        // the least of the problems a take with dropped samples has, and the
+        // producer is told about those separately.
+        for (int i = 0; i < numWraps && wraps != nullptr; ++i)
+        {
+            const int n = wrapCount.load();
+            if (n >= maxPasses)
+                break;
+            wrapFrames[(size_t) n] = { base + std::clamp (wraps[i].frame, 0, written), wraps[i].beat };
+            wrapCount.store (n + 1);
+        }
+
+        framesPushed.store (base + written);
+
         if (written < numFrames)
             dropped.fetch_add (numFrames - written);
     }
@@ -137,6 +224,12 @@ private:
     std::atomic<bool>   active    { false };
     std::atomic<double> startBeat { -1.0 };
     std::atomic<int>    dropped   { 0 };
+
+    // Written by the audio thread, read once recording has stopped. Fixed
+    // size, because growing it would mean allocating on the audio thread.
+    std::array<LoopWrap, (size_t) maxPasses> wrapFrames {};
+    std::atomic<int>    wrapCount    { 0 };
+    std::atomic<int>    framesPushed { 0 };
 };
 
 // Writes a 24-bit WAV file. Kept self-contained on purpose.

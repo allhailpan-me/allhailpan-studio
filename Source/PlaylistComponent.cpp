@@ -266,7 +266,11 @@ bool PlaylistComponent::isEditing() const noexcept
         || drag.mode == DragState::Mode::trimLeft  || drag.mode == DragState::Mode::trimRight
         || drag.mode == DragState::Mode::stretchLeft || drag.mode == DragState::Mode::stretchRight
         || drag.mode == DragState::Mode::warp
-        || drag.mode == DragState::Mode::autoPoint || drag.mode == DragState::Mode::autoBend;
+        || drag.mode == DragState::Mode::autoPoint || drag.mode == DragState::Mode::autoBend
+        // A swipe across a take folder is one edit, not one per mouse move,
+        // so nothing is committed to the undo history until the mouse comes
+        // up. Setting a loop range is not an arrangement edit at all.
+        || drag.mode == DragState::Mode::comp;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,16 +427,26 @@ void PlaylistComponent::updateClipBar()
         // the markers win: a clip with markers has its timing set by them, so
         // the ratio and the tempo match are not the clip's own any more.
         const bool warped = c->isWarped();
-        stretchSlider.setEnabled (! c->followTempo && ! warped);
-        sourceBpmSlider.setEnabled (! warped);
-        syncButton.setEnabled (! warped);
+        const bool folder = c->isTakeFolder();
+        stretchSlider.setEnabled (! c->followTempo && ! warped && ! folder);
+        sourceBpmSlider.setEnabled (! warped && ! folder);
+        syncButton.setEnabled (! warped && ! folder);
 
         const bool rendering = isRendering && isRendering (*c);
         juce::String status = rendering
             ? juce::String ("Rendering high-quality stretch...")
             : "Starts " + formatPosition (c->start) + "   Length "
                   + juce::String (c->lengthBeats (project.bpm) / 4.0, 3) + " bars";
-        if (warped)
+        if (folder)
+        {
+            const int joins = std::max (0, (int) c->compSpans().size() - 1);
+            status << "   " << c->folder->size() << " takes, "
+                   << joins << (joins == 1 ? " join" : " joins")
+                   << " crossfaded over " << juce::String (c->folder->crossfadeMs, 1) << " ms"
+                   << "   Drag across a lane to comp from it, double-click a lane for all of it,"
+                      " Alt-click to throw a take away";
+        }
+        else if (warped)
             status << "   " << (int) c->warp.size() << (c->warp.size() == 1 ? " warp marker" : " warp markers");
         else if (audio)
             status << "   Double-click the clip to add a warp marker";
@@ -644,6 +658,20 @@ void PlaylistComponent::paint (juce::Graphics& g)
             g.fillRect (juce::Rectangle<float> (beatToX (end) - 1.0f, (float) ruler.getY(), 2.0f, (float) ruler.getHeight()));
         }
 
+        // The loop range, drawn as a bar across the top of the ruler with a
+        // post at each end. It has to be obvious: playback repeating over
+        // eight bars with nothing on screen saying why is the sort of thing
+        // that costs an hour.
+        if (project.hasLoopRange())
+        {
+            const float lx = beatToX (project.loopStart);
+            const float rx = beatToX (project.loopEnd);
+            g.setColour (Ahp::rec.withAlpha (0.85f));
+            g.fillRect (juce::Rectangle<float> (lx, (float) ruler.getY(), std::max (2.0f, rx - lx), 5.0f));
+            g.fillRect (juce::Rectangle<float> (lx, (float) ruler.getY(), 2.0f, (float) ruler.getHeight()));
+            g.fillRect (juce::Rectangle<float> (rx - 2.0f, (float) ruler.getY(), 2.0f, (float) ruler.getHeight()));
+        }
+
         const float sx = beatToX (engine.getSongStart());
         juce::Path tri;
         tri.addTriangle (sx - 6.0f, (float) ruler.getY() + 12.0f, sx + 6.0f, (float) ruler.getY() + 12.0f, sx, (float) ruler.getBottom() - 1.0f);
@@ -702,6 +730,19 @@ void PlaylistComponent::paint (juce::Graphics& g)
     }
 
     // ---- playhead ----
+    // The loop's edges continue down over the arrangement, so that the range
+    // can be read against the clips it covers rather than only against the
+    // bar numbers.
+    if (project.hasLoopRange())
+    {
+        juce::Graphics::ScopedSaveState s2 (g);
+        g.reduceClipRegion (grid);
+        g.setColour (Ahp::rec.withAlpha (0.35f));
+        for (double edge : { project.loopStart, project.loopEnd })
+            g.fillRect (juce::Rectangle<float> (beatToX (edge) - 1.0f, (float) grid.getY(),
+                                                2.0f, (float) grid.getHeight()));
+    }
+
     if (engine.isPlaying())
     {
         const float px = beatToX (engine.getBeatPosition());
@@ -709,6 +750,141 @@ void PlaylistComponent::paint (juce::Graphics& g)
         {
             g.setColour (Ahp::bone.withAlpha (0.9f));
             g.fillRect (juce::Rectangle<float> (std::round (px), (float) ruler.getY(), 2.0f, (float) (grid.getBottom() - ruler.getY())));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Take folders
+
+juce::Rectangle<float> PlaylistComponent::takeLanes (juce::Rectangle<float> clipRect) const
+{
+    // Below the name strip, and above a thin band along the bottom that shows
+    // the comp itself: which pass is heard where, read in one glance without
+    // having to compare the lit parts of several lanes.
+    return clipRect.withTrimmedTop (15.0f).withTrimmedBottom (5.0f).reduced (1.0f, 0.0f);
+}
+
+int PlaylistComponent::takeLaneAt (const Clip& c, juce::Rectangle<float> clipRect, float y) const
+{
+    if (! c.isTakeFolder())
+        return -1;
+
+    const auto lanes = takeLanes (clipRect);
+    const int  count = c.folder->size();
+    if (count <= 0 || lanes.getHeight() <= 0.0f)
+        return -1;
+
+    const int lane = (int) std::floor ((y - lanes.getY()) / (lanes.getHeight() / (float) count));
+    return juce::isPositiveAndBelow (lane, count) ? lane : -1;
+}
+
+juce::Rectangle<float> PlaylistComponent::takeLaneBounds (const Clip& c, juce::Rectangle<float> clipRect, int lane) const
+{
+    const auto lanes = takeLanes (clipRect);
+    const int  count = c.isTakeFolder() ? c.folder->size() : 0;
+    if (count <= 0 || ! juce::isPositiveAndBelow (lane, count))
+        return {};
+
+    const float h = lanes.getHeight() / (float) count;
+    return { lanes.getX(), lanes.getY() + h * (float) lane, lanes.getWidth(), h };
+}
+
+double PlaylistComponent::folderSecondsAt (const Clip& c, double beat) const
+{
+    // The comp lives in seconds into the folder; the playlist works in beats.
+    // Through the clip's own mapping rather than a second copy of it, so that
+    // the two cannot drift.
+    return c.sourceAtBeat (project.bpm, beat - c.start);
+}
+
+void PlaylistComponent::paintTakeFolder (juce::Graphics& g, const Clip& c,
+                                         juce::Rectangle<float> r, bool dim)
+{
+    const int count = c.folder->size();
+    const auto lanes = takeLanes (r);
+    if (count <= 0 || lanes.getHeight() <= 0.0f)
+        return;
+
+    const auto spans = c.compSpans();
+    const float gain  = juce::Decibels::decibelsToGain (c.gainDb);
+    const double secondsPerBeat = 60.0 / std::max (1.0, project.bpm);
+
+    const int x0 = (int) std::max (r.getX() + 1.0f, (float) grid.getX());
+    const int x1 = (int) std::min (r.getRight() - 1.0f, (float) grid.getRight());
+
+    auto secondsAtX = [&] (float x) { return folderSecondsAt (c, xToBeat (x)); };
+
+    for (int lane = 0; lane < count; ++lane)
+    {
+        const auto* take = c.folder->take (lane);
+        const auto  row  = takeLaneBounds (c, r, lane);
+
+        if (lane % 2)
+        {
+            g.setColour (Ahp::black.withAlpha (0.12f));
+            g.fillRect (row);
+        }
+
+        if (take == nullptr || take->sample == nullptr || take->sample->peaks.empty())
+            continue;
+
+        const auto& peaks = take->sample->peaks;
+        const double peaksPerSecond = take->sample->sampleRate / SampleData::peakBlock;
+        const float  midY = row.getCentreY();
+        const float  amp  = std::max (1.0f, row.getHeight() * 0.5f - 0.5f);
+
+        for (int x = x0; x < x1; ++x)
+        {
+            const double from = secondsAtX ((float) x);
+            const double to   = secondsAtX ((float) x + 1.0f);
+
+            // The lane shows the whole pass; only the comped stretch of it is
+            // lit. Seeing the parts you rejected is the point of a take
+            // folder, so they are dimmed rather than hidden.
+            const bool chosen = compTakeAt (c.folder->comp, from) == lane;
+
+            const double s0 = take->offset + (from - take->start);
+            const double s1 = take->offset + (to   - take->start);
+            if (s1 <= take->offset || s0 >= take->offset + take->length)
+                continue;
+
+            size_t i0 = (size_t) std::max (0.0, s0 * peaksPerSecond);
+            size_t i1 = std::max (i0 + 1, (size_t) std::max (0.0, s1 * peaksPerSecond));
+            float v = 0.0f;
+            for (size_t i = i0; i < std::min (i1, peaks.size()); ++i)
+                v = std::max (v, peaks[i]);
+            v = std::min (1.0f, v * gain);
+
+            g.setColour (Ahp::bone.withAlpha (dim ? 0.25f : chosen ? 0.95f : 0.28f));
+            g.fillRect ((float) x, midY - v * amp, 1.0f, std::max (1.0f, v * amp * 2.0f));
+        }
+    }
+
+    // The comp itself, along the bottom: one block per stretch, at the height
+    // of the lane it came from, so the shape of the comp is readable without
+    // reading the lanes.
+    const auto strip = juce::Rectangle<float> (r.getX() + 1.0f, r.getBottom() - 5.0f,
+                                               r.getWidth() - 2.0f, 4.0f);
+    for (const auto& span : spans)
+    {
+        if (! span.isAudible())
+            continue;
+
+        const float sx = beatToX (c.start + span.start / secondsPerBeat);
+        const float ex = beatToX (c.start + span.end   / secondsPerBeat);
+        const float t  = count > 1 ? (float) span.take / (float) (count - 1) : 0.0f;
+
+        g.setColour (Ahp::bone.withAlpha (dim ? 0.3f : 0.45f + 0.5f * (1.0f - t)));
+        g.fillRect (juce::Rectangle<float> (sx, strip.getY(), std::max (1.0f, ex - sx), strip.getHeight())
+                        .getIntersection (strip));
+
+        // A tick at each join, where the crossfade is. Too short to draw to
+        // scale at any useful zoom, so it is marked rather than drawn.
+        if (span.start > 0.0)
+        {
+            g.setColour (Ahp::black.withAlpha (dim ? 0.3f : 0.8f));
+            g.fillRect (juce::Rectangle<float> (sx - 0.5f, strip.getY(), 1.0f, strip.getHeight()));
         }
     }
 }
@@ -732,7 +908,11 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
     g.setColour (selected ? Ahp::black : Ahp::panel);
     g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
     juce::String label = c.displayName (project.channels);
-    if (c.isAudio())
+    if (c.isTakeFolder())
+    {
+        label << "   drag a lane to comp";
+    }
+    else if (c.isAudio())
     {
         if (c.isWarped())                          label << "   warped";
         else if (std::abs (c.stretch - 1.0) > 1e-4) label << "   x" << juce::String (c.stretch, 2);
@@ -745,7 +925,11 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
     const int x1 = (int) std::min (r.getRight() - 1.0f, (float) grid.getRight());
     const float bodyTop = r.getY() + 15.0f, bodyH = r.getHeight() - 16.0f;
 
-    if (c.isAudio() && c.sample != nullptr && ! c.sample->peaks.empty())
+    if (c.isTakeFolder())
+    {
+        paintTakeFolder (g, c, r, dim);
+    }
+    else if (c.isAudio() && c.sample != nullptr && ! c.sample->peaks.empty())
     {
         const auto& peaks = c.sample->peaks;
         const float midY  = bodyTop + bodyH / 2.0f;
@@ -1244,6 +1428,12 @@ PlaylistComponent::Hit PlaylistComponent::hitTest (juce::Point<float> p) const
                     }
             }
 
+            // Which pass of a folder is under the mouse. The name strip is
+            // left out, so it stays a grab handle for moving the folder
+            // rather than the top lane being impossible to drag the clip by.
+            if (it->isTakeFolder() && p.y > r.getY() + 15.0f)
+                h.takeLane = takeLaneAt (*it, r, p.y);
+
             if (h.warpIndex < 0 && h.autoPoint < 0 && h.autoBend < 0 && r.getWidth() > 18.0f)
             {
                 if (r.getRight() - p.x < 7.0f)  h.edge = Edge::right;
@@ -1286,6 +1476,7 @@ void PlaylistComponent::mouseMove (const juce::MouseEvent& e)
         else if (h.warpIndex >= 0)           cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.autoPoint >= 0)           cursor = juce::MouseCursor::DraggingHandCursor;
         else if (h.autoBend >= 0)            cursor = juce::MouseCursor::UpDownResizeCursor;
+        else if (h.takeLane >= 0)            cursor = juce::MouseCursor::IBeamCursor;
         else if (h.edge != Edge::none)       cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.clipId != 0)              cursor = juce::MouseCursor::DraggingHandCursor;
     }
@@ -1307,8 +1498,16 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
 
     if (h.zone == Zone::ruler)
     {
-        // Click the timeline to play from there
+        // Click the timeline to play from there, as it always has. Dragging
+        // from the same click sets the loop range, which is a gesture the
+        // ruler had going spare and the obvious place for it. Moving the
+        // playhead to the start of the drag as well is not a side effect to
+        // apologise for: setting a loop and then playing it is one thought.
         const double b = std::max (0.0, snap (h.beat, e.mods, true));
+
+        drag.mode  = DragState::Mode::loopRange;
+        drag.beat0 = drag.beat1 = b;
+
         if (onPlayFrom)
             onPlayFrom (b);
         repaint();
@@ -1380,6 +1579,32 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
     auto* clip = project.find (h.clipId);
     if (clip == nullptr)
         return;
+
+    // Swiping across a lane of a take folder comps from that pass. It is
+    // grabbed before the move and trim gestures, because the lanes fill the
+    // body of the folder and there would otherwise be nowhere to swipe; the
+    // name strip is still the handle for moving it.
+    if (h.takeLane >= 0 && ! e.mods.isPopupMenu() && tool == Tool::draw)
+    {
+        if (e.mods.isAltDown())
+        {
+            // Alt removes a pass. The comp is renumbered with it, so the
+            // stretches taken from the passes that remain are undisturbed.
+            project.removeTake (clip->id, h.takeLane);
+            updateClipBar();
+            repaint();
+            return;
+        }
+
+        project.selection  = { clip->id };
+        drag.mode          = DragState::Mode::comp;
+        drag.clipId        = clip->id;
+        drag.takeLane      = h.takeLane;
+        drag.beat0         = h.beat;
+        drag.beat1         = h.beat;
+        drag.compBefore    = clip->folder->comp;
+        return;
+    }
 
     // A warp marker is grabbed before anything else, so dragging one never
     // moves or duplicates the clip by accident. Only a selected clip shows its
@@ -1489,10 +1714,16 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
     drag.track0  = h.track;
     drag.anchor0 = clip->start;
 
+    // A take folder's edges are not handles. Its length is its longest pass
+    // and its comp is measured from its start, so trimming it would mean
+    // deciding what a comp means for audio that is no longer in the clip, and
+    // stretching it would need a stretched copy of every pass rather than of
+    // one sample. Both are turned off here rather than half supported.
+    const bool edged = h.edge != Edge::none && ! clip->isTakeFolder();
     const bool stretchMode = clip->isAudio() && (stretchButton.getToggleState() != e.mods.isShiftDown());
-    if (h.edge == Edge::right)      drag.mode = stretchMode ? DragState::Mode::stretchRight : DragState::Mode::trimRight;
-    else if (h.edge == Edge::left)  drag.mode = stretchMode ? DragState::Mode::stretchLeft  : DragState::Mode::trimLeft;
-    else                            drag.mode = DragState::Mode::move;
+    if (edged && h.edge == Edge::right)      drag.mode = stretchMode ? DragState::Mode::stretchRight : DragState::Mode::trimRight;
+    else if (edged && h.edge == Edge::left)  drag.mode = stretchMode ? DragState::Mode::stretchLeft  : DragState::Mode::trimLeft;
+    else                                     drag.mode = DragState::Mode::move;
 
     if (drag.mode != DragState::Mode::move)
         project.selection = { clip->id };
@@ -1558,6 +1789,37 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
                 drag.ctrlClick = false;
             repaint (grid);
             return;
+
+        case DragState::Mode::loopRange:
+            drag.beat1 = std::max (0.0, snap (h.beat, e.mods));
+            if (e.getDistanceFromDragStart() > 3)
+            {
+                drag.moved = true;
+                project.setLoopRange (drag.beat0, drag.beat1);
+            }
+            repaint();
+            return;
+
+        case DragState::Mode::comp:
+        {
+            // Applied from the comp as it was when the swipe began rather than
+            // from whatever the last mouse move left, so that dragging back
+            // over your own swipe narrows it instead of leaving the boundary
+            // the wide version put there.
+            auto* c = project.find (drag.clipId);
+            if (c == nullptr || ! c->isTakeFolder())
+                return;
+
+            drag.beat1 = snap (h.beat, e.mods);
+            drag.moved = true;
+
+            c->folder->comp = drag.compBefore;
+            project.setCompTake (c->id, folderSecondsAt (*c, std::min (drag.beat0, drag.beat1)),
+                                 folderSecondsAt (*c, std::max (drag.beat0, drag.beat1)),
+                                 drag.takeLane);
+            repaint();
+            return;
+        }
 
         case DragState::Mode::erase:
             if (h.clipId != 0)
@@ -1780,16 +2042,27 @@ void PlaylistComponent::mouseUp (const juce::MouseEvent& e)
     {
         project.selection = { drag.clipId };
     }
+    else if (drag.mode == DragState::Mode::comp && ! drag.moved)
+    {
+        // A click rather than a swipe gives the whole folder to that pass,
+        // which is how you audition one before comping from it.
+        if (auto* c = project.find (drag.clipId); c != nullptr && c->isTakeFolder())
+        {
+            c->folder->comp = drag.compBefore;
+            project.setCompTake (c->id, 0.0, c->length, drag.takeLane);
+            drag.moved = true;
+        }
+    }
 
     // A finished drag is the point at which a warped clip's stretch ratio can
     // be put back to its own average rate, and so a fresh render started.
     // Doing it during the drag would re-render on every mouse move. This covers
     // dragging a marker, trimming and stretching alike, and does nothing to a
     // clip that is not warped.
-    if (drag.moved && drag.clipId != 0)
+    if (drag.moved && drag.clipId != 0 && drag.mode != DragState::Mode::comp)
         project.retuneWarpRatio (drag.clipId);
 
-    const bool edited = drag.moved;
+    const bool edited = drag.moved && drag.mode != DragState::Mode::loopRange;
     drag = {};
     if (edited)
         project.changed();   // now the stretch can render
@@ -1801,6 +2074,18 @@ void PlaylistComponent::mouseUp (const juce::MouseEvent& e)
 void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
 {
     const auto h = hitTest (e.position);
+
+    // Double clicking the ruler takes the loop range off again. Dragging a
+    // range shorter than a sixteenth note does the same, but that is a thing
+    // you discover rather than a thing you would try.
+    if (h.zone == Zone::ruler)
+    {
+        drag = {};
+        if (project.hasLoopRange())
+            project.clearLoopRange();
+        repaint();
+        return;
+    }
 
     if (h.zone == Zone::grid && h.clipId != 0)
     {
@@ -1837,8 +2122,25 @@ void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
         // it removes it, anywhere else it adds one. Adding one does not change
         // the sound, it only pins what is already there, so this is safe to do
         // by accident.
+        //
+        // A take folder has no markers of its own: it reads several pieces of
+        // audio and a warp map describes one. Its double click is spent on
+        // comping instead, giving the whole folder to the pass under the
+        // mouse, which is the second half of the swipe gesture.
         if (tool != Tool::draw)
             return;
+
+        if (c->isTakeFolder())
+        {
+            if (h.takeLane >= 0)
+            {
+                project.selection = { c->id };
+                project.setCompTake (c->id, 0.0, c->length, h.takeLane);
+                updateClipBar();
+                repaint();
+            }
+            return;
+        }
 
         if (project.selection.count (c->id) == 0)
             project.selection = { c->id };

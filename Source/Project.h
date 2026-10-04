@@ -3,6 +3,7 @@
 #include "SampleData.h"
 #include "WarpMap.h"
 #include "AutomationCurve.h"
+#include "CompModel.h"
 #include <set>
 #include <array>
 #include <map>
@@ -24,6 +25,12 @@ static constexpr int kMaxOutBuses = 16;  // output buses a plugin may be split a
 // file adopts the file's own tempo only in that case, since overriding a
 // tempo the producer set would be worse than ignoring the file's.
 static constexpr double kDefaultBpm = 128.0;
+
+// The shortest loop range the transport will take. A sixteenth note is short
+// enough for any musical purpose and long enough that a wrap cannot happen
+// more than once inside an audio block, which is what keeps the recorder's
+// pass splitting honest.
+static constexpr double kMinLoopBeats = 0.25;
 
 struct Track
 {
@@ -423,6 +430,96 @@ inline juce::String autoTargetName (const AutoTarget& t, const std::vector<Chann
 
 enum class ClipType { audio, midi, automation };
 
+//=============================================================================
+// Take folders, and the comp over them.
+//
+// Recording a loop over and over is how a vocal or a solo actually gets made:
+// eight bars round and round, ten passes, and then one performance built from
+// the best moments of each. Keeping those passes as ten clips stacked on one
+// track loses which of them belong together, and keeping only the last one
+// throws the morning away. So the passes live in a take folder: one clip in
+// the arrangement holding several alternatives, with a comp saying which of
+// them is heard where. The takes are never edited by comping, so a choice can
+// be remade at any point, including after the project has been closed and
+// reopened.
+//
+// A take is described in seconds throughout, as the comp over it is: `start`
+// is seconds into the folder where this pass begins, and `offset` and
+// `length` say which seconds of its own source file it plays, exactly as they
+// do for an ordinary audio clip. Loop recording gives every pass the same
+// start and very nearly the same length, but a pass that was armed late, or
+// that dropped samples, does not cover the whole folder, and the comp has to
+// cope with that rather than read off the end of it.
+//=============================================================================
+
+struct Take
+{
+    juce::String name;
+    std::shared_ptr<SampleData> sample;
+
+    double start  = 0.0;   // seconds into the folder where this pass begins
+    double offset = 0.0;   // seconds into the source where the take begins
+    double length = 0.0;   // seconds of source the take runs for
+
+    bool operator== (const Take& o) const
+    {
+        return name == o.name && sample == o.sample
+            && start == o.start && offset == o.offset && length == o.length;
+    }
+
+    /** Where this take sits inside the folder, which is what the comp needs to
+        know to keep from reading past the end of it. */
+    CompTakeSpan span() const noexcept { return { start, length }; }
+};
+
+struct TakeFolder
+{
+    std::vector<Take>        takes;
+    std::vector<CompSegment> comp;   // kept normalised: see CompModel.h
+
+    // The width of the crossfade at a comp join. There is no standard for
+    // this: the requirement is only that it be long enough to hide the slope
+    // discontinuity between two different performances and short enough not to
+    // smear a consonant, and ten milliseconds sits comfortably between those.
+    // It is per folder rather than global because a drum comp wants it shorter
+    // than a string pad does.
+    double crossfadeMs = 10.0;
+
+    bool operator== (const TakeFolder& o) const
+    {
+        return takes == o.takes && comp == o.comp && crossfadeMs == o.crossfadeMs;
+    }
+
+    int size() const noexcept { return (int) takes.size(); }
+
+    const Take* take (int index) const noexcept
+    {
+        return juce::isPositiveAndBelow (index, (int) takes.size()) ? &takes[(size_t) index] : nullptr;
+    }
+
+    /** The longest any take runs, in seconds of source. The folder clip is as
+        long as its longest pass, so a take that overran is not cut off by the
+        folder having been sized to a shorter one. */
+    double longestSeconds() const noexcept
+    {
+        double longest = 0.0;
+        for (const auto& t : takes)
+            longest = std::max (longest, t.length);
+        return longest;
+    }
+
+    std::vector<CompTakeSpan> spans() const
+    {
+        std::vector<CompTakeSpan> out;
+        out.reserve (takes.size());
+        for (const auto& t : takes)
+            out.push_back (t.span());
+        return out;
+    }
+
+    void tidy (double folderSeconds) { normaliseCompSegments (comp, size(), folderSeconds); }
+};
+
 struct Clip
 {
     int      id   = 0;
@@ -432,6 +529,14 @@ struct Clip
     std::shared_ptr<MidiPattern> pattern;   // midi
     std::shared_ptr<AutoCurve>   curve;     // automation
     int channel = 0;                        // midi: which instrument slot
+
+    // Several takes of this same stretch, with a comp over them. An audio clip
+    // with a folder reads its takes through the comp instead of reading
+    // `sample`, which is then null. It is an audio clip in every other
+    // respect, which is the point: a take folder is dragged, trimmed, muted,
+    // gained and deleted by the playlist's existing code rather than by a
+    // parallel set of operations that could drift from it.
+    std::shared_ptr<TakeFolder> folder;
 
     int    track   = 0;
     double start   = 0.0;    // beats
@@ -460,6 +565,7 @@ struct Clip
     bool   muted   = false;
 
     bool   isAudio() const noexcept      { return type == ClipType::audio; }
+    bool   isTakeFolder() const noexcept { return type == ClipType::audio && folder != nullptr && ! folder->takes.empty(); }
     bool   isMidi() const noexcept       { return type == ClipType::midi; }
     bool   isAutomation() const noexcept { return type == ClipType::automation; }
     bool   isWarped() const noexcept     { return isAudio() && ! warp.empty(); }
@@ -503,6 +609,17 @@ struct Clip
         rest back in order. Call after anything that moves `offset`. */
     void tidyWarp() { normaliseWarpMarkers (warp, offset); }
 
+    /** The stretches of this folder the comp actually plays, in seconds into
+        the folder. Empty for a clip that is not a take folder. No tempo comes
+        into it, which is the point: see CompModel.h. */
+    std::vector<CompSpan> compSpans() const
+    {
+        if (! isTakeFolder())
+            return {};
+        return buildCompSpans (folder->comp, folder->spans(), length,
+                               folder->crossfadeMs * 0.001);
+    }
+
     // Copies share nothing editable with the original
     Clip deepCopy() const
     {
@@ -511,11 +628,15 @@ struct Clip
             c.pattern = std::make_shared<MidiPattern> (*pattern);
         if (curve != nullptr)
             c.curve = std::make_shared<AutoCurve> (*curve);
+        if (folder != nullptr)
+            c.folder = std::make_shared<TakeFolder> (*folder);
         return c;
     }
 
     juce::String displayName (const std::vector<ChannelInfo>& channels) const
     {
+        if (isTakeFolder())
+            return juce::String (folder->size()) + " takes";
         if (isAudio())
             return sample != nullptr ? sample->name : juce::String ("Missing audio");
         if (isAutomation())
@@ -558,6 +679,59 @@ public:
     Groove                   groove;
     double bpm = kDefaultBpm;
 
+    // ---- loop range ----
+    // The span the transport repeats over, set by dragging in the playlist
+    // ruler. An empty range means no range, and playback then loops at the end
+    // of the last clip exactly as it always has, which is a different thing
+    // and worth keeping: it is what you want when auditioning an arrangement
+    // and never what you want when recording takes.
+    //
+    // This is not part of the undo history, for the same reason arming is not:
+    // it is where you are working, not what the arrangement is, and having
+    // Ctrl+Z move the loop instead of undoing the edit you just made would be
+    // maddening. It is saved with the project, because where you were working
+    // is worth coming back to.
+    double loopStart = 0.0, loopEnd = 0.0;
+
+    bool hasLoopRange() const noexcept
+    {
+        return loopEnd - loopStart >= kMinLoopBeats
+            && std::isfinite (loopStart) && std::isfinite (loopEnd);
+    }
+
+    /** Sets the range, or clears it if the drag was too short to be one.
+        Clearing on a short drag rather than clamping up to the minimum is
+        what makes a click in the ruler a way to get rid of the loop. */
+    void setLoopRange (double from, double to)
+    {
+        if (! std::isfinite (from) || ! std::isfinite (to))
+            return;
+        if (to < from)
+            std::swap (from, to);
+
+        from = std::max (0.0, from);
+        to   = std::max (from, to);
+
+        if (to - from < kMinLoopBeats)
+        {
+            loopStart = loopEnd = 0.0;
+        }
+        else
+        {
+            loopStart = from;
+            loopEnd   = to;
+        }
+        changed();
+    }
+
+    void clearLoopRange()
+    {
+        loopStart = loopEnd = 0.0;
+        changed();
+    }
+
+    double loopLengthBeats() const noexcept { return hasLoopRange() ? loopEnd - loopStart : 0.0; }
+
     // ---- channel rack ----
     // The rack edits a region of the arrangement rather than owning its own
     // kind of data: every step is a real note in a real MIDI clip, so the same
@@ -588,6 +762,8 @@ public:
 
         modulators.clear();
         groove = {};
+
+        loopStart = loopEnd = 0.0;
 
         rackStart       = 0.0;
         rackBars        = 1;
@@ -812,6 +988,150 @@ public:
         return addClip (std::move (c));
     }
 
+    // ---- take folders and comping ----------------------------------------
+    //
+    // As with automation clips, everything here goes through find() and leaves
+    // the clip list alone otherwise, so a take folder is moved, trimmed, muted
+    // and deleted by the playlist's existing code rather than by a second set
+    // of operations that could drift from it.
+
+    /** The folder a clip holds, or null if it does not hold one. */
+    TakeFolder* folderFor (int id)
+    {
+        auto* c = find (id);
+        return (c != nullptr && c->isTakeFolder()) ? c->folder.get() : nullptr;
+    }
+
+    /** An existing take folder covering the same stretch of the same track, so
+        that recording a second round of passes over the same loop joins the
+        folder already there instead of burying it. */
+    Clip* takeFolderAt (int track, double startBeat, double lengthSeconds)
+    {
+        for (auto& c : clips)
+            if (c.isTakeFolder() && c.track == track
+                && std::abs (c.start - startBeat) < 1.0e-6
+                && std::abs (c.length - lengthSeconds) < 1.0e-3)
+                return &c;
+        return nullptr;
+    }
+
+    /** Sizes a folder clip to its longest take and puts its comp back into the
+        form every lookup assumes. Call after adding or removing a take. */
+    void tidyFolder (Clip& c)
+    {
+        if (c.folder == nullptr)
+            return;
+
+        // The folder is as long as its longest pass. Sizing it to the shortest
+        // would cut the end off a take that ran on, and sizing it to the first
+        // would mean the order the passes arrived in decided the length.
+        c.length = c.folder->longestSeconds();
+        c.offset = 0.0;
+
+        // A folder reads its takes directly, one short read per comped
+        // stretch, so the things that put something between a clip and its
+        // audio do not apply to it: warp markers describe one piece of audio
+        // and a folder holds several, and stretching would need a stretched
+        // copy of every pass rather than of one sample. Both are turned off
+        // here rather than guarded against in the renderer.
+        c.warp.clear();
+        c.stretch     = 1.0;
+        c.pitch       = 0.0;
+        c.followTempo = false;
+
+        c.folder->tidy (c.length);
+    }
+
+    /** Puts a folder of takes on a track. The last pass is heard to begin
+        with, because it is the one just recorded and the one the producer is
+        waiting to hear; every earlier pass is still there to comp from.
+    */
+    int addTakeFolder (int track, double startBeat, std::vector<Take> takes)
+    {
+        Clip c;
+        c.type   = ClipType::audio;
+        c.track  = juce::jlimit (0, (int) tracks.size() - 1, track);
+        c.start  = std::max (0.0, startBeat);
+        c.folder = std::make_shared<TakeFolder>();
+        c.folder->takes = std::move (takes);
+        c.folder->comp.push_back ({ 0.0, std::max (0, c.folder->size() - 1) });
+        tidyFolder (c);
+
+        return addClip (std::move (c));
+    }
+
+    /** Appends a pass to a folder already on the playlist, and makes it the
+        one heard, which is what recording another take means. */
+    int addTake (int id, Take take)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! c->isAudio())
+            return -1;
+
+        if (c->folder == nullptr)
+            c->folder = std::make_shared<TakeFolder>();
+        if ((size_t) c->folder->size() >= kMaxCompTakes)
+            return -1;
+
+        c->folder->takes.push_back (std::move (take));
+        const int index = c->folder->size() - 1;
+        tidyFolder (*c);
+        setCompRegion (c->folder->comp, 0.0, c->length, index, c->folder->size(), c->length);
+        changed();
+        return index;
+    }
+
+    /** Throws a pass away. The comp is renumbered with it, so the stretches
+        that used a surviving take still use that same take rather than
+        whichever one slid into its index. */
+    void removeTake (int id, int index)
+    {
+        auto* c = find (id);
+        if (c == nullptr || c->folder == nullptr
+            || ! juce::isPositiveAndBelow (index, c->folder->size()))
+            return;
+
+        c->folder->takes.erase (c->folder->takes.begin() + index);
+        tidyFolder (*c);
+        compTakeRemoved (c->folder->comp, index, c->folder->size(), c->length);
+
+        // A folder with nothing left in it is not a clip any more.
+        if (c->folder->takes.empty())
+        {
+            const int gone = c->id;
+            c->folder.reset();
+            selection.erase (gone);
+            clips.erase (std::remove_if (clips.begin(), clips.end(),
+                                         [gone] (const Clip& x) { return x.id == gone; }),
+                         clips.end());
+        }
+
+        changed();
+    }
+
+    /** The comping gesture: this stretch of the folder comes from this pass.
+        Positions are seconds into the folder, which is what the comp is kept
+        in. One call is one finished swipe, so it is one undo step. */
+    void setCompTake (int id, double fromSeconds, double toSeconds, int take)
+    {
+        auto* c = find (id);
+        if (c == nullptr || ! c->isTakeFolder())
+            return;
+
+        setCompRegion (c->folder->comp, fromSeconds, toSeconds, take,
+                       c->folder->size(), c->length);
+        changed();
+    }
+
+    void setCompCrossfadeMs (int id, double ms)
+    {
+        if (auto* f = folderFor (id); f != nullptr && std::isfinite (ms))
+        {
+            f->crossfadeMs = std::clamp (ms, 0.0, 250.0);
+            changed();
+        }
+    }
+
     /** An automation clip aimed at this target that overlaps a span, if there
         is one.
 
@@ -1001,7 +1321,9 @@ public:
     int addWarpMarker (int id, double beatsIn)
     {
         auto* c = find (id);
-        if (c == nullptr || ! c->isAudio() || beatsIn <= 0.0)
+        // A warp map describes one piece of audio and a folder holds several,
+        // so a folder has no markers; see tidyFolder.
+        if (c == nullptr || ! c->isAudio() || c->isTakeFolder() || beatsIn <= 0.0)
             return -1;
 
         // Not past the clip's own end either. Snapping can round a click near
@@ -1231,6 +1553,13 @@ public:
         if (c == nullptr || atBeat <= c->start + 1e-6 || atBeat >= c->endBeat (bpm) - 1e-6)
             return 0;
 
+        // A comp is measured from the folder's start, and both halves of a cut
+        // folder would need the whole of every pass to stay meaningful. Rather
+        // than half support that, a folder is not cut: comping is already the
+        // way to say which part of it you want.
+        if (c->isTakeFolder())
+            return 0;
+
         Clip right = c->deepCopy();
         const double cutBeats = atBeat - c->start;
         right.start = atBeat;
@@ -1358,6 +1687,12 @@ private:
         if (a.curve != b.curve
             && ! (a.curve != nullptr && b.curve != nullptr && *a.curve == *b.curve))
             return false;
+        // A comp edit is an edit: choosing a different take over a bar changes
+        // what the song sounds like, so it belongs in the undo history, and
+        // one finished swipe has to be one step.
+        if (a.folder != b.folder
+            && ! (a.folder != nullptr && b.folder != nullptr && *a.folder == *b.folder))
+            return false;
         if (a.pattern == b.pattern)
             return true;
         return a.pattern != nullptr && b.pattern != nullptr && *a.pattern == *b.pattern;
@@ -1403,6 +1738,21 @@ private:
                         if (old.id == c.id && old.curve != nullptr && *old.curve == *c.curve)
                             reuse = old.curve;
                 copy.curve = reuse != nullptr ? reuse : std::make_shared<AutoCurve> (*c.curve);
+            }
+            if (c.folder != nullptr)
+            {
+                // Shared rather than copied where nothing changed, which
+                // matters more here than anywhere else: a folder holds ten
+                // passes of a vocal, and a hundred undo steps each holding
+                // their own copy of that list would be a hundred copies of
+                // the session. Only the bookkeeping is copied in any case;
+                // the audio itself is shared through SampleData.
+                std::shared_ptr<TakeFolder> reuse;
+                if (previous != nullptr)
+                    for (const auto& old : previous->clips)
+                        if (old.id == c.id && old.folder != nullptr && *old.folder == *c.folder)
+                            reuse = old.folder;
+                copy.folder = reuse != nullptr ? reuse : std::make_shared<TakeFolder> (*c.folder);
             }
             s.clips.push_back (std::move (copy));
         }

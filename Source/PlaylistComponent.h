@@ -80,12 +80,22 @@ private:
         // shapes the segment between them.
         int    autoPoint = -1;
         int    autoBend  = -1;
+
+        // Which pass of a take folder is under the mouse. Swiping across one
+        // is what comps from it, which is the whole gesture.
+        int    takeLane = -1;
     };
 
     struct DragState
     {
         enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee, warp,
-                          autoPoint, autoBend } mode = Mode::none;
+                          autoPoint, autoBend, comp, loopRange } mode = Mode::none;
+        int    takeLane = -1;
+        // The comp as it was when the swipe began. A swipe is applied from
+        // this rather than from whatever the last mouse move left behind, so
+        // that dragging back over your own swipe narrows it instead of
+        // leaving the boundary the wide version put there.
+        std::vector<CompSegment> compBefore;
         int    warpIndex = -1;
         int    pointIndex = -1;
         double bend0 = 0.0;      // the bend the segment had when the drag began
@@ -124,6 +134,20 @@ private:
     // clip, the same rule the warp markers follow, so that they never get in
     // the way of moving an unselected one.
     juce::Rectangle<float> curveBody (juce::Rectangle<float> clipRect) const;
+
+    // ---- take folders ----
+    //
+    // A folder is drawn as one lane per pass inside the clip, with the comped
+    // stretch of each lane lit and the rest of it dimmed, so that what is
+    // being heard is visible at a glance against what is not. Dragging across
+    // a lane gives that stretch to that pass.
+    juce::Rectangle<float> takeLanes (juce::Rectangle<float> clipRect) const;
+    int    takeLaneAt (const Clip&, juce::Rectangle<float> clipRect, float y) const;
+    juce::Rectangle<float> takeLaneBounds (const Clip&, juce::Rectangle<float> clipRect, int lane) const;
+    /** Seconds into the folder at a point on screen, which is the unit the
+        comp is kept in. */
+    double folderSecondsAt (const Clip&, double beat) const;
+    void   paintTakeFolder (juce::Graphics&, const Clip&, juce::Rectangle<float> r, bool dim);
     bool   curveVisible (const Clip&) const;
     float  curveValueToY (juce::Rectangle<float> body, double value) const;
     double curveYToValue (juce::Rectangle<float> body, float y) const;

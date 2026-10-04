@@ -209,7 +209,7 @@ MainComponent::MainComponent()
     playlist.onOpenPianoRoll = [this] (int id) { pianoRoll.setClip (id); if (auto* c = project.find (id)) selectChannel (c->channel); setView (View::pianoRoll); };
     playlist.isRendering     = [this] (const Clip& c)
     {
-        return c.sample != nullptr && StretchCache::needsRender (c.stretch, c.pitch)
+        return c.sample != nullptr && ! c.isTakeFolder() && StretchCache::needsRender (c.stretch, c.pitch)
             && stretchCache.isPending (*c.sample, c.stretch, c.pitch);
     };
     playlist.onRouteTrack    = [this] (int) { mixer.refresh(); };
@@ -478,6 +478,13 @@ void MainComponent::toggleRecord()
 
     const double countBeats = (countInBox.getSelectedId() - 1) * 4.0;
 
+    // Recording over a loop starts at the loop, not wherever the playhead
+    // happened to be. Otherwise the first pass would be the odd one out: it
+    // would start somewhere else and be a different length from the nine
+    // after it, and nothing in the folder would line up.
+    if (project.hasLoopRange())
+        engine.setSongStart (project.loopStart);
+
     engine.stopAndRewind();
     engine.setRecordSource (wantInstrument ? channel : -1);
     if (recordingSomeAudio)
@@ -504,8 +511,11 @@ void MainComponent::toggleRecord()
     juce::String what = wantInstrument ? (wantMidi ? "this channel's sound, its notes and its knob moves" : "this channel's sound")
                       : wantInput      ? (wantMidi ? "your input and MIDI" : "your input")
                                        : "MIDI and automation";
-    setStatus (countBeats > 0.0 ? "Counting in, then recording " + what + "..."
-                                : "Recording " + what + ". Press Space or Stop to finish.");
+    juce::String msg = countBeats > 0.0 ? "Counting in, then recording " + what + "..."
+                                        : "Recording " + what + ". Press Space or Stop to finish.";
+    if (project.hasLoopRange() && recordingSomeAudio)
+        msg << "  Every time round the loop is kept as its own take.";
+    setStatus (msg);
 }
 
 void MainComponent::collectRecordedMidi()
@@ -632,48 +642,155 @@ void MainComponent::finishRecording()
     // ---- audio ----
     if (recordingAudio)
     {
+        // Read before it is cleared: whether the take came back through the
+        // interface is what decides if its head has to be trimmed, and
+        // clearing the flag first silently trimmed every instrument take by
+        // a round trip it never made.
+        const bool throughInterface = ! recordingInstrument;
         recordingAudio = false;
         recordingInstrument = false;
         engine.setRecordSource (-1);
-        auto take = engine.stopAudioRecording();
-        if (take.has_value())
-        {
-            const double sampleRate = engine.getSampleRate();
-            const double latency    = recordingInstrument ? 0.0 : engine.getRoundTripLatencySamples() / sampleRate;
-            const auto   name       = recordingInstrument && project.channels[(size_t) midiChannel].name.isNotEmpty()
-                                          ? project.channels[(size_t) midiChannel].name + " take "
-                                          : juce::String ("Take ");
-            const auto   file       = BrowserPanel::recordingsFolder()
-                                          .getChildFile (name + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav");
-
-            const bool   saved     = writeWavFile (file, take->audio, sampleRate);
-            const double startBeat = take->startBeat;
-            const int    dropped   = take->droppedFrames;
-
-            auto sample = cache.adopt (std::move (take->audio), sampleRate, file, file.getFileNameWithoutExtension());
-            const double duration = sample->durationSeconds();
-            if (duration > 0.01)
-            {
-                Clip clip;
-                clip.type   = ClipType::audio;
-                clip.sample = sample;
-                clip.track  = audioTrack;
-                clip.start  = startBeat;
-                clip.offset = std::min (latency, duration * 0.5);
-                clip.length = duration - clip.offset;
-                project.selection.insert (project.addClip (clip));
-                browser.refresh();
-
-                juce::String msg = saved ? "Take saved to " + file.getFullPathName()
-                                         : "Take kept in this session, but it couldn't be saved to disk.";
-                if (dropped > 0)
-                    msg << "  (" << dropped << " samples dropped. Try a larger buffer size.)";
-                setStatus (msg);
-            }
-        }
+        finishAudioRecording (engine.stopAudioRecording(), throughInterface);
     }
 
     playlist.refresh();
+}
+
+// Turns what the recorder captured into clips. One pass makes one audio clip,
+// exactly as it always did. Several passes, which is what recording round a
+// loop produces, make one take folder: they are alternatives for the same
+// stretch of the song rather than a stack of clips on top of each other, and
+// keeping them together is what makes comping possible at all.
+//
+// Each pass still gets its own file in Recordings, so nothing about this is a
+// new way of storing audio, and a pass can be dragged out of the project and
+// used elsewhere.
+void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface)
+{
+    if (passes.empty())
+        return;
+
+    const double sampleRate = engine.getSampleRate();
+
+    // The interface's round trip is why a take lands late against the
+    // arrangement, so the head of every pass is trimmed by it. Recording an
+    // instrument's own output never goes out to the interface and back, so
+    // there is nothing to trim there.
+    const double latency = throughInterface ? engine.getRoundTripLatencySamples() / sampleRate : 0.0;
+
+    const auto stem = ! throughInterface && project.channels[(size_t) midiChannel].name.isNotEmpty()
+                          ? project.channels[(size_t) midiChannel].name + " take "
+                          : juce::String ("Take ");
+    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
+
+    int  dropped   = 0;
+    int  unsaved   = 0;
+    bool anyToDisk = false;
+
+    std::vector<Take> takes;
+    double folderStart = -1.0;
+
+    for (size_t i = 0; i < passes.size(); ++i)
+    {
+        auto& pass = passes[i];
+        dropped = std::max (dropped, pass.droppedFrames);
+
+        const auto suffix = passes.size() > 1 ? " " + juce::String ((int) i + 1) : juce::String();
+        const auto file   = BrowserPanel::recordingsFolder().getChildFile (stem + stamp + suffix + ".wav");
+
+        if (writeWavFile (file, pass.audio, sampleRate))
+            anyToDisk = true;
+        else
+            ++unsaved;
+
+        auto sample = cache.adopt (std::move (pass.audio), sampleRate, file,
+                                   file.getFileNameWithoutExtension());
+        const double duration = sample->durationSeconds();
+        const double trim     = std::min (latency, duration * 0.5);
+        if (duration - trim <= 0.01)
+            continue;                      // a pass too short to be one
+
+        if (folderStart < 0.0)
+            folderStart = pass.startBeat;
+
+        Take take;
+        take.name   = "Take " + juce::String ((int) takes.size() + 1);
+        take.sample = sample;
+        take.offset = trim;
+        take.length = duration - trim;
+
+        // Where this pass sits inside the folder. Loop recording puts every
+        // pass at the same place, and this is zero for all of them; a pass
+        // that began later than the first is held back by the difference, so
+        // a punch in does not slide to the front of the folder.
+        take.start = std::max (0.0, (pass.startBeat - folderStart) * 60.0 / std::max (1.0, project.bpm));
+
+        takes.push_back (std::move (take));
+    }
+
+    if (takes.empty())
+        return;
+
+    juce::String msg;
+
+    if (takes.size() == 1)
+    {
+        // One pass is one clip, the way it has always been. Wrapping a single
+        // take in a folder would mean every ordinary recording came back as
+        // something that needs comping.
+        Clip clip;
+        clip.type   = ClipType::audio;
+        clip.sample = takes[0].sample;
+        clip.track  = audioTrack;
+        clip.start  = folderStart;
+        clip.offset = takes[0].offset;
+        clip.length = takes[0].length;
+        project.selection.insert (project.addClip (clip));
+        msg = unsaved == 0 ? "Take saved to " + takes[0].sample->file.getFullPathName()
+                           : juce::String ("Take kept in this session, but it couldn't be saved to disk.");
+    }
+    else
+    {
+        // Another round of passes over the same loop joins the folder already
+        // there rather than burying it, which is what makes "keep going until
+        // one of them is right" work.
+        const double totalSeconds = [&takes]
+        {
+            double longest = 0.0;
+            for (const auto& t : takes)
+                longest = std::max (longest, t.start + t.length);
+            return longest;
+        }();
+
+        int id = 0;
+        if (auto* existing = project.takeFolderAt (audioTrack, folderStart, totalSeconds))
+        {
+            id = existing->id;
+            for (auto& t : takes)
+                project.addTake (id, std::move (t));
+        }
+        else
+        {
+            id = project.addTakeFolder (audioTrack, folderStart, std::move (takes));
+        }
+
+        project.selection = { id };
+        const auto* folder = project.folderFor (id);
+        const int   count  = folder != nullptr ? folder->size() : 0;
+
+        msg = juce::String (count) + " takes in a folder on "
+            + project.tracks[(size_t) audioTrack].name
+            + ". Drag across a lane to comp from that take.";
+    }
+
+    if (unsaved > 0 && takes.size() > 1)
+        msg << (anyToDisk ? "  (" + juce::String (unsaved) + " of them couldn't be written to disk.)"
+                          : "  (Kept in this session, but nothing could be written to disk.)");
+    if (dropped > 0)
+        msg << "  (" << dropped << " samples dropped. Try a larger buffer size.)";
+
+    browser.refresh();
+    setStatus (msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -692,7 +809,50 @@ void MainComponent::pushArrangement (bool allowRenders)
         if (c.muted || track.muted)
             continue;
 
-        if (c.isAudio())
+        if (c.isTakeFolder())
+        {
+            // One comped stretch becomes one entry, so the renderer plays a
+            // comp with the code it already has for playing audio, and the
+            // offline export inherits it without a second implementation:
+            // renderOffline calls renderAudioClips over this same snapshot.
+            // That is the only way to be sure a bounce sounds like what was
+            // heard, which for a comp matters more than for anything else,
+            // because the comp is the performance.
+            const double secondsPerBeat = 60.0 / std::max (1.0, project.bpm);
+            const float  gain = juce::Decibels::decibelsToGain (c.gainDb);
+
+            for (const auto& span : c.compSpans())
+            {
+                const auto* take = c.folder->take (span.take);
+                if (take == nullptr || take->sample == nullptr || ! span.isAudible()
+                    || take->sample->audio.getNumSamples() == 0
+                    || take->sample->audio.getNumChannels() == 0)
+                    continue;
+
+                AudioEngine::AudioClipRT rt;
+                rt.insert     = track.insert;
+                rt.data       = take->sample.get();
+                rt.gain       = gain;
+                rt.rate       = 1.0;
+                rt.start      = c.start + span.readFrom / secondsPerBeat;
+                rt.readOffset = take->offset + (span.readFrom - take->start);
+                rt.playLength = span.readTo - span.readFrom;
+
+                // The ramps are the only thing converted into beats, because
+                // beats are what the renderer has per sample. The comp itself
+                // stays in seconds so that changing the tempo moves the
+                // folder on the grid without moving the joins through the
+                // performance.
+                const auto f = span.fade();
+                rt.fade = { c.start + f.inFrom   / secondsPerBeat,
+                            c.start + f.inTo     / secondsPerBeat,
+                            c.start + f.outFrom  / secondsPerBeat,
+                            c.start + f.outTo    / secondsPerBeat };
+
+                snap.audio.push_back (rt);
+            }
+        }
+        else if (c.isAudio())
         {
             if (c.sample == nullptr || c.sample->audio.getNumSamples() == 0 || c.sample->audio.getNumChannels() == 0)
                 continue;   // missing file
@@ -818,6 +978,11 @@ void MainComponent::pushArrangement (bool allowRenders)
     snap.songEnd    = project.songEndBeats();
     snap.modulators = project.modulators;      // small, so copied whole
     engine.setSnapshot (std::move (snap));
+
+    if (project.hasLoopRange())
+        engine.setLoopRange (project.loopStart, project.loopEnd);
+    else
+        engine.clearLoopRange();
     stretchCache.keepOnly (keysInUse);
 }
 
@@ -834,6 +999,18 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
             updateUndoButtons();
         }
         pushArmedState();
+
+        // The loop range is saved with the project but is deliberately not
+        // part of the undo history, so commit() above never notices it. It
+        // still has to make the project worth saving, or moving the loop and
+        // closing the window would quietly lose it.
+        if (project.loopStart != lastLoopStart || project.loopEnd != lastLoopEnd)
+        {
+            lastLoopStart = project.loopStart;
+            lastLoopEnd   = project.loopEnd;
+            markDirty();
+        }
+
         playlist.refresh();
         if (view == View::pianoRoll) pianoRoll.refresh();
         if (view == View::rack)      rack.refresh();
@@ -1804,6 +1981,7 @@ void MainComponent::newProject()
 
         self.currentFile = juce::File();
         self.dirty = false;
+        self.noteLoopRange();
         self.selectChannel (0);
         self.mixer.selectInsert (0);
         self.pushArrangement (true);
@@ -1859,6 +2037,7 @@ bool MainComponent::loadProject (const juce::File& file, bool recovered)
                                       nullptr);
         currentFile = juce::File();
         dirty = false;
+        noteLoopRange();
     }
     else if (recovered)
     {
@@ -1870,6 +2049,7 @@ bool MainComponent::loadProject (const juce::File& file, bool recovered)
     {
         currentFile = file;
         dirty = false;
+        noteLoopRange();
         recent.addFile (file);
         plugins.settings().setValue ("recentProjects", recent.toString());
         setStatus ("Opened " + file.getFullPathName());
@@ -2007,6 +2187,7 @@ bool MainComponent::saveProject (const juce::File& file, bool collectSamples)
 
     currentFile = target;
     dirty = false;
+    noteLoopRange();
     recent.addFile (target);
     plugins.settings().setValue ("recentProjects", recent.toString());
     plugins.settings().saveIfNeeded();
