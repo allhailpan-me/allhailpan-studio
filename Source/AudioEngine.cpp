@@ -548,7 +548,12 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
     for (auto& c : channelSlots)
     {
-        c.midi.ensureSize (8192);
+        // Bytes, not events, and JUCE spends about nine of them per three
+        // byte message. The worst case here is stopTrackedNotes releasing a
+        // note on every one of the sixteen MIDI channels at once, which is
+        // two thousand messages, and growing this buffer is the audio thread
+        // allocating inside the graph lock.
+        c.midi.ensureSize (32768);
         c.mixdown.setSize (2, cap, false, true, true);
         if (c.plugin != nullptr)
         {
@@ -1148,7 +1153,14 @@ void AudioEngine::applyAutomation (double beat)
         const auto& params = slot.plugin->getParameters();
         for (const auto& lane : clip.lanes)
         {
-            if (! juce::isPositiveAndBelow (lane.paramIndex, params.size()) || lane.lane.points.empty())
+            // Checked against the vector that is actually indexed, not only
+            // against the parameter list, which is what the mixer path a few
+            // lines down does. The two agree today because setChannelPlugin
+            // sizes lastAuto from getParameters() under the graph lock, but
+            // the asymmetry is the risk, not the current behaviour.
+            if (! juce::isPositiveAndBelow (lane.paramIndex, params.size())
+                || (size_t) params.size() != slot.lastAuto.size()
+                || lane.lane.points.empty())
                 continue;
             if (! params[lane.paramIndex]->isAutomatable())
                 continue;
@@ -1349,10 +1361,17 @@ void AudioEngine::applyModulation (double beat)
                 if (! m.enabled)
                     continue;
 
+                // Once per modulator rather than once per target per
+                // parameter: the shape depends only on the modulator and the
+                // beat, and this is the innermost loop in the callback. A
+                // plugin with several hundred parameters was evaluating the
+                // same sine that many times per block.
+                const float v = m.valueAt (beat);
+
                 for (const auto& t : m.targets)
                     if (t.kind == AutoTargetKind::channelParam
                         && t.channel == channel && (size_t) t.paramIndex == p)
-                        offset += m.valueAt (beat) * t.depth;
+                        offset += v * t.depth;
             }
 
             const float wanted = juce::jlimit (0.0f, 1.0f, slot.modBase[p] + offset);
