@@ -135,12 +135,32 @@ explain the choice, rather than implying an authority that is not there.
 
 JUCE cannot be compiled in the development sandbox, so CI is the compile check.
 But most of the dangerous logic here is arithmetic, and arithmetic can be tested
-without JUCE: copy the header into a scratch directory with a small stub for the
-few JUCE types it uses, and compile it with sanitizers.
+without JUCE, in seconds, with sanitizers on.
+
+A test that nothing runs is a comment that took longer to write, so these live
+in `Tests/` and run on every push, as their own CI job that reports before the
+platform builds have finished fetching their dependencies. A red test does not
+stop the build, because knowing whether the code still compiles everywhere is
+useful while a test is red, but it does stop a release from publishing.
 
 ```
-g++ -std=c++20 -O1 -fsanitize=address,undefined -I. -o test test.cpp && ./test
+./Tests/run.sh
 ```
+
+That builds and runs every `Tests/*Test.cpp` with address and undefined
+behaviour sanitizers, halting on the first undefined behaviour so the exit
+code means something. Two rules make a new test fit:
+
+- Name it `*Test.cpp`. It is compiled with `-I Source` and nothing else, so the
+  header it covers must build without JUCE. Keeping a header that way where it
+  can be is worth it on its own: `WarpMap.h` is pure arithmetic for exactly
+  this reason. Where a header really does need a few JUCE types, stub them in
+  the test file ahead of the include, as `LatencyDelayTest.cpp` does for
+  `juce::AudioBuffer` and the `jmax` family.
+- Exit non-zero when something is wrong, and print what. There is no framework.
+- A `*Probe.cpp` is not run: that is a measurement that justified a design
+  decision, kept so the decision can be rechecked, and it may need third party
+  sources and minutes. `WarpStretcherProbe.cpp` is the example.
 
 This has repeatedly caught real bugs before they shipped:
 
@@ -204,6 +224,7 @@ braces on their own line.
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
+| `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 
 ## Things worth knowing about the design
 
