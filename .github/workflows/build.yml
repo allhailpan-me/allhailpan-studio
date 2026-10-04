@@ -3,7 +3,22 @@ name: Build
 on:
   push:
   pull_request:
+
+  # Cutting a release from the Actions tab: run this workflow, fill in a tag
+  # like v0.2.0, and it builds all three platforms, creates the tag, and
+  # publishes the release with RELEASE_NOTES.md attached to it. Leaving the
+  # tag empty just builds, as an ordinary run does.
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a release with this tag (e.g. v0.2.0). Leave empty to only build."
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the release as a pre-release"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -88,14 +103,18 @@ jobs:
           name: ALLHAILPAN-Studio-${{ runner.os }}
           path: dist/*.zip
 
-      # Pushing a tag like v0.2.0 publishes the release and attaches all three
-      # builds to it. The notes come from RELEASE_NOTES.md in the repository,
-      # so they are written and reviewed alongside the code they describe.
+      # A release is published either by pushing a tag, or by running this
+      # workflow from the Actions tab with a tag filled in. The notes come from
+      # RELEASE_NOTES.md in the repository, so they are written and reviewed
+      # alongside the code they describe.
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
           body_path: RELEASE_NOTES.md
-          prerelease: true
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: ALLHAILPAN Studio ${{ inputs.release_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.release_tag == '' || inputs.prerelease }}
           fail_on_unmatched_files: true
