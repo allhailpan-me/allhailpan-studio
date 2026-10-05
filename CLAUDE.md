@@ -1,7 +1,7 @@
 # Notes for working on this codebase
 
 ALLHAILPAN Studio is a digital audio workstation: a JUCE application in C++20,
-about nineteen thousand lines across fifty files in `Source`, with another six
+about twenty thousand lines across fifty two files in `Source`, with another six
 thousand of standalone tests in `Tests`, built with CMake and FetchContent. It
 ships with its own instrument, hosts VST3 plugins, records audio and MIDI,
 warps and comps takes, and exports finished mixes.
@@ -270,6 +270,8 @@ braces on their own line.
 | `MixerComponent.h` | Strips, effect racks, sends |
 | `ModulatorPanel.h` | Shapes wired to plugin parameters |
 | `MixReportPanel.h` | What the finished master measures |
+| `Preferences.h` | Application settings: bounds, what a stored value has to pass, and the arithmetic over it. No JUCE |
+| `PreferencesWindow.h` | The preferences window, and the one path from a stored setting to its effect |
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |

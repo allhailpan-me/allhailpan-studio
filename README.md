@@ -21,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. For low latency monitoring choose Windows Audio (Exclusive Mode) in the audio settings, which the window will tell you the cost of in milliseconds, or build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
+- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. For low latency monitoring choose Windows Audio (Exclusive Mode) in **Preferences > Audio**, which tells you the cost of your choice in milliseconds, or build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 
@@ -98,7 +98,7 @@ cmake --build build --parallel
   - **Save with samples** copies every file into a `<project> Samples` folder beside the project, so you can move the folder or share it.
   - If files are missing when opening, those clips show a red header. Use **File > Find missing samples** to pick a folder, and they're matched by name.
 - **Missing plugins** (for example, a project opened on another computer) are listed when opening. Their saved settings stay in the project, so saving again doesn't lose them.
-- **Autosave** runs every two minutes while you have unsaved changes. If the app closes unexpectedly, you're offered your work back the next time it starts.
+- **Autosave** runs every two minutes while you have unsaved changes, or at whatever interval you set in **Preferences > General**, including off. If the app closes unexpectedly, you're offered your work back the next time it starts.
 
 ### Exporting
 - **File > Export song to WAV** renders the whole arrangement to a 24-bit WAV at your device's sample rate. It runs offline, so it's much faster than playing the song through.
@@ -258,12 +258,20 @@ Two kinds, for the two different things automation is asked to do.
 - **Sends:** each insert has two, below the effect rack. Pick a destination and a level to feed part of this insert into another one, so a reverb or delay can be shared instead of loaded on every track. A send can only feed a later insert, which is what keeps the mixer free of feedback loops, so the destination list offers only those.
 - For mastering, select **Master** and add LANDR there. The metronome and browser previews skip the master rack, so your chain never processes the click.
 
+### Preferences
+**Ctrl+,** or *File > Preferences*, in three tabs:
+
+- **General:** how often the autosave runs, how loud the metronome is, and the tempo a new project starts at. Each applies as you change it, so you can set the click level while it's running. There's a button to open the folder your settings, plugin list and autosave live in.
+- **Audio:** the device, sample rate and buffer size, with the monitoring round trip printed in milliseconds underneath and a note on what to change if it's too high.
+- **Plugins:** scanning for VST3 and the other formats your platform supports (*Options > Scan for new or updated VST3 plug-ins*).
+
+The **Audio** and **Plugins** buttons in the toolbar open the same window on those tabs, since picking a device and scanning for plugins are what a fresh install needs. Monitoring, the record mode and the count-in stay on the toolbar: they're decisions you make between takes, not settings you go looking for.
+
 ### Other
-- **Plugins** opens the plugin manager (*Options > Scan for new or updated VST3 plug-ins*).
 - The status bar shows your device, latency, CPU load, and input and output levels.
 
 ### Not yet
-- No instruments are bundled yet, so you need your own VST3s to make sound.
+- One instrument ships with the studio, PAN One. Anything beyond it is your own VST3s.
 - **4/4 only**, and one tempo for the whole song. A tempo change part way through a MIDI file is read at its opening tempo and the status bar says so.
 - Loading a plugin and dragging a mixer fader are not undo steps.
 - The downloadable Windows build has no ASIO: see **Known limitations** in the release notes for why, and how to build it with ASIO yourself.
@@ -294,15 +302,17 @@ Done:
 - True peak to BS.1770-4 Annex 2, and loudness range to EBU Tech 3342
 - Groove: swing at the resolution you choose, with a velocity and a randomise amount
 - A test suite over the arithmetic that fails quietly, run on every push before the platform builds finish fetching their dependencies
+- PAN One, an instrument compiled in, loaded through an internal plugin format so it behaves like any other plugin everywhere else
+- A preferences window, with the device, the plugin list and the settings that had nowhere to live in one place
 
 Next, roughly in the order they are worth doing:
 
-- A bundle of open-source instruments, so a fresh install makes sound on its own
+- Screenshots in this file, which has none. It needs someone running the app to take them
 - Undo for loading a plugin and for moving a mixer fader, which are the two obvious gaps left in the history
 - Time signatures other than 4/4, and a tempo that can change during a song. Both are assumed to be fixed in more than one place, so this is engine work rather than an interface
-- A preferences window, so the settings currently spread across the interface have somewhere to live
-- Sampler channels, and a built-in synth
+- Sampler channels, built on the same internal plugin format PAN One uses
 - Groove taken from one performance and applied to another, which is the useful half of what a groove pool is for
+- Spectral editing and repair, which is a project rather than a feature
 
 ## Project layout
 

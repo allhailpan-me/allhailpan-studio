@@ -2453,8 +2453,13 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
         // the tempo nobody chose. A producer who has set a tempo means it, and
         // a dropped file silently moving the whole arrangement underneath them
         // would be far worse than a part that needs stretching.
+        //
+        // Against startingBpm rather than kDefaultBpm, because the tempo a new
+        // project opens at is a preference: comparing with the compiled in
+        // default would mean anyone who set theirs to 140 never got an
+        // imported file's tempo offered again.
         if (read.bpm > 0.0 && adoptedTempo == 0.0
-            && std::abs (project.bpm - kDefaultBpm) < 1.0e-9 && onSetTempo)
+            && std::abs (project.bpm - project.startingBpm) < 1.0e-9 && onSetTempo)
         {
             adoptedTempo = read.bpm;   // applied below, once the clips are in
         }

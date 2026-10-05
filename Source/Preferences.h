@@ -35,7 +35,7 @@ namespace Prefs
 */
 namespace Key
 {
-    inline constexpr const char* autosaveMinutes  = "autosaveMinutes";
+    inline constexpr const char* autosaveInterval = "autosaveInterval";
     inline constexpr const char* metronomeLevelDb = "metronomeLevelDb";
     inline constexpr const char* defaultTempo     = "defaultTempo";
 
@@ -80,6 +80,17 @@ inline constexpr Range metronomeLevelDb { -48.0, 0.0, -9.1 };
     be reached from the control it sets is a preference that looks broken.
 */
 inline constexpr Range defaultTempo { 20.0, 400.0, 128.0 };
+
+//==============================================================================
+/** The rate of the main window's timer, which is what the autosave interval is
+    counted in.
+
+    Here rather than only at the startTimerHz call so the two cannot drift. The
+    autosave used to be a literal 60 * 120 counted against this rate, and a
+    change to the timer would have quietly turned two minutes into something
+    else.
+*/
+inline constexpr double mainTimerHz = 60.0;
 
 //==============================================================================
 /** Reads a stored number back, usable whatever the file contained. */

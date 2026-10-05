@@ -572,6 +572,22 @@ public:
     Groove                   groove;
     double bpm = kDefaultBpm;
 
+    // The tempo File > New starts at, which is a preference rather than part of
+    // the project: it is held here only because clearAll is what puts the tempo
+    // back and has nothing else to read it from. So it is deliberately not
+    // saved, not loaded, not reset by clearAll and not in the undo snapshot,
+    // which is the one place the four things a new field usually needs do not
+    // apply. MainComponent sets it from the settings file at startup and
+    // whenever the preference changes.
+    //
+    // Two things read it, and both have to: clearAll, and the test in
+    // PlaylistComponent for whether the project is still at a tempo nobody
+    // chose, which is what lets a dropped file offer its own. Leaving the
+    // second one comparing against the compiled in default would mean a
+    // producer whose projects start at 140 never got an imported file's tempo
+    // adopted again.
+    double startingBpm = kDefaultBpm;
+
     // ---- loop range ----
     // The span the transport repeats over, set by dragging in the playlist
     // ruler. An empty range means no range, and playback then loops at the end
@@ -677,7 +693,10 @@ public:
         // New. Whoever sets this has to move the engine and the displayed
         // number with it, which is why MainComponent::newProject goes through
         // the tempo control rather than writing this back.
-        bpm = kDefaultBpm;
+        //
+        // startingBpm, not kDefaultBpm: the tempo a new project opens at is a
+        // preference now, and startingBpm is not itself reset here.
+        bpm = startingBpm;
 
         loopStart = loopEnd = 0.0;
 

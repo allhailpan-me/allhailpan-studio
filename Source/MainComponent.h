@@ -16,7 +16,7 @@
 #include <atomic>
 #include "MixerComponent.h"
 #include "PluginPicker.h"
-#include "AudioSettingsPanel.h"
+#include "PreferencesWindow.h"
 #include "Logo.h"
 #include "ProjectIO.h"
 #include "ExportJob.h"
@@ -199,7 +199,11 @@ private:
     void ignoreEditsForAWhile() { ignoreEditsUntil = juce::Time::getMillisecondCounter() + 2000; }
     std::unique_ptr<juce::AudioPluginInstance> createPluginForProject (const juce::PluginDescription&, juce::String& error);
     static juce::File projectsFolder();
-    void showAudioSettings();
+    void showPreferences (PreferencesComponent::Tab tab);
+
+    // What each setting in the preferences window does, handed to it so that
+    // the window owns the controls and this owns the effect.
+    PreferencesActions preferenceActions();
     void setStatus (const juce::String&);
     void updateTypingLabel();
     void pushArmedState();
@@ -229,7 +233,7 @@ private:
     juce::ComboBox   recordMode, countInBox, monitorBox;
     juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" };
     juce::TextButton modTab { "Mod" }, reportTab { "Report" }, mixerTab { "Mixer" };
-    juce::TextButton audioButton { "Audio settings" }, pluginsButton { "Plugins" };
+    juce::TextButton audioButton { "Audio" }, pluginsButton { "Plugins" };
     juce::TextButton undoButton { "Undo" }, redoButton { "Redo" }, fileButton { "File" };
     juce::Slider     tempo;
     juce::Label      tempoLabel { {}, "Tempo" }, clock;
@@ -261,6 +265,10 @@ private:
     double lastLoopStart = 0.0, lastLoopEnd = 0.0;
     juce::uint32 ignoreEditsUntil = 0;
     int autosaveTicks = 0;
+
+    // Ticks of this component's timer between autosaves, or zero for off. Set
+    // from the settings file rather than compiled in, which it used to be.
+    int autosaveEvery = 0;
     std::unique_ptr<juce::FileChooser> chooser;
     std::unique_ptr<MixerWindow> mixerWindow;
     std::unique_ptr<ExportJob> exportJob;

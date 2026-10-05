@@ -228,6 +228,13 @@ static void theAutosaveIntervalKeepsTheIntervalItAlwaysHad()
     // The rate is a parameter rather than an assumption, so a change to the
     // timer must carry the interval with it.
     check (Prefs::autosaveTicks (2.0, 30.0) == 3600, "the interval ignored a change of timer rate");
+
+    // And the rate the application really runs at is the one the old literal
+    // assumed, so the default interval is unchanged by all of this.
+    check (Prefs::mainTimerHz > 0.0, "the main timer rate is not positive");
+    check (Prefs::autosaveTicks (Prefs::autosaveMinutesFor (Prefs::autosaveChoice.fallback),
+                                 Prefs::mainTimerHz) == 7200,
+           "the default autosave interval is no longer the 7200 ticks the application used");
 }
 
 static void autosavingOffIsTheOnlyWayToGetZero()

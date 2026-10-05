@@ -44,13 +44,19 @@ MainComponent::MainComponent()
     {
         const auto mode = (AudioEngine::Monitor) (monitorBox.getSelectedId() - 1);
         engine.setMonitorMode (mode);
-        plugins.settings().setValue ("monitorMode", monitorBox.getSelectedId());
+        plugins.settings().setValue (Prefs::Key::monitorMode, monitorBox.getSelectedId());
 
         if (mode != AudioEngine::Monitor::off)
             setStatus ("Monitoring through " + engine.insert (engine.getMonitorInsert()).name
                          + ". Use headphones: speakers near a microphone will feed back.");
     };
-    monitorBox.setSelectedId (plugins.settings().getIntValue ("monitorMode", 1), juce::dontSendNotification);
+    // Through choiceId, because an id the box does not have selects nothing,
+    // which reads back as zero, and zero minus one is not a monitoring mode the
+    // engine has. See Preferences.h.
+    monitorBox.setSelectedId (Prefs::choiceId (plugins.settings().getIntValue (Prefs::Key::monitorMode,
+                                                                              Prefs::monitorMode.fallback),
+                                              Prefs::monitorMode),
+                             juce::dontSendNotification);
     engine.setMonitorMode ((AudioEngine::Monitor) (monitorBox.getSelectedId() - 1));
 
     recordMode.addItem ("Rec: Auto", recAuto);
@@ -59,8 +65,15 @@ MainComponent::MainComponent()
     recordMode.addItem ("Rec: Input audio + MIDI", recBoth);
     recordMode.addItem ("Rec: Instrument sound", recInstrument);
     recordMode.addItem ("Rec: Instrument sound + MIDI", recInstrumentMidi);
-    recordMode.setSelectedId (plugins.settings().getIntValue ("recordMode", recAuto), juce::dontSendNotification);
-    recordMode.onChange = [this] { plugins.settings().setValue ("recordMode", recordMode.getSelectedId()); };
+    static_assert (Prefs::recordMode.count == (int) recInstrumentMidi,
+                   "a record mode was added without telling Preferences.h, so a stored id for it "
+                   "would be rejected as out of range");
+
+    recordMode.setSelectedId (Prefs::choiceId (plugins.settings().getIntValue (Prefs::Key::recordMode,
+                                                                              Prefs::recordMode.fallback),
+                                              Prefs::recordMode),
+                              juce::dontSendNotification);
+    recordMode.onChange = [this] { plugins.settings().setValue (Prefs::Key::recordMode, recordMode.getSelectedId()); };
     recordMode.setTooltip ("Auto records the selected channel's sound and its MIDI when an instrument is loaded,\n"
                            "otherwise audio from your interface.\n"
                            "\"Instrument sound\" captures whatever the plugin makes, including notes you play with the\n"
@@ -69,8 +82,11 @@ MainComponent::MainComponent()
     countInBox.addItem ("Count: off", 1);
     countInBox.addItem ("Count: 1 bar", 2);
     countInBox.addItem ("Count: 2 bars", 3);
-    countInBox.setSelectedId (plugins.settings().getIntValue ("countIn", 1), juce::dontSendNotification);
-    countInBox.onChange = [this] { plugins.settings().setValue ("countIn", countInBox.getSelectedId()); };
+    countInBox.setSelectedId (Prefs::choiceId (plugins.settings().getIntValue (Prefs::Key::countIn,
+                                                                              Prefs::countIn.fallback),
+                                              Prefs::countIn),
+                              juce::dontSendNotification);
+    countInBox.onChange = [this] { plugins.settings().setValue (Prefs::Key::countIn, countInBox.getSelectedId()); };
     countInBox.setTooltip ("Counts you in with the metronome before recording starts. The song stays silent during the count.");
 
     clickButton.setToggleState (engine.isMetronomeOn(), juce::dontSendNotification);
@@ -103,13 +119,20 @@ MainComponent::MainComponent()
     undoButton.setTooltip ("Undo (Ctrl+Z). Unlimited steps.");
     redoButton.setTooltip ("Redo (Ctrl+Y or Ctrl+Shift+Z)");
 
-    audioButton.onClick   = [this] { showAudioSettings(); };
-    pluginsButton.onClick = [this] { plugins.showPluginWindow(); };
+    // Both of these open the same window, on the tab they are named after. They
+    // stay as separate buttons because picking a device and scanning for plugins
+    // are the two things someone does on a fresh install, and burying either one
+    // behind a tab would cost a first run more than the tidiness is worth.
+    audioButton.onClick   = [this] { showPreferences (PreferencesComponent::audio); };
+    pluginsButton.onClick = [this] { showPreferences (PreferencesComponent::plugins); };
+    audioButton.setTooltip ("Audio device and the monitoring latency it costs (part of Preferences, Ctrl+,)");
+    pluginsButton.setTooltip ("Scan for VST3 and other plugins (part of Preferences, Ctrl+,)");
 
     tempo.setSliderStyle (juce::Slider::LinearBar);
     tempo.setRange (20.0, 400.0, 0.01);
     tempo.setNumDecimalPlacesToDisplay (2);
-    tempo.setValue (plugins.settings().getDoubleValue ("bpm", 128.0), juce::dontSendNotification);
+    tempo.setValue (storedPreference (plugins.settings(), "bpm", Prefs::defaultTempo),
+                    juce::dontSendNotification);
     tempo.onValueChange = [this]
     {
         engine.setBpm (tempo.getValue());
@@ -284,8 +307,12 @@ MainComponent::MainComponent()
     pushArmedState();
     updateUndoButtons();
 
+    // Everything the preferences window owns, applied the same way it applies a
+    // change: one path from a stored setting to its effect.
+    applyPreferences (plugins.settings(), preferenceActions());
+
     if (startupError.isNotEmpty())
-        setStatus ("Audio device problem: " + startupError + ". Open Audio settings to pick another device.");
+        setStatus ("Audio device problem: " + startupError + ". Open Preferences (Ctrl+,) to pick another device.");
 
     // Crash recovery: if the last session didn't close cleanly, offer the autosave
     const bool crashedLastTime = plugins.settings().getBoolValue ("sessionOpen", false)
@@ -300,12 +327,19 @@ MainComponent::MainComponent()
 
     setWantsKeyboardFocus (true);
     setSize (1500, 920);
-    startTimerHz (60);
+    // The same rate the autosave interval is counted in, so the two cannot
+    // drift. See Prefs::mainTimerHz.
+    startTimerHz ((int) Prefs::mainTimerHz);
 }
 
 MainComponent::~MainComponent()
 {
     stopTimer();
+
+    // Before anything else goes: it holds references to the plugin manager and
+    // the device manager, which are members here.
+    closePreferencesWindow();
+
     if (recordingAudio || recordingMidi)
         finishRecording();
 
@@ -1603,6 +1637,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (is ('s', cmd | juce::ModifierKeys::shiftModifier)) { saveAs (false); return true; }
     if (is ('o', cmd))                                  { openProjectDialog(); return true; }
     if (is ('n', cmd))                                  { newProject(); return true; }
+    if (is (',', cmd))                                  { showPreferences (PreferencesComponent::general); return true; }
     if (is ('y', cmd) || is ('z', cmd | juce::ModifierKeys::shiftModifier)) { undoRedo (true); return true; }
 
     if (view == View::playlist)
@@ -1637,19 +1672,46 @@ void MainComponent::updateTypingLabel()
                          juce::dontSendNotification);
 }
 
-void MainComponent::showAudioSettings()
+PreferencesActions MainComponent::preferenceActions()
 {
-    auto* selector = new AudioSettingsPanel (engine.devices());
+    // SafePointer rather than this, because the preferences window outlives
+    // nothing here in practice but is owned by the desktop rather than by this
+    // component, and a setting changed while the window is closing must not
+    // reach a component that has gone.
+    juce::Component::SafePointer<MainComponent> safeThis (this);
 
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (selector);
-    o.dialogTitle                  = "Audio settings";
-    o.dialogBackgroundColour       = Ahp::panel;
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar            = true;
-    o.resizable                    = true;
-    if (auto* w = o.launchAsync())
-        Ahp::applyDarkTitleBar (*w);
+    PreferencesActions actions;
+
+    actions.setMetronomeGain = [safeThis] (float gain)
+    {
+        if (safeThis != nullptr)
+            safeThis->engine.setMetronomeGain (gain);
+    };
+
+    actions.setAutosaveTicks = [safeThis] (int ticks)
+    {
+        if (safeThis == nullptr)
+            return;
+
+        safeThis->autosaveEvery = ticks;
+
+        // So that shortening the interval does not have to wait out the old
+        // one, and lengthening it does not fire immediately.
+        safeThis->autosaveTicks = 0;
+    };
+
+    actions.setDefaultTempo = [safeThis] (double bpm)
+    {
+        if (safeThis != nullptr)
+            safeThis->project.startingBpm = bpm;
+    };
+
+    return actions;
+}
+
+void MainComponent::showPreferences (PreferencesComponent::Tab tab)
+{
+    showPreferencesWindow (plugins, engine.devices(), preferenceActions(), tab);
 }
 
 void MainComponent::setStatus (const juce::String& message)
@@ -1692,7 +1754,7 @@ void MainComponent::resized()
     reportTab   .setBounds (bar.removeFromLeft (64));
     mixerTab    .setBounds (bar.removeFromLeft (58));
     pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
-    audioButton  .setBounds (bar.removeFromRight (104)); bar.removeFromRight (14);
+    audioButton  .setBounds (bar.removeFromRight (66)); bar.removeFromRight (14);
     redoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (4);
     undoButton   .setBounds (bar.removeFromRight (54));
 
@@ -1808,7 +1870,9 @@ void MainComponent::timerCallback()
     checkModulationLearn();
     updateFloatingWindows();
 
-    if (++autosaveTicks >= 60 * 120)        // every two minutes
+    // Zero is off. Counting only while it is on, so turning the autosave off
+    // does not leave a counter climbing towards a save that never comes.
+    if (autosaveEvery > 0 && ++autosaveTicks >= autosaveEvery)
     {
         autosaveTicks = 0;
         if (dirty && ! recordingAudio && ! recordingMidi && ! playlist.isEditing() && ! pianoRoll.isDragging())
@@ -1897,6 +1961,8 @@ void MainComponent::showFileMenu()
     menu.addItem (item (6, "Find missing samples" + (missing.isEmpty() ? juce::String() : " (" + juce::String (missing.size()) + ")"),
                         {}, ! missing.isEmpty()));
     menu.addItem (item (7, "Show project in folder", {}, currentFile.existsAsFile()));
+    menu.addSeparator();
+    menu.addItem (item (13, "Preferences...", "Ctrl+,"));
 
     juce::Component::SafePointer<MainComponent> safeThis (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&fileButton), [safeThis] (int result)
@@ -1933,6 +1999,7 @@ void MainComponent::showFileMenu()
             case 10: self.importMidiDialog(); break;
             case 11: self.exportMidi (false); break;
             case 12: self.exportMidi (true); break;
+            case 13: self.showPreferences (PreferencesComponent::general); break;
             default: break;
         }
     });

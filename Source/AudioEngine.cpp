@@ -755,7 +755,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     clickSamplesLeft = (int) (sampleRate * 0.05);
                     clickPhase = 0.0;
                     clickFreq  = (beat % 4 == 0) ? 1760.0 : 1320.0;
-                    clickAmp   = 0.35f;
+
+                    // Read once per click rather than per sample: a level
+                    // changed mid click would otherwise step on a decay that
+                    // is already running, which is audible as a chirp.
+                    clickAmp   = clickGain.load();
                 }
             }
             position += beatsPerSample;
