@@ -1,8 +1,10 @@
 # Notes for working on this codebase
 
 ALLHAILPAN Studio is a digital audio workstation: a JUCE application in C++20,
-about twelve thousand lines, built with CMake and FetchContent. It hosts VST3
-plugins, records audio and MIDI, and exports finished mixes.
+about nineteen thousand lines across fifty files in `Source`, with another six
+thousand of standalone tests in `Tests`, built with CMake and FetchContent. It
+ships with its own instrument, hosts VST3 plugins, records audio and MIDI,
+warps and comps takes, and exports finished mixes.
 
 This file is what a newcomer would otherwise have to learn by breaking things.
 
