@@ -15,10 +15,10 @@ public:
     juce::KnownPluginList          knownPlugins;
 
     juce::PropertiesFile& settings()    { return *properties.getUserSettings(); }
-    juce::File crashedPluginsFile();
 
-    // Opens the plugin manager window, where the user can scan for plugins.
-    void showPluginWindow();
+    // Where a plugin that crashed while being scanned is recorded, so the next
+    // scan skips it. The preferences window needs it to build the plugin list.
+    juce::File crashedPluginsFile();
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;

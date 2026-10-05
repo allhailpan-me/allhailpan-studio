@@ -1,6 +1,4 @@
 #include "PluginManager.h"
-#include "AhpLookAndFeel.h"
-#include "DarkTitleBar.h"
 #include "PluginScanner.h"
 #include "InternalPluginFormat.h"
 
@@ -51,22 +49,6 @@ juce::File PluginManager::crashedPluginsFile()
 {
     // If a plugin crashes during scanning, it is recorded here and skipped next time.
     return settings().getFile().getSiblingFile ("RecentlyCrashedPlugins");
-}
-
-void PluginManager::showPluginWindow()
-{
-    auto* list = new juce::PluginListComponent (formats, knownPlugins, crashedPluginsFile(), &settings(), true);
-    list->setSize (780, 540);
-
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (list);
-    o.dialogTitle                  = "Plugins";
-    o.dialogBackgroundColour       = Ahp::panel;
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar            = true;
-    o.resizable                    = true;
-    if (auto* w = o.launchAsync())
-        Ahp::applyDarkTitleBar (*w);
 }
 
 void PluginManager::changeListenerCallback (juce::ChangeBroadcaster*)

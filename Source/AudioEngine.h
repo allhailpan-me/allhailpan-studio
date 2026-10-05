@@ -55,6 +55,12 @@ public:
     void setMetronome (bool on) noexcept         { metronome.store (on); }
     bool isMetronomeOn() const noexcept          { return metronome.load(); }
 
+    /** Linear gain for the click, zero being silent. One atomic store, read by
+        the callback when it starts a click rather than per sample, so changing
+        the level while the metronome is running cannot step on a click that is
+        already decaying. */
+    void setMetronomeGain (float g) noexcept     { clickGain.store (g); }
+
     double getBeatPosition() const noexcept      { return beatPosition.load(); }
     float  getInputLevel() const noexcept        { return inputLevel.load(); }
     double getSampleRate() const noexcept        { return sampleRate; }
@@ -494,6 +500,11 @@ private:
     int    clickSamplesLeft = 0;
     double clickPhase = 0.0, clickFreq = 1000.0, clickDecay = 0.999;
     float  clickAmp = 0.0f;
+
+    // The level each click starts at. Was a constant 0.35 here, and the default
+    // preference is still that to a tenth of a decibel, so nobody's metronome
+    // changes level because it became adjustable.
+    std::atomic<float> clickGain { 0.35f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };
