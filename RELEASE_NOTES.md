@@ -1,4 +1,20 @@
-The studio now makes sound on its own. Below that, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+The settings have somewhere to live. Below that, the instrument that makes the studio sound on its own, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.4.0
+
+**A preferences window,** on Ctrl+, or from the File menu. The audio device was behind one button and the plugin list behind another, with no relationship between the two windows, and three more settings were constants nobody could reach. All of it is in one window now, in three tabs:
+
+- **General:** how often the autosave runs, including off; how loud the metronome is; and the tempo a new project starts at. Each applies as you change it, so you can set the click level while the metronome is running rather than guessing and reopening the window. There is a button to open the folder your settings, plugin list and autosave live in, and one to put those three back to their defaults.
+- **Audio:** the device chooser, with the monitoring round trip still printed in milliseconds underneath it.
+- **Plugins:** scanning, exactly as before.
+
+The **Audio** and **Plugins** buttons in the toolbar now open that window on those tabs, because picking a device and scanning for plugins are what a fresh install needs and neither should be behind a tab. Monitoring, the record mode and the count-in stay on the toolbar: they are decisions you make between takes, not settings you go looking for.
+
+The metronome level was a fixed number in the engine before this, and the default is that same number to within a tenth of a decibel, so your click does not change level on upgrade. It is read once per click rather than per sample, so turning it down while the metronome is running cannot step on a click that is already decaying. The autosave default is the same two minutes it has always been.
+
+**A monitoring fault that a settings file could cause.** The monitoring mode, the record mode and the count-in were restored from the settings file without checking that the stored value was one the control offers. An unknown value leaves a combo box with nothing selected, which reads back as zero, and for monitoring that zero became a mode the engine does not have: the callback took its low latency path, which deliberately skips delay compensation, while the mixer matched neither "armed" nor "on" and passed no input through. The result would have been monitoring that is silent and costs the compensation anyway, which is a hard thing to diagnose from the symptom. No released version wrote a value that could trigger it, so nobody will have seen this, but a hand edited or future written settings file would have been enough.
+
+Related, and the reason the above was found: a setting that is not a number parses as zero, and zero is a real value for several of these. It is off for the autosave and full level for the metronome, so a single garbled line in the settings file would have read back as a deliberate choice, and for the click as the loudest one in the range. Settings are now checked before they are acted on, and anything unreadable falls back to its default.
 
 ## Since v0.3.1
 
