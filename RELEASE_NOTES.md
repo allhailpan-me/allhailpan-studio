@@ -1,4 +1,19 @@
-Two fixes found by playing v0.3.0, followed by everything that went into v0.3.0 itself.
+The studio now makes sound on its own. Below that, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.3.1
+
+**It comes with an instrument.** Until now the studio was silent on a new machine until you supplied your own VST3s, which is where most people who try a studio stop trying it. PAN One is built in: two oscillators with selectable shapes and detune, a sub an octave down, a resonant filter with its own envelope, an amplitude envelope, sixteen voices, and five presets (Sub Bass, Soft Keys, Slow Pad, Short Pluck, Reed Lead).
+
+It is in the instrument list the first time you open the studio. There is nothing to scan for and nothing to download, and it behaves as an ordinary plugin everywhere else: it loads the same way a VST3 does, saves into a project the same way, and records, modulates and mixes through the same code rather than through a special case.
+
+The oscillators are band limited. A naive saw or square is a discontinuity sampled directly, and everything above Nyquist folds back as partials that are not harmonically related to the note, so they move the wrong way as you play up the keyboard. That shimmer in the top two octaves is what gives a soft synth away, and no filter afterwards removes it. Measured against the naive version at 2 kHz, the saw puts 17 dB less energy into those partials and the square 18 dB less.
+
+The filter is a state variable design with the integrators kept as integrators, which matters because a filter envelope changes the cutoff every single sample. The usual alternative clicks on fast sweeps and can be driven unstable by the modulation alone. Its resonant peak lands on the cutoff to four decimal places from a Q of 0.5 to 10.
+
+**What it does not do yet,** said here rather than left to be found:
+
+- It exposes no parameters, only presets, so the modulators cannot reach it and its plugin window is empty. An instrument of this kind may only carry a particular kind of parameter object, which is real work rather than a line or two, and half doing it would be worse than starting properly. It is the next job.
+- Only the preset number is saved in a project, not the patch. Since the patch is not editable there is nothing else to save, and storing a copy of a constant would freeze your project against later improvements to the preset it names.
 
 ## Since v0.3.0
 

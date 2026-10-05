@@ -2,12 +2,15 @@
 
 A free, open-source digital audio workstation built around patterns: a channel rack and step sequencer for building them, a piano roll for writing them out, a playlist for arranging them, and a mixer with inserts and sends to finish. It records audio and MIDI, hosts VST3 plugins, warps and comps takes, imports and exports MIDI files, and exports stems.
 
+It comes with an instrument, so it makes sound the moment you install it.
+
 Built for the people. Free forever, source included.
 
 > Early development, but the engine is real. Plugin delay compensation that understands sends, tempo-locked modulators on any plugin parameter, automation clips on the playlist and the mixer, loop recording with take folders and comping, warp markers, broadcast-standard loudness and true peak metering, and per-output routing for multi-output drum machines all work today.
 
 ## What makes it different
 
+- **It makes sound on its own.** PAN One is built in: two oscillators with detune, a sub an octave down, a resonant filter with its own envelope, sixteen voices and five presets. It is there in the instrument list the first time you open the studio, with nothing to scan for and nothing to download. The oscillators are band limited, so the top two octaves do not shimmer with partials that have nothing to do with the note, which is the thing that gives a soft synth away.
 - **Modulators on anything.** A tempo-locked shape wired to any parameter of any plugin you host, assigned by grabbing the knob rather than hunting through a list. Several can stack on one parameter, and they ride on top of whatever the knob is already set to.
 - **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Loudness is verified against EBU Tech 3341 compliance test cases to within 0.011 LU, true peak against the interpolator the standard tabulates, and loudness range follows EBU Tech 3342 including its gates. A plugin only hears its own insert; the studio hears the whole thing.
 - **Delay compensation that understands sends.** Look-ahead plugins hold audio back, and a bus fed by another insert cannot be ready before its source. Every path is levelled so instruments, audio clips and sends reach the master on the same sample.
@@ -18,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound, optional ASIO)
+- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. For low latency monitoring choose Windows Audio (Exclusive Mode) in the audio settings, which the window will tell you the cost of in milliseconds, or build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 
