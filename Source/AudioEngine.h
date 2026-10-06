@@ -33,6 +33,18 @@ public:
         delay compensation deliberately, so what a player feels is the
         device's round trip and nothing else. */
     double monitoringRoundTripMs() const;
+
+    /** Looks for the fastest driver this machine has and moves to it, saving
+        the result as a chosen device. The same thing the engine does by
+        itself on a first run, asked for on purpose: somebody upgrading
+        already has a device in their settings file, and overriding a choice
+        the studio thinks they made would be worse than offering it.
+
+        Message thread, and it blocks for a second or two per driver it tries,
+        because switching one closes the device and waits for the operating
+        system to let go of it. Returns a sentence about what happened, for
+        showing to whoever asked. */
+    juce::String findFastestDevice();
     juce::MidiKeyboardState&  keyboard() noexcept  { return keyboardState; }
 
     // ---- transport ----

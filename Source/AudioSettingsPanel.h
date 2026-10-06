@@ -3,6 +3,9 @@
 #include "AhpLookAndFeel.h"
 #include "AudioDefaults.h"
 
+#include <functional>
+#include <utility>
+
 //==============================================================================
 /** The device chooser, with the number that actually decides whether you can
     play through it printed underneath.
@@ -30,15 +33,30 @@ class AudioSettingsPanel : public juce::Component,
                            private juce::Timer
 {
 public:
-    explicit AudioSettingsPanel (juce::AudioDeviceManager& manager)
+    AudioSettingsPanel (juce::AudioDeviceManager& manager,
+                        std::function<juce::String()> findFastest)
         : devices (manager),
-          selector (manager, 0, 8, 0, 8, true, false, true, false)
+          selector (manager, 0, 8, 0, 8, true, false, true, false),
+          findFastestDevice (std::move (findFastest))
     {
         addAndMakeVisible (selector);
         addAndMakeVisible (readout);
 
         readout.setJustificationType (juce::Justification::topLeft);
         readout.setFont (juce::FontOptions (12.0f));
+
+        addAndMakeVisible (outcome);
+        outcome.setJustificationType (juce::Justification::topLeft);
+        outcome.setFont (juce::FontOptions (12.0f));
+        outcome.setColour (juce::Label::textColourId, Ahp::muted);
+
+        addAndMakeVisible (findButton);
+        findButton.setTooltip ("Tries every driver this machine has, keeps the fastest one that "
+                               "monitoring can be played through, and remembers it.\n"
+                               "Takes a few seconds, because changing driver closes the device "
+                               "and waits for the system to let go of it.");
+        findButton.setEnabled (findFastestDevice != nullptr);
+        findButton.onClick = [this] { lookForSomethingFaster(); };
 
         refresh();
         startTimerHz (4);          // the device can change under this window
@@ -48,11 +66,54 @@ public:
     void resized() override
     {
         auto area = getLocalBounds();
+
+        // Bottom upwards, which reads top down as: the chooser, then what you
+        // have in milliseconds, then the button, then what it did. Taken in
+        // that order because the button is only worth pressing once the
+        // number above it has told you that you want to.
+        outcome.setBounds (area.removeFromBottom (36).reduced (10, 2));
+        findButton.setBounds (area.removeFromBottom (34).reduced (10, 4)
+                                  .removeFromLeft (210));
         readout.setBounds (area.removeFromBottom (78).reduced (10, 6));
         selector.setBounds (area);
     }
 
 private:
+    /** The studio does this by itself on a first run. This is the same thing
+        asked for on purpose, which is what somebody upgrading needs: their
+        settings file already names a device, and the engine will not override
+        a choice it has to assume was theirs.
+
+        The work blocks the message thread, so the waiting text is put up and
+        the search left until the next trip through the event loop. Otherwise
+        the first thing anyone sees is a window that has stopped repainting. */
+    void lookForSomethingFaster()
+    {
+        if (findFastestDevice == nullptr)
+            return;
+
+        findButton.setEnabled (false);
+        outcome.setText ("Trying every driver on this machine, which takes a few seconds...",
+                         juce::dontSendNotification);
+
+        juce::Component::SafePointer<AudioSettingsPanel> safeThis (this);
+
+        juce::Timer::callAfterDelay (60, [safeThis]
+        {
+            if (safeThis == nullptr)
+                return;
+
+            const auto result = safeThis->findFastestDevice();
+
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->outcome.setText (result, juce::dontSendNotification);
+            safeThis->findButton.setEnabled (true);
+            safeThis->refresh();
+        });
+    }
+
     void timerCallback() override { refresh(); }
 
     void refresh()
@@ -114,9 +175,10 @@ private:
             if (! driver.containsIgnoreCase ("ASIO")
                 && ! driver.containsIgnoreCase ("Low Latency")
                 && ! driver.containsIgnoreCase ("Exclusive"))
-                text << "\nIf that is not enough, change Audio device type above to "
-                        "Windows Audio (Low Latency Mode), or to ASIO if your interface provides it. "
-                        "\"" << driver << "\" shares the device with everything else on the system and buffers for it.";
+                text << "\n\"" << driver << "\" shares the device with everything else on the system "
+                        "and buffers for it. Press Find the fastest device below, or change Audio "
+                        "device type above to Windows Audio (Low Latency Mode), or to ASIO if your "
+                        "interface provides it.";
            #else
             juce::ignoreUnused (driver);
            #endif
@@ -127,7 +189,10 @@ private:
 
     juce::AudioDeviceManager& devices;
     juce::AudioDeviceSelectorComponent selector;
-    juce::Label readout;
+    juce::Label readout, outcome;
+    juce::TextButton findButton { "Find the fastest device" };
+
+    std::function<juce::String()> findFastestDevice;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioSettingsPanel)
 };

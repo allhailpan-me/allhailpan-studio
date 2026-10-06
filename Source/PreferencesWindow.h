@@ -63,6 +63,10 @@ struct PreferencesActions
 
     /** The tempo a new project starts at. */
     std::function<void (double)> setDefaultTempo;
+
+    /** Asks the engine to go and find the fastest driver this machine has,
+        and returns a sentence about what it found. Blocks while it works. */
+    std::function<juce::String()> findFastestDevice;
 };
 
 /** Reads every setting this window owns and applies it.
@@ -307,10 +311,14 @@ public:
         tabs.setOutline (0);
         tabs.setTabBarDepth (28);
 
+        // Taken out before the rest of the actions are handed over below.
+        auto findFastest = actions.findFastestDevice;
+
         tabs.addTab ("General", Ahp::panel,
                      new GeneralPreferencesPanel (pluginManager.settings(), std::move (actions)), true);
 
-        tabs.addTab ("Audio", Ahp::panel, new AudioSettingsPanel (devices), true);
+        tabs.addTab ("Audio", Ahp::panel,
+                     new AudioSettingsPanel (devices, std::move (findFastest)), true);
 
         // The same list component the Plugins button used to open on its own.
         // Scanning writes straight into the known plugin list, which saves

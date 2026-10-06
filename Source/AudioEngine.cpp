@@ -58,6 +58,37 @@ double AudioEngine::monitoringRoundTripMs() const
                                        device->getCurrentSampleRate());
 }
 
+juce::String AudioEngine::findFastestDevice()
+{
+    const double       before = monitoringRoundTripMs();
+    const juce::String was    = deviceManager.getCurrentAudioDeviceType();
+
+    chooseLowLatencyDevice();
+
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        return "No audio device would open. Pick one above.";
+
+    const double       after = monitoringRoundTripMs();
+    const juce::String now   = deviceManager.getCurrentAudioDeviceType();
+
+    juce::String result;
+    result << "Monitoring is " << juce::String (after, 1) << " ms round trip on " << now << ".";
+
+    if (now != was)
+        result << " Changed from " << was << ", which was "
+               << juce::String (before, 1) << " ms.";
+    else if (after < before - 0.05)
+        result << " Same driver, smaller buffer: it was "
+               << juce::String (before, 1) << " ms.";
+    else if (! AudioDefaults::playable (after))
+        result << " Nothing on this machine was faster, so this is as good as it gets "
+                  "without a dedicated interface.";
+    else
+        result << " It was already as fast as it goes.";
+
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Choosing a driver and a buffer size on first run.
 //

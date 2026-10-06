@@ -1726,6 +1726,20 @@ PreferencesActions MainComponent::preferenceActions()
             safeThis->project.startingBpm = bpm;
     };
 
+    actions.findFastestDevice = [safeThis]() -> juce::String
+    {
+        if (safeThis == nullptr)
+            return {};
+
+        const auto result = safeThis->engine.findFastestDevice();
+
+        // The device may have changed underneath the whole graph, so the
+        // status bar should say what it now is rather than what it said
+        // before somebody pressed the button.
+        safeThis->setStatus (result);
+        return result;
+    };
+
     return actions;
 }
 
