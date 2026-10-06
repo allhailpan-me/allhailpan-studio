@@ -21,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. You should not have to do anything about latency: the first time it runs, the studio checks what monitoring costs and moves itself to Windows Audio (Low Latency Mode) if what Windows handed it is too slow to play through. **Preferences > Audio** shows what you ended up with in milliseconds, and has a **Find the fastest device** button to ask for the same search again, which is what you want if you are upgrading rather than installing fresh. Windows Audio (Exclusive Mode) is faster again and the studio will not choose it for you, because it takes the sound card and nothing else on the machine plays while the studio is open. For lower still, build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
+- **Windows** 10 and 11, with ASIO. If you have an audio interface, the studio uses its own driver, which is what makes it playable. The downloads did not include ASIO until Steinberg dual licensed the SDK under GPL-3.0 on 15 October 2025, which this project's AGPL-3.0 can use. You should not have to do anything about latency: on first run the studio measures what monitoring costs and works down a list, ASIO first, then Windows Audio (Low Latency Mode), and only reaches for Windows Audio (Exclusive Mode) if nothing that shares the sound card was fast enough, saying so when it does. **Preferences > Audio** shows what you ended up with in milliseconds, what it tried along the way, and has a **Find the fastest device** button to run the same search again, which is what you want when upgrading rather than installing fresh.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 
@@ -275,7 +275,7 @@ The **Audio** and **Plugins** buttons in the toolbar open the same window on tho
 - One instrument ships with the studio, PAN One. Anything beyond it is your own VST3s.
 - **4/4 only**, and one tempo for the whole song. A tempo change part way through a MIDI file is read at its opening tempo and the status bar says so.
 - Loading a plugin and dragging a mixer fader are not undo steps.
-- The downloadable Windows build has no ASIO: see **Known limitations** in the release notes for why, and how to build it with ASIO yourself.
+- The Windows build includes ASIO, so an audio interface's own driver is used. **Preferences > Audio** says outright whether the build you are running has it.
 
 ## Roadmap
 

@@ -71,6 +71,46 @@ jobs:
             libxcursor-dev libxext-dev libxi-dev libxinerama-dev libxrandr-dev \
             libxrender-dev libglu1-mesa-dev mesa-common-dev
 
+      # ASIO is how an audio interface is actually played through on Windows.
+      # Until 15 October 2025 the SDK could not be shipped with a GPL family
+      # project at all, because its licence was proprietary only and imposed
+      # terms the GPL forbids adding. On that date Steinberg dual licensed it
+      # under GPL-3.0, which this project can use: it is AGPL-3.0, and GPLv3
+      # section 13 exists precisely to permit that combination.
+      #
+      # Without this the studio cannot see an interface's own driver at all,
+      # and on hardware whose maker never implemented Windows' low latency
+      # shared mode, which is most interfaces, there is then nothing fast left
+      # to offer. That is not a small loss, so a failure here stops the build
+      # rather than quietly producing a Windows binary that cannot do the one
+      # thing this step is for.
+      - name: Fetch the ASIO SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url      = 'https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip'
+          $expected = 'd5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca'
+
+          Invoke-WebRequest -Uri $url -OutFile asiosdk.zip
+
+          # Checked rather than trusted: this is a third party download going
+          # straight into a binary that other people run.
+          $actual = (Get-FileHash asiosdk.zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "ASIO SDK checksum mismatch. Expected $expected, got $actual"
+          }
+
+          Expand-Archive asiosdk.zip -DestinationPath asiosdk -Force
+
+          # Found rather than assumed, because the folder inside the zip
+          # carries the version and the date in its name.
+          $header = Get-ChildItem -Path asiosdk -Recurse -Filter iasiodrv.h | Select-Object -First 1
+          if (-not $header) { throw "iasiodrv.h is not in the ASIO SDK archive" }
+
+          $sdkRoot = Split-Path (Split-Path $header.FullName -Parent) -Parent
+          Write-Host "ASIO SDK at $sdkRoot"
+          "AHP_ASIO_SDK_DIR=$sdkRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       # Build for both Apple Silicon and Intel so one download covers every Mac.
       - name: Configure (macOS)
         if: runner.os == 'macOS'
@@ -79,8 +119,33 @@ jobs:
           -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
+      # A Windows build without ASIO cannot reach an audio interface's own
+      # driver, which is the whole reason the step above exists. CMake only
+      # warns when the SDK is not where it was told to look, and a warning in
+      # a thousand lines of configure output is not a thing anybody sees, so
+      # the one line that proves ASIO was switched on is matched for and its
+      # absence fails the build.
+      #
+      # Matching the proof rather than the input on purpose. Checking that the
+      # path variable was set proves nothing: the step above already throws
+      # when the header is missing, so the variable cannot be empty by the
+      # time anything looks, and a path that exists but has moved its headers
+      # would sail straight through. The CMakeLists message is the only thing
+      # that is emitted if and only if JUCE_ASIO was actually defined.
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $log = cmake -B build -DCMAKE_BUILD_TYPE=Release `
+                   -DAHP_ASIO_SDK_DIR="${{ env.AHP_ASIO_SDK_DIR }}" 2>&1 | Out-String
+          Write-Host $log
+
+          if ($log -notmatch 'ASIO support enabled from') {
+            throw "This Windows build has no ASIO support. The SDK was downloaded but CMake did not enable it, so the layout inside the archive has probably changed and CMakeLists is looking in the wrong place."
+          }
+
       - name: Configure
-        if: runner.os != 'macOS'
+        if: runner.os == 'Linux'
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
       # The build output is echoed back as GitHub error annotations on

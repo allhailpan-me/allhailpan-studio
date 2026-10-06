@@ -8,6 +8,7 @@
 #include "LatencyDelay.h"
 #include "LoudnessMeter.h"
 #include "LatencyGraph.h"
+#include "AudioDefaults.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -46,6 +47,27 @@ public:
         system to let go of it. Returns a sentence about what happened, for
         showing to whoever asked. */
     juce::String findFastestDevice();
+
+    /** What the last search tried and what each driver gave, as several lines
+        meant to be read. Always carries at least the current figure; the list
+        of what was tried is there once a search has run. */
+    juce::String deviceSearchReport() const;
+
+    /** Whether the device open right now is on a driver that holds the sound
+        card, so the studio can say so rather than leaving somebody to find
+        out when their browser goes quiet.
+
+        Asked of the device manager every time rather than remembered. A
+        remembered answer was wrong in both directions: stale after a failed
+        switch, and unable to tell the studio's choice from the person's. */
+    bool hasTakenTheDevice() const
+    {
+        return AudioDefaults::takesTheDevice (deviceManager.getCurrentAudioDeviceType().toStdString());
+    }
+
+    /** Whether the figure above is the driver's own or worked out from the
+        buffer because the driver would not say. */
+    bool monitoringLatencyIsEstimated() const;
     juce::MidiKeyboardState&  keyboard() noexcept  { return keyboardState; }
 
     // ---- transport ----
@@ -433,6 +455,14 @@ private:
     void chooseLowLatencyDevice();
     bool openDeviceType (const juce::String& typeName);
     void tightenBufferSize();
+    void note (const juce::String& typeName, double roundTrip, const juce::String& why);
+
+    juce::StringArray deviceSearch;
+
+    // Whether the search moved off the driver it started on, which is what
+    // tells "the studio took the sound card" apart from "you were already on
+    // it". Not a record of what the device is now: that is read live.
+    bool searchChangedTheDeviceType = false;
 
     void mixMonitorInput (const float* const* inputChannelData, int numInputChannels, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
