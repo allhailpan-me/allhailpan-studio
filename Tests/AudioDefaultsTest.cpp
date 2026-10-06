@@ -87,25 +87,35 @@ static void driverOrder()
     };
 
     const int lowLatency = position ("Windows Audio (Low Latency Mode)");
-    const int exclusive  = position ("Windows Audio (Exclusive Mode)");
     const int asio       = position ("ASIO");
 
     check (lowLatency >= 0, "Windows Audio (Low Latency Mode) is not preferred at all");
-    check (exclusive >= 0,  "Windows Audio (Exclusive Mode) is not preferred at all");
     check (asio >= 0,       "ASIO is not preferred at all");
-
-    // Low Latency Mode before Exclusive Mode, and both only after ASIO. The
-    // ordering is the point: exclusive mode is fast but it takes the device,
-    // so everything else on the machine goes silent, and that is a surprise
-    // to inflict on somebody who only asked to hear their guitar. Low Latency
-    // Mode is as fast and still shares.
-    if (lowLatency >= 0 && exclusive >= 0)
-        check (lowLatency < exclusive,
-               "exclusive mode is preferred over low latency mode, which takes "
-               "the device away from the rest of the system for no gain");
 
     if (asio >= 0 && lowLatency >= 0)
         check (asio < lowLatency, "ASIO is not preferred first");
+
+    // The one that must never be chosen for somebody. Exclusive mode holds
+    // the endpoint, so nothing else on the machine plays through that device
+    // while the studio is open, and a browser that has gone silent is not a
+    // thing anybody would connect back to turning monitoring on.
+    const auto taking = AudioDefaults::driversThatTakeTheDevice();
+
+    check (! taking.empty(), "nothing is marked as taking the device over");
+
+    for (const auto& name : taking)
+    {
+        check (std::find (drivers.begin(), drivers.end(), name) == drivers.end(),
+               "\"" + name + "\" takes the device over and is on the list the studio "
+               "moves people onto by itself");
+
+        check (! name.empty(), "a driver that takes the device has no name");
+    }
+
+    check (std::find (taking.begin(), taking.end(),
+                      std::string ("Windows Audio (Exclusive Mode)")) != taking.end(),
+           "exclusive mode is not named as taking the device over, so nothing can "
+           "suggest it to somebody who needs it");
 
     // No name may be a substring of another. The engine compares these
     // exactly, but a later change to matching by substring would otherwise

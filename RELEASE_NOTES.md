@@ -6,7 +6,11 @@ Monitoring you can play through without configuring anything, a front panel on t
 
 Windows has been offering a faster route to the same device the whole time. Alongside the shared mode everything gets by default, it exposes the same device through IAudioClient3, which JUCE calls Windows Audio (Low Latency Mode): single digit milliseconds, and still shared, so a video in a browser keeps playing. The studio was not asking for it.
 
-So on first run, and only on first run, the engine measures what monitoring costs and, if it is too slow to play through, works down a list until something is fast enough. Low Latency Mode comes before Exclusive Mode, which is just as fast but takes the device away from the rest of the machine, and that is a surprise to inflict on somebody who only asked to hear their guitar. ASIO leads the list where it exists, though these builds are not compiled with it. The choice is then saved as if you had made it, so this happens once, and a machine that was already fast enough is not touched at all.
+So on first run, and only on first run, the engine measures what monitoring costs and, if it is too slow to play through, works down a list until something is fast enough. The choice is then saved as if you had made it, so this happens once, and a machine that was already fast enough is not touched at all.
+
+Exclusive Mode is deliberately not on that list, although it would win. It holds the sound card, so nothing else on the machine plays while the studio is open, and somebody who asked to hear their guitar and found their browser had gone silent would have no way to connect the two: they would report a second fault rather than the price of the first one being fixed. The studio names it where the latency is shown, and leaves it to you.
+
+**If you are upgrading, press the button.** The search only runs when there is no saved audio device, because a settings file that already names one is a choice the studio has to assume you made. **Preferences > Audio** has a *Find the fastest device* button that asks for the same search on purpose, with what it found printed underneath.
 
 Buffer size is chosen the same way, against a five millisecond target rather than the smallest the driver will admit to. A buffer at the floor is where dropouts live, and a studio that crackles until you raise a setting is a worse first impression than one four milliseconds slower than it could be. If you want the floor, it is still yours to take.
 

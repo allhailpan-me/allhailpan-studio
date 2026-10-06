@@ -21,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. You should not have to do anything about latency: the first time it runs, the studio checks what monitoring costs and moves itself to a faster driver if what Windows handed it is too slow to play through, preferring Windows Audio (Low Latency Mode), which is fast and still lets everything else on the machine make sound. **Preferences > Audio** shows what you ended up with, in milliseconds. For lower still, build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
+- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. You should not have to do anything about latency: the first time it runs, the studio checks what monitoring costs and moves itself to Windows Audio (Low Latency Mode) if what Windows handed it is too slow to play through. **Preferences > Audio** shows what you ended up with in milliseconds, and has a **Find the fastest device** button to ask for the same search again, which is what you want if you are upgrading rather than installing fresh. Windows Audio (Exclusive Mode) is faster again and the studio will not choose it for you, because it takes the sound card and nothing else on the machine plays while the studio is open. For lower still, build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 

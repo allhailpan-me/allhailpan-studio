@@ -74,7 +74,7 @@ public:
         outcome.setBounds (area.removeFromBottom (36).reduced (10, 2));
         findButton.setBounds (area.removeFromBottom (34).reduced (10, 4)
                                   .removeFromLeft (210));
-        readout.setBounds (area.removeFromBottom (78).reduced (10, 6));
+        readout.setBounds (area.removeFromBottom (94).reduced (10, 6));
         selector.setBounds (area);
     }
 
@@ -177,8 +177,10 @@ private:
                 && ! driver.containsIgnoreCase ("Exclusive"))
                 text << "\n\"" << driver << "\" shares the device with everything else on the system "
                         "and buffers for it. Press Find the fastest device below, or change Audio "
-                        "device type above to Windows Audio (Low Latency Mode), or to ASIO if your "
-                        "interface provides it.";
+                        "device type above to Windows Audio (Low Latency Mode)."
+                        "\nWindows Audio (Exclusive Mode) is faster again, but it takes the sound "
+                        "card: nothing else on this machine will play while the studio is open. "
+                        "The studio will not choose that one for you.";
            #else
             juce::ignoreUnused (driver);
            #endif

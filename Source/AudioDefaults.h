@@ -28,18 +28,25 @@
 
     Low Latency Mode is the one to want: it is fast and it still shares, so a
     video in a browser keeps playing. It has been sitting there unused because
-    the studio accepted whatever the system handed it.
+    the studio accepted whatever the system handed it. Exclusive mode is fast
+    too and is deliberately never chosen automatically, for the reason set out
+    above driversThatTakeTheDevice below.
 
     The arithmetic is here rather than in the engine so it can be tested. The
     driver choice cannot be: it depends on what the machine has.
 */
 namespace AudioDefaults
 {
-    /** Drivers worth having, best first.
+    /** Drivers the studio may move somebody onto without asking, best first.
 
         ASIO leads where it exists, since a dedicated driver beats anything
-        the operating system offers, though the public builds are not compiled
-        with it. Then the two Windows modes that are not the buffered default.
+        the operating system offers. It is on this list despite usually being
+        exclusive to one application, because the public builds are not
+        compiled with ASIO at all: having it means somebody installed an
+        interface's driver and built the studio against the SDK on purpose,
+        which is as clear a statement of intent as a dropdown.
+
+        Then Low Latency Mode, which is the one that makes this worth doing.
         CoreAudio and JACK are already low latency, and ALSA is last because
         it is the fallback rather than a choice.
 
@@ -50,10 +57,30 @@ namespace AudioDefaults
     {
         return { "ASIO",
                  "Windows Audio (Low Latency Mode)",
-                 "Windows Audio (Exclusive Mode)",
                  "CoreAudio",
                  "JACK",
                  "ALSA" };
+    }
+
+    /** Fast, and deliberately not on the list above.
+
+        Exclusive mode bypasses the Windows audio engine and holds the
+        endpoint. Microsoft's own description of the two modes is that in
+        shared mode "the audio engine mixes the streams from these
+        applications", while in exclusive mode "the client has exclusive
+        access to the audio hardware", which means nothing else on the machine
+        plays through that device for as long as the studio is open.
+
+        That is a reasonable thing to choose and an unreasonable thing to have
+        chosen for you. Somebody who asked to hear their guitar and found that
+        their browser had gone silent would have no way to connect the two,
+        and would report it as a second fault rather than as the price of the
+        first one being fixed. So the studio names this where the latency is
+        shown and leaves the choice where it belongs.
+    */
+    inline std::vector<std::string> driversThatTakeTheDevice()
+    {
+        return { "Windows Audio (Exclusive Mode)" };
     }
 
     /** How much of the round trip the engine should aim to be responsible for,

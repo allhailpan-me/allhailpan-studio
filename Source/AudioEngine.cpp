@@ -81,8 +81,19 @@ juce::String AudioEngine::findFastestDevice()
         result << " Same driver, smaller buffer: it was "
                << juce::String (before, 1) << " ms.";
     else if (! AudioDefaults::playable (after))
-        result << " Nothing on this machine was faster, so this is as good as it gets "
-                  "without a dedicated interface.";
+    {
+        result << " Nothing the studio will choose by itself was faster.";
+
+        // Named rather than taken. It would almost certainly win, and winning
+        // is not the only thing that matters: it holds the sound card, so
+        // everything else on the machine goes quiet while the studio is open.
+        for (const auto& taking : AudioDefaults::driversThatTakeTheDevice())
+            for (auto* type : deviceManager.getAvailableDeviceTypes())
+                if (type->getTypeName() == juce::String (taking))
+                    result << " " << taking << " above is faster still, but it takes "
+                              "the sound card, so nothing else on this machine will play "
+                              "while the studio is open. That one is yours to choose.";
+    }
     else
         result << " It was already as fast as it goes.";
 
