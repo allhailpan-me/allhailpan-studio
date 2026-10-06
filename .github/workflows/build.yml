@@ -15,10 +15,15 @@ on:
         required: false
         default: ""
       prerelease:
+        # False by default because passing a tag at all is the decision to
+        # release: a dispatch with no tag does not publish anything, so the
+        # only way to reach this is to have meant it. Defaulting to true
+        # published v0.5.0 as a pre-release, which left the previous version
+        # showing as the latest one on the releases page.
         description: "Mark the release as a pre-release"
         type: boolean
         required: false
-        default: true
+        default: false
 
 permissions:
   contents: write
