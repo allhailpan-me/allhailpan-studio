@@ -103,6 +103,20 @@ send, or splitting a channel's buses. Forget it and tracks drift apart by an
 amount that depends on which plugins happen to be loaded, which is maddening to
 diagnose from a bug report.
 
+The arithmetic itself is in `LatencyGraph.h`, which carries no JUCE and is
+tested. `updateLatency` is only the part that needs JUCE: reading each plugin's
+reported latency, reading the routing out of the atomics, and pushing the
+answers into the delay lines. Keep it that way. Decisions moved back into the
+engine stop being testable, and this is the calculation here least able to
+announce that it is wrong: nothing errors, nothing crackles, tracks just sit a
+few milliseconds apart. Two real bugs lived in it, and both had a comment above
+them claiming the opposite of what the code did.
+
+It also reuses one `Setup` and one `Result`, held as members, because it runs
+with the graph lock held and the audio thread only ever *tries* that lock. An
+allocation in there is a chance of a dropped block every time somebody clicks a
+bypass button.
+
 **A take folder reads its takes directly, and its comp is in seconds.** A
 folder clip has no `sample`: `Clip::compSpans` turns its comp into one read per
 comped stretch, and `pushArrangement` turns each of those into one
@@ -275,6 +289,8 @@ braces on their own line.
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
+| `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
+| `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `CompModel.h` | Take folders: which take is heard where, and the equal-power crossfade at each join. In seconds, not beats, so a comp survives a tempo change. No JUCE |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
@@ -295,7 +311,41 @@ Audio clips are read by mapping a beat to a source time, in
 `AudioEngine::renderAudioClips`. Playlist audio is delayed by reading further
 back in the arrangement rather than through a delay line, which costs nothing.
 
-Input monitoring deliberately skips delay compensation. That compensation
-aligns internal paths with each other; on a monitor path it would only be
-latency the player feels. Aligning the take with the arrangement is handled
-separately, by the recorder.
+Input monitoring deliberately skips delay compensation, and so do the sends
+out of the insert being monitored through. That compensation aligns internal
+paths with each other; on a monitor path it would only be latency the player
+feels. Aligning the take with the arrangement is handled separately, by the
+recorder.
+
+Both halves matter. A send is a copy of the insert taken after its fader, so on
+a monitored insert it carries the player's own input, and compensating the copy
+puts back exactly what was taken off the original: the player then hears
+themselves once immediately and again at send level, a slap back that moves
+whenever a plugin is loaded elsewhere. Putting a reverb on a vocal while
+tracking it is the ordinary way to use a send, so this is not an exotic case.
+The price is that anything else parked on that insert travels early too, down
+the dry path and the sends alike, so a mix should not be judged with monitoring
+left on.
+
+The monitored insert is never insert 0. The master is what every other insert
+is lined up to, so there is nothing to exempt it from, and a monitor routed
+there would run through the whole master chain and pick up its lookahead, which
+is the exact thing the exemption exists to avoid.
+
+**On Windows, the driver decides the monitoring latency and the buffer size
+control cannot rescue it.** JUCE registers three WASAPI modes, and in the plain
+shared one, `WASAPIDeviceMode::shared`, it offers a single buffer size and
+ignores any request to change it, because the wakeup period belongs to the
+driver. So a buffer size setting on "Windows Audio" genuinely does nothing,
+which is what a bug report said and which reading
+`juce_WASAPI_windows.cpp` confirmed. "Windows Audio (Low Latency Mode)" is the
+`IAudioClient3` path and is the one to want: it enumerates from the driver's
+minimum period upward and honours what is asked for, while still sharing the
+device. Microsoft document the inbox HDAudio driver as supporting 128 to 480
+samples, and a driver has to opt in to the small end, so Low Latency Mode is
+not guaranteed to help on every machine. "Windows Audio (Exclusive Mode)" is
+faster again and is never chosen automatically: it holds the endpoint, so
+nothing else on the machine makes a sound while the studio is open, and nobody
+would connect a silent browser back to turning monitoring on. It is named
+where the latency is shown instead. The preference order lives in
+`AudioDefaults.h`.

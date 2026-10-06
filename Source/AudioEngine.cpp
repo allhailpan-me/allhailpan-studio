@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include "AudioDefaults.h"
+#include "LatencyGraph.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -254,22 +255,16 @@ int AudioEngine::getRoundTripLatencySamples()
 // ---------------------------------------------------------------------------
 // Delay compensation
 //
-// Plugins that look ahead report how many samples they hold back. Left alone,
-// a track carrying one plays late against the others, and by a different
-// amount every time a plugin is loaded.
+// The arithmetic is in LatencyGraph.h, which carries no JUCE and has its own
+// test. It was here, and that was the wrong place for it: this is the
+// calculation in the studio least able to announce that it is wrong. Nothing
+// errors and nothing crackles, tracks just sit a few milliseconds apart by an
+// amount that depends on which plugins are loaded. The bug that moved it out
+// had a comment above it claiming the opposite of what the code did.
 //
-// Every place signals merge has to be levelled, and sends make that a graph
-// rather than two fixed stages: a bus fed by another insert cannot be ready
-// before its source is. Because a send may only feed a higher numbered insert,
-// one pass from 1 upward resolves it. For each insert:
-//
-//   inLat  = the latest anything feeding it arrives
-//   outLat = inLat + its own effects
-//
-// Each thing entering an insert is then delayed to that insert's inLat, and
-// each insert's output delayed to the master's. Everything therefore reaches
-// the master the same distance behind the playhead, which is what
-// getPluginLatencySamples() reports.
+// So what is left here is only the three things that genuinely need JUCE:
+// reading each plugin's reported latency, reading the routing out of the
+// atomics, and pushing the answers into the delay lines. No decisions.
 //
 // Must be called with graphLock held.
 // ---------------------------------------------------------------------------
@@ -280,115 +275,104 @@ void AudioEngine::updateLatency()
         return p != nullptr ? std::max (0, p->getLatencySamples()) : 0;
     };
 
-    int slowestInstrument = 0;
-    for (auto& c : channelSlots)
-        if (c.plugin != nullptr)
-            slowestInstrument = std::max (slowestInstrument, latencyOf (c.plugin.get()));
+    // latencySetup and latencyGraph are members, reused. Everything below is
+    // resize or assign on vectors that are already the right size after the
+    // first call, so nothing here allocates while graphLock is held.
+    auto& setup = latencySetup;
 
-    std::array<int, kNumInserts> fxLatency {}, inLat {}, outLat {};
+    setup.inserts.resize ((size_t) kNumInserts);
+    setup.channels.resize ((size_t) kNumChannels);
 
     for (int i = 0; i < kNumInserts; ++i)
     {
+        auto& entry = setup.inserts[(size_t) i];
+
         int sum = 0;
         for (int k = 0; k < kNumFxSlots; ++k)
             if (! controls[(size_t) i].bypass[(size_t) k].load())
                 sum += latencyOf (insertSlots[(size_t) i].fx[(size_t) k].plugin.get());
 
-        fxLatency[(size_t) i] = sum;
-        inLat[(size_t) i] = slowestInstrument;    // instruments and playlist audio
+        entry.fxLatency = sum;
+
+        // Insert 0 is the master and has no send of its own to resolve, so
+        // its row is left empty rather than gathered and ignored.
+        entry.sendTo.resize (i == 0 ? 0 : (size_t) kNumSends);
+
+        for (int s = 0; s < (int) entry.sendTo.size(); ++s)
+            entry.sendTo[(size_t) s] = controls[(size_t) i].sendTo[(size_t) s].load();
     }
 
-    // Forward pass: a send cannot reach its destination before it has been
-    // produced, so each destination waits for the latest of its feeds.
-    for (int i = 1; i < kNumInserts; ++i)
+    for (int c = 0; c < kNumChannels; ++c)
     {
-        outLat[(size_t) i] = inLat[(size_t) i] + fxLatency[(size_t) i];
+        auto& source  = channelSlots[(size_t) c];
+        auto& channel = setup.channels[(size_t) c];
 
-        for (int s = 0; s < kNumSends; ++s)
-        {
-            const int to = controls[(size_t) i].sendTo[(size_t) s].load();
-            if (to > i && to < kNumInserts)
-                inLat[(size_t) to] = std::max (inLat[(size_t) to], outLat[(size_t) i]);
-        }
-    }
+        channel.latency    = latencyOf (source.plugin.get());
+        channel.insert     = source.insert.load();
+        channel.splitBuses = source.splitBuses.load();
 
-    int masterIn = 0;
-    for (int i = 1; i < kNumInserts; ++i)
-        masterIn = std::max (masterIn, outLat[(size_t) i]);
-
-    const int block = std::max (blockSize, 1);
-    const int widest = std::max (masterIn, slowestInstrument);
-
-    // Instruments wait for whatever else lands on the same insert. A channel
-    // whose buses are split can land on several at once, so each bus waits for
-    // its own destination.
-    for (auto& c : channelSlots)
-    {
-        const int own = latencyOf (c.plugin.get());
-        const int main = juce::jlimit (0, kNumInserts - 1, c.insert.load());
-
-        c.align.prepare (2, widest, block);
-        c.align.setDelay (std::max (0, inLat[(size_t) main] - own));
-
-        if (! c.splitBuses.load())
+        if (! channel.splitBuses)
             continue;
+
+        channel.busInsert.resize ((size_t) kMaxOutBuses);
+        channel.busChannels.resize ((size_t) kMaxOutBuses);
 
         for (int b = 0; b < kMaxOutBuses; ++b)
         {
-            if (c.busChannelCount[(size_t) b] <= 0)
-                continue;
-
-            const int routed = c.busInsert[(size_t) b].load();
-            const int to = routed > 0 ? juce::jlimit (1, kNumInserts - 1, routed) : main;
-
-            c.busAlign[(size_t) b].prepare (2, widest, block);
-            c.busAlign[(size_t) b].setDelay (std::max (0, inLat[(size_t) to] - own));
+            channel.busInsert[(size_t) b]  = source.busInsert[(size_t) b].load();
+            channel.busChannels[(size_t) b] = source.busChannelCount[(size_t) b];
         }
     }
 
-    // The insert a player is monitoring through is not held back.
-    //
-    // That compensation exists to line internal paths up with each other, and
-    // on everything else it is right. On the signal a player is listening to
-    // while playing it, it is latency they feel in their hands: put a
-    // lookahead limiter on the master and the compensation that keeps the
-    // tracks together would also push the guitar back by the limiter's whole
-    // lookahead, which makes the instrument unplayable. The engine said in a
-    // comment that monitoring skipped this, and it did not: the monitored
-    // audio is mixed into an insert's buffer, and that buffer was delayed
-    // along with everything else in it.
-    //
-    // The cost is that anything else landing on that insert plays early by
-    // the same amount while monitoring is on. That is the right trade for a
-    // take: the player has to be able to play.
-    const bool lowLatencyMonitoring = monitorMode.load() != Monitor::off;
-    const int  monitoredInsert = lowLatencyMonitoring
-                               ? juce::jlimit (0, kNumInserts - 1, monitorInsert.load())
-                               : -1;
+    // The insert a player is monitoring through, or -1 for nobody. The reason
+    // this one insert is treated differently, and why its sends are too, is
+    // set out at the top of LatencyGraph.h.
+    setup.monitoredInsert = monitorMode.load() != Monitor::off ? monitoredInsertIndex() : -1;
+
+    LatencyGraph::compute (setup, latencyGraph);
+
+    const auto& graph = latencyGraph;
+    const int   block = std::max (blockSize, 1);
+
+    for (int c = 0; c < kNumChannels; ++c)
+    {
+        auto& slot = channelSlots[(size_t) c];
+
+        slot.align.prepare (2, graph.widest, block);
+        slot.align.setDelay (graph.channelDelay[(size_t) c]);
+
+        const auto& buses = graph.busDelay[(size_t) c];
+
+        for (size_t b = 0; b < buses.size() && b < (size_t) kMaxOutBuses; ++b)
+        {
+            if (slot.busChannelCount[b] <= 0)
+                continue;
+
+            slot.busAlign[b].prepare (2, graph.widest, block);
+            slot.busAlign[b].setDelay (buses[b]);
+        }
+    }
 
     for (int i = 1; i < kNumInserts; ++i)
     {
         auto& slot = insertSlots[(size_t) i];
 
-        slot.align.prepare (2, widest, block);
-        slot.align.setDelay (i == monitoredInsert
-                                 ? 0
-                                 : std::max (0, masterIn - outLat[(size_t) i]));
+        slot.align.prepare (2, graph.widest, block);
+        slot.align.setDelay (graph.insertDelay[(size_t) i]);
 
-        for (int s = 0; s < kNumSends; ++s)
+        const auto& sends = graph.sendDelay[(size_t) i];
+
+        for (size_t s = 0; s < sends.size() && s < (size_t) kNumSends; ++s)
         {
-            const int to = controls[(size_t) i].sendTo[(size_t) s].load();
-            const int target = (to > i && to < kNumInserts) ? inLat[(size_t) to] : outLat[(size_t) i];
-
-            slot.sendAlign[(size_t) s].prepare (2, widest, block);
-            slot.sendAlign[(size_t) s].setDelay (std::max (0, target - outLat[(size_t) i]));
+            slot.sendAlign[s].prepare (2, graph.widest, block);
+            slot.sendAlign[s].setDelay (sends[s]);
         }
     }
 
     for (int i = 0; i < kNumInserts; ++i)
-        clipDelaySamples[(size_t) i].store (inLat[(size_t) i]);
+        clipDelaySamples[(size_t) i].store (graph.clipDelay[(size_t) i]);
 
-    totalLatency.store (masterIn + fxLatency[0]);
+    totalLatency.store (graph.totalLatency);
 }
 
 void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, float level)
@@ -424,7 +408,7 @@ void AudioEngine::setMonitorMode (Monitor m)
 
 void AudioEngine::setMonitorInsert (int insertIndex)
 {
-    const int wanted = juce::jlimit (0, kNumInserts - 1, insertIndex);
+    const int wanted = juce::jlimit (1, kNumInserts - 1, insertIndex);
 
     if (monitorInsert.load() == wanted)
         return;
@@ -1829,7 +1813,7 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int num
         return;
     }
 
-    auto& dest = insertSlots[(size_t) juce::jlimit (0, kNumInserts - 1, monitorInsert.load())].buffer;
+    auto& dest = insertSlots[(size_t) monitoredInsertIndex()].buffer;
     const float gain = monitorGain.load();
 
     const auto* left  = inputChannelData[0];

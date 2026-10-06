@@ -7,6 +7,7 @@
 #include "Recorder.h"
 #include "LatencyDelay.h"
 #include "LoudnessMeter.h"
+#include "LatencyGraph.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -276,7 +277,9 @@ public:
     /** Which insert the input is heard through, so it can be monitored with
         the amp simulator or reverb it is going to be recorded alongside. */
     void setMonitorInsert (int insertIndex);
-    int getMonitorInsert() const noexcept      { return monitorInsert.load(); }
+    // Through the same clamp as everywhere else, so a caller naming the
+    // insert cannot name one the monitor never actually uses.
+    int getMonitorInsert() const noexcept      { return monitoredInsertIndex(); }
 
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
     float getMonitorGain() const noexcept      { return monitorGain.load(); }
@@ -410,6 +413,22 @@ private:
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
+    /** The insert the monitored input is summed into, as one expression used
+        everywhere rather than several clamps that can drift apart.
+
+        Clamped to 1 upwards, never 0. Insert 0 is the master, and monitoring
+        into it would defeat the exemption: the master is what every other
+        insert is lined up *to*, so there is nothing to exempt it from, and
+        the monitored signal would then run through the whole master chain and
+        pick up its lookahead. That is the exact thing the exemption exists to
+        avoid, so a lookahead limiter on the master would make the instrument
+        unplayable again by a different route. Safe to call from either
+        thread. */
+    int monitoredInsertIndex() const noexcept
+    {
+        return juce::jlimit (1, kNumInserts - 1, monitorInsert.load());
+    }
+
     // ---- first run device configuration, all message thread ----
     void chooseLowLatencyDevice();
     bool openDeviceType (const juce::String& typeName);
@@ -441,13 +460,21 @@ private:
     Snapshot snapshot;
     int capacity = 0;
 
-    // Delay compensation. clipDelay holds playlist audio back to match the
-    // slowest instrument; totalLatency is what the whole mixer runs behind.
-    // Playlist audio has no plugin in front of it, so it is held back to match
-    // whatever else arrives at the same insert. Per insert, because a send can
-    // make one bus run later than another.
+    // Delay compensation. Playlist audio has no plugin in front of it, so it
+    // is held back to match whatever else arrives at the same insert: the
+    // slowest instrument, or a send that lands there, whichever is later. Per
+    // insert, because a send can make one bus run later than another, and for
+    // insert 0 that figure is the whole mixer's, since the master is where
+    // everything meets. totalLatency is what the mixer as a whole runs behind.
     std::array<std::atomic<int>, kNumInserts> clipDelaySamples {};
     std::atomic<int> totalLatency { 0 };
+
+    // Reused by updateLatency rather than built each time. That function runs
+    // with graphLock held and the audio thread only tries for that lock, so
+    // an allocation in there is a chance of a dropped block every time
+    // somebody clicks a bypass button. See LatencyGraph::compute.
+    LatencyGraph::Setup  latencySetup;
+    LatencyGraph::Result latencyGraph;
 
     // Modulators follow the song while it plays, so a project sounds the
     // same every time and matches its export. While stopped they run off

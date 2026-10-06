@@ -18,7 +18,14 @@
     and the difference between them is not small:
 
       Windows Audio                     shared, heavily buffered, tens of
-                                        milliseconds, and the default
+                                        milliseconds, and the default. Worse
+                                        than heavily buffered: JUCE offers a
+                                        single buffer size on this mode and
+                                        ignores any request to change it,
+                                        because the wakeup period belongs to
+                                        the driver. The buffer size control
+                                        really does nothing here, which is
+                                        exactly what it was reported to do
       Windows Audio (Low Latency Mode)  shared, but negotiated through
                                         IAudioClient3, single digit
                                         milliseconds on Windows 10 and later
@@ -86,17 +93,26 @@ namespace AudioDefaults
     /** How much of the round trip the engine should aim to be responsible for,
         one way, in seconds.
 
-        Five milliseconds each way lands near ten round trip once the driver's
-        own buffering either side is counted, which is about where a player
-        stops feeling the delay and starts just hearing themselves.
+        Two and a half milliseconds, which is 120 samples at 48 kHz. That
+        number is chosen against what Windows actually offers rather than
+        picked for feel: Microsoft's low latency audio documentation states
+        that the inbox HDAudio driver "has been updated to support buffer
+        sizes between 128 samples (2.66ms@48kHz) and 480 samples
+        (10ms@48kHz)", and the 480 end is what everything gets by default. A
+        target of 2.5 ms therefore lands on the first size such a driver
+        offers, which is the whole point of asking for Low Latency Mode at
+        all. Asking for five milliseconds, as this did at first, would have
+        skipped past 128 and 192 to take 256, throwing away most of the gain
+        the mode exists to provide.
 
-        Deliberately not the smallest the driver will admit to. A buffer at
-        the floor is where dropouts live, and a studio that crackles until you
-        raise a setting is a worse first impression than one that is four
-        milliseconds slower than it could be. Someone who wants the floor can
-        still go and take it.
+        Deliberately expressed as a target rather than "the smallest it will
+        admit to". On a driver whose minimum is smaller than 128 the floor
+        below keeps this off the very bottom, because a buffer at the floor is
+        where dropouts live and a studio that crackles until you raise a
+        setting is a worse first impression than one a millisecond slower than
+        it could be. Someone who wants the floor can still go and take it.
     */
-    inline constexpr double targetBufferSeconds = 0.005;
+    inline constexpr double targetBufferSeconds = 0.0025;
 
     /** Picks a buffer size from the ones a driver admits to supporting.
 
@@ -148,12 +164,31 @@ namespace AudioDefaults
         return 1000.0 * (inputLatencySamples + outputLatencySamples) / sampleRate;
     }
 
-    /** Whether a round trip is low enough to play an instrument through.
-        A rule of thumb rather than a standard: there is no specification for
-        what a musician can play through and it varies by player. Ten is about
-        where it stops being felt. */
-    inline bool playable (double roundTrip) { return roundTrip <= 10.0; }
+    /** Whether a round trip is low enough to stop looking for something
+        faster.
 
-    /** Whether it is bad enough to be worth saying something about. */
-    inline bool tooSlowToPlay (double roundTrip) { return roundTrip > 25.0; }
+        A rule of thumb rather than a standard: there is no specification for
+        what a musician can play through, and it varies by player and by
+        instrument. Fifteen is set where it is from two directions. Below
+        roughly ten milliseconds the delay stops being felt at all, so
+        anything in that region is unarguably done. The upper end comes from
+        what players demonstrably work at: Image-Line's own guidance for FL
+        Studio is to run an ASIO buffer of "between 10 and 20 ms (440 to 880
+        samples)", which is a round trip of twenty milliseconds and more, and
+        people record guitar through that every day.
+
+        Fifteen is therefore comfortably better than the thing this is being
+        compared against, while still being a number the search will not
+        settle for when something genuinely faster is available. Set it at ten
+        and a machine that has reached the best it can do, 128 samples each
+        way plus the driver's own, gets reported as a failure.
+    */
+    inline bool playable (double roundTrip) { return roundTrip <= 15.0; }
+
+    /** Whether it is bad enough to be worth telling somebody about, as
+        opposed to merely not the best available. Thirty is past the point
+        where a player hears themselves late rather than feeling the note,
+        and well past anything the settings above should have produced, so
+        reaching it means something is worth saying. */
+    inline bool tooSlowToPlay (double roundTrip) { return roundTrip > 30.0; }
 }

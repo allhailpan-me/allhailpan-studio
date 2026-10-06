@@ -188,29 +188,38 @@ static void nothingToChooseFrom()
 
 static void theUsualDrivers()
 {
-    // Five milliseconds at 48 kHz is 240 samples, so 256 is the smallest
-    // power of two that covers it.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 48000.0), 256,
+    // Two and a half milliseconds at 48 kHz is 120 samples, so 128 covers it.
+    // That is deliberately the first size Windows offers on a driver that
+    // supports small buffers: Microsoft document the inbox HDAudio driver as
+    // supporting 128 to 480, and taking 256 instead would throw away most of
+    // what Low Latency Mode exists to provide.
+    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 48000.0), 128,
                 "48 kHz with the usual sizes");
 
-    // 44.1 kHz asks for 220.5, which must not round down into 128.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 44100.0), 256,
+    // 44.1 kHz asks for 110.25, which must not round down into 64.
+    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 44100.0), 128,
                 "44.1 kHz with the usual sizes");
 
     // Higher rates need proportionally larger buffers for the same delay,
     // which is the part that gets forgotten when a buffer size is hardcoded.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 96000.0), 512,
+    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024 }, 96000.0), 256,
                 "96 kHz with the usual sizes");
-    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024, 2048 }, 192000.0), 1024,
+    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 128, 256, 512, 1024, 2048 }, 192000.0), 512,
                 "192 kHz with the usual sizes");
 
-    // An exact match is the right answer and must not be skipped over.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 120, 240, 480 }, 48000.0), 240,
+    // The exact figure a 48 kHz driver would be asked for, which must not be
+    // skipped over in favour of the next one up.
+    checkEqual (AudioDefaults::chooseBufferSize ({ 120, 240, 480 }, 48000.0), 120,
                 "an exact match should be taken");
+
+    // The real shape of a Low Latency Mode list: the minimum period, then
+    // multiples of the fundamental period up to the maximum.
+    checkEqual (AudioDefaults::chooseBufferSize ({ 128, 160, 192, 224, 256, 480 }, 48000.0), 128,
+                "a low latency mode buffer size list");
 
     // The list order is the driver's business. ASIO devices in particular
     // report whatever order they like.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 1024, 64, 512, 128, 256 }, 48000.0), 256,
+    checkEqual (AudioDefaults::chooseBufferSize ({ 1024, 64, 512, 128, 256 }, 48000.0), 128,
                 "an unsorted list");
 
     // One size offered, which is what a device in exclusive mode can look
@@ -225,9 +234,9 @@ static void driversThatWillNotReachTheTarget()
 {
     // Everything on offer is below the target, so the target cannot be met and
     // the largest is the safest of the options rather than the worst of them.
-    checkEqual (AudioDefaults::chooseBufferSize ({ 64, 96, 128 }, 48000.0), 128,
+    checkEqual (AudioDefaults::chooseBufferSize ({ 32, 64, 96 }, 48000.0), 96,
                 "all sizes below the target should take the largest");
-    checkEqual (AudioDefaults::chooseBufferSize ({ 128, 64, 96 }, 48000.0), 128,
+    checkEqual (AudioDefaults::chooseBufferSize ({ 96, 32, 64 }, 48000.0), 96,
                 "all sizes below the target, unsorted");
 }
 
@@ -265,10 +274,20 @@ static void defaultTargetIsPlayable()
     // true the number was changed without the thresholds being revisited.
     const double bothWays = 2000.0 * AudioDefaults::targetBufferSeconds;
 
-    check (! AudioDefaults::tooSlowToPlay (bothWays),
-           "the default target is already too slow before the driver adds anything");
-    check (bothWays < 25.0 - 10.0,
-           "the default target leaves no headroom for the driver's own buffering");
+    check (AudioDefaults::playable (bothWays),
+           "the default target is not even playable before the driver adds anything");
+
+    // And it has to leave room for the driver's own buffering either side
+    // before it stops being playable, since that is added on top and is not
+    // ours to choose. Expressed against the thresholds rather than against
+    // numbers, so that moving one of them cannot leave this passing by
+    // accident.
+    double headroom = 0.0;
+    while (AudioDefaults::playable (bothWays + headroom))
+        headroom += 0.1;
+
+    check (headroom >= bothWays,
+           "the default target leaves less headroom for the driver than it uses itself");
 }
 
 static void roundTrip()
