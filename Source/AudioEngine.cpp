@@ -54,51 +54,106 @@ double AudioEngine::monitoringRoundTripMs() const
     if (device == nullptr)
         return 0.0;
 
-    return AudioDefaults::roundTripMs (device->getInputLatencyInSamples(),
-                                       device->getOutputLatencyInSamples(),
-                                       device->getCurrentSampleRate());
+    // Estimated from the buffer when the driver reports nothing, rather than
+    // read as zero. See AudioDefaults::roundTripOrEstimate: an ASIO driver
+    // whose getLatencies call fails leaves both figures at zero, and zero is
+    // the best possible score.
+    return AudioDefaults::roundTripOrEstimate (device->getInputLatencyInSamples(),
+                                               device->getOutputLatencyInSamples(),
+                                               device->getCurrentBufferSizeSamples(),
+                                               device->getCurrentSampleRate());
+}
+
+bool AudioEngine::monitoringLatencyIsEstimated() const
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    return device != nullptr
+        && device->getInputLatencyInSamples() + device->getOutputLatencyInSamples() <= 0;
+}
+
+namespace
+{
+    /** Whether ASIO was compiled in.
+
+        Worth being able to say out loud. When it is not, JUCE does not
+        register the type at all, so a search for it looks exactly like a
+        machine that has no ASIO driver installed. Those are completely
+        different problems with completely different answers, and telling them
+        apart from the outside is impossible, which is how an interface's own
+        driver can sit unused on somebody's machine for days while the studio
+        reports that it looked and found nothing. */
+    bool builtWithAsio() noexcept
+    {
+       #if JUCE_ASIO
+        return true;
+       #else
+        return false;
+       #endif
+    }
 }
 
 juce::String AudioEngine::findFastestDevice()
 {
-    const double       before = monitoringRoundTripMs();
-    const juce::String was    = deviceManager.getCurrentAudioDeviceType();
-
     chooseLowLatencyDevice();
 
     if (deviceManager.getCurrentAudioDevice() == nullptr)
         return "No audio device would open. Pick one above.";
 
-    const double       after = monitoringRoundTripMs();
-    const juce::String now   = deviceManager.getCurrentAudioDeviceType();
+    return deviceSearchReport();
+}
 
-    juce::String result;
-    result << "Monitoring is " << juce::String (after, 1) << " ms round trip on " << now << ".";
+/** What the search tried and what each one gave.
 
-    if (now != was)
-        result << " Changed from " << was << ", which was "
-               << juce::String (before, 1) << " ms.";
-    else if (after < before - 0.05)
-        result << " Same driver, smaller buffer: it was "
-               << juce::String (before, 1) << " ms.";
-    else if (! AudioDefaults::playable (after))
+    This exists because the last three attempts at this problem were all made
+    without knowing what the machine had actually done. The studio reported
+    one number, that number was wrong or irrelevant, and the next change was a
+    guess. A list of what was tried turns "still slow" into something that can
+    be read off a screenshot in one go, which is the difference between
+    diagnosing this and iterating at it.
+*/
+juce::String AudioEngine::deviceSearchReport() const
+{
+    const juce::String now = deviceManager.getCurrentAudioDeviceType();
+
+    juce::String report;
+    report << "Monitoring is " << juce::String (monitoringRoundTripMs(), 1)
+           << " ms round trip on " << now << ".";
+
+    if (monitoringLatencyIsEstimated())
+        report << " That is estimated from the buffer size, because this driver does not "
+                  "report its own latency.";
+
+    if (hasTakenTheDevice())
     {
-        result << " Nothing the studio will choose by itself was faster.";
+        report << "\nThe sound card is held by the studio, so other applications will not "
+                  "play through it while this is open.";
 
-        // Named rather than taken. It would almost certainly win, and winning
-        // is not the only thing that matters: it holds the sound card, so
-        // everything else on the machine goes quiet while the studio is open.
-        for (const auto& taking : AudioDefaults::driversThatTakeTheDevice())
-            for (auto* type : deviceManager.getAvailableDeviceTypes())
-                if (type->getTypeName() == juce::String (taking))
-                    result << " " << taking << " above is faster still, but it takes "
-                              "the sound card, so nothing else on this machine will play "
-                              "while the studio is open. That one is yours to choose.";
+        if (searchChangedTheDeviceType)
+            report << " Nothing that shares it was fast enough.";
+
+        report << " Change Audio device type above to undo that.";
     }
-    else
-        result << " It was already as fast as it goes.";
 
-    return result;
+   #if JUCE_WINDOWS
+    // Said whether or not a search has run, because it is the first thing
+    // worth knowing on a machine with an audio interface: without ASIO the
+    // studio cannot reach the interface's own driver at all, whatever else it
+    // tries.
+    report << (builtWithAsio()
+                 ? "\nThis build includes ASIO, so an interface's own driver can be used."
+                 : "\nThis build has no ASIO, so an interface's own driver cannot be used.");
+   #endif
+
+    if (deviceSearch.isEmpty())
+        return report;
+
+    report << "\n\nWhat was tried:";
+
+    for (const auto& line : deviceSearch)
+        report << "\n  " << line;
+
+    return report;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,32 +175,45 @@ juce::String AudioEngine::findFastestDevice()
 
 void AudioEngine::chooseLowLatencyDevice()
 {
+    deviceSearch.clear();
+    searchChangedTheDeviceType = false;
+
     // The buffer size is worth tightening whatever driver we are on, and it
     // is the cheap half: no device switch, so no wait.
     tightenBufferSize();
 
-    if (AudioDefaults::playable (monitoringRoundTripMs())
-        && deviceManager.getCurrentAudioDevice() != nullptr)
-        return;
-
     const juce::String fallbackType = deviceManager.getCurrentAudioDeviceType();
-    double             bestRoundTrip = monitoringRoundTripMs();
-    juce::String       bestType = fallbackType;
 
-    if (deviceManager.getCurrentAudioDevice() == nullptr)
-        bestRoundTrip = std::numeric_limits<double>::max();
-
-    for (const auto& preferred : AudioDefaults::preferredDrivers())
+    if (deviceManager.getCurrentAudioDevice() != nullptr)
     {
-        const juce::String typeName (preferred);
+        const double current = monitoringRoundTripMs();
 
+        note (fallbackType, current, "where the system had it");
+
+        if (AudioDefaults::playable (current))
+            return;
+    }
+
+    double       bestRoundTrip = deviceManager.getCurrentAudioDevice() != nullptr
+                                   ? monitoringRoundTripMs()
+                                   : std::numeric_limits<double>::max();
+    juce::String bestType      = fallbackType;
+    bool         bestTakesIt   = AudioDefaults::takesTheDevice (fallbackType.toStdString());
+
+    for (const auto& candidate : AudioDefaults::searchOrder())
+    {
+        const juce::String typeName (candidate.name);
+
+        // Where the search started. Measured above when a device was open, and
+        // reached again by the fallback at the end when one was not, so there
+        // is nothing to gain from closing and reopening it here.
         if (typeName == fallbackType)
-            continue;                  // already measured, and it was not good enough
+            continue;
 
         // Only types the machine actually has, and only ones with a device on
         // them: an empty type would be switched to and then fail to open,
         // which costs the wait for nothing.
-        const bool usable = [this, &typeName]
+        const bool present = [this, &typeName]
         {
             for (auto* type : deviceManager.getAvailableDeviceTypes())
                 if (type->getTypeName() == typeName)
@@ -155,29 +223,54 @@ void AudioEngine::chooseLowLatencyDevice()
             return false;
         }();
 
-        if (! usable)
+        if (! present)
+        {
+           #if JUCE_WINDOWS
+            const bool missingFromBuild = typeName == "ASIO" && ! builtWithAsio();
+           #else
+            // ASIO is a Windows interface. Saying "not compiled in" on a Mac
+            // would imply a build option that does not exist.
+            const bool missingFromBuild = false;
+           #endif
+
+            note (typeName, -1.0, missingFromBuild ? "not compiled into this build"
+                                                   : "not on this machine");
             continue;
+        }
 
         if (! openDeviceType (typeName))
+        {
+            note (typeName, -1.0, "would not open");
             continue;
+        }
 
         tightenBufferSize();
 
         const double roundTrip = monitoringRoundTripMs();
 
-        if (roundTrip > 0.0 && roundTrip < bestRoundTrip)
+        note (typeName, roundTrip, candidate.takesTheDevice ? "takes the sound card" : "");
+
+        // A driver that holds the device only wins if it is playable and
+        // nothing which shares the device was. Being merely faster is not
+        // enough to pay that price: the loop reaches these last, so anything
+        // already found was both sharing and not good enough.
+        const bool worthTaking = ! candidate.takesTheDevice
+                               || AudioDefaults::playable (roundTrip);
+
+        if (roundTrip > 0.0 && roundTrip < bestRoundTrip && worthTaking)
         {
             bestRoundTrip = roundTrip;
             bestType      = typeName;
+            bestTakesIt   = candidate.takesTheDevice;
         }
 
         if (AudioDefaults::playable (roundTrip))
-            return;                    // good enough: stop paying for attempts
+            break;                     // good enough: stop paying for attempts
     }
 
-    // Nothing reached the target, so settle on whichever was least bad. This
-    // can be the driver we started on, in which case the machine simply does
-    // not go faster and the settings panel says so in milliseconds.
+    // Settle on whichever was least bad, which can be the driver we started
+    // on, in which case the machine simply does not go faster and the report
+    // says so in milliseconds.
     if (deviceManager.getCurrentAudioDeviceType() != bestType
         || deviceManager.getCurrentAudioDevice() == nullptr)
     {
@@ -189,10 +282,37 @@ void AudioEngine::chooseLowLatencyDevice()
     if (deviceManager.getCurrentAudioDevice() == nullptr)
     {
         openDeviceType (fallbackType);
+        bestTakesIt = AudioDefaults::takesTheDevice (fallbackType.toStdString());
 
         if (deviceManager.getCurrentAudioDevice() == nullptr)
             deviceManager.initialise (8, 8, nullptr, true);
     }
+
+    // Deliberately read back off the device manager rather than carried along
+    // in bestTakesIt, which an audit found could be false while the studio was
+    // in fact holding the sound card: setCurrentAudioDeviceType does nothing
+    // at all when handed a name it does not recognise, so the last type the
+    // loop opened can still be the live one. Being wrong in that direction is
+    // the one that hurts, because then nothing tells the person why the rest
+    // of their machine went quiet.
+    searchChangedTheDeviceType = deviceManager.getCurrentAudioDeviceType() != fallbackType;
+    juce::ignoreUnused (bestTakesIt);
+}
+
+/** One line of the record of what was tried. A round trip below zero means it
+    was never measured, and the reason says why. */
+void AudioEngine::note (const juce::String& typeName, double roundTrip, const juce::String& why)
+{
+    juce::String line;
+    line << typeName << ": ";
+
+    if (roundTrip < 0.0)
+        line << why;
+    else
+        line << juce::String (roundTrip, 1) << " ms"
+             << (why.isNotEmpty() ? ", " + why : juce::String());
+
+    deviceSearch.add (line);
 }
 
 bool AudioEngine::openDeviceType (const juce::String& typeName)

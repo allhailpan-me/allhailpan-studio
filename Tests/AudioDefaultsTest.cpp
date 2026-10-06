@@ -95,44 +95,102 @@ static void driverOrder()
     if (asio >= 0 && lowLatency >= 0)
         check (asio < lowLatency, "ASIO is not preferred first");
 
-    // The one that must never be chosen for somebody. Exclusive mode holds
-    // the endpoint, so nothing else on the machine plays through that device
-    // while the studio is open, and a browser that has gone silent is not a
-    // thing anybody would connect back to turning monitoring on.
+    // Exclusive mode holds the endpoint, so nothing else on the machine plays
+    // through that device while the studio is open. That is a cost, not a
+    // veto: on an audio interface it costs close to nothing, and the
+    // alternative is somebody who cannot play. It has to be known about so
+    // that it comes last and so that the studio can say it took the device.
     const auto taking = AudioDefaults::driversThatTakeTheDevice();
 
     check (! taking.empty(), "nothing is marked as taking the device over");
 
     for (const auto& name : taking)
     {
-        check (std::find (drivers.begin(), drivers.end(), name) == drivers.end(),
-               "\"" + name + "\" takes the device over and is on the list the studio "
-               "moves people onto by itself");
-
         check (! name.empty(), "a driver that takes the device has no name");
+        check (AudioDefaults::takesTheDevice (name),
+               "\"" + name + "\" is on the list but is not recognised by name");
+        check (std::find (drivers.begin(), drivers.end(), name) == drivers.end(),
+               "\"" + name + "\" is on both lists, so it would be tried twice");
     }
 
     check (std::find (taking.begin(), taking.end(),
                       std::string ("Windows Audio (Exclusive Mode)")) != taking.end(),
            "exclusive mode is not named as taking the device over, so nothing can "
-           "suggest it to somebody who needs it");
+           "reach for it when it is the only thing left");
+
+    for (const auto& name : drivers)
+        check (! AudioDefaults::takesTheDevice (name),
+               "\"" + name + "\" is preferred but is also said to take the device");
+}
+
+//==============================================================================
+/** The order everything is tried in, which is the whole policy. */
+static void searchOrder()
+{
+    const auto order = AudioDefaults::searchOrder();
+    const auto preferred = AudioDefaults::preferredDrivers();
+    const auto taking = AudioDefaults::driversThatTakeTheDevice();
+
+    checkEqual ((int) order.size(), (int) (preferred.size() + taking.size()),
+                "the search order is not everything on both lists");
+
+    // Nothing that takes the device may be tried before something that does
+    // not. A faster driver is not worth having if a slower one would have
+    // done without silencing the rest of the machine.
+    bool seenOneThatTakes = false;
+
+    for (const auto& candidate : order)
+    {
+        if (candidate.takesTheDevice)
+            seenOneThatTakes = true;
+        else
+            check (! seenOneThatTakes,
+                   "\"" + candidate.name + "\" is tried after a driver that takes the "
+                   "device, so the studio could hold the sound card when it did not have to");
+
+        check (AudioDefaults::takesTheDevice (candidate.name) == candidate.takesTheDevice,
+               "\"" + candidate.name + "\" is flagged differently from how it is classified");
+    }
+
+    check (seenOneThatTakes,
+           "nothing in the search order takes the device, so a machine where only "
+           "exclusive mode is fast has nothing left to try");
+
+    // And the order within the preferred part is preserved, since that is
+    // where ASIO being first matters. Guarded, because nothing here aborts on
+    // a failure: without this a short order would be an out of bounds read
+    // and the suite would report a crash rather than the named problem.
+    if (order.size() < preferred.size())
+        return;
+
+    for (std::size_t i = 0; i < preferred.size(); ++i)
+        check (order[i].name == preferred[i],
+               "the search order does not follow the preferred order");
+
+    // Across the whole order, not just the preferred part, since the two are
+    // now tried from one list.
+    std::vector<std::string> names;
+
+    for (const auto& candidate : order)
+        names.push_back (candidate.name);
 
     // No name may be a substring of another. The engine compares these
     // exactly, but a later change to matching by substring would otherwise
     // silently start matching the wrong driver, and "Windows Audio" matching
-    // all three WASAPI modes is precisely the failure being fixed.
-    for (const auto& a : drivers)
-        for (const auto& b : drivers)
+    // all three WASAPI modes is precisely the failure being fixed. This is
+    // the check that would catch somebody adding plain "Windows Audio" back.
+    for (const auto& a : names)
+        for (const auto& b : names)
             if (&a != &b)
                 check (b.find (a) == std::string::npos,
                        "\"" + a + "\" is a substring of \"" + b + "\"");
 
     // Duplicates would mean trying the same driver twice and skipping a real
     // candidate if the first attempt failed for a reason the second shares.
-    auto sorted = drivers;
+    auto sorted = names;
     std::sort (sorted.begin(), sorted.end());
     check (std::adjacent_find (sorted.begin(), sorted.end()) == sorted.end(),
-           "the preferred driver list has a duplicate");
+           "the search order has a duplicate");
 }
 
 //==============================================================================
@@ -290,6 +348,36 @@ static void defaultTargetIsPlayable()
            "the default target leaves less headroom for the driver than it uses itself");
 }
 
+static void estimatingWhenTheDriverWillNotSay()
+{
+    // Reported figures win when there are any.
+    checkEqual ((int) std::lround (AudioDefaults::roundTripOrEstimate (256, 256, 256, 48000.0) * 100.0),
+                1067, "a driver that reports its latency should be believed");
+
+    // And when there are none, two buffers is the floor and ranks correctly.
+    // This is the ASIO case: JUCE zeroes both figures when getLatencies fails.
+    checkEqual ((int) std::lround (AudioDefaults::roundTripOrEstimate (0, 0, 128, 48000.0) * 100.0),
+                533, "a driver that reports nothing should be estimated from its buffer");
+
+    check (AudioDefaults::roundTripOrEstimate (0, 0, 128, 48000.0) > 0.0,
+           "an estimate of zero would be read as a perfect device");
+
+    // An interface reporting nothing at a small buffer has to come out
+    // playable, or the search throws away the one driver that would have
+    // worked and falls back to the slow one.
+    check (AudioDefaults::playable (AudioDefaults::roundTripOrEstimate (0, 0, 128, 48000.0)),
+           "a fast driver that reports no latency is not being recognised as playable");
+
+    // And one at a large buffer must not be.
+    check (! AudioDefaults::playable (AudioDefaults::roundTripOrEstimate (0, 0, 2048, 48000.0)),
+           "a slow driver that reports no latency is being treated as playable");
+
+    checkEqual ((int) AudioDefaults::roundTripOrEstimate (0, 0, 0, 48000.0), 0,
+                "nothing known at all should stay zero rather than be invented");
+    checkEqual ((int) AudioDefaults::roundTripOrEstimate (256, 256, 256, 0.0), 0,
+                "an unknown sample rate should stay zero rather than divide by it");
+}
+
 static void roundTrip()
 {
     checkEqual ((int) std::lround (AudioDefaults::roundTripMs (256, 256, 48000.0) * 100.0),
@@ -318,6 +406,11 @@ static void thresholds()
             check (! AudioDefaults::tooSlowToPlay (ms),
                    "a round trip is both playable and too slow to play");
 
+    check (! AudioDefaults::playable (0.0),
+           "a round trip of zero means nothing was measured, and must not read as "
+           "the best possible score: a search that believes it stops on the one "
+           "driver that would not answer");
+    check (! AudioDefaults::playable (-3.0), "a negative round trip should not be playable");
     check (AudioDefaults::playable (5.0),   "five milliseconds should be playable");
     check (! AudioDefaults::playable (40.0), "forty milliseconds should not be playable");
     check (AudioDefaults::tooSlowToPlay (50.0),
@@ -402,6 +495,7 @@ static void randomised()
 int main()
 {
     driverOrder();
+    searchOrder();
     nothingToChooseFrom();
     theUsualDrivers();
     driversThatWillNotReachTheTarget();
@@ -409,6 +503,7 @@ int main()
     aDifferentTarget();
     defaultTargetIsPlayable();
     roundTrip();
+    estimatingWhenTheDriverWillNotSay();
     thresholds();
     randomised();
 

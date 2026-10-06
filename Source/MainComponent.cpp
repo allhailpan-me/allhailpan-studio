@@ -1733,10 +1733,23 @@ PreferencesActions MainComponent::preferenceActions()
 
         const auto result = safeThis->engine.findFastestDevice();
 
-        // The device may have changed underneath the whole graph, so the
-        // status bar should say what it now is rather than what it said
-        // before somebody pressed the button.
-        safeThis->setStatus (result);
+        // The status bar gets one line, since the full record of what was
+        // tried belongs in the window that asked for it. The one thing it
+        // must carry is the sound card having been taken, because that is a
+        // change to the whole machine and somebody who misses it will hear it
+        // as a second fault.
+        // The first line of the report either way, so the status bar cannot
+        // contradict the window: when no device would open, that is what both
+        // of them say. The sound card being held is added to it rather than
+        // replacing it, because that is a change to the whole machine and
+        // somebody who misses it will hear it as a second fault.
+        auto headline = result.upToFirstOccurrenceOf ("\n", false, false);
+
+        if (safeThis->engine.hasTakenTheDevice())
+            headline << " The sound card is held by the studio, so other applications "
+                        "will not play through it while this is open.";
+
+        safeThis->setStatus (headline);
         return result;
     };
 

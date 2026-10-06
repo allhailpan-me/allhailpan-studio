@@ -57,13 +57,15 @@ device is a choice the studio has to assume you made. That left everybody
 upgrading without the fix, which is most of the people who need it. The button
 asks for the same search on purpose and prints what it found underneath.
 
-**Exclusive mode is offered rather than taken.** It is the fastest thing
-Windows has, and it holds your sound card: nothing else on the computer makes
-a sound while the studio is open. Somebody who turned monitoring on and found
-their browser silent would have no way to connect the two. So the studio names
-it where the latency is shown, with what it costs, and leaves the choice alone.
-For what it is worth, FL Studio's own driver is documented as multi-client, so
-sharing the device is the same choice it makes.
+**Exclusive mode is tried last rather than refused.** It is the fastest thing
+Windows has and it holds your sound card, so nothing else on the computer plays
+through it while the studio is open. That is a cost, not a veto, and the first
+version of this got the balance wrong: refusing outright sounds careful, but on
+a machine with an audio interface it protects you from nothing, since the
+system's sound is not going through the interface anyway. It just leaves you
+unable to play. So drivers that share the device are tried first, exclusive
+mode is reached for only when none of them was fast enough, and the studio says
+plainly when it has taken the card.
 
 ## Since v0.4.0
 
@@ -212,7 +214,7 @@ Not code-signed, so every operating system will complain. Nothing is wrong with 
 
 ## Known limitations
 
-- **No ASIO in these builds.** Steinberg's licence does not allow redistributing the SDK, so the downloadable Windows build uses the Windows Audio modes only. The studio picks the fastest of those it can on first run, which is usually enough to play through, but ASIO is lower still: download the SDK yourself and build with `-DAHP_ASIO_SDK_DIR=` pointing at it.
+- **Low latency on Windows needs an interface with an ASIO driver,** or a sound card whose driver supports Windows' small shared buffers. Plenty of built-in sound chips support neither, and on those the studio will offer exclusive mode and little else.
 - **4/4 only, and one tempo for the whole song.** A MIDI file that changes tempo part way through is read at its opening tempo, and the status bar says so.
 - **Loading a plugin and dragging a mixer fader are not undo steps.** Everything else that edits the arrangement is.
 - **An instrument with 32 or more output channels** (sixteen stereo buses, which is the most this studio will route) makes the engine allocate once per block on the audio thread. Instruments with eight buses or fewer, which is all of the ones tested, are unaffected.

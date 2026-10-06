@@ -45,14 +45,27 @@ public:
         readout.setJustificationType (juce::Justification::topLeft);
         readout.setFont (juce::FontOptions (12.0f));
 
+        // A TextEditor rather than a Label, because the report is as long as
+        // the machine makes it and a Label silently squeezes or drops the
+        // lines that do not fit. What it drops first is the end, which is the
+        // list of what was tried, which is the whole reason this exists.
         addAndMakeVisible (outcome);
-        outcome.setJustificationType (juce::Justification::topLeft);
-        outcome.setFont (juce::FontOptions (12.0f));
-        outcome.setColour (juce::Label::textColourId, Ahp::muted);
+        outcome.setMultiLine (true, false);
+        outcome.setReadOnly (true);
+        outcome.setScrollbarsShown (true);
+        outcome.setCaretVisible (false);
+        outcome.setFont (juce::FontOptions (11.0f));
+        outcome.setColour (juce::TextEditor::textColourId, Ahp::muted);
+        outcome.setColour (juce::TextEditor::backgroundColourId, Ahp::panel);
+        outcome.setColour (juce::TextEditor::outlineColourId, Ahp::line);
+        outcome.setColour (juce::TextEditor::focusedOutlineColourId, Ahp::line);
 
         addAndMakeVisible (findButton);
         findButton.setTooltip ("Tries every driver this machine has, keeps the fastest one that "
                                "monitoring can be played through, and remembers it.\n"
+                               "Drivers that share the sound card are tried first. One that takes "
+                               "it is used only if nothing that shares it was fast enough, and the "
+                               "studio says so when that happens.\n"
                                "Takes a few seconds, because changing driver closes the device "
                                "and waits for the system to let go of it.");
         findButton.setEnabled (findFastestDevice != nullptr);
@@ -71,10 +84,10 @@ public:
         // have in milliseconds, then the button, then what it did. Taken in
         // that order because the button is only worth pressing once the
         // number above it has told you that you want to.
-        outcome.setBounds (area.removeFromBottom (36).reduced (10, 2));
+        outcome.setBounds (area.removeFromBottom (112).reduced (10, 2));
         findButton.setBounds (area.removeFromBottom (34).reduced (10, 4)
                                   .removeFromLeft (210));
-        readout.setBounds (area.removeFromBottom (94).reduced (10, 6));
+        readout.setBounds (area.removeFromBottom (80).reduced (10, 6));
         selector.setBounds (area);
     }
 
@@ -93,8 +106,7 @@ private:
             return;
 
         findButton.setEnabled (false);
-        outcome.setText ("Trying every driver on this machine, which takes a few seconds...",
-                         juce::dontSendNotification);
+        outcome.setText ("Trying every driver on this machine, which takes a few seconds.", false);
 
         juce::Component::SafePointer<AudioSettingsPanel> safeThis (this);
 
@@ -108,7 +120,7 @@ private:
             if (safeThis == nullptr)
                 return;
 
-            safeThis->outcome.setText (result, juce::dontSendNotification);
+            safeThis->outcome.setText (result, false);
             safeThis->findButton.setEnabled (true);
             safeThis->refresh();
         });
@@ -176,11 +188,8 @@ private:
                 && ! driver.containsIgnoreCase ("Low Latency")
                 && ! driver.containsIgnoreCase ("Exclusive"))
                 text << "\n\"" << driver << "\" shares the device with everything else on the system "
-                        "and buffers for it. Press Find the fastest device below, or change Audio "
-                        "device type above to Windows Audio (Low Latency Mode)."
-                        "\nWindows Audio (Exclusive Mode) is faster again, but it takes the sound "
-                        "card: nothing else on this machine will play while the studio is open. "
-                        "The studio will not choose that one for you.";
+                        "and buffers for it. Press Find the fastest device below. If you have an "
+                        "audio interface, its own ASIO driver is the one to be on.";
            #else
             juce::ignoreUnused (driver);
            #endif
@@ -191,7 +200,8 @@ private:
 
     juce::AudioDeviceManager& devices;
     juce::AudioDeviceSelectorComponent selector;
-    juce::Label readout, outcome;
+    juce::Label      readout;
+    juce::TextEditor outcome;
     juce::TextButton findButton { "Find the fastest device" };
 
     std::function<juce::String()> findFastestDevice;

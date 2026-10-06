@@ -342,10 +342,37 @@ which is what a bug report said and which reading
 `IAudioClient3` path and is the one to want: it enumerates from the driver's
 minimum period upward and honours what is asked for, while still sharing the
 device. Microsoft document the inbox HDAudio driver as supporting 128 to 480
-samples, and a driver has to opt in to the small end, so Low Latency Mode is
-not guaranteed to help on every machine. "Windows Audio (Exclusive Mode)" is
-faster again and is never chosen automatically: it holds the endpoint, so
-nothing else on the machine makes a sound while the studio is open, and nobody
-would connect a silent browser back to turning monitoring on. It is named
-where the latency is shown instead. The preference order lives in
-`AudioDefaults.h`.
+samples, and a driver has to opt in to the small end. The makers of audio
+interfaces mostly did not, because they ship an ASIO driver and expect it to be
+used, so on that hardware Low Latency Mode reports the same ten milliseconds as
+the default and there is nothing to be had from it.
+
+**ASIO is the one that matters on Windows, and the builds have it.** Until 15
+October 2025 they could not: the SDK's licence was proprietary only and
+incompatible with this project's AGPL-3.0. On that date Steinberg dual licensed
+it under GPL-3.0, which AGPL-3.0 may combine with through section 13 of each,
+so CI now downloads it, checks it against a known SHA-256 and builds with
+`JUCE_ASIO=1`. A Windows build that ends up without it **fails**: the configure
+step matches on CMake's own "ASIO support enabled from" line, because a
+silently ASIO-less Windows build is a studio that cannot reach an interface's
+driver at all, and that is invisible from outside. The studio also says in
+Preferences > Audio whether the running build has ASIO, so "not on this
+machine" and "not compiled in" can be told apart. Three days went into the
+wrong problem for want of exactly that distinction.
+
+"Windows Audio (Exclusive Mode)" holds the endpoint, so nothing else on the
+machine plays through that device while the studio is open. It is tried **last**
+rather than refused. Refusing outright sounds careful and is wrong on the
+hardware that needs it: somebody with an interface is not listening to the
+system through it, so taking it costs them nothing, and refusing leaves them
+unable to play. The order lives in `AudioDefaults::searchOrder`, and the test
+asserts the property rather than the list: nothing that takes the device may be
+tried before something that shares it.
+
+**A reported latency of zero means "the driver did not say", never "instant".**
+JUCE's ASIO backend zeroes both figures when `getLatencies` fails, and zero is
+the best possible score, so a search that believes it stops on the one driver
+that would not answer and then falls back to the slow one. `playable` therefore
+requires a round trip above zero, and `roundTripOrEstimate` falls back to two
+buffers, which is the floor any device can have. An audit caught this before it
+shipped; the first version of the ASIO support would have been defeated by it.
