@@ -1,6 +1,9 @@
 #include "AudioEngine.h"
+#include "AudioDefaults.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <vector>
 
 AudioEngine::AudioEngine()
 {
@@ -23,12 +26,180 @@ juce::String AudioEngine::start (const juce::XmlElement* savedDeviceState)
     auto error = deviceManager.initialise (8, 8, savedDeviceState, true);
 
     if (savedDeviceState == nullptr)
+    {
+        // First run only. After this the saved state is either the user's own
+        // choice or the choice made here on a previous launch, and overriding
+        // it every time would mean a setting that will not stay set.
+        chooseLowLatencyDevice();
+
+        // A reconfiguration may have opened a device where the first attempt
+        // could not, so what initialise said about it is out of date.
+        if (deviceManager.getCurrentAudioDevice() != nullptr)
+            error.clear();
+
         for (auto& d : juce::MidiInput::getAvailableDevices())
             deviceManager.setMidiInputDeviceEnabled (d.identifier, true);
+    }
 
     deviceManager.addMidiInputDeviceCallback ({}, &midiCollector);
     deviceManager.addAudioCallback (this);
     return error;
+}
+
+double AudioEngine::monitoringRoundTripMs() const
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+        return 0.0;
+
+    return AudioDefaults::roundTripMs (device->getInputLatencyInSamples(),
+                                       device->getOutputLatencyInSamples(),
+                                       device->getCurrentSampleRate());
+}
+
+// ---------------------------------------------------------------------------
+// Choosing a driver and a buffer size on first run.
+//
+// This is here because of a bug report that was not a settings problem: a
+// guitarist turned on monitoring, could not play through the delay, and had
+// no reason to know that the answer was a driver dropdown two menus away.
+// Whatever the operating system hands out by default is tuned for playing
+// back a video without glitching, not for hearing yourself in time, and on
+// Windows the gap between the two is tens of milliseconds.
+//
+// The order of operations matters. Nothing is touched unless the default is
+// actually too slow to play through, because on a machine that is already
+// fast, changing the device is all risk and no gain. Switching driver type
+// costs a second and a half inside JUCE, which closes the device and waits
+// for the operating system to let go of it, so each attempt stops as soon as
+// it has an answer rather than measuring them all.
+
+void AudioEngine::chooseLowLatencyDevice()
+{
+    // The buffer size is worth tightening whatever driver we are on, and it
+    // is the cheap half: no device switch, so no wait.
+    tightenBufferSize();
+
+    if (AudioDefaults::playable (monitoringRoundTripMs())
+        && deviceManager.getCurrentAudioDevice() != nullptr)
+        return;
+
+    const juce::String fallbackType = deviceManager.getCurrentAudioDeviceType();
+    double             bestRoundTrip = monitoringRoundTripMs();
+    juce::String       bestType = fallbackType;
+
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        bestRoundTrip = std::numeric_limits<double>::max();
+
+    for (const auto& preferred : AudioDefaults::preferredDrivers())
+    {
+        const juce::String typeName (preferred);
+
+        if (typeName == fallbackType)
+            continue;                  // already measured, and it was not good enough
+
+        // Only types the machine actually has, and only ones with a device on
+        // them: an empty type would be switched to and then fail to open,
+        // which costs the wait for nothing.
+        const bool usable = [this, &typeName]
+        {
+            for (auto* type : deviceManager.getAvailableDeviceTypes())
+                if (type->getTypeName() == typeName)
+                    return ! type->getDeviceNames (false).isEmpty()
+                        || ! type->getDeviceNames (true).isEmpty();
+
+            return false;
+        }();
+
+        if (! usable)
+            continue;
+
+        if (! openDeviceType (typeName))
+            continue;
+
+        tightenBufferSize();
+
+        const double roundTrip = monitoringRoundTripMs();
+
+        if (roundTrip > 0.0 && roundTrip < bestRoundTrip)
+        {
+            bestRoundTrip = roundTrip;
+            bestType      = typeName;
+        }
+
+        if (AudioDefaults::playable (roundTrip))
+            return;                    // good enough: stop paying for attempts
+    }
+
+    // Nothing reached the target, so settle on whichever was least bad. This
+    // can be the driver we started on, in which case the machine simply does
+    // not go faster and the settings panel says so in milliseconds.
+    if (deviceManager.getCurrentAudioDeviceType() != bestType
+        || deviceManager.getCurrentAudioDevice() == nullptr)
+    {
+        openDeviceType (bestType);
+        tightenBufferSize();
+    }
+
+    // Whatever happened above, the studio must not be left without a device.
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+    {
+        openDeviceType (fallbackType);
+
+        if (deviceManager.getCurrentAudioDevice() == nullptr)
+            deviceManager.initialise (8, 8, nullptr, true);
+    }
+}
+
+bool AudioEngine::openDeviceType (const juce::String& typeName)
+{
+    if (deviceManager.getCurrentAudioDeviceType() != typeName)
+        deviceManager.setCurrentAudioDeviceType (typeName, true);
+
+    // setCurrentAudioDeviceType does nothing at all when the name it is given
+    // is already the current one, and it reports nothing when the device it
+    // then tries to open fails. Both of those leave the type selected with no
+    // device behind it, and initialise is the only public call that fills in
+    // default device names for the current type and opens them.
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        deviceManager.initialise (8, 8, nullptr, true);
+
+    return deviceManager.getCurrentAudioDeviceType() == typeName
+        && deviceManager.getCurrentAudioDevice() != nullptr;
+}
+
+void AudioEngine::tightenBufferSize()
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+
+    if (device == nullptr)
+        return;
+
+    const double rate = device->getCurrentSampleRate();
+
+    if (rate <= 0.0)
+        return;
+
+    std::vector<int> sizes;
+
+    for (int size : device->getAvailableBufferSizes())
+        sizes.push_back (size);
+
+    const int wanted = AudioDefaults::chooseBufferSize (sizes, rate);
+
+    if (wanted == 0 || wanted == device->getCurrentBufferSizeSamples())
+        return;
+
+    const auto previous = deviceManager.getAudioDeviceSetup();
+    auto       tighter  = previous;
+    tighter.bufferSize  = wanted;
+
+    // A driver can list a size and then refuse it. Putting the working setup
+    // back is better than leaving the device closed over a buffer size.
+    if (deviceManager.setAudioDeviceSetup (tighter, true).isNotEmpty()
+        || deviceManager.getCurrentAudioDevice() == nullptr)
+        deviceManager.setAudioDeviceSetup (previous, true);
 }
 
 int AudioEngine::getRoundTripLatencySamples()

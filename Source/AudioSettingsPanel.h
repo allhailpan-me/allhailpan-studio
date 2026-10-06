@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "AhpLookAndFeel.h"
+#include "AudioDefaults.h"
 
 //==============================================================================
 /** The device chooser, with the number that actually decides whether you can
@@ -19,12 +20,11 @@
     is one dropdown away. A driver that cannot go below forty milliseconds at
     any buffer size is not, and the answer there is a different driver.
 
-    The thresholds below are a practical rule of thumb and not a standard:
-    there is no specification that says what latency a musician can play
-    through, and it varies by player and by instrument. They are set where
-    they are because under roughly ten milliseconds is close to the delay of
-    standing a couple of paces from an amplifier, and past roughly twenty five
-    most players start to hear themselves late rather than feel the note.
+    The arithmetic and the thresholds come from AudioDefaults rather than from
+    here, because the same numbers decide what the studio picks on first run
+    and they have tests on them there. Two copies would drift, and the window
+    disagreeing with the engine about whether a setting is playable is a
+    worse bug than either being wrong.
 */
 class AudioSettingsPanel : public juce::Component,
                            private juce::Timer
@@ -76,7 +76,7 @@ private:
         // some of them by a lot more than the buffer accounts for.
         const int inSamples  = device->getInputLatencyInSamples();
         const int outSamples = device->getOutputLatencyInSamples();
-        const double roundTripMs = 1000.0 * (inSamples + outSamples) / rate;
+        const double roundTripMs = AudioDefaults::roundTripMs (inSamples, outSamples, rate);
 
         const juce::String driver = devices.getCurrentAudioDeviceType();
 
@@ -87,12 +87,12 @@ private:
              << " ms, buffer " << device->getCurrentBufferSizeSamples()
              << " at " << juce::String (rate / 1000.0, 1) << " kHz)";
 
-        if (roundTripMs <= 10.0)
+        if (AudioDefaults::playable (roundTripMs))
         {
             readout.setColour (juce::Label::textColourId, Ahp::bone);
             text << "\nLow enough to play through.";
         }
-        else if (roundTripMs <= 25.0)
+        else if (! AudioDefaults::tooSlowToPlay (roundTripMs))
         {
             readout.setColour (juce::Label::textColourId, Ahp::bone);
             text << "\nPlayable, though you may feel it on fast parts. A smaller buffer will cut it further.";
@@ -103,14 +103,19 @@ private:
             text << "\nToo high to play through comfortably. Try a smaller buffer size first.";
 
            #if JUCE_WINDOWS
-            // On Windows the driver matters more than the buffer. Shared mode
-            // Windows Audio and DirectSound both buffer heavily no matter
-            // what buffer size is asked for, and no setting in this window
-            // recovers that.
+            // On Windows the driver matters more than the buffer. Plain
+            // Windows Audio is the shared WASAPI mode, and it buffers heavily
+            // no matter what buffer size is asked for, so no setting in this
+            // window recovers it. Low Latency Mode is the same shared device
+            // negotiated through IAudioClient3 instead: single digit
+            // milliseconds, and other applications keep making sound.
+            // Exclusive Mode is as fast but takes the device, which is why it
+            // is suggested second.
             if (! driver.containsIgnoreCase ("ASIO")
+                && ! driver.containsIgnoreCase ("Low Latency")
                 && ! driver.containsIgnoreCase ("Exclusive"))
-                text << "\nIf that is not enough, change Audio device type above: "
-                        "ASIO if your interface provides it, otherwise Windows Audio (Exclusive Mode). "
+                text << "\nIf that is not enough, change Audio device type above to "
+                        "Windows Audio (Low Latency Mode), or to ASIO if your interface provides it. "
                         "\"" << driver << "\" shares the device with everything else on the system and buffers for it.";
            #else
             juce::ignoreUnused (driver);
