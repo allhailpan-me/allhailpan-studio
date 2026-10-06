@@ -1,4 +1,29 @@
-ASIO, which is what makes an audio interface playable on Windows, plus a front panel on the instrument and somewhere for the settings to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+A mono input is heard in the middle rather than out of one speaker, and ASIO, which is what makes an audio interface playable on Windows at all. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.6.0
+
+**One instrument in one socket is now heard in the middle, not out of one
+speaker.** The studio took input 1 as the left of a stereo pair and input 2 as
+the right, always. That is right for a keyboard using two sockets and wrong for
+everything else: a guitar in input 1, with nothing plugged into input 2, came
+out of the left speaker with silence in the right. Takes were recorded the same
+way, as a stereo file with the performance down one side.
+
+It looks like an output fault, which is the worst part of it. One speaker sends
+you to the output settings, and nothing there can help, because the problem was
+on the way in.
+
+There is now an input selector on the toolbar, next to the record mode. Mono
+inputs are listed first and are centred; pick a pair only for something
+genuinely stereo. **If you were monitoring a real stereo pair on inputs 1 and
+2, you will need to select "In 1+2" after upgrading,** because the default is
+now a single instrument on the first input, which is what almost everybody
+plugs in first.
+
+The input meter follows the selection too, so a meter that moves is a meter for
+the channel you are actually recording. Changing input while monitoring fades
+across rather than cutting, because a full scale step into an amp simulator is
+loud.
 
 ## Since v0.5.1
 
