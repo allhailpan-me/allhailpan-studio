@@ -1,4 +1,38 @@
-Monitoring you can actually play through, a front panel on the instrument, and the settings have somewhere to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+ASIO, which is what makes an audio interface playable on Windows, plus a front panel on the instrument and somewhere for the settings to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.5.1
+
+**The Windows builds now include ASIO.** If you have an audio interface, this
+is the change that matters, and it is the reason monitoring was still not
+playable after two previous attempts at it. Without ASIO the studio cannot see
+an interface's own driver at all, and the makers of interfaces mostly did not
+implement Windows' own low latency mode, because they ship an ASIO driver and
+expect it to be used. So on that hardware there was nothing fast for the studio
+to find, and it correctly reported finding nothing, which looked exactly like a
+machine that simply could not go faster.
+
+It could not be included before. The ASIO SDK's licence was proprietary only
+and imposed terms the GPL family forbids adding, which is why these downloads
+shipped without it. Steinberg dual licensed the SDK under GPL-3.0 on 15 October
+2025, and this project's AGPL-3.0 may combine with GPL-3.0 under section 13 of
+each, so the obstacle is gone. The build fetches the SDK, checks it against a
+known SHA-256, and fails rather than quietly producing a Windows binary without
+it.
+
+**Exclusive mode is tried last rather than refused.** The previous release made
+a point of never choosing it for you, on the grounds that it holds your sound
+card and nothing else on the machine plays through it. That is right on a
+laptop with one sound card and wrong on a machine with an interface, where your
+system sound is not going through the interface anyway: refusing protected
+nobody and left people unable to play. Drivers that share the device are still
+tried first, and the studio says plainly when it has taken the card.
+
+**The studio now shows its working.** Preferences > Audio lists every driver it
+tried and what each one gave, or why it was skipped, and says outright whether
+the build you are running includes ASIO. That last line matters more than it
+looks: a build compiled without ASIO behaves exactly like a machine with no
+ASIO driver installed, and from the outside there was no way to tell those
+apart. That is why this took three attempts.
 
 ## Since v0.5.0
 
