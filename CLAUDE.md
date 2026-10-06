@@ -1,7 +1,7 @@
 # Notes for working on this codebase
 
 ALLHAILPAN Studio is a digital audio workstation: a JUCE application in C++20,
-about twenty thousand lines across fifty two files in `Source`, with another six
+about twenty two thousand lines across sixty files in `Source`, with another nine
 thousand of standalone tests in `Tests`, built with CMake and FetchContent. It
 ships with its own instrument, hosts VST3 plugins, records audio and MIDI,
 warps and comps takes, and exports finished mixes.
@@ -291,6 +291,9 @@ braces on their own line.
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
+| `RealFFT.h` | A radix-2 transform for real signals. No JUCE, so the spectral chain is testable end to end |
+| `Spectrogram.h` | Short time analysis and weighted overlap-add resynthesis: the window, the hop, and the sum that has to come back flat. No JUCE |
+| `SpectralEdit.h` | A region of the time against frequency plane and the gain applied to it, with tapered edges so a repair does not ring. No JUCE |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `CompModel.h` | Take folders: which take is heard where, and the equal-power crossfade at each join. In seconds, not beats, so a comp survives a tempo change. No JUCE |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
