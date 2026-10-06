@@ -1,4 +1,4 @@
-Monitoring you can play through without configuring anything, and the settings have somewhere to live. Below that, the instrument that makes the studio sound on its own, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+Monitoring you can play through without configuring anything, a front panel on the instrument, and the settings have somewhere to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
 
 ## Since v0.4.0
 
@@ -24,6 +24,14 @@ The **Audio** and **Plugins** buttons in the toolbar now open that window on tho
 
 The metronome level was a fixed number in the engine before this, and the default is that same number to within a tenth of a decibel, so your click does not change level on upgrade. It is read once per click rather than per sample, so turning it down while the metronome is running cannot step on a click that is already decaying. The autosave default is the same two minutes it has always been.
 
+**PAN One has a front panel.** The instrument shipped in v0.3.1 with no controls at all, so its window opened black: there were no parameters, and the generic editor every host falls back on had nothing to draw. There are eighteen controls now, grouped into oscillators, filter, amplitude envelope and filter envelope, with the presets in a box at the top. A marker appears when the knobs no longer match the preset they came from, so a preset that has stopped sounding like itself explains itself.
+
+They are ordinary plugin parameters, which means **the modulators reach into PAN One** exactly as they reach into anything else you host: wire a shape to its cutoff and it sweeps. The note in v0.3.1 saying that needed real work first was simply wrong, and reading the framework's own source rather than trusting that note is what settled it.
+
+Projects now save the knobs rather than only the preset number, written by name so that a later version adding a control in the middle cannot shift your saved values along by one. A project saved before the knobs existed carries a preset number and nothing else, and loads as that preset.
+
+The knobs and the presets are a table in a header with no JUCE in it, rather than four hand written lists in four places, which is what lets a test check the things that would otherwise be silent: that no two controls write the same part of the patch, that every value in every preset is inside the range of the control that will hold it, and that the panel draws every control exactly once. Twenty one deliberate breakages of that table are all caught.
+
 **A monitoring fault that a settings file could cause.** The monitoring mode, the record mode and the count-in were restored from the settings file without checking that the stored value was one the control offers. An unknown value leaves a combo box with nothing selected, which reads back as zero, and for monitoring that zero became a mode the engine does not have: the callback took its low latency path, which deliberately skips delay compensation, while the mixer matched neither "armed" nor "on" and passed no input through. The result would have been monitoring that is silent and costs the compensation anyway, which is a hard thing to diagnose from the symptom. No released version wrote a value that could trigger it, so nobody will have seen this, but a hand edited or future written settings file would have been enough.
 
 Related, and the reason the above was found: a setting that is not a number parses as zero, and zero is a real value for several of these. It is off for the autosave and full level for the metronome, so a single garbled line in the settings file would have read back as a deliberate choice, and for the click as the loudest one in the range. Settings are now checked before they are acted on, and anything unreadable falls back to its default.
@@ -37,12 +45,6 @@ It is in the instrument list the first time you open the studio. There is nothin
 The oscillators are band limited. A naive saw or square is a discontinuity sampled directly, and everything above Nyquist folds back as partials that are not harmonically related to the note, so they move the wrong way as you play up the keyboard. That shimmer in the top two octaves is what gives a soft synth away, and no filter afterwards removes it. Measured against the naive version at 2 kHz, the saw puts 17 dB less energy into those partials and the square 18 dB less.
 
 The filter is a state variable design with the integrators kept as integrators, which matters because a filter envelope changes the cutoff every single sample. The usual alternative clicks on fast sweeps and can be driven unstable by the modulation alone. Its resonant peak lands on the cutoff to four decimal places from a Q of 0.5 to 10.
-
-**It has a front panel,** which it did not when it first shipped. The window opened black with nothing in it, because the instrument had no parameters and the generic editor every host falls back on had nothing to draw. There are eighteen controls now, grouped into oscillators, filter, amplitude envelope and filter envelope, with the presets in a box at the top. A marker appears when the knobs no longer match the preset they came from, so a preset that stopped sounding like itself explains itself.
-
-Those are ordinary plugin parameters, which means **the modulators reach into PAN One** exactly as they reach into anything else you host: wire a shape to its cutoff and it sweeps. The note in the first release saying this needed real work was wrong, and reading the framework's own source rather than trusting that note is what settled it.
-
-Projects now save the knobs rather than only the preset number, written by name so that a later version adding a control in the middle does not shift your saved values along by one. A project saved before the knobs existed carries a preset number and nothing else, and loads as that preset.
 
 ## Since v0.3.0
 
