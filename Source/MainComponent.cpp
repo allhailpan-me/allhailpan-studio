@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "AudioDefaults.h"
 #include "MidiFileIO.h"
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
@@ -47,8 +48,27 @@ MainComponent::MainComponent()
         plugins.settings().setValue (Prefs::Key::monitorMode, monitorBox.getSelectedId());
 
         if (mode != AudioEngine::Monitor::off)
-            setStatus ("Monitoring through " + engine.insert (engine.getMonitorInsert()).name
-                         + ". Use headphones: speakers near a microphone will feed back.");
+        {
+            const double roundTrip = engine.monitoringRoundTripMs();
+
+            juce::String message;
+            message << "Monitoring through " << engine.insert (engine.getMonitorInsert()).name
+                    << " at " << juce::String (roundTrip, 1) << " ms round trip. "
+                       "Use headphones: speakers near a microphone will feed back.";
+
+            // Said at the moment it matters, which is when somebody turns
+            // monitoring on with an instrument in their hands rather than
+            // when they go looking in a settings window. The number alone is
+            // only useful to somebody who already knows what a good one is,
+            // so when it is bad it says so and says where to go. The studio
+            // picks the fastest driver it can on first run, so getting here
+            // means either the machine will not go faster or the device has
+            // been chosen by hand since.
+            if (AudioDefaults::tooSlowToPlay (roundTrip))
+                message << " That is too slow to play through: open Audio settings and try another device type.";
+
+            setStatus (message);
+        }
     };
     // Through choiceId, because an id the box does not have selects nothing,
     // which reads back as zero, and zero minus one is not a monitoring mode the

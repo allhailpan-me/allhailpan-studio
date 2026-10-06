@@ -21,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. For low latency monitoring choose Windows Audio (Exclusive Mode) in **Preferences > Audio**, which tells you the cost of your choice in milliseconds, or build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
+- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. You should not have to do anything about latency: the first time it runs, the studio checks what monitoring costs and moves itself to a faster driver if what Windows handed it is too slow to play through, preferring Windows Audio (Low Latency Mode), which is fast and still lets everything else on the machine make sound. **Preferences > Audio** shows what you ended up with, in milliseconds. For lower still, build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 
@@ -164,6 +164,7 @@ Building one good performance out of several passes.
 - **Use headphones.** Monitoring through speakers with a microphone open feeds back, and an amp simulator makes that loud. The status bar shows **MONITORING** whenever input is passing through.
 - The monitor path deliberately skips delay compensation. That compensation lines internal paths up with each other, and on a monitor path it would only be latency you feel while playing. Lining the take up with the arrangement is handled separately, when the take is recorded.
 - Turning it on and off fades over about five milliseconds rather than switching, so it cannot click.
+- Turning monitoring on prints the round trip in milliseconds in the status bar, and says so plainly if it is too slow to play through. The number is what the driver reports, not what the buffer size implies.
 - Your interface's own direct monitoring is still the lowest latency route, and is worth using if your buffer size is large.
 
 ### Playlist
