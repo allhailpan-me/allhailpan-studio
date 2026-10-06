@@ -1,4 +1,69 @@
-Monitoring you can play through without configuring anything, a front panel on the instrument, and the settings have somewhere to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+Monitoring you can actually play through, a front panel on the instrument, and the settings have somewhere to live. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.5.0
+
+**Monitoring, properly this time.** v0.5.0 moved the studio onto a faster
+driver, and that was necessary but not sufficient: it was still not playable,
+and the report that it was not came with the detail that settled it, which was
+that the same machine is fine in another studio. That rules out the hardware.
+Four things were wrong, and two of them were ours.
+
+*The buffer was four times larger than it needed to be.* Microsoft document
+the standard Windows audio driver as supporting buffer sizes from 128 samples
+up to 480, with 480 being what every application gets by default. The studio
+was aiming at five milliseconds, which asks for 240 samples and therefore
+takes 256, stepping straight over 128 and 192. Most of the gain from the
+faster driver was being thrown away immediately. It now lands on 128.
+
+*The buffer size control really does nothing on plain Windows Audio.* This was
+reported and assumed to be a misunderstanding. It is not: in that mode JUCE
+publishes a single buffer size and ignores any request to change it, because
+the wakeup period belongs to the driver. If you were changing that setting and
+hearing no difference, you were right.
+
+*You could hear yourself twice.* A send is a copy of a channel taken after its
+fader, so on the channel you are monitoring through it carries your own
+playing. The direct path was exempted from delay compensation and the send
+copy was not, so your input arrived once immediately and again at send level,
+separated by the longest plugin lookahead in the project and moving every time
+a plugin was loaded anywhere. Anybody who has put a reverb on a vocal while
+tracking it was hearing that.
+
+*Anything routed straight to the master played early.* The opposite problem. A
+synth or a playlist clip sent directly to the master waited for far less than
+the rest of the mix, so it sat ahead of everything by whatever lookahead
+happened to be loaded on any insert. Nothing in the original report pointed at
+this; writing the test found it.
+
+Both of those last two survived because they were somewhere no test could
+reach, and this is the arithmetic in the studio least able to announce that it
+is wrong. Nothing errors, nothing crackles: tracks simply sit a few
+milliseconds apart and the record sounds slightly smeared. Both had a comment
+above them claiming the opposite of what the code did.
+
+So the whole compensation graph is now plain arithmetic in a file of its own,
+and the test does not check the formulas. It walks every route through a
+generated mixer, totals everything on the path, and asserts that all of them
+reach the master on the same sample: twenty thousand mixers, with sends chained
+forward, output buses split across destinations and lookahead plugins anywhere.
+Monitoring is asserted as the deliberate exception, early by exactly the amount
+skipped and with its send copy not put back. Then the file was broken on
+purpose twenty seven ways, including both original bugs reintroduced verbatim,
+and all twenty seven were caught.
+
+**A "Find the fastest device" button,** in Preferences > Audio. The automatic
+search runs only on a first run, because a settings file that already names a
+device is a choice the studio has to assume you made. That left everybody
+upgrading without the fix, which is most of the people who need it. The button
+asks for the same search on purpose and prints what it found underneath.
+
+**Exclusive mode is offered rather than taken.** It is the fastest thing
+Windows has, and it holds your sound card: nothing else on the computer makes
+a sound while the studio is open. Somebody who turned monitoring on and found
+their browser silent would have no way to connect the two. So the studio names
+it where the latency is shown, with what it costs, and leaves the choice alone.
+For what it is worth, FL Studio's own driver is documented as multi-client, so
+sharing the device is the same choice it makes.
 
 ## Since v0.4.0
 
