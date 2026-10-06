@@ -64,6 +64,7 @@ target_sources(AllHailPanStudio PRIVATE
     Source/MainComponent.cpp
     Source/AudioEngine.cpp
     Source/PluginManager.cpp
+    Source/PanOne.cpp
     Source/PlaylistComponent.cpp
     Source/PianoRollComponent.cpp
     Source/StretchCache.cpp
