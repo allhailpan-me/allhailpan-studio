@@ -27,6 +27,12 @@ public:
     juce::String start (const juce::XmlElement* savedDeviceState);
 
     juce::AudioDeviceManager& devices() noexcept   { return deviceManager; }
+
+    /** What monitoring currently costs, in milliseconds, or zero if no device
+        is open. The engine's own latency is not in this: monitoring skips
+        delay compensation deliberately, so what a player feels is the
+        device's round trip and nothing else. */
+    double monitoringRoundTripMs() const;
     juce::MidiKeyboardState&  keyboard() noexcept  { return keyboardState; }
 
     // ---- transport ----
@@ -386,6 +392,11 @@ private:
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
+    // ---- first run device configuration, all message thread ----
+    void chooseLowLatencyDevice();
+    bool openDeviceType (const juce::String& typeName);
+    void tightenBufferSize();
+
     void mixMonitorInput (const float* const* inputChannelData, int numInputChannels, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
