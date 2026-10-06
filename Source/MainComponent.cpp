@@ -18,6 +18,12 @@ namespace
     }
 
     enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth, recInstrument, recInstrumentMidi };
+
+    constexpr const char* inputTooltip =
+        "Which input you hear and record.\n"
+        "One instrument in one socket is a mono input, and it is heard in the middle "
+        "rather than out of one speaker. Pick a pair only for something genuinely "
+        "stereo, like a keyboard using two sockets.";
 }
 
 MainComponent::MainComponent()
@@ -33,6 +39,19 @@ MainComponent::MainComponent()
     recordButton.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
     recordButton.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
     recordButton.setTooltip ("Record (Ctrl+R)");
+
+    inputBox.setTooltip (inputTooltip);
+    inputBox.onChange = [this]
+    {
+        const int id = inputBox.getSelectedId();
+
+        if (id <= 0)
+            return;
+
+        const auto choice = InputSource::fromStored (id - 1);
+        engine.setInputSource (choice);
+        plugins.settings().setValue (Prefs::Key::inputSource, id - 1);
+    };
 
     monitorBox.addItem ("Monitor: off", 1);
     monitorBox.addItem ("Monitor: armed", 2);
@@ -70,6 +89,8 @@ MainComponent::MainComponent()
             setStatus (message);
         }
     };
+    refreshInputSources();
+
     // Through choiceId, because an id the box does not have selects nothing,
     // which reads back as zero, and zero minus one is not a monitoring mode the
     // engine has. See Preferences.h.
@@ -296,7 +317,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
-                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
+                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&inputBox), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
                      static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
@@ -1761,6 +1782,68 @@ void MainComponent::showPreferences (PreferencesComponent::Tab tab)
     showPreferencesWindow (plugins, engine.devices(), preferenceActions(), tab);
 }
 
+void MainComponent::refreshInputSources()
+{
+    const int channels = engine.getInputChannelCount();
+    const auto all = InputSource::options (channels);
+
+    // The id is the packed choice plus one, because a ComboBox treats zero as
+    // "nothing selected". That makes the menu rebuildable without a lookup
+    // table: whatever is selected can be unpacked straight back into a choice.
+    //
+    // Read from the settings file rather than from the engine. The engine
+    // holds what is working now, which after a fallback is not what the
+    // person chose: unplug an eight input interface and the choice falls back
+    // to input 1, and taking that back off the engine next time would make
+    // the fallback permanent, quietly ignoring a preference still sitting on
+    // disk and still right. Falling back must not be the same as choosing.
+    const int stored = plugins.settings().getIntValue (
+                           Prefs::Key::inputSource,
+                           InputSource::toStored (InputSource::defaultChoice()));
+
+    const int wantedId = InputSource::toStored (InputSource::fromStored (stored)) + 1;
+
+    inputBox.clear (juce::dontSendNotification);
+
+    for (const auto& choice : all)
+        inputBox.addItem (InputSource::describe (choice), InputSource::toStored (choice) + 1);
+
+    if (all.empty())
+    {
+        inputBox.setTextWhenNoChoicesAvailable ("No inputs");
+        return;
+    }
+
+    // Keep what was stored when this device still has it, and fall back to
+    // the first input when it does not. Deliberately without notification, so
+    // the fallback is not written back over the preference: plugging the
+    // interface back in has to restore the choice rather than find it gone.
+    const bool stillThere = inputBox.indexOfItemId (wantedId) >= 0;
+    const int  chosenId   = stillThere ? wantedId
+                                       : InputSource::toStored (InputSource::defaultChoice()) + 1;
+
+    inputBox.setSelectedId (chosenId, juce::dontSendNotification);
+    engine.setInputSource (InputSource::fromStored (chosenId - 1));
+
+    // What each entry is on the hardware in front of them. "In 1" is the
+    // first input the device hands over, which is the first socket only while
+    // every channel is enabled: untick one in the audio settings and the
+    // numbering shifts. Spelling the mapping out here costs a tooltip and
+    // removes the one way this menu could still mislead.
+    juce::String tip (inputTooltip);
+    const auto names = engine.getActiveInputChannelNames();
+
+    if (names.size() == channels && channels > 0)
+    {
+        tip << "\nOn this device: ";
+
+        for (int i = 0; i < channels; ++i)
+            tip << (i > 0 ? ", " : "") << "In " << (i + 1) << " is " << names[i];
+    }
+
+    inputBox.setTooltip (tip);
+}
+
 void MainComponent::setStatus (const juce::String& message)
 {
     statusMessage = message;
@@ -1782,28 +1865,38 @@ void MainComponent::resized()
 
     auto bar = topBar.reduced (10, 10);
     logo.setBounds (topBar.getX() + 8, topBar.getY() + 3, 38, topBar.getHeight() - 6);
+
+    // The right hand buttons are taken off first, before the left chain has a
+    // chance to eat the bar. Taken afterwards, as they were, a left chain
+    // wider than the window leaves them a rectangle of negative width and
+    // they land on top of each other. The top bar is over subscribed at the
+    // smallest window this will open at, so that is not hypothetical: this
+    // way the overflow clips the middle of the bar, which is recoverable by
+    // widening the window, rather than destroying the buttons at the end.
+    pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
+    audioButton  .setBounds (bar.removeFromRight (66)); bar.removeFromRight (14);
+    redoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (4);
+    undoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (10);
+
     bar.removeFromLeft (40 + 132);                          // logo + wordmark
     fileButton  .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (10);
     playButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     stopButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     recordButton.setBounds (bar.removeFromLeft (50));  bar.removeFromLeft (4);
-    recordMode  .setBounds (bar.removeFromLeft (140)); bar.removeFromLeft (4);
-    monitorBox  .setBounds (bar.removeFromLeft (124)); bar.removeFromLeft (4);
-    countInBox  .setBounds (bar.removeFromLeft (112)); bar.removeFromLeft (10);
-    clock       .setBounds (bar.removeFromLeft (86));  bar.removeFromLeft (10);
+    recordMode  .setBounds (bar.removeFromLeft (132)); bar.removeFromLeft (4);
+    inputBox    .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (4);
+    monitorBox  .setBounds (bar.removeFromLeft (116)); bar.removeFromLeft (4);
+    countInBox  .setBounds (bar.removeFromLeft (104)); bar.removeFromLeft (8);
+    clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
-    tempo       .setBounds (bar.removeFromLeft (78));  bar.removeFromLeft (6);
-    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (18);
+    tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
+    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));
     modTab      .setBounds (bar.removeFromLeft (48));
     reportTab   .setBounds (bar.removeFromLeft (64));
     mixerTab    .setBounds (bar.removeFromLeft (58));
-    pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
-    audioButton  .setBounds (bar.removeFromRight (66)); bar.removeFromRight (14);
-    redoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (4);
-    undoButton   .setBounds (bar.removeFromRight (54));
 
     auto cb = channelBar.reduced (10, 7);
     channelLabel .setBounds (cb.removeFromLeft (62));
@@ -1913,6 +2006,16 @@ void MainComponent::timerCallback()
 
     if (editWatcher.touched.exchange (false) && juce::Time::getMillisecondCounter() > ignoreEditsUntil)
         markDirty();
+
+    // The input menu belongs to whichever device is open, and the device can
+    // change from the preferences window or from the driver search, neither of
+    // which comes back through here. Comparing the channel count is cheap and
+    // catches every way it can happen, including an interface being unplugged.
+    if (const int channels = engine.getInputChannelCount(); channels != lastInputChannelCount)
+    {
+        lastInputChannelCount = channels;
+        refreshInputSources();
+    }
 
     checkModulationLearn();
     updateFloatingWindows();

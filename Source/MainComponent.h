@@ -205,6 +205,12 @@ private:
     // the window owns the controls and this owns the effect.
     PreferencesActions preferenceActions();
     void setStatus (const juce::String&);
+
+    /** Fills the input menu from the device that is open now, keeping the
+        stored choice when it still exists. Called at startup and whenever the
+        device changes, because an interface with eight inputs and one with
+        two do not offer the same list. */
+    void refreshInputSources();
     void updateTypingLabel();
     void pushArmedState();
     void checkModulationLearn();
@@ -230,7 +236,11 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
-    juce::ComboBox   recordMode, countInBox, monitorBox;
+    juce::ComboBox   recordMode, countInBox, monitorBox, inputBox;
+
+    // What the input menu was last built for. Starts at a count no device can
+    // have, so the menu is built on the first timer tick whatever happens.
+    int lastInputChannelCount = -1;
     juce::TextButton playlistTab { "Playlist" }, pianoTab { "Piano roll" }, rackTab { "Rack" };
     juce::TextButton modTab { "Mod" }, reportTab { "Report" }, mixerTab { "Mixer" };
     juce::TextButton audioButton { "Audio" }, pluginsButton { "Plugins" };

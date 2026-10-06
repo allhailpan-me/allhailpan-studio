@@ -9,6 +9,7 @@
 #include "LoudnessMeter.h"
 #include "LatencyGraph.h"
 #include "AudioDefaults.h"
+#include "InputSource.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -310,6 +311,57 @@ public:
         pushed down here for the "while armed" monitoring mode to use. */
     void setInputArmed (bool armed) noexcept   { inputArmed.store (armed); }
 
+    /** Which input is listened to and recorded, and whether it is one
+        instrument or a stereo pair.
+
+        Packed into a single atomic so the audio thread reads it in one go.
+        Changing it is immediate and needs no graph update: it decides which
+        pointers are read, not how anything is delayed. */
+    void setInputSource (InputSource::Choice choice) noexcept
+    {
+        inputSourceStored.store (InputSource::toStored (choice));
+    }
+
+    InputSource::Choice getInputSource() const noexcept
+    {
+        return InputSource::fromStored (inputSourceStored.load());
+    }
+
+    /** The names the device gives its active inputs, in the order the audio
+        callback hands them over.
+
+        Only the enabled ones, because that is what the callback contains: the
+        backends pack the array densely over active channels, so "the first
+        input" means the first enabled one, which is not the first socket if
+        somebody has unticked a channel. Showing these is what stops the menu
+        quietly meaning something other than the label on the hardware. */
+    juce::StringArray getActiveInputChannelNames() const
+    {
+        juce::StringArray names;
+
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+        {
+            const auto all    = device->getInputChannelNames();
+            const auto active = device->getActiveInputChannels();
+
+            for (int i = 0; i < all.size(); ++i)
+                if (active[i])
+                    names.add (all[i]);
+        }
+
+        return names;
+    }
+
+    /** How many inputs the open device actually has, for building the menu.
+        Zero when nothing is open. */
+    int getInputChannelCount() const
+    {
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+            return device->getActiveInputChannels().countNumberOfSetBits();
+
+        return 0;
+    }
+
     /** True while input is actually being passed through, so the interface can
         show it and warn about feedback. */
     bool isMonitoring() const noexcept         { return monitoring.load(); }
@@ -464,7 +516,8 @@ private:
     // it". Not a record of what the device is now: that is read live.
     bool searchChangedTheDeviceType = false;
 
-    void mixMonitorInput (const float* const* inputChannelData, int numInputChannels, int numSamples);
+    void mixMonitorInput (const float* const* inputChannelData,
+                          const InputSource::Resolved& pick, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
@@ -516,6 +569,12 @@ private:
     std::atomic<float>   monitorGain { 1.0f };
     std::atomic<bool>    monitoring { false };
     std::atomic<bool>    inputArmed { false };
+    std::atomic<int>     inputSourceStored { InputSource::toStored (InputSource::defaultChoice()) };
+
+    // Audio thread only: the channels currently being heard, which during a
+    // change lag the chosen ones until the fade reaches silence. Negative
+    // until the first block, so the first choice is adopted without a fade.
+    int monitorActiveLeft = -1, monitorActiveRight = -1;
     float                monitorRamp = 0.0f;   // fades in and out, so toggling does not click
 
     // Mix analysis. Measured on the audio thread, read by the interface.

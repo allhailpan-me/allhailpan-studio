@@ -45,6 +45,11 @@ namespace Key
     inline constexpr const char* monitorMode      = "monitorMode";
     inline constexpr const char* recordMode       = "recordMode";
     inline constexpr const char* countIn          = "countIn";
+
+    /** Which input is monitored and recorded, packed by InputSource::toStored.
+        Not a Choice: its range depends on how many inputs the device has, so
+        it is checked against the open device rather than against a constant. */
+    inline constexpr const char* inputSource      = "inputSource";
 }
 
 //==============================================================================

@@ -971,12 +971,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Without this the CPU meter spikes seconds after the sound has stopped.
     juce::ScopedNoDenormals noDenormals;
 
+    // Resolved once and used by the meter, the recorder and the monitor, so
+    // all three cannot disagree about which socket the player is plugged
+    // into. A take captured from a different channel than the one being
+    // monitored would be a very hard thing to work out afterwards.
+    const auto inputPick = InputSource::resolve (getInputSource(), numInputChannels);
+
     // ---- input meter ----
+    // Only the channels being listened to. Metering everything looks helpful
+    // and is the opposite: it moves for an instrument in a socket the studio
+    // is not recording, which is exactly the "looks fine, is wrong" shape
+    // that made the original fault so hard to place.
     float inPeak = 0.0f;
-    for (int ch = 0; ch < numInputChannels; ++ch)
-        if (auto* in = inputChannelData[ch])
-            for (int i = 0; i < numSamples; ++i)
-                inPeak = std::max (inPeak, std::abs (in[i]));
+    if (inputPick.valid && inputChannelData != nullptr)
+    {
+        for (int ch : { inputPick.left, inputPick.right })
+            if (auto* in = inputChannelData[ch])
+                for (int i = 0; i < numSamples; ++i)
+                    inPeak = std::max (inPeak, std::abs (in[i]));
+    }
     inputLevel.store (std::max (inPeak, inputLevel.load() * 0.85f));
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
@@ -1099,9 +1112,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // found in this block is handed over with the block it falls inside.
     const int recordFrom = recordSource.load();
     bool recordingTapped = false;
-    if (sequencing && recordFrom < 0 && numInputChannels > 0)
+    if (sequencing && recordFrom < 0 && inputPick.valid)
     {
-        recorder.push (inputChannelData[0], numInputChannels > 1 ? inputChannelData[1] : nullptr,
+        // A null right channel is how the recorder is told this is one
+        // instrument: it writes the same samples to both sides, so the take is
+        // centred rather than a stereo file with silence down one of them.
+        recorder.push (inputChannelData[inputPick.left],
+                       inputPick.isCentred() ? nullptr : inputChannelData[inputPick.right],
                        numSamples, blockStartBeat, blockWraps.data(), blockWrapCount);
         recordingTapped = true;
     }
@@ -1225,7 +1242,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // sources get. That delay exists to line internal paths up with
             // each other; on a monitor path it would just be latency the
             // player feels.
-            mixMonitorInput (inputChannelData, numInputChannels, numSamples);
+            mixMonitorInput (inputChannelData, inputPick, numSamples);
 
             // inserts into master
             auto& master = insertSlots[0].buffer;
@@ -1905,28 +1922,45 @@ void AudioEngine::processInsert (int index, int numSamples)
     mid-performance would otherwise click, and a click into a guitar amp
     simulator is loud.
 */
-void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int numInputChannels,
-                                   int numSamples)
+void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
+                                   const InputSource::Resolved& pick, int numSamples)
 {
     const auto mode = monitorMode.load();
-    const bool wanted = numInputChannels > 0
-                     && (mode == Monitor::always
-                         || (mode == Monitor::armed && (inputArmed.load() || recorder.isActive())));
+    const bool listening = pick.valid
+                        && (mode == Monitor::always
+                            || (mode == Monitor::armed && (inputArmed.load() || recorder.isActive())));
 
     // About five milliseconds either way, which is short enough to feel
     // immediate and long enough not to click.
     const float step = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
-    const float target = wanted ? 1.0f : 0.0f;
+
+    // Changing input is as much of a discontinuity as switching monitoring on
+    // and off, and the same answer applies: fade out, swap, fade back in.
+    // Cutting straight from one socket to another puts a full scale step into
+    // whatever effects the player is monitoring through, and a click into a
+    // guitar amp simulator is loud.
+    const bool changingSource = pick.valid
+                             && (pick.left != monitorActiveLeft || pick.right != monitorActiveRight);
+
+    const float target = (listening && ! changingSource) ? 1.0f : 0.0f;
+
+    // Adopted only at silence, so nothing is ever spliced mid waveform.
+    if (changingSource && monitorRamp <= 0.0f)
+    {
+        monitorActiveLeft  = pick.left;
+        monitorActiveRight = pick.right;
+    }
 
     if (monitorRamp <= 0.0f && target <= 0.0f)
+    {
+        monitoring.store (false);
         return;
+    }
 
-    // The ramp outlives the device. Monitoring something and then switching
-    // to an interface with no inputs leaves the ramp up, and the two reads
-    // below would then take element zero of an array that has no elements.
-    // Index one was range checked and index zero was not, which is how this
-    // survived.
-    if (numInputChannels <= 0 || inputChannelData == nullptr)
+    // The ramp outlives the device. Monitoring something and then switching to
+    // an interface with no inputs leaves the ramp up, and the reads below
+    // would then take a channel of an array that has none.
+    if (! pick.valid || inputChannelData == nullptr)
     {
         monitorRamp = 0.0f;
         monitoring.store (false);
@@ -1936,14 +1970,23 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int num
     auto& dest = insertSlots[(size_t) monitoredInsertIndex()].buffer;
     const float gain = monitorGain.load();
 
-    const auto* left  = inputChannelData[0];
-    const auto* right = numInputChannels > 1 ? inputChannelData[1] : inputChannelData[0];
+    // The channels being faded out of, which during a change are the old ones
+    // rather than the ones just picked.
+    const int readLeft  = monitorActiveLeft  >= 0 ? monitorActiveLeft  : pick.left;
+    const int readRight = monitorActiveRight >= 0 ? monitorActiveRight : pick.right;
+
+    const auto* left  = inputChannelData[readLeft];
+    const auto* right = inputChannelData[readRight];
 
     if (left == nullptr)
-        return;
+        left = right;
 
     if (right == nullptr)
         right = left;
+
+    // Both null means the device handed over channels it has no data for.
+    if (left == nullptr)
+        return;
 
     auto* outL = dest.getWritePointer (0);
     auto* outR = dest.getWritePointer (1);
@@ -1960,6 +2003,7 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData, int num
 
     monitoring.store (monitorRamp > 0.0f);
 }
+
 
 void AudioEngine::mixChannelOutput (ChannelSlot& c, const juce::AudioBuffer<float>& view,
                                     int numSamples)

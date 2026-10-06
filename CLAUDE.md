@@ -291,6 +291,7 @@ braces on their own line.
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
+| `InputSource.h` | Which input channel is heard and recorded, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
 | `RealFFT.h` | A radix-2 transform for real signals. No JUCE, so the spectral chain is testable end to end |
 | `Spectrogram.h` | Short time analysis and weighted overlap-add resynthesis: the window, the hop, and the sum that has to come back flat. No JUCE |
 | `SpectralEdit.h` | A region of the time against frequency plane and the gain applied to it, with tapered edges so a repair does not ring. No JUCE |
@@ -371,6 +372,20 @@ system through it, so taking it costs them nothing, and refusing leaves them
 unable to play. The order lives in `AudioDefaults::searchOrder`, and the test
 asserts the property rather than the list: nothing that takes the device may be
 tried before something that shares it.
+
+**One instrument in one socket is a mono input, and mono means centred.** The
+engine took input channel 1 as the left of a stereo pair and input channel 2 as
+the right, always, in both monitoring and recording. That is right for a stereo
+keyboard and wrong for everything else: a guitar in input 1 of an interface,
+with nothing in input 2, was heard out of one speaker and recorded as a stereo
+take with silence down one side. Which input is listened to is now chosen, in
+`InputSource.h`, and a mono choice resolves both sides to the same channel.
+
+Worth remembering for the shape of it as much as the fault. It presents as an
+**output** problem, because one speaker is an output symptom, so that is where
+the person goes looking and nothing they find there can help. The test asserts
+the property directly: a mono source is centred, for every channel of every
+device size.
 
 **A reported latency of zero means "the driver did not say", never "instant".**
 JUCE's ASIO backend zeroes both figures when `getLatencies` fails, and zero is
