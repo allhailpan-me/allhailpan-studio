@@ -1,6 +1,18 @@
-The settings have somewhere to live. Below that, the instrument that makes the studio sound on its own, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+Monitoring you can play through without configuring anything, and the settings have somewhere to live. Below that, the instrument that makes the studio sound on its own, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
 
 ## Since v0.4.0
+
+**Monitoring is low enough to play through without you setting anything.** This is the second half of a fix. The first half, in v0.4.0, was a real defect: the monitored signal was being held back by plugin delay compensation. What was left was not a defect in the studio's code at all, which is why it survived that fix: the studio was accepting whatever driver Windows offered, and what Windows offers by default is tuned for playing a video back without glitching rather than for hearing yourself in time. That is tens of milliseconds, and no buffer size setting recovers it.
+
+Windows has been offering a faster route to the same device the whole time. Alongside the shared mode everything gets by default, it exposes the same device through IAudioClient3, which JUCE calls Windows Audio (Low Latency Mode): single digit milliseconds, and still shared, so a video in a browser keeps playing. The studio was not asking for it.
+
+So on first run, and only on first run, the engine measures what monitoring costs and, if it is too slow to play through, works down a list until something is fast enough. Low Latency Mode comes before Exclusive Mode, which is just as fast but takes the device away from the rest of the machine, and that is a surprise to inflict on somebody who only asked to hear their guitar. ASIO leads the list where it exists, though these builds are not compiled with it. The choice is then saved as if you had made it, so this happens once, and a machine that was already fast enough is not touched at all.
+
+Buffer size is chosen the same way, against a five millisecond target rather than the smallest the driver will admit to. A buffer at the floor is where dropouts live, and a studio that crackles until you raise a setting is a worse first impression than one four milliseconds slower than it could be. If you want the floor, it is still yours to take.
+
+Turning monitoring on now also prints the round trip in milliseconds, and says plainly when it is too slow to play through rather than leaving you to work that out with an instrument in your hands.
+
+The ordering and the arithmetic are in a header with no JUCE in it, so they are tested rather than asserted: the buffer choice is checked against an independently written second implementation over twenty thousand generated driver lists, with sizes drawn at the boundaries because that is where it can be wrong. Nineteen deliberate breakages of that header, including putting the buffered shared mode back at the top of the preference list, are all caught by the tests.
 
 **A preferences window,** on Ctrl+, or from the File menu. The audio device was behind one button and the plugin list behind another, with no relationship between the two windows, and three more settings were constants nobody could reach. All of it is in one window now, in three tabs:
 
@@ -26,10 +38,11 @@ The oscillators are band limited. A naive saw or square is a discontinuity sampl
 
 The filter is a state variable design with the integrators kept as integrators, which matters because a filter envelope changes the cutoff every single sample. The usual alternative clicks on fast sweeps and can be driven unstable by the modulation alone. Its resonant peak lands on the cutoff to four decimal places from a Q of 0.5 to 10.
 
-**What it does not do yet,** said here rather than left to be found:
+**It has a front panel,** which it did not when it first shipped. The window opened black with nothing in it, because the instrument had no parameters and the generic editor every host falls back on had nothing to draw. There are eighteen controls now, grouped into oscillators, filter, amplitude envelope and filter envelope, with the presets in a box at the top. A marker appears when the knobs no longer match the preset they came from, so a preset that stopped sounding like itself explains itself.
 
-- It exposes no parameters, only presets, so the modulators cannot reach it and its plugin window is empty. An instrument of this kind may only carry a particular kind of parameter object, which is real work rather than a line or two, and half doing it would be worse than starting properly. It is the next job.
-- Only the preset number is saved in a project, not the patch. Since the patch is not editable there is nothing else to save, and storing a copy of a constant would freeze your project against later improvements to the preset it names.
+Those are ordinary plugin parameters, which means **the modulators reach into PAN One** exactly as they reach into anything else you host: wire a shape to its cutoff and it sweeps. The note in the first release saying this needed real work was wrong, and reading the framework's own source rather than trusting that note is what settled it.
+
+Projects now save the knobs rather than only the preset number, written by name so that a later version adding a control in the middle does not shift your saved values along by one. A project saved before the knobs existed carries a preset number and nothing else, and loads as that preset.
 
 ## Since v0.3.0
 
@@ -128,8 +141,7 @@ Not code-signed, so every operating system will complain. Nothing is wrong with 
 
 ## Known limitations
 
-- **No ASIO in these builds.** Steinberg's licence does not allow redistributing the SDK, so the downloadable Windows build uses Windows Audio only. For ASIO, download the SDK yourself and build with `-DAHP_ASIO_SDK_DIR=` pointing at it.
-- **No instruments are bundled**, so you need your own VST3s to make sound.
+- **No ASIO in these builds.** Steinberg's licence does not allow redistributing the SDK, so the downloadable Windows build uses the Windows Audio modes only. The studio picks the fastest of those it can on first run, which is usually enough to play through, but ASIO is lower still: download the SDK yourself and build with `-DAHP_ASIO_SDK_DIR=` pointing at it.
 - **4/4 only, and one tempo for the whole song.** A MIDI file that changes tempo part way through is read at its opening tempo, and the status bar says so.
 - **Loading a plugin and dragging a mixer fader are not undo steps.** Everything else that edits the arrangement is.
 - **An instrument with 32 or more output channels** (sixteen stereo buses, which is the most this studio will route) makes the engine allocate once per block on the audio thread. Instruments with eight buses or fewer, which is all of the ones tested, are unaffected.

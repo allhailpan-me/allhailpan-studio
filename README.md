@@ -10,7 +10,7 @@ Built for the people. Free forever, source included.
 
 ## What makes it different
 
-- **It makes sound on its own.** PAN One is built in: two oscillators with detune, a sub an octave down, a resonant filter with its own envelope, sixteen voices and five presets. It is there in the instrument list the first time you open the studio, with nothing to scan for and nothing to download. The oscillators are band limited, so the top two octaves do not shimmer with partials that have nothing to do with the note, which is the thing that gives a soft synth away.
+- **It makes sound on its own.** PAN One is built in: two oscillators with detune, a sub an octave down, a resonant filter with its own envelope, sixteen voices, eighteen knobs and five presets. It is there in the instrument list the first time you open the studio, with nothing to scan for and nothing to download. The oscillators are band limited, so the top two octaves do not shimmer with partials that have nothing to do with the note, which is the thing that gives a soft synth away.
 - **Modulators on anything.** A tempo-locked shape wired to any parameter of any plugin you host, assigned by grabbing the knob rather than hunting through a list. Several can stack on one parameter, and they ride on top of whatever the knob is already set to.
 - **A mix report, not a magic knob.** The studio measures the finished master to ITU-R BS.1770-4, the same standard streaming services normalise to, and tells you plainly what the numbers mean. Loudness is verified against EBU Tech 3341 compliance test cases to within 0.011 LU, true peak against the interpolator the standard tabulates, and loudness range follows EBU Tech 3342 including its gates. A plugin only hears its own insert; the studio hears the whole thing.
 - **Delay compensation that understands sends.** Look-ahead plugins hold audio back, and a bus fed by another insert cannot be ready before its source. Every path is levelled so instruments, audio clips and sends reach the master on the same sample.
@@ -21,7 +21,7 @@ Built for the people. Free forever, source included.
 
 ## Runs on
 
-- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. For low latency monitoring choose Windows Audio (Exclusive Mode) in **Preferences > Audio**, which tells you the cost of your choice in milliseconds, or build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
+- **Windows** 10 and 11 (WASAPI, DirectSound). The downloads here are built without ASIO, because the Steinberg SDK it needs cannot be redistributed and the build machine does not have it. You should not have to do anything about latency: the first time it runs, the studio checks what monitoring costs and moves itself to a faster driver if what Windows handed it is too slow to play through, preferring Windows Audio (Low Latency Mode), which is fast and still lets everything else on the machine make sound. **Preferences > Audio** shows what you ended up with, in milliseconds. For lower still, build locally with `AHP_ASIO_SDK_DIR` pointing at the SDK to turn ASIO on.
 - **macOS** (CoreAudio, VST3 and Audio Units)
 - **Linux** (ALSA and JACK, VST3 and LV2)
 
@@ -164,6 +164,7 @@ Building one good performance out of several passes.
 - **Use headphones.** Monitoring through speakers with a microphone open feeds back, and an amp simulator makes that loud. The status bar shows **MONITORING** whenever input is passing through.
 - The monitor path deliberately skips delay compensation. That compensation lines internal paths up with each other, and on a monitor path it would only be latency you feel while playing. Lining the take up with the arrangement is handled separately, when the take is recorded.
 - Turning it on and off fades over about five milliseconds rather than switching, so it cannot click.
+- Turning monitoring on prints the round trip in milliseconds in the status bar, and says so plainly if it is too slow to play through. The number is what the driver reports, not what the buffer size implies.
 - Your interface's own direct monitoring is still the lowest latency route, and is worth using if your buffer size is large.
 
 ### Playlist
