@@ -38,10 +38,11 @@ The oscillators are band limited. A naive saw or square is a discontinuity sampl
 
 The filter is a state variable design with the integrators kept as integrators, which matters because a filter envelope changes the cutoff every single sample. The usual alternative clicks on fast sweeps and can be driven unstable by the modulation alone. Its resonant peak lands on the cutoff to four decimal places from a Q of 0.5 to 10.
 
-**What it does not do yet,** said here rather than left to be found:
+**It has a front panel,** which it did not when it first shipped. The window opened black with nothing in it, because the instrument had no parameters and the generic editor every host falls back on had nothing to draw. There are eighteen controls now, grouped into oscillators, filter, amplitude envelope and filter envelope, with the presets in a box at the top. A marker appears when the knobs no longer match the preset they came from, so a preset that stopped sounding like itself explains itself.
 
-- It exposes no parameters, only presets, so the modulators cannot reach it and its plugin window is empty. An instrument of this kind may only carry a particular kind of parameter object, which is real work rather than a line or two, and half doing it would be worse than starting properly. It is the next job.
-- Only the preset number is saved in a project, not the patch. Since the patch is not editable there is nothing else to save, and storing a copy of a constant would freeze your project against later improvements to the preset it names.
+Those are ordinary plugin parameters, which means **the modulators reach into PAN One** exactly as they reach into anything else you host: wire a shape to its cutoff and it sweeps. The note in the first release saying this needed real work was wrong, and reading the framework's own source rather than trusting that note is what settled it.
+
+Projects now save the knobs rather than only the preset number, written by name so that a later version adding a control in the middle does not shift your saved values along by one. A project saved before the knobs existed carries a preset number and nothing else, and loads as that preset.
 
 ## Since v0.3.0
 
