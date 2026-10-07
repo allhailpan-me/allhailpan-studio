@@ -414,6 +414,19 @@ void AudioEngine::updateLatency()
 
         entry.fxLatency = sum;
 
+        // An insert carrying a live input is exempt from compensation, and
+        // several can be at once: recording a band is a microphone on each of
+        // several inserts, and every one of those players has to be able to
+        // play. Deliberately not conditioned on the per insert arm, which
+        // changes without a graph update: being exempt when it did not have
+        // to be costs the alignment of other material on that insert, which
+        // is the trade already documented for monitoring, while being
+        // compensated when it should not be is unplayable latency.
+        entry.monitored = i >= 1
+                       && ! exportingFullyCompensated
+                       && monitorMode.load() != Monitor::off
+                       && InputSource::assignmentFromStored (insertInput[(size_t) i].load()).assigned;
+
         // Insert 0 is the master and has no send of its own to resolve, so
         // its row is left empty rather than gathered and ignored.
         entry.sendTo.resize (i == 0 ? 0 : (size_t) kNumSends);
@@ -443,11 +456,6 @@ void AudioEngine::updateLatency()
             channel.busChannels[(size_t) b] = source.busChannelCount[(size_t) b];
         }
     }
-
-    // The insert a player is monitoring through, or -1 for nobody. The reason
-    // this one insert is treated differently, and why its sends are too, is
-    // set out at the top of LatencyGraph.h.
-    setup.monitoredInsert = monitorMode.load() != Monitor::off ? monitoredInsertIndex() : -1;
 
     LatencyGraph::compute (setup, latencyGraph);
 
@@ -526,19 +534,87 @@ void AudioEngine::setMonitorMode (Monitor m)
     updateLatency();
 }
 
-void AudioEngine::setMonitorInsert (int insertIndex)
+void AudioEngine::startAudioRecording()
 {
-    const int wanted = juce::jlimit (1, kNumInserts - 1, insertIndex);
+    // An instrument recording taps a channel's own output and has nothing to
+    // do with sockets, so it keeps its own recorder and none of the input
+    // ones are started.
+    if (recordSource.load() >= 0)
+    {
+        recorder.begin();
+        return;
+    }
 
-    if (monitorInsert.load() == wanted)
+    for (int i = 1; i < kNumInserts; ++i)
+    {
+        const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
+
+        // Armed and wired. Armed with nothing plugged in would produce a file
+        // of silence and a clip nobody asked for.
+        if (assignment.assigned && insertArmed[(size_t) i].load())
+            inputRecorders[(size_t) i].begin();
+    }
+}
+
+std::vector<AudioEngine::CapturedInput> AudioEngine::stopAudioRecording()
+{
+    std::vector<CapturedInput> captured;
+
+    for (int i = 1; i < kNumInserts; ++i)
+    {
+        if (! inputRecorders[(size_t) i].isActive())
+            continue;
+
+        auto passes = inputRecorders[(size_t) i].end();
+
+        if (! passes.empty())
+            captured.push_back ({ i, std::move (passes) });
+    }
+
+    return captured;
+}
+
+bool AudioEngine::isRecordingAudio() const noexcept
+{
+    if (recorder.isActive())
+        return true;
+
+    for (const auto& capture : inputRecorders)
+        if (capture.isActive())
+            return true;
+
+    return false;
+}
+
+void AudioEngine::setInsertInput (int insertIndex, InputSource::Assignment assignment)
+{
+    // Never the master. It is where every insert is summed after each has
+    // been lined up, so a live input there would run through the whole master
+    // chain and pick up its lookahead, which is the one thing the monitoring
+    // exemption exists to prevent.
+    if (! juce::isPositiveAndBelow (insertIndex, kNumInserts) || insertIndex < 1)
         return;
 
-    monitorInsert.store (wanted);
+    const int wanted = InputSource::assignmentToStored (assignment);
 
-    // The insert that skips compensation has moved, so the one it left has to
-    // be held back again.
+    // Nothing to do when it has not moved. Worth the test: clearing every
+    // input, resetting the engine and loading a project all walk every insert
+    // in a loop, and without this a project open took the graph lock about
+    // thirty times. The audio thread only ever tries that lock, so each one
+    // is a chance of a dropped block.
+    if (insertInput[(size_t) insertIndex].exchange (wanted) == wanted)
+        return;
+
+    // An insert carrying a live input is exempt from delay compensation and
+    // one that has stopped carrying it is not, so the graph has to be redone.
     const juce::SpinLock::ScopedLockType lock (graphLock);
     updateLatency();
+}
+
+void AudioEngine::setInsertArmed (int insertIndex, bool armed)
+{
+    if (juce::isPositiveAndBelow (insertIndex, kNumInserts) && insertIndex >= 1)
+        insertArmed[(size_t) insertIndex].store (armed);
 }
 
 void AudioEngine::setFxBypass (int insertIndex, int slotIndex, bool shouldBypass)
@@ -893,6 +969,13 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     midiCollector.reset (newRate);
     recorder.prepare (newRate);
 
+    // All of them, because arming happens while the device is open and
+    // preparing allocates. A ring is four seconds of two channels, so
+    // seventeen of them is a few tens of megabytes and nothing is reserved
+    // for a take until that insert is actually armed.
+    for (auto& capture : inputRecorders)
+        capture.prepare (newRate);
+
     // Everything from here is behind the graph lock, including the engine's
     // own block sized buffers and the rate and block size themselves. JUCE
     // stops the device callback around a restart, so the live path would be
@@ -971,25 +1054,45 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // Without this the CPU meter spikes seconds after the sound has stopped.
     juce::ScopedNoDenormals noDenormals;
 
-    // Resolved once and used by the meter, the recorder and the monitor, so
-    // all three cannot disagree about which socket the player is plugged
-    // into. A take captured from a different channel than the one being
-    // monitored would be a very hard thing to work out afterwards.
-    const auto inputPick = InputSource::resolve (getInputSource(), numInputChannels);
-
     // ---- input meter ----
-    // Only the channels being listened to. Metering everything looks helpful
-    // and is the opposite: it moves for an instrument in a socket the studio
-    // is not recording, which is exactly the "looks fine, is wrong" shape
-    // that made the original fault so hard to place.
+    // Only the channels actually wired to an insert. Metering everything
+    // looks helpful and is the opposite: it moves for an instrument in a
+    // socket the studio is not recording, which is exactly the "looks fine,
+    // is wrong" shape that made the original one speaker fault so hard to
+    // place. With nothing wired it reads the first input, so somebody who
+    // has not set anything up yet can still see that a signal is arriving.
     float inPeak = 0.0f;
-    if (inputPick.valid && inputChannelData != nullptr)
+
+    if (inputChannelData != nullptr && numInputChannels > 0)
     {
-        for (int ch : { inputPick.left, inputPick.right })
-            if (auto* in = inputChannelData[ch])
-                for (int i = 0; i < numSamples; ++i)
-                    inPeak = std::max (inPeak, std::abs (in[i]));
+        bool metered = false;
+
+        for (int i = 1; i < kNumInserts; ++i)
+        {
+            const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
+
+            if (! assignment.assigned)
+                continue;
+
+            const auto pick = InputSource::resolve (assignment.choice, numInputChannels);
+
+            if (! pick.valid)
+                continue;
+
+            metered = true;
+
+            for (int ch : { pick.left, pick.right })
+                if (auto* in = inputChannelData[ch])
+                    for (int s = 0; s < numSamples; ++s)
+                        inPeak = std::max (inPeak, std::abs (in[s]));
+        }
+
+        if (! metered)
+            if (auto* in = inputChannelData[0])
+                for (int s = 0; s < numSamples; ++s)
+                    inPeak = std::max (inPeak, std::abs (in[s]));
     }
+
     inputLevel.store (std::max (inPeak, inputLevel.load() * 0.85f));
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
@@ -1026,7 +1129,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     const bool   clickOn        = metronome.load() || counting;
     const double currentBpm     = bpm.load();
     const double beatsPerSample = currentBpm / 60.0 / sampleRate;
-    const bool   recording      = recorder.isActive() || midiRecording.load();
+    // isRecordingAudio rather than recorder.isActive: the input takes live in
+    // inputRecorders now, and reading only the instrument recorder here meant
+    // the transport looped at the end of the last clip during an input
+    // recording and played over the take that had just been made.
+    const bool   recording      = isRecordingAudio() || midiRecording.load();
     const bool   sequencing     = isRunning && ! counting;   // clips stay quiet during the count
     const double songTail       = songEnd.load();
     const int    slots          = (int) blockBeats.size();
@@ -1112,15 +1219,46 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // found in this block is handed over with the block it falls inside.
     const int recordFrom = recordSource.load();
     bool recordingTapped = false;
-    if (sequencing && recordFrom < 0 && inputPick.valid)
+    if (sequencing && recordFrom < 0 && numInputChannels > 0 && inputChannelData != nullptr)
     {
-        // A null right channel is how the recorder is told this is one
-        // instrument: it writes the same samples to both sides, so the take is
-        // centred rather than a stereo file with silence down one of them.
-        recorder.push (inputChannelData[inputPick.left],
-                       inputPick.isCentred() ? nullptr : inputChannelData[inputPick.right],
-                       numSamples, blockStartBeat, blockWraps.data(), blockWrapCount);
-        recordingTapped = true;
+        for (int i = 1; i < kNumInserts; ++i)
+        {
+            auto& capture = inputRecorders[(size_t) i];
+
+            if (! capture.isActive())
+                continue;
+
+            const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
+
+            const auto pick = assignment.assigned
+                                ? InputSource::resolve (assignment.choice, numInputChannels)
+                                : InputSource::Resolved{};
+
+            const bool usable = pick.valid
+                             && pick.left  < numInputChannels
+                             && pick.right < numInputChannels;
+
+            // An active take that cannot be read this block is padded rather
+            // than skipped. Skipping shortens the take and shifts everything
+            // after the gap earlier against the arrangement, with nothing to
+            // say it happened. Clearing a strip's input mid take is two
+            // clicks, so this is reachable.
+            if (! usable)
+            {
+                if (numSamples <= (int) silence.size())
+                    capture.push (silence.data(), silence.data(), numSamples, blockStartBeat,
+                                  blockWraps.data(), blockWrapCount);
+                continue;
+            }
+
+            // A null right channel is how the recorder is told this is one
+            // instrument: it writes the same samples to both sides, so the
+            // take is centred rather than a stereo file with silence down one
+            // of them.
+            capture.push (inputChannelData[pick.left],
+                          pick.isCentred() ? nullptr : inputChannelData[pick.right],
+                          numSamples, blockStartBeat, blockWraps.data(), blockWrapCount);
+        }
     }
 
     // ---- MIDI recording tap ----
@@ -1242,7 +1380,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // sources get. That delay exists to line internal paths up with
             // each other; on a monitor path it would just be latency the
             // player feels.
-            mixMonitorInput (inputChannelData, inputPick, numSamples);
+            mixMonitorInput (inputChannelData, numInputChannels, numSamples);
 
             // inserts into master
             auto& master = insertSlots[0].buffer;
@@ -1910,99 +2048,134 @@ void AudioEngine::processInsert (int index, int numSamples)
     what was heard.
 */
 // ---------------------------------------------------------------------------
-/** Passes the interface's input through to an insert, so the player hears
-    themselves through the studio's own effects.
+/** Passes the interface's inputs through to the inserts they are wired to, so
+    each player hears themselves through the studio's own effects.
+
+    One input per insert and several inserts at once, which is what recording
+    more than one player is. Each insert keeps its own fade, so arming a
+    second microphone does not interrupt the first.
 
     Deliberately not delay compensated. That compensation lines internal paths
     up with each other; on a monitor path it would only add latency the player
     feels directly, and the recorder already lines the take itself up with the
     arrangement.
 
-    The level ramps rather than switching, because turning monitoring on or off
-    mid-performance would otherwise click, and a click into a guitar amp
-    simulator is loud.
+    The level ramps rather than switching, because changing input or turning
+    monitoring on or off mid-performance would otherwise click, and a click
+    into a guitar amp simulator is loud.
 */
 void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
-                                   const InputSource::Resolved& pick, int numSamples)
+                                   int numInputChannels, int numSamples)
 {
     const auto mode = monitorMode.load();
-    const bool listening = pick.valid
-                        && (mode == Monitor::always
-                            || (mode == Monitor::armed && (inputArmed.load() || recorder.isActive())));
+    bool anyLive = false;
 
     // About five milliseconds either way, which is short enough to feel
     // immediate and long enough not to click.
     const float step = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
-
-    // Changing input is as much of a discontinuity as switching monitoring on
-    // and off, and the same answer applies: fade out, swap, fade back in.
-    // Cutting straight from one socket to another puts a full scale step into
-    // whatever effects the player is monitoring through, and a click into a
-    // guitar amp simulator is loud.
-    const bool changingSource = pick.valid
-                             && (pick.left != monitorActiveLeft || pick.right != monitorActiveRight);
-
-    const float target = (listening && ! changingSource) ? 1.0f : 0.0f;
-
-    // Adopted only at silence, so nothing is ever spliced mid waveform.
-    if (changingSource && monitorRamp <= 0.0f)
-    {
-        monitorActiveLeft  = pick.left;
-        monitorActiveRight = pick.right;
-    }
-
-    if (monitorRamp <= 0.0f && target <= 0.0f)
-    {
-        monitoring.store (false);
-        return;
-    }
-
-    // The ramp outlives the device. Monitoring something and then switching to
-    // an interface with no inputs leaves the ramp up, and the reads below
-    // would then take a channel of an array that has none.
-    if (! pick.valid || inputChannelData == nullptr)
-    {
-        monitorRamp = 0.0f;
-        monitoring.store (false);
-        return;
-    }
-
-    auto& dest = insertSlots[(size_t) monitoredInsertIndex()].buffer;
     const float gain = monitorGain.load();
 
-    // The channels being faded out of, which during a change are the old ones
-    // rather than the ones just picked.
-    const int readLeft  = monitorActiveLeft  >= 0 ? monitorActiveLeft  : pick.left;
-    const int readRight = monitorActiveRight >= 0 ? monitorActiveRight : pick.right;
-
-    const auto* left  = inputChannelData[readLeft];
-    const auto* right = inputChannelData[readRight];
-
-    if (left == nullptr)
-        left = right;
-
-    if (right == nullptr)
-        right = left;
-
-    // Both null means the device handed over channels it has no data for.
-    if (left == nullptr)
-        return;
-
-    auto* outL = dest.getWritePointer (0);
-    auto* outR = dest.getWritePointer (1);
-
-    for (int i = 0; i < numSamples; ++i)
+    for (int i = 1; i < kNumInserts; ++i)
     {
-        if (monitorRamp < target)      monitorRamp = std::min (target, monitorRamp + step);
-        else if (monitorRamp > target) monitorRamp = std::max (target, monitorRamp - step);
+        const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
+        auto& ramp = monitorRamps[(size_t) i];
 
-        const float level = monitorRamp * gain;
-        outL[i] += left[i]  * level;
-        outR[i] += right[i] * level;
+        const auto pick = assignment.assigned
+                            ? InputSource::resolve (assignment.choice, numInputChannels)
+                            : InputSource::Resolved{};
+
+        // "armed" passes only the inserts about to be recorded, which is what
+        // keeps a studio quiet between takes when eight sockets are wired.
+        // "on" passes everything that has an input.
+        // This insert's own recorder, not the instrument one. Testing the
+        // instrument recorder here meant that bouncing a plugin's output
+        // opened the monitor on every wired insert, mixing live microphones
+        // into the room during a take that had nothing to do with them.
+        const bool listening = pick.valid
+                            && (mode == Monitor::always
+                                || (mode == Monitor::armed
+                                    && (insertArmed[(size_t) i].load()
+                                        || inputRecorders[(size_t) i].isActive())));
+
+        // Changing input is as much of a discontinuity as switching monitoring
+        // on and off, and the same answer applies: fade out, swap at silence,
+        // fade back in. Cutting straight from one socket to another puts a
+        // full scale step into whatever effects the player is monitoring
+        // through, and a click into a guitar amp simulator is loud.
+        // What this insert should be reading, which is nothing when it has no
+        // input. Tracked even then, so that a fade to silence completes and
+        // the old channels stop being read.
+        const int wantLeft  = pick.valid ? pick.left  : -1;
+        const int wantRight = pick.valid ? pick.right : -1;
+
+        const bool changingSource = wantLeft  != monitorActiveLeft[(size_t) i]
+                                 || wantRight != monitorActiveRight[(size_t) i];
+
+        const float target = (listening && ! changingSource) ? 1.0f : 0.0f;
+
+        if (changingSource && ramp <= 0.0f)
+        {
+            monitorActiveLeft[(size_t) i]  = wantLeft;
+            monitorActiveRight[(size_t) i] = wantRight;
+        }
+
+        if (ramp <= 0.0f && target <= 0.0f)
+            continue;
+
+        // Still reading the channels it was reading, because the ramp has not
+        // reached silence yet. Setting an insert to "No input" has to fade
+        // out like everything else: cutting the gain in one sample is the
+        // click this whole mechanism exists to avoid, and clearing an input
+        // is two clicks away in the mixer.
+        const int readLeft  = monitorActiveLeft[(size_t) i];
+        const int readRight = monitorActiveRight[(size_t) i];
+
+        // Nothing adopted yet, or the device has shrunk under us. Either way
+        // there is nothing safe to read, so drop the level rather than take a
+        // channel of an array that does not have it.
+        if (inputChannelData == nullptr
+            || readLeft < 0 || readRight < 0
+            || readLeft >= numInputChannels || readRight >= numInputChannels)
+        {
+            ramp = 0.0f;
+            continue;
+        }
+
+        const auto* left  = inputChannelData[readLeft];
+        const auto* right = inputChannelData[readRight];
+
+        if (left == nullptr)  left = right;
+        if (right == nullptr) right = left;
+
+        // Both null means the device handed over channels it has no data for.
+        if (left == nullptr)
+            continue;
+
+        auto& dest = insertSlots[(size_t) i].buffer;
+        auto* outL = dest.getWritePointer (0);
+        auto* outR = dest.getWritePointer (1);
+
+        float level = ramp;
+
+        for (int n = 0; n < numSamples; ++n)
+        {
+            if (level < target)      level = std::min (target, level + step);
+            else if (level > target) level = std::max (target, level - step);
+
+            const float scaled = level * gain;
+            outL[n] += left[n]  * scaled;
+            outR[n] += right[n] * scaled;
+        }
+
+        ramp = level;
+
+        if (ramp > 0.0f)
+            anyLive = true;
     }
 
-    monitoring.store (monitorRamp > 0.0f);
+    monitoring.store (anyLive);
 }
+
 
 
 void AudioEngine::mixChannelOutput (ChannelSlot& c, const juce::AudioBuffer<float>& view,
@@ -2205,6 +2378,29 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     juce::Thread::sleep (60);                 // let the device callback fall quiet
 
     const juce::SpinLock::ScopedLockType lock (graphLock);
+
+    // A bounce is fully compensated, whatever monitoring is doing.
+    //
+    // The exemption that keeps a player able to play is a deliberate
+    // misalignment, and it is the right trade while tracking. It is the wrong
+    // trade in a rendered file: with several inputs wired, most of the mixer
+    // would be uncompensated in the export, and the person would have a
+    // bounce that does not match what a compensated playback sounds like with
+    // nothing to say why. The engine's own rule is that a bounce must not
+    // sound different from what was heard, and the honest reading of that is
+    // that it must not inherit a tracking compromise either.
+    exportingFullyCompensated = true;
+    updateLatency();
+
+    struct RestoreCompensation
+    {
+        AudioEngine& engine;
+        ~RestoreCompensation()
+        {
+            engine.exportingFullyCompensated = false;
+            engine.updateLatency();
+        }
+    } restoreCompensation { *this };
 
     // Remember the live transport so the session is undisturbed afterwards
     const double savedPosition = position;

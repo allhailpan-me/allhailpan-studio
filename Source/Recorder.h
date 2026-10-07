@@ -60,8 +60,15 @@ public:
             const juce::ScopedLock sl (dataLock);
             takeL.clear();
             takeR.clear();
-            takeL.reserve ((size_t) (sampleRate * 120.0));
-            takeR.reserve ((size_t) (sampleRate * 120.0));
+            // Thirty seconds, not two minutes. This is only here to avoid a
+            // reallocation partway through a take, and a reallocation happens
+            // on the writer thread rather than the audio thread, so the cost
+            // of getting it wrong is small. The cost of reserving too much is
+            // not: recording eight inputs at once means eight of these, and
+            // two minutes each at 48 kHz would reserve the better part of
+            // four hundred megabytes before a note had been played.
+            takeL.reserve ((size_t) (sampleRate * 30.0));
+            takeR.reserve ((size_t) (sampleRate * 30.0));
             fifo.reset();
         }
         dropped.store (0);

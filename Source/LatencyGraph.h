@@ -36,10 +36,12 @@
     only ever feed a higher numbered insert. That rule is load bearing: relax
     it and this needs a real cycle check and a topological order instead.
 
-    THE ONE DELIBERATE EXCEPTION
+    THE DELIBERATE EXCEPTION
 
-    The insert a player is monitoring through is not held back, and neither
-    are its sends. Compensation exists to line internal paths up with each
+    An insert a player is monitoring through is not held back, and neither are
+    its sends. There can be several at once, which is what recording a band
+    is: a microphone on each of four inserts means four people who each have
+    to be able to play. Compensation exists to line internal paths up with each
     other; on the signal a player is listening to while playing it, it is
     latency they feel in their hands. Put a lookahead limiter on the master
     and the compensation that keeps the tracks together would push the guitar
@@ -89,13 +91,18 @@ namespace LatencyGraph
     {
         int fxLatency = 0;           /**< the sum of its unbypassed effects */
         std::vector<int> sendTo;     /**< per send: destination insert, or 0 for none */
+
+        /** True when a live input is being listened to through this insert,
+            which exempts it and its sends from compensation. Several can be
+            true at once: recording a band is several microphones into several
+            inserts, and every one of those players has to be able to play. */
+        bool monitored = false;
     };
 
     struct Setup
     {
         std::vector<Insert>  inserts;         /**< at least one: the master */
         std::vector<Channel> channels;
-        int monitoredInsert = -1;             /**< -1 when nobody is monitoring */
     };
 
     struct Result
@@ -133,9 +140,8 @@ namespace LatencyGraph
     }
 
     /** The same, for the places where 0 is not a destination: an output bus
-        uses 0 to mean "wherever the channel goes", and the monitored insert
-        must never be the master, since the master is where the compensation
-        is measured to rather than something that can be exempted from it. */
+        uses 0 to mean "wherever the channel goes" rather than as an insert
+        number of its own. */
     inline int clampInsert (int index, int numInserts) noexcept
     {
         if (numInserts <= 1)
@@ -240,8 +246,6 @@ namespace LatencyGraph
         result.widest   = std::max (masterIn, slowestInstrument);
 
 
-        const int monitored = setup.monitoredInsert;
-
         // Instruments wait for whatever else lands on the same insert. A
         // channel whose buses are split can land on several at once, so each
         // bus waits for its own destination rather than for the channel's.
@@ -296,7 +300,11 @@ namespace LatencyGraph
         for (int i = 1; i < numInserts; ++i)
         {
             const auto& insert = setup.inserts[(std::size_t) i];
-            const bool  isMonitored = i == monitored;
+
+            // Insert 0 is never monitored: it is the master, which is what
+            // everything else is lined up to, so there is nothing to exempt
+            // it from. The loop starting at 1 is what enforces that.
+            const bool isMonitored = insert.monitored;
 
             result.insertDelay[(std::size_t) i]
                 = isMonitored ? 0

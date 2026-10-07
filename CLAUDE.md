@@ -291,7 +291,7 @@ braces on their own line.
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
-| `InputSource.h` | Which input channel is heard and recorded, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
+| `InputSource.h` | Which input channel feeds which mixer insert, Auto-map, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
 | `RealFFT.h` | A radix-2 transform for real signals. No JUCE, so the spectral chain is testable end to end |
 | `Spectrogram.h` | Short time analysis and weighted overlap-add resynthesis: the window, the hop, and the sum that has to come back flat. No JUCE |
 | `SpectralEdit.h` | A region of the time against frequency plane and the gain applied to it, with tapered edges so a repair does not ring. No JUCE |
@@ -372,6 +372,37 @@ system through it, so taking it costs them nothing, and refusing leaves them
 unable to play. The order lives in `AudioDefaults::searchOrder`, and the test
 asserts the property rather than the list: nothing that takes the device may be
 tried before something that shares it.
+
+**Each mixer insert can take one input from the interface, and any number of
+them record at once.** That is the capability a studio needs to record a band
+rather than one person, and it is modelled on how Image-Line document FL
+Studio's mixer, because the behaviour is established and nobody should have to
+learn a second set of rules for the same job: one input per track, a menu with
+the stereo pairs above the mono inputs, selecting an input arms the track, and
+a right click offering Auto-map, which gives every input on the device a strip
+of its own working upward. The routing model is in `InputSource.h` and is
+tested; the mixer strip owns the menu and the arm button.
+
+A few consequences worth keeping straight:
+
+- Insert 0 never takes an input. It is where every insert is summed after each
+  has been lined up, so a live input there would run through the whole master
+  chain and pick up its lookahead, which is the thing the monitoring exemption
+  exists to prevent.
+- Every insert carrying a live input is exempt from delay compensation, not
+  just one. `LatencyGraph::Insert::monitored` is per insert for that reason.
+- **A bounce is fully compensated whatever monitoring is doing.** The
+  exemption is the right trade while tracking and the wrong one in a rendered
+  file, where it would leave most of the mixer uncompensated with nothing to
+  say why. `renderOffline` sets `exportingFullyCompensated` and recomputes the
+  graph around the render.
+- Each armed insert gets its own recorder and its own playlist track. The
+  track is found empty rather than counted off: stepping blindly drops one
+  player onto another player's clips, and running off the end and clamping
+  appends one performance into another's take folder, which is a comp.
+- A recorder that cannot read its input for a block is **padded with silence**,
+  not skipped. Skipping shortens the take and shifts everything after it
+  earlier against the arrangement with nothing to say so.
 
 **One instrument in one socket is a mono input, and mono means centred.** The
 engine took input channel 1 as the left of a stereo pair and input channel 2 as

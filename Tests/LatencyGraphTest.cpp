@@ -59,6 +59,20 @@ static void checkEqual (int actual, int expected, const std::string& what)
                    + ", expected " + std::to_string (expected));
 }
 
+/** The tests were written when exactly one insert could be monitored. These
+    keep them reading the same way now that any number can be. */
+static void monitor (LatencyGraph::Setup& setup, int insert)
+{
+    if (insert >= 0 && insert < (int) setup.inserts.size())
+        setup.inserts[(size_t) insert].monitored = true;
+}
+
+static bool isMonitored (const LatencyGraph::Setup& setup, int insert)
+{
+    return insert >= 0 && insert < (int) setup.inserts.size()
+        && setup.inserts[(size_t) insert].monitored;
+}
+
 //==============================================================================
 // An independent walk of the finished graph, written in terms of arrival times
 // rather than of delays, so that it cannot share a mistake with the thing it
@@ -149,7 +163,7 @@ namespace walk
                                      + hold (main),
                                  "channel " + std::to_string (c) + " into insert "
                                      + std::to_string (main),
-                                 main, main == setup.monitoredInsert });
+                                 main, isMonitored (setup, main) });
                 continue;
             }
 
@@ -165,7 +179,7 @@ namespace walk
                                      + hold (to),
                                  "channel " + std::to_string (c) + " bus " + std::to_string (b)
                                      + " into insert " + std::to_string (to),
-                                 to, to == setup.monitoredInsert });
+                                 to, isMonitored (setup, to) });
             }
         }
 
@@ -188,32 +202,28 @@ namespace walk
                                      + hold (to),
                                  "send from insert " + std::to_string (i) + " to "
                                      + std::to_string (to),
-                                 to, i == setup.monitoredInsert
-                                       || to == setup.monitoredInsert });
+                                 to, isMonitored (setup, i)
+                                       || isMonitored (setup, to) });
             }
         }
 
         return out;
     }
 
-    /** When the monitored input itself reaches the master, by its dry route. */
+    /** When the input monitored through insert m reaches the master, by its
+        dry route. The monitor is summed straight into the insert's buffer, so
+        unlike a channel it is not delayed up to inLat first: it goes in at
+        zero and takes only what is downstream of that point. */
     static int monitorDryArrival (const LatencyGraph::Setup& setup,
-                                  const LatencyGraph::Result& result)
+                                  const LatencyGraph::Result& result, int m)
     {
-        const int m = setup.monitoredInsert;
-        const auto in = inLatencies (setup);
-
-        // The monitor is summed straight into the insert's buffer, so unlike a
-        // channel it is not delayed up to inLat first: it goes in at zero and
-        // takes only what is downstream of that point.
         return fx (setup, m) + result.insertDelay[(size_t) m];
     }
 
     static int monitorSendArrival (const LatencyGraph::Setup& setup,
                                    const LatencyGraph::Result& result,
-                                   size_t sendIndex)
+                                   int m, size_t sendIndex)
     {
-        const int m  = setup.monitoredInsert;
         const int to = setup.inserts[(size_t) m].sendTo[sendIndex];
 
         return fx (setup, m) + result.sendDelay[(size_t) m][sendIndex]
@@ -343,7 +353,7 @@ static void theMonitoredInsertIsNotHeldBack()
     setup.inserts[0].fxLatency = 1024;      // a lookahead limiter on the master
     setup.inserts[8].fxLatency = 256;
     setup.channels[0].latency = 64;
-    setup.monitoredInsert = 1;
+    monitor (setup, 1);
 
     const auto result = LatencyGraph::compute (setup);
 
@@ -359,7 +369,7 @@ static void theMonitoredInsertIsNotHeldBack()
 
     // And the player hears themselves as early as the graph allows, which with
     // nothing on their own insert means immediately.
-    checkEqual (walk::monitorDryArrival (setup, result), 0,
+    checkEqual (walk::monitorDryArrival (setup, result, 1), 0,
                 "the player should hear themselves with no added delay at all");
 }
 
@@ -375,7 +385,7 @@ static void theMonitoredSendIsNotPutBack()
     setup.inserts[2].fxLatency = 1024;      // lookahead somewhere else entirely
     setup.inserts[1].sendTo[0] = 5;         // the monitored insert sends to 5
     setup.inserts[2].sendTo[0] = 5;
-    setup.monitoredInsert = 1;
+    monitor (setup, 1);
 
     const auto result = LatencyGraph::compute (setup);
 
@@ -385,8 +395,8 @@ static void theMonitoredSendIsNotPutBack()
                 "the send out of the monitored insert is being compensated, so the "
                 "player hears themselves twice");
 
-    const int dry = walk::monitorDryArrival (setup, result);
-    const int wet = walk::monitorSendArrival (setup, result, 0);
+    const int dry = walk::monitorDryArrival (setup, result, 1);
+    const int wet = walk::monitorSendArrival (setup, result, 1, 0);
 
     checkEqual (dry, 0, "the dry monitor path should be immediate");
     checkEqual (wet, 0, "the send copy of the monitor should not be delayed behind it");
@@ -404,12 +414,12 @@ static void aMonitoredSendOnlyLagsByWhatIsRealDownstream()
     auto setup = mixer (17, 4);
     setup.inserts[6].fxLatency = 512;       // a reverb with lookahead, on the send bus
     setup.inserts[1].sendTo[0] = 6;
-    setup.monitoredInsert = 1;
+    monitor (setup, 1);
 
     const auto result = LatencyGraph::compute (setup);
 
-    const int dry = walk::monitorDryArrival (setup, result);
-    const int wet = walk::monitorSendArrival (setup, result, 0);
+    const int dry = walk::monitorDryArrival (setup, result, 1);
+    const int wet = walk::monitorSendArrival (setup, result, 1, 0);
 
     checkEqual (result.sendDelay[1][0], 0, "the send itself should add nothing");
     checkEqual (wet - dry, 512,
@@ -422,7 +432,7 @@ static void monitoringOffCompensatesEverything()
     auto setup = mixer (17, 4);
     setup.inserts[2].fxLatency = 300;
     setup.inserts[1].sendTo[0] = 4;
-    setup.monitoredInsert = -1;
+    /* nobody monitoring */
 
     const auto result = LatencyGraph::compute (setup);
 
@@ -585,7 +595,12 @@ static void reusingAResultCannotLeaveAnythingBehind()
             }
         }
 
-        setup.monitoredInsert = sometimes (rng) ? anInsert (rng) : -1;
+        // Any number of inserts monitored at once, which is what recording
+        // several players is.
+        for (auto& insert : setup.inserts)
+            insert.monitored = sometimes (rng);
+
+        setup.inserts[0].monitored = false;    // the master never is
         return setup;
     };
 
@@ -672,8 +687,16 @@ static void randomised()
             }
         }
 
-        const bool monitoring = often (rng);
-        setup.monitoredInsert = monitoring ? anInsert (rng) : -1;
+        // Several at once, since a band is several microphones into several
+        // inserts and every one of those players has to be able to play.
+        std::vector<int> monitoredInserts;
+
+        for (int i = 1; i < 17; ++i)
+            if (sometimes (rng))
+            {
+                setup.inserts[(size_t) i].monitored = true;
+                monitoredInserts.push_back (i);
+            }
 
         const auto result = LatencyGraph::compute (setup);
 
@@ -697,14 +720,14 @@ static void randomised()
             if (! arrival.exempt && arrival.when != result.masterIn)
                 ++disagreements;
 
-        if (! monitoring)
-            continue;
-
-        const int m = setup.monitoredInsert;
-
+        // Every monitored insert, not just one. Four players tracking at once
+        // is four people who each have to be able to play, and a rule that
+        // only holds for the first of them is not a rule.
+        for (int m : monitoredInserts)
+        {
         // The player must never be later than everything else, and must be
         // strictly earlier whenever there was anything to skip.
-        const int dry = walk::monitorDryArrival (setup, result);
+        const int dry = walk::monitorDryArrival (setup, result, m);
 
         if (dry > result.masterIn)
             ++monitorNotEarly;
@@ -720,12 +743,13 @@ static void randomised()
             if (! LatencyGraph::isLegalSendTarget (m, to, 17))
                 continue;
 
-            const int wet = walk::monitorSendArrival (setup, result, s);
+            const int wet = walk::monitorSendArrival (setup, result, m, s);
             const int downstream = std::max (0, setup.inserts[(size_t) to].fxLatency)
                                  + result.insertDelay[(size_t) to];
 
             if (wet - dry != downstream)
                 ++monitorDoubled;
+        }
         }
     }
 

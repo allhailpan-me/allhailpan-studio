@@ -138,4 +138,89 @@ namespace InputSource
 
         return { stored >> 1, (stored & 1) != 0 };
     }
+
+    //==========================================================================
+    /** What one mixer insert is fed from, which may be nothing.
+
+        Most inserts carry no live input: they are where an instrument or a
+        send lands. Only the ones being recorded through have a socket behind
+        them, so "nothing" is the common case and has to be representable
+        rather than faked with channel zero.
+
+        This is modelled on how Image-Line document FL Studio's mixer, because
+        the behaviour is established and a musician coming from one studio to
+        another should not have to learn a second set of rules for the same
+        job. Their manual: "Each Mixer track can receive one external stereo
+        audio input", from a menu with "an upper stereo list and lower mono
+        list". Same here: one input per insert, pairs listed above singles.
+    */
+    struct Assignment
+    {
+        Choice choice;
+        bool   assigned = false;
+    };
+
+    /** Zero means nothing, so an insert with no input stores as zero and a
+        settings file full of zeroes means a mixer nobody has wired up yet. */
+    inline int assignmentToStored (const Assignment& assignment)
+    {
+        return assignment.assigned ? toStored (assignment.choice) + 1 : 0;
+    }
+
+    inline Assignment assignmentFromStored (int stored)
+    {
+        if (stored <= 0)
+            return {};
+
+        return { fromStored (stored - 1), true };
+    }
+
+    /** Gives every input on the device an insert of its own, starting at
+        `firstInsert` and working upward.
+
+        Image-Line's manual calls this Auto-map: "This will automatically map
+        each input on your audio device to a unique Mixer Track Input,
+        starting on the Mixer track where the Auto-map was initiated and
+        working to the right." It is the difference between wiring an eight
+        input interface in one action and in eight.
+
+        Returns one assignment per insert, unassigned where nothing reached.
+        Runs out gracefully at both ends: more inputs than inserts leaves the
+        extra inputs unmapped, and more inserts than inputs leaves the extra
+        inserts alone rather than wrapping around and stealing an input that
+        already has a home.
+
+        Insert 0 is the master and is never mapped, for the same reason it is
+        never the monitored insert: it is where everything else is summed, so
+        a live input there would run through the whole master chain.
+    */
+    inline std::vector<Assignment> autoMap (int firstInsert, int numInserts,
+                                            int numInputChannels, bool asStereoPairs)
+    {
+        std::vector<Assignment> mapped;
+
+        if (numInserts <= 0)
+            return mapped;
+
+        mapped.resize ((std::size_t) numInserts);
+
+        if (numInputChannels <= 0)
+            return mapped;
+
+        const int step  = asStereoPairs ? 2 : 1;
+        const int start = firstInsert < 1 ? 1 : firstInsert;
+
+        int insert = start;
+
+        for (int channel = 0; channel + step - 1 < numInputChannels; channel += step)
+        {
+            if (insert >= numInserts)
+                break;                      // out of inserts before out of inputs
+
+            mapped[(std::size_t) insert] = { { channel, asStereoPairs }, true };
+            ++insert;
+        }
+
+        return mapped;
+    }
 }

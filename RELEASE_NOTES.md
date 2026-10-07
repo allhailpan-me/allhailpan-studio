@@ -1,4 +1,34 @@
-A mono input is heard in the middle rather than out of one speaker, and ASIO, which is what makes an audio interface playable on Windows at all. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+Every mixer strip can take its own input and they all record at once, a mono input is heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+
+## Since v0.6.1
+
+**Every mixer strip can take its own input, and they all record at once.**
+This is what the studio needed in order to record more than one person at a
+time. Open the mixer and each strip now has an input menu and an arm button:
+pick a socket on your interface and that strip is armed. Press record and
+every armed strip is captured, each to its own playlist track, each named
+after the strip it came from.
+
+Right click a strip for **Map inputs from here**, which gives every input on
+your interface a strip of its own in one action rather than eight. There is a
+version for stereo pairs, and one to clear the lot.
+
+The menu lists stereo pairs above mono inputs and uses your interface's own
+names for its sockets, so what is on screen matches what is written on the box
+in front of you. Choosing an input also arms the strip, because wiring a
+socket to a strip and then not recording it is almost never what anybody
+meant.
+
+The input selector that was on the toolbar is gone. One input for the whole
+studio was the thing standing in the way of recording a band, and it was in
+the wrong place: the choice belongs next to the strip it feeds.
+
+A few things that follow from it. The **Monitor** box now means the armed
+strips, or every strip that has an input, rather than one chosen insert. Your
+routing is saved with the project, since which microphone is on which strip is
+part of a session rather than a preference. And a bounce is now fully delay
+compensated whatever monitoring is doing: skipping compensation is the right
+trade while somebody is playing and the wrong one in a finished file.
 
 ## Since v0.6.0
 

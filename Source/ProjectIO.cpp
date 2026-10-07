@@ -282,6 +282,16 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         ctl.volume.store (0.8f);
         ctl.pan.store (0.0f);
         ctl.mute.store (false);
+
+        // Reset, which is the one of the four that survives testing and then
+        // leaks between projects: a strip still wired to a microphone in a
+        // project that never mentioned one.
+        if (i > 0)
+        {
+            engine.setInsertInput (i, {});
+            engine.setInsertArmed (i, false);
+        }
+
         for (int k = 0; k < kNumSends; ++k)
         {
             ctl.sendTo[(size_t) k].store (0);
@@ -370,6 +380,22 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("volume", (double) ctl.volume.load());
         e->setAttribute ("pan", (double) ctl.pan.load());
         e->setAttribute ("mute", ctl.mute.load());
+
+        // Which socket feeds this strip, and whether it records. Saved with
+        // the project rather than the application, because which microphone
+        // is on which strip is part of a session rather than a preference,
+        // and reopening a session to find the routing gone would mean setting
+        // it up again every time.
+        if (i > 0)
+        {
+            const auto assignment = engine.getInsertInput (i);
+
+            if (assignment.assigned)
+            {
+                e->setAttribute ("input", InputSource::assignmentToStored (assignment));
+                e->setAttribute ("armed", engine.isInsertArmed (i));
+            }
+        }
 
         for (int k = 0; k < kNumSends; ++k)
             if (ctl.sendTo[(size_t) k].load() > 0)
@@ -645,6 +671,15 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             ctl.volume.store ((float) juce::jlimit (0.0, 1.25, e->getDoubleAttribute ("volume", 0.8)));
             ctl.pan.store ((float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0)));
             ctl.mute.store (e->getBoolAttribute ("mute"));
+
+            // Routed through the engine so the delay compensation is
+            // recomputed: an insert carrying a live input is exempt from it.
+            if (i > 0)
+            {
+                const auto assignment = InputSource::assignmentFromStored (e->getIntAttribute ("input", 0));
+                engine.setInsertInput (i, assignment);
+                engine.setInsertArmed (i, assignment.assigned && e->getBoolAttribute ("armed", true));
+            }
 
             for (auto* send : e->getChildWithTagNameIterator ("SEND"))
             {
