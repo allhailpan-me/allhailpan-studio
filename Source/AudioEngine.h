@@ -297,34 +297,67 @@ public:
     void setMonitorMode (Monitor m);
     Monitor getMonitorMode() const noexcept    { return monitorMode.load(); }
 
-    /** Which insert the input is heard through, so it can be monitored with
-        the amp simulator or reverb it is going to be recorded alongside. */
-    void setMonitorInsert (int insertIndex);
-    // Through the same clamp as everywhere else, so a caller naming the
-    // insert cannot name one the monitor never actually uses.
-    int getMonitorInsert() const noexcept      { return monitoredInsertIndex(); }
-
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
     float getMonitorGain() const noexcept      { return monitorGain.load(); }
 
-    /** Whether any track is armed. Arming lives in the project, so it is
-        pushed down here for the "while armed" monitoring mode to use. */
-    void setInputArmed (bool armed) noexcept   { inputArmed.store (armed); }
+    /** Which device input feeds a mixer insert, or nothing.
 
-    /** Which input is listened to and recorded, and whether it is one
-        instrument or a stereo pair.
+        One input per insert, which is how every studio that does this models
+        it, and it is what makes recording several players at once possible:
+        a microphone on insert 1, a guitar on insert 2, each with its own
+        strip, its own effects and its own take.
 
-        Packed into a single atomic so the audio thread reads it in one go.
-        Changing it is immediate and needs no graph update: it decides which
-        pointers are read, not how anything is delayed. */
-    void setInputSource (InputSource::Choice choice) noexcept
+        Packed into one atomic per insert so the audio thread reads each in a
+        single go. Changing one needs a graph update, because an insert
+        carrying a live input is exempt from delay compensation and one that
+        has stopped carrying it is not. */
+    void setInsertInput (int insertIndex, InputSource::Assignment assignment);
+
+    InputSource::Assignment getInsertInput (int insertIndex) const noexcept
     {
-        inputSourceStored.store (InputSource::toStored (choice));
+        if (! juce::isPositiveAndBelow (insertIndex, kNumInserts))
+            return {};
+
+        return InputSource::assignmentFromStored (insertInput[(size_t) insertIndex].load());
     }
 
-    InputSource::Choice getInputSource() const noexcept
+    /** Whether this insert's input is captured when recording starts.
+
+        Image-Line's manual for FL Studio describes selecting an input as auto
+        arming the track, and the reason is sound: wiring a socket to a strip
+        and then not recording it is almost never what somebody meant. The
+        caller does that; the engine only stores it. */
+    void setInsertArmed (int insertIndex, bool armed);
+
+    bool isInsertArmed (int insertIndex) const noexcept
     {
-        return InputSource::fromStored (inputSourceStored.load());
+        return juce::isPositiveAndBelow (insertIndex, kNumInserts)
+            && insertArmed[(size_t) insertIndex].load();
+    }
+
+    /** How many inserts have an input wired to them at all, armed or not. */
+    int countWiredInputs() const noexcept
+    {
+        int wired = 0;
+
+        for (int i = 1; i < kNumInserts; ++i)
+            if (InputSource::assignmentFromStored (insertInput[(size_t) i].load()).assigned)
+                ++wired;
+
+        return wired;
+    }
+
+    /** How many inserts would record if the button were pressed now. */
+    int countArmedInputs() const noexcept
+    {
+        int armed = 0;
+
+        for (int i = 1; i < kNumInserts; ++i)
+            if (insertArmed[(size_t) i].load()
+                && InputSource::assignmentFromStored (insertInput[(size_t) i].load()).assigned)
+                ++armed;
+
+        return armed;
     }
 
     /** The names the device gives its active inputs, in the order the audio
@@ -366,9 +399,30 @@ public:
         show it and warn about feedback. */
     bool isMonitoring() const noexcept         { return monitoring.load(); }
     int  getRecordSource() const noexcept       { return recordSource.load(); }
-    void startAudioRecording()                         { recorder.begin(); }
-    std::vector<Recorder::Take> stopAudioRecording()   { return recorder.end(); }
-    bool isRecordingAudio() const noexcept             { return recorder.isActive(); }
+    /** What one insert captured. */
+    struct CapturedInput
+    {
+        int insert = 0;
+        std::vector<Recorder::Take> passes;
+    };
+
+    /** Starts the instrument recorder, or one recorder for every armed insert
+        that has an input, which is how several players are recorded at once.
+
+        Image-Line's manual puts it plainly for FL Studio: "It's possible to,
+        simultaneously, record the full number of audio inputs on your audio
+        device." That is the capability, and a studio without it cannot record
+        a band. */
+    void startAudioRecording();
+
+    /** Every armed insert's passes, keyed by the insert they came from, so
+        each lands on its own playlist track. Empty for an instrument
+        recording, which comes back through stopInstrumentRecording. */
+    std::vector<CapturedInput> stopAudioRecording();
+
+    std::vector<Recorder::Take> stopInstrumentRecording() { return recorder.end(); }
+
+    bool isRecordingAudio() const noexcept;
 
     void startMidiRecording (int channel);
     void stopMidiRecording()                           { midiRecording.store (false); }
@@ -487,22 +541,6 @@ private:
     void processInsert (int index, int numSamples);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
-    /** The insert the monitored input is summed into, as one expression used
-        everywhere rather than several clamps that can drift apart.
-
-        Clamped to 1 upwards, never 0. Insert 0 is the master, and monitoring
-        into it would defeat the exemption: the master is what every other
-        insert is lined up *to*, so there is nothing to exempt it from, and
-        the monitored signal would then run through the whole master chain and
-        pick up its lookahead. That is the exact thing the exemption exists to
-        avoid, so a lookahead limiter on the master would make the instrument
-        unplayable again by a different route. Safe to call from either
-        thread. */
-    int monitoredInsertIndex() const noexcept
-    {
-        return juce::jlimit (1, kNumInserts - 1, monitorInsert.load());
-    }
-
     // ---- first run device configuration, all message thread ----
     void chooseLowLatencyDevice();
     bool openDeviceType (const juce::String& typeName);
@@ -517,7 +555,7 @@ private:
     bool searchChangedTheDeviceType = false;
 
     void mixMonitorInput (const float* const* inputChannelData,
-                          const InputSource::Resolved& pick, int numSamples);
+                          int numInputChannels, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
@@ -565,17 +603,30 @@ private:
     double modFreeClock = 0.0;
 
     std::atomic<Monitor> monitorMode { Monitor::off };
-    std::atomic<int>     monitorInsert { 1 };
     std::atomic<float>   monitorGain { 1.0f };
     std::atomic<bool>    monitoring { false };
-    std::atomic<bool>    inputArmed { false };
-    std::atomic<int>     inputSourceStored { InputSource::toStored (InputSource::defaultChoice()) };
+    // Per insert, index 0 unused: the master is where everything is summed,
+    // so a live input there would run through the whole master chain.
+    // Set only while a bounce is running, so the export is fully compensated
+    // rather than inheriting the monitoring exemption. Message thread, under
+    // the graph lock, which is also where updateLatency reads it.
+    bool exportingFullyCompensated = false;
 
-    // Audio thread only: the channels currently being heard, which during a
-    // change lag the chosen ones until the fade reaches silence. Negative
-    // until the first block, so the first choice is adopted without a fade.
-    int monitorActiveLeft = -1, monitorActiveRight = -1;
-    float                monitorRamp = 0.0f;   // fades in and out, so toggling does not click
+    std::array<std::atomic<int>,  kNumInserts> insertInput {};
+    std::array<std::atomic<bool>, kNumInserts> insertArmed {};
+
+    // Audio thread only, per insert: the channels currently being heard
+    // through it, which during a change lag the chosen ones until the fade
+    // reaches silence, and the fade itself. Negative until the first block,
+    // so the first choice is adopted without a fade.
+    // Filled with -1 rather than left zeroed, because zero is a real channel
+    // and "nothing adopted yet" has to be distinguishable from "reading input
+    // one". A previous version of this comment claimed they were negative
+    // while the code zeroed them, which made the guard below dead.
+    std::array<int, kNumInserts>   monitorActiveLeft  = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
+    std::array<int, kNumInserts>   monitorActiveRight = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
+    std::array<float, kNumInserts> monitorRamps {};
+
 
     // Mix analysis. Measured on the audio thread, read by the interface.
     LoudnessMeter      loudness;
@@ -591,7 +642,12 @@ private:
     double previewPos = 0.0;
     juce::SpinLock previewLock;
 
+    // The instrument tap, which records a channel's own output rather than a
+    // socket, and one recorder per insert for the live inputs. A recorder
+    // only reserves its take buffers in begin(), so the unarmed ones cost a
+    // four second ring each and nothing more.
     Recorder recorder;
+    std::array<Recorder, kNumInserts> inputRecorders;
 
     std::atomic<bool>   midiRecording { false };
     std::atomic<int>    midiRecordChannel { 0 };

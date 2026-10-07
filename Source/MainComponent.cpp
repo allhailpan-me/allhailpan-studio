@@ -19,11 +19,6 @@ namespace
 
     enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth, recInstrument, recInstrumentMidi };
 
-    constexpr const char* inputTooltip =
-        "Which input you hear and record.\n"
-        "One instrument in one socket is a mono input, and it is heard in the middle "
-        "rather than out of one speaker. Pick a pair only for something genuinely "
-        "stereo, like a keyboard using two sockets.";
 }
 
 MainComponent::MainComponent()
@@ -40,25 +35,14 @@ MainComponent::MainComponent()
     recordButton.setColour (juce::TextButton::textColourOnId, juce::Colours::white);
     recordButton.setTooltip ("Record (Ctrl+R)");
 
-    inputBox.setTooltip (inputTooltip);
-    inputBox.onChange = [this]
-    {
-        const int id = inputBox.getSelectedId();
-
-        if (id <= 0)
-            return;
-
-        const auto choice = InputSource::fromStored (id - 1);
-        engine.setInputSource (choice);
-        plugins.settings().setValue (Prefs::Key::inputSource, id - 1);
-    };
-
     monitorBox.addItem ("Monitor: off", 1);
     monitorBox.addItem ("Monitor: armed", 2);
     monitorBox.addItem ("Monitor: on", 3);
     monitorBox.setSelectedId (1, juce::dontSendNotification);
-    monitorBox.setTooltip ("Hear your input through this studio's own effects.\n"
-                           "armed = only while a track is armed, on = always.\n"
+    monitorBox.setTooltip ("Hear your inputs through this studio's own effects.\n"
+                           "armed = only the mixer strips that are armed to record, on = every "
+                           "strip that has an input.\n"
+                           "Pick which input feeds which strip in the mixer.\n"
                            "Use headphones: monitoring through speakers near a microphone feeds back.");
     monitorBox.onChange = [this]
     {
@@ -71,9 +55,15 @@ MainComponent::MainComponent()
             const double roundTrip = engine.monitoringRoundTripMs();
 
             juce::String message;
-            message << "Monitoring through " << engine.insert (engine.getMonitorInsert()).name
-                    << " at " << juce::String (roundTrip, 1) << " ms round trip. "
-                       "Use headphones: speakers near a microphone will feed back.";
+            const int wired = engine.countWiredInputs();
+
+            if (wired == 0)
+                message << "No inputs are wired to a mixer insert yet. Open the mixer and "
+                           "pick one on the strip you want to record through.";
+            else
+                message << "Monitoring " << wired << (wired == 1 ? " input" : " inputs")
+                        << " at " << juce::String (roundTrip, 1) << " ms round trip. "
+                           "Use headphones: speakers near a microphone will feed back.";
 
             // Said at the moment it matters, which is when somebody turns
             // monitoring on with an instrument in their hands rather than
@@ -89,8 +79,6 @@ MainComponent::MainComponent()
             setStatus (message);
         }
     };
-    refreshInputSources();
-
     // Through choiceId, because an id the box does not have selects nothing,
     // which reads back as zero, and zero minus one is not a monitoring mode the
     // engine has. See Preferences.h.
@@ -317,7 +305,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (logo);
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
-                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&inputBox), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
+                     static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
                      static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
                      static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
@@ -345,7 +333,6 @@ MainComponent::MainComponent()
     pushArrangement (true);
     updateTypingLabel();
     setView (View::playlist);
-    pushArmedState();
     updateUndoButtons();
 
     // Everything the preferences window owns, applied the same way it applies a
@@ -536,6 +523,21 @@ void MainComponent::toggleRecord()
         wantInput = false;
     }
 
+    // Recording an input means recording the armed strips, so with none armed
+    // there is nothing to capture and the record button would roll the
+    // transport and produce nothing. Saying which button to press is more use
+    // than a take that silently did not happen.
+    if (wantInput && engine.countArmedInputs() == 0)
+    {
+        if (! wantMidi && ! wantInstrument)
+        {
+            setStatus ("No mixer strip is armed. Open the mixer, pick an input on a strip, "
+                       "or right click a strip and choose Map inputs from here.");
+            return;
+        }
+        wantInput = false;
+    }
+
     int armed = project.firstArmedTrack();
     if (armed < 0)
     {
@@ -543,8 +545,15 @@ void MainComponent::toggleRecord()
         project.tracks[(size_t) armed].armed = true;
     }
     const bool recordingSomeAudio = wantInput || wantInstrument;
+
+    // Input recording takes one track per armed strip, so MIDI has to start
+    // looking past all of them rather than past the first. Otherwise the MIDI
+    // clip lands on the track the second microphone is about to use.
+    const int audioTracksNeeded = wantInput ? std::max (1, engine.countArmedInputs()) : 1;
+
     audioTrack  = armed;
-    midiTrack   = recordingSomeAudio ? project.firstEmptyTrackFrom (armed + 1) : armed;
+    midiTrack   = recordingSomeAudio ? project.firstEmptyTrackFrom (armed + audioTracksNeeded)
+                                     : armed;
     midiChannel = channel;
 
     takeNotes.clear();
@@ -717,15 +726,56 @@ void MainComponent::finishRecording()
     // ---- audio ----
     if (recordingAudio)
     {
-        // Read before it is cleared: whether the take came back through the
+        // Read before they are cleared: whether the take came back through the
         // interface is what decides if its head has to be trimmed, and
-        // clearing the flag first silently trimmed every instrument take by
-        // a round trip it never made.
-        const bool throughInterface = ! recordingInstrument;
+        // clearing the flags first silently trimmed every instrument take by
+        // a round trip it never made. Reading wasInstrument after clearing it
+        // is how the instrument branch below became unreachable once, which
+        // lost the take and left the recorder running for the rest of the
+        // session.
+        const bool wasInstrument = recordingInstrument;
         recordingAudio = false;
         recordingInstrument = false;
         engine.setRecordSource (-1);
-        finishAudioRecording (engine.stopAudioRecording(), throughInterface);
+
+        if (wasInstrument)
+        {
+            finishAudioRecording (engine.stopInstrumentRecording(), false, audioTrack,
+                                  project.channels[(size_t) midiChannel].name);
+        }
+        else
+        {
+            // One take per armed insert, each on its own playlist track, so
+            // recording four players at once gives four tracks rather than
+            // four clips in a heap.
+            //
+            // Each track is found empty rather than counted off from the
+            // first. Stepping blindly would drop a second microphone onto a
+            // track that already has clips, and worse, running past the last
+            // track and clamping would append one player's passes into
+            // another player's take folder, which is a comp: comping would
+            // then crossfade between two different instruments.
+            auto captured = engine.stopAudioRecording();
+            int  track = audioTrack;
+
+            for (auto& capture : captured)
+            {
+                if (! juce::isPositiveAndBelow (track, Project::numTracks))
+                {
+                    setStatus ("Ran out of playlist tracks, so "
+                                 + juce::String ((int) captured.size()) + " inputs could not all "
+                                   "be kept. The ones that fit were.");
+                    break;
+                }
+
+                finishAudioRecording (std::move (capture.passes), true, track,
+                                      engine.insert (capture.insert).name);
+
+                // Asked again each time, because the clip just added makes
+                // the track it landed on no longer empty.
+                track = project.firstEmptyTrackFrom (track + 1);
+            }
+        }
     }
 
     playlist.refresh();
@@ -740,7 +790,8 @@ void MainComponent::finishRecording()
 // Each pass still gets its own file in Recordings, so nothing about this is a
 // new way of storing audio, and a pass can be dragged out of the project and
 // used elsewhere.
-void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface)
+void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface,
+                                          int track, const juce::String& sourceName)
 {
     if (passes.empty())
         return;
@@ -753,9 +804,10 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
     // there is nothing to trim there.
     const double latency = throughInterface ? engine.getRoundTripLatencySamples() / sampleRate : 0.0;
 
-    const auto stem = ! throughInterface && project.channels[(size_t) midiChannel].name.isNotEmpty()
-                          ? project.channels[(size_t) midiChannel].name + " take "
-                          : juce::String ("Take ");
+    // Named after whatever it came from, which with several inputs at once is
+    // the difference between four files called Take and four that say which
+    // microphone they were.
+    const auto stem = sourceName.isNotEmpty() ? sourceName + " take " : juce::String ("Take ");
     const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
 
     int  dropped   = 0;
@@ -816,7 +868,7 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         Clip clip;
         clip.type   = ClipType::audio;
         clip.sample = takes[0].sample;
-        clip.track  = audioTrack;
+        clip.track  = track;
         clip.start  = folderStart;
         clip.offset = takes[0].offset;
         clip.length = takes[0].length;
@@ -838,7 +890,7 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         }();
 
         int id = 0;
-        if (auto* existing = project.takeFolderAt (audioTrack, folderStart, totalSeconds))
+        if (auto* existing = project.takeFolderAt (track, folderStart, totalSeconds))
         {
             id = existing->id;
             for (auto& t : takes)
@@ -846,7 +898,7 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         }
         else
         {
-            id = project.addTakeFolder (audioTrack, folderStart, std::move (takes));
+            id = project.addTakeFolder (track, folderStart, std::move (takes));
         }
 
         project.selection = { id };
@@ -854,7 +906,7 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         const int   count  = folder != nullptr ? folder->size() : 0;
 
         msg = juce::String (count) + " takes in a folder on "
-            + project.tracks[(size_t) audioTrack].name
+            + project.tracks[(size_t) track].name
             + ". Drag across a lane to comp from that take.";
     }
 
@@ -1073,8 +1125,7 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
                 markDirty();
             updateUndoButtons();
         }
-        pushArmedState();
-
+    
         // The loop range is saved with the project but is deliberately not
         // part of the undo history, so commit() above never notices it. It
         // still has to make the project worth saving, or moving the loop and
@@ -1619,19 +1670,6 @@ void MainComponent::showBusRouting (int channel)
     });
 }
 
-void MainComponent::pushArmedState()
-{
-    bool armed = false;
-    for (const auto& t : project.tracks)
-        if (t.armed)
-        {
-            armed = true;
-            break;
-        }
-
-    engine.setInputArmed (armed);
-}
-
 void MainComponent::setView (View v)
 {
     view = v;
@@ -1782,68 +1820,6 @@ void MainComponent::showPreferences (PreferencesComponent::Tab tab)
     showPreferencesWindow (plugins, engine.devices(), preferenceActions(), tab);
 }
 
-void MainComponent::refreshInputSources()
-{
-    const int channels = engine.getInputChannelCount();
-    const auto all = InputSource::options (channels);
-
-    // The id is the packed choice plus one, because a ComboBox treats zero as
-    // "nothing selected". That makes the menu rebuildable without a lookup
-    // table: whatever is selected can be unpacked straight back into a choice.
-    //
-    // Read from the settings file rather than from the engine. The engine
-    // holds what is working now, which after a fallback is not what the
-    // person chose: unplug an eight input interface and the choice falls back
-    // to input 1, and taking that back off the engine next time would make
-    // the fallback permanent, quietly ignoring a preference still sitting on
-    // disk and still right. Falling back must not be the same as choosing.
-    const int stored = plugins.settings().getIntValue (
-                           Prefs::Key::inputSource,
-                           InputSource::toStored (InputSource::defaultChoice()));
-
-    const int wantedId = InputSource::toStored (InputSource::fromStored (stored)) + 1;
-
-    inputBox.clear (juce::dontSendNotification);
-
-    for (const auto& choice : all)
-        inputBox.addItem (InputSource::describe (choice), InputSource::toStored (choice) + 1);
-
-    if (all.empty())
-    {
-        inputBox.setTextWhenNoChoicesAvailable ("No inputs");
-        return;
-    }
-
-    // Keep what was stored when this device still has it, and fall back to
-    // the first input when it does not. Deliberately without notification, so
-    // the fallback is not written back over the preference: plugging the
-    // interface back in has to restore the choice rather than find it gone.
-    const bool stillThere = inputBox.indexOfItemId (wantedId) >= 0;
-    const int  chosenId   = stillThere ? wantedId
-                                       : InputSource::toStored (InputSource::defaultChoice()) + 1;
-
-    inputBox.setSelectedId (chosenId, juce::dontSendNotification);
-    engine.setInputSource (InputSource::fromStored (chosenId - 1));
-
-    // What each entry is on the hardware in front of them. "In 1" is the
-    // first input the device hands over, which is the first socket only while
-    // every channel is enabled: untick one in the audio settings and the
-    // numbering shifts. Spelling the mapping out here costs a tooltip and
-    // removes the one way this menu could still mislead.
-    juce::String tip (inputTooltip);
-    const auto names = engine.getActiveInputChannelNames();
-
-    if (names.size() == channels && channels > 0)
-    {
-        tip << "\nOn this device: ";
-
-        for (int i = 0; i < channels; ++i)
-            tip << (i > 0 ? ", " : "") << "In " << (i + 1) << " is " << names[i];
-    }
-
-    inputBox.setTooltip (tip);
-}
-
 void MainComponent::setStatus (const juce::String& message)
 {
     statusMessage = message;
@@ -1884,7 +1860,6 @@ void MainComponent::resized()
     stopButton  .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (4);
     recordButton.setBounds (bar.removeFromLeft (50));  bar.removeFromLeft (4);
     recordMode  .setBounds (bar.removeFromLeft (132)); bar.removeFromLeft (4);
-    inputBox    .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (4);
     monitorBox  .setBounds (bar.removeFromLeft (116)); bar.removeFromLeft (4);
     countInBox  .setBounds (bar.removeFromLeft (104)); bar.removeFromLeft (8);
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
@@ -2007,14 +1982,15 @@ void MainComponent::timerCallback()
     if (editWatcher.touched.exchange (false) && juce::Time::getMillisecondCounter() > ignoreEditsUntil)
         markDirty();
 
-    // The input menu belongs to whichever device is open, and the device can
-    // change from the preferences window or from the driver search, neither of
-    // which comes back through here. Comparing the channel count is cheap and
-    // catches every way it can happen, including an interface being unplugged.
+    // The mixer's input menus belong to whichever device is open, and the
+    // device can change from the preferences window or from the driver
+    // search, neither of which comes back through here. Comparing the channel
+    // count is cheap and catches every way it can happen, including an
+    // interface being unplugged.
     if (const int channels = engine.getInputChannelCount(); channels != lastInputChannelCount)
     {
         lastInputChannelCount = channels;
-        refreshInputSources();
+        mixer.refreshInputs();
     }
 
     checkModulationLearn();

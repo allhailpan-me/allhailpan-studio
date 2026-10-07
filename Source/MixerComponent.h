@@ -94,6 +94,83 @@ public:
 
     int getSelectedInsert() const noexcept { return selected; }
 
+    /** Rebuilds every strip's input menu from the device that is open now.
+        Called when the device changes, since an interface with eight inputs
+        and one with two do not offer the same list. */
+    void refreshInputs()
+    {
+        const auto names = inputChannelNames();
+
+        // A studio with an interface attached and nothing wired to it cannot
+        // record, and says so only once somebody presses the button. So the
+        // first input gets the first strip, once, which is what somebody with
+        // one instrument in one socket wanted anyway.
+        //
+        // Once per session and only when nothing at all is wired, so that
+        // clearing every input stays cleared and a project that wires its own
+        // strips is never second guessed.
+        if (! names.isEmpty() && ! offeredADefaultInput && engine.countWiredInputs() == 0)
+        {
+            offeredADefaultInput = true;
+            engine.setInsertInput (1, { InputSource::defaultChoice(), true });
+            engine.setInsertArmed (1, true);
+        }
+
+        for (auto* s : strips)
+            s->refreshInputs (names);
+
+        refresh();
+    }
+
+    /** The device's own names for its active inputs, falling back to numbers
+        when it gives none. */
+    juce::StringArray inputChannelNames() const
+    {
+        auto names = engine.getActiveInputChannelNames();
+        const int channels = engine.getInputChannelCount();
+
+        // A device that names nothing still has to be selectable.
+        while (names.size() < channels)
+            names.add ("In " + juce::String (names.size() + 1));
+
+        names.removeRange (channels, names.size() - channels);
+        return names;
+    }
+
+    /** Gives every input on the device a strip of its own, from `firstInsert`
+        upward, or clears them all. */
+    void mapInputsFrom (int firstInsert, bool asPairs, bool clearInstead)
+    {
+        if (clearInstead)
+        {
+            for (int i = 1; i < kNumInserts; ++i)
+            {
+                engine.setInsertInput (i, {});
+                engine.setInsertArmed (i, false);
+            }
+        }
+        else
+        {
+            const auto mapped = InputSource::autoMap (firstInsert, kNumInserts,
+                                                      engine.getInputChannelCount(), asPairs);
+
+            for (int i = 1; i < (int) mapped.size() && i < kNumInserts; ++i)
+            {
+                // Only the strips the map reached. Clearing the rest would
+                // throw away an input somebody wired by hand further along.
+                if (! mapped[(size_t) i].assigned)
+                    continue;
+
+                engine.setInsertInput (i, mapped[(size_t) i]);
+                engine.setInsertArmed (i, true);
+            }
+        }
+
+        refreshInputs();
+        refresh();
+        edited();
+    }
+
     void refresh()
     {
         auto& ctl = engine.insert (selected);
@@ -307,6 +384,60 @@ private:
                 owner.edited();
             };
 
+            // The master has nothing to record: it is where every insert is
+            // summed, so a live input there would run through the whole
+            // master chain and pick up its lookahead.
+            if (index > 0)
+            {
+                inputBox.setTextWhenNothingSelected ("in");
+                inputBox.setTooltip ("Which input on your audio interface feeds this strip.\n"
+                                     "One instrument in one socket is a mono input and is heard in "
+                                     "the middle. Pairs are for something genuinely stereo.\n"
+                                     "Picking an input arms the strip, so pressing record captures it.\n"
+                                     "Right click the strip for Map inputs from here, which gives every "
+                                     "input on the interface its own strip in one go.");
+                inputBox.onChange = [this]
+                {
+                    const int id = inputBox.getSelectedId();
+
+                    if (id <= 0)
+                        return;
+
+                    const auto assignment = InputSource::assignmentFromStored (id - 1);
+                    owner.engine.setInsertInput (index, assignment);
+
+                    // Image-Line's manual: "Selecting an input will auto-arm
+                    // the track for recording." Wiring a socket to a strip
+                    // and then not recording it is almost never what somebody
+                    // meant, and the alternative is a take that silently did
+                    // not happen.
+                    owner.engine.setInsertArmed (index, assignment.assigned);
+
+                    refresh();
+                    owner.edited();
+                };
+
+                arm.setClickingTogglesState (false);
+                arm.setTooltip ("Record this strip's input when the record button is pressed.\n"
+                                "Any number of strips can be armed at once, which is how several "
+                                "players are recorded at the same time.");
+                arm.onClick = [this]
+                {
+                    owner.engine.setInsertArmed (index, ! owner.engine.isInsertArmed (index));
+                    refresh();
+                    owner.edited();
+                };
+
+                for (auto* c : { static_cast<juce::Component*> (&inputBox),
+                                 static_cast<juce::Component*> (&arm) })
+                {
+                    c->setWantsKeyboardFocus (false);
+                    c->setMouseClickGrabsKeyboardFocus (false);
+                    c->addMouseListener (this, false);
+                    addAndMakeVisible (c);
+                }
+            }
+
             for (auto* c : { static_cast<juce::Component*> (&fader), static_cast<juce::Component*> (&pan),
                              static_cast<juce::Component*> (&mute) })
             {
@@ -330,7 +461,101 @@ private:
             for (int k = 0; k < kNumFxSlots; ++k)
                 if (owner.engine.getFx (index, k) != nullptr)
                     ++fxCount;
+
+            if (index > 0)
+            {
+                const auto assignment = owner.engine.getInsertInput (index);
+                const int  id = InputSource::assignmentToStored (assignment) + 1;
+
+                if (inputBox.getSelectedId() != id)
+                    inputBox.setSelectedId (inputBox.indexOfItemId (id) >= 0 ? id : 1,
+                                            juce::dontSendNotification);
+
+                const bool armed = owner.engine.isInsertArmed (index);
+                arm.setButtonText (armed ? "rec" : "arm");
+                arm.setToggleState (armed, juce::dontSendNotification);
+                arm.setColour (juce::TextButton::textColourOffId,
+                               assignment.assigned ? Ahp::bone : Ahp::muted);
+                arm.setColour (juce::TextButton::textColourOnId, Ahp::rec);
+            }
+
             repaint();
+        }
+
+        /** Rebuilds the input menu from the device that is open now.
+
+            Laid out the way Image-Line document FL Studio's, "an upper stereo
+            list and lower mono list", because a musician should not have to
+            learn a second set of rules for the same job. Nothing comes first,
+            since most strips carry an instrument rather than a socket. */
+        void refreshInputs (const juce::StringArray& channelNames)
+        {
+            if (index == 0)
+                return;
+
+            const int channels = channelNames.size();
+            const auto wanted = owner.engine.getInsertInput (index);
+
+            inputBox.clear (juce::dontSendNotification);
+            inputBox.addItem ("No input", 1);
+
+            const auto label = [&channelNames] (const InputSource::Choice& choice, int channels_)
+            {
+                const auto resolved = InputSource::resolve (choice, channels_);
+
+                if (! resolved.valid)
+                    return juce::String (InputSource::describe (choice));
+
+                // The device's own names where it gives them, because "In 1"
+                // is the first input the device hands over, which is the first
+                // socket only while every channel is enabled.
+                auto name = channelNames[resolved.left];
+
+                if (! choice.stereo)
+                    return name;
+
+                return name + " + " + channelNames[resolved.right];
+            };
+
+            const auto all = InputSource::options (channels);
+
+            if (channels >= 2)
+            {
+                inputBox.addSectionHeading ("Stereo");
+
+                for (const auto& choice : all)
+                    if (choice.stereo)
+                        inputBox.addItem (label (choice, channels),
+                                          InputSource::assignmentToStored ({ choice, true }) + 1);
+            }
+
+            if (channels >= 1)
+            {
+                inputBox.addSectionHeading ("Mono");
+
+                for (const auto& choice : all)
+                    if (! choice.stereo)
+                        inputBox.addItem (label (choice, channels),
+                                          InputSource::assignmentToStored ({ choice, true }) + 1);
+            }
+
+            // What was wired stays wired when the device still has it.
+            const int wantedId = InputSource::assignmentToStored (wanted) + 1;
+            const bool stillThere = inputBox.indexOfItemId (wantedId) >= 0;
+
+            inputBox.setSelectedId (stillThere ? wantedId : 1, juce::dontSendNotification);
+
+            // And when it does not, the engine is told as well, not just the
+            // menu. Showing "No input" while the engine kept the old
+            // assignment meant that swapping an eight input interface for a
+            // two input one left a strip reading "No input", still armed, and
+            // still recording: InputSource::resolve clamps, so it captured
+            // input 2 under the name of insert 5.
+            if (! stillThere && wanted.assigned)
+            {
+                owner.engine.setInsertInput (index, {});
+                owner.engine.setInsertArmed (index, false);
+            }
         }
 
         void repaintMeter() { repaint (meterArea.expanded (0, 1)); }
@@ -355,6 +580,15 @@ private:
             auto r = getLocalBounds().reduced (5, 6);
             r.removeFromTop (20);                                  // name
             r.removeFromTop (12);                                  // fx count
+
+            if (index > 0)
+            {
+                inputBox.setBounds (r.removeFromTop (19));
+                r.removeFromTop (2);
+                arm.setBounds (r.removeFromTop (16));
+                r.removeFromTop (3);
+            }
+
             pan.setBounds (r.removeFromTop (30).withSizeKeepingCentre (30, 30));
             r.removeFromTop (4);
             mute.setBounds (r.removeFromBottom (20));
@@ -440,6 +674,22 @@ private:
             m.addItem (2, "Reset volume and pan");
             m.addItem (3, "Remove all effects", fxCount > 0);
 
+            // Image-Line's manual calls this Auto-map: "This will
+            // automatically map each input on your audio device to a unique
+            // Mixer Track Input, starting on the Mixer track where the
+            // Auto-map was initiated and working to the right." It is the
+            // difference between wiring an eight input interface in one
+            // action and in eight.
+            const int channels = owner.engine.getInputChannelCount();
+
+            if (index > 0 && channels > 0)
+            {
+                m.addSeparator();
+                m.addItem (10, "Map inputs from here");
+                m.addItem (11, "Map inputs from here, in pairs", channels >= 2);
+                m.addItem (12, "Clear every input");
+            }
+
             juce::Component::SafePointer<Strip> safe (this);
             m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this), [safe] (int result)
             {
@@ -448,6 +698,13 @@ private:
                 auto& ctl = safe->owner.engine.insert (safe->index);
 
                 if (result == 1) { safe->rename(); return; }
+
+                if (result == 10 || result == 11 || result == 12)
+                {
+                    safe->owner.mapInputsFrom (safe->index, result == 11, result == 12);
+                    return;
+                }
+
                 if (result == 2)
                 {
                     ctl.volume.store (0.8f);
@@ -470,6 +727,8 @@ private:
         int fxCount = 0;
         juce::Slider fader, pan;
         juce::TextButton mute;
+        juce::ComboBox   inputBox;
+        juce::TextButton arm { "arm" };
         juce::Rectangle<int> meterArea;
     };
 
@@ -480,7 +739,11 @@ private:
     std::function<void (int insert, int slot)> removeFxCallback;
     void removeFx (int insert, int slot) { if (removeFxCallback) removeFxCallback (insert, slot); }
 
-    static constexpr int stripW = 66, stripH = 190, gap = 6;
+    // Taller than it was by the input menu and the arm button together.
+    bool offeredADefaultInput = false;
+
+    // Taller than it was by the input menu and the arm button together.
+    static constexpr int stripW = 66, stripH = 230, gap = 6;
 
     AudioEngine& engine;
     Project&     project;

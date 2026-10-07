@@ -148,7 +148,11 @@ private:
 
     // arrangement
     void pushArrangement (bool allowRenders);
-    void finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface);
+    /** Turns one source's passes into clips on one playlist track. Called
+        once per armed insert, so several inputs recorded at once end up as
+        several tracks rather than a heap on one. */
+    void finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface,
+                               int track, const juce::String& sourceName);
 
     // channels, instruments, effects
     void refreshPluginLists();
@@ -206,13 +210,7 @@ private:
     PreferencesActions preferenceActions();
     void setStatus (const juce::String&);
 
-    /** Fills the input menu from the device that is open now, keeping the
-        stored choice when it still exists. Called at startup and whenever the
-        device changes, because an interface with eight inputs and one with
-        two do not offer the same list. */
-    void refreshInputSources();
     void updateTypingLabel();
-    void pushArmedState();
     void checkModulationLearn();
     void paintStatus (juce::Graphics&, juce::Rectangle<int>);
 
@@ -236,7 +234,7 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
-    juce::ComboBox   recordMode, countInBox, monitorBox, inputBox;
+    juce::ComboBox   recordMode, countInBox, monitorBox;
 
     // What the input menu was last built for. Starts at a count no device can
     // have, so the menu is built on the first timer tick whatever happens.
