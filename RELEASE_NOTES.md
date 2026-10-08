@@ -1,6 +1,45 @@
-Every mixer strip can take its own input and they all record at once, a mono input is heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Below that, the instrument itself, two fixes found by playing v0.3.0, and then everything that went into v0.3.0 itself.
+Takes now land where you played them, which they did not quite before. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.6.1
+
+**A take now lands where you played it.** What you play arrives back at the
+studio later than your hands did. It has to go out through your interface, be
+heard, played along with, and come back in through the other converter, and
+if anything in the mix is holding the sound back for a lookahead plugin it is
+behind that too. The studio was putting some of that back and not all of it,
+so an overdub sat a few milliseconds behind the part it was played against.
+
+That is a horrible thing to be wrong, because nothing tells you. No error, no
+crackle, no meter moving. The guitar is just late, and the only person
+standing there to take the blame for that is you.
+
+Three things were wrong with the old correction. It used only what your
+interface reports, so the moment a lookahead plugin went on the master every
+take went back to landing late by its whole lookahead. It was limited to half
+the length of a take, so a short one was half corrected. And recording round a
+loop, it cut each pass in the right place but read past the head of the next
+one, which threw away the last few milliseconds of every pass: your last note
+before the loop came round, every time.
+
+What that correction never had any answer for at all is a driver that does
+not report its latency. Plenty do not, and the studio then had nothing to go
+on and no way for you to tell it. **So Preferences > Audio now prints what is
+actually being taken off a take, in milliseconds and in samples, and has a
+correction you can set if it is wrong.** If you want to check it rather than
+trust it: patch a cable from one of your outputs straight back into an input,
+record the metronome through it, and look at where the recorded clicks sit
+against the grid. They should be on it.
+
+Nothing is lost at the front of a take, either. The audio you played before
+the record point is still in the file, it is just not in the clip, so you can
+always drag a take's left edge back over it.
+
+Two things this does not cover yet, said plainly. A **MIDI** recording is
+still not corrected, so recording a socket and a keyboard into one take
+leaves the two halves slightly apart. And the very **end** of a take now
+stops a few milliseconds earlier than it used to, because the studio stops
+listening the moment the transport does and the last of what you played is
+still on its way back.
 
 **Every mixer strip can take its own input, and they all record at once.**
 This is what the studio needed in order to record more than one person at a
