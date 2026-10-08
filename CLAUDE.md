@@ -301,6 +301,7 @@ braces on their own line.
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
+| `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
 
@@ -512,3 +513,34 @@ divide out the best fitting scale first. The table normalises by its loudest
 stored sample and a continuous peak sits between samples, so the two differ
 by about a tenth of a percent, which reads as -60 dB and hides everything the
 check is for.
+
+**A modulation routing is saved in the project, so it is named and not
+numbered.** `Synth/ModMatrix.h` gives every source and destination a stable
+string id, the same discipline `PanOneParams` uses for knobs, and the id is
+what an `.ahp` stores.
+
+The reason is the failure it prevents. If a destination were an index into a
+list, inserting one new entry in the middle would leave every patch anybody
+had ever saved modulating the wrong thing: the filter envelope on the pan,
+the vibrato on the amplitude. The patch would still load and still play. That
+is the shape of fault this project keeps meeting, and an index is the easiest
+way to invite it.
+
+For the same reason an id nobody knows resolves to minus one and the routing
+is dropped. Losing a routing is a patch that is less than it was; redirecting
+it is a patch that is wrong, and the second is much worse because nothing
+about it looks broken.
+
+Two more things in there that are decisions rather than details. Every
+destination declares what a depth of one is worth in its own units, so the
+same number in any row means a comparable amount of movement, and a slot at
+full depth is a strong musical move rather than an unusable one. And a
+routing can be scaled by a third source, which is what lets a mod wheel
+control the depth of a vibrato rather than the vibrato itself.
+
+When mutation testing anything in `Source`, compile the broken copy **with
+the sanitizers**, the way `Tests/run.sh` does. Four deliberate breakages of
+the bounds checks in here looked like they survived, and every one of them
+was an out of bounds read that the suite catches and a plain `-O2` build does
+not. A mutation harness that is weaker than the real test run will report
+gaps that are not there and hide the ones that are.
