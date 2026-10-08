@@ -321,9 +321,16 @@ out of the insert being monitored through. That compensation aligns internal
 paths with each other; on a monitor path it would only be latency the player
 feels. Aligning the take itself with the arrangement is a separate job, done
 once per take in `startAudioRecording` from the figure `RecordAlign.h` works
-out. It is worth knowing that this file claimed that job was already being
-done for several releases before it was: nothing in the recorder put the round
-trip back, so every overdub landed late by it, silently.
+out.
+
+It used to be done in `MainComponent::finishAudioRecording` instead, by
+reading past the head of each pass by the device's reported round trip. That
+left out the studio's own compensation, so a lookahead plugin on the master
+put every take late again; it was clamped to half a pass; and it left the loop
+split points where the transport wrapped, so the last few milliseconds of
+each pass were trimmed off the front of the next one and lost. Worth knowing
+because all three survived for releases: the figure was in the window, where
+nothing tests it.
 
 Both halves matter. A send is a copy of the insert taken after its fader, so on
 a monitored insert it carries the player's own input, and compensating the copy

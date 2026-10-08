@@ -108,7 +108,6 @@ public:
     float  getInputLevel() const noexcept        { return inputLevel.load(); }
     double getSampleRate() const noexcept        { return sampleRate; }
     int    getBlockSize() const noexcept         { return blockSize; }
-    int    getRoundTripLatencySamples();
 
     // ---- mix analysis ----
     // Measured on the master, after every effect, so it is what actually
@@ -138,13 +137,13 @@ public:
 
     /** Everything the record offset is made of, as the device and the mixer
         report it right now. */
-    RecordAlign::Figures getRecordFigures();
+    RecordAlign::Figures getRecordFigures() const;
 
     /** How far ahead of its arrival a frame of a capture belongs, which is
         what is taken off the front of every take. Here so that the audio
         settings can show the figure rather than leave somebody guessing
         whether anything is being applied at all. */
-    int    getRecordOffsetSamples();
+    int    getRecordOffsetSamples() const;
 
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);

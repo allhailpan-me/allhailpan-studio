@@ -4,6 +4,7 @@
 #include "AudioDefaults.h"
 #include "Preferences.h"
 
+#include <cmath>
 #include <functional>
 #include <utility>
 
@@ -129,9 +130,12 @@ public:
         auto area = getLocalBounds();
 
         // Bottom upwards, which reads top down as: the chooser, then what you
-        // have in milliseconds, then the button, then what it did. Taken in
+        // have in milliseconds and what is being taken off a take, then the
+        // correction to that, then the button, then what it did. Taken in
         // that order because the button is only worth pressing once the
-        // number above it has told you that you want to.
+        // number above it has told you that you want to, and the correction
+        // is only worth reaching for once the line above it has said what is
+        // already being applied.
         outcome.setBounds (area.removeFromBottom (112).reduced (10, 2));
         findButton.setBounds (area.removeFromBottom (34).reduced (10, 4)
                                   .removeFromLeft (210));
@@ -257,9 +261,19 @@ private:
         if (recordOffsetSamples != nullptr)
         {
             const int offset = recordOffsetSamples();
+            const juce::String ms = juce::String (std::abs (1000.0 * offset / rate), 1);
 
-            text << "\nRecorded takes are pulled " << juce::String (1000.0 * offset / rate, 1)
-                 << " ms earlier (" << offset << " samples), so a part lands where it was played.";
+            text << "\nRecorded takes are ";
+
+            if (offset > 0)
+                text << "pulled " << ms << " ms earlier (" << offset
+                     << " samples), so a part lands where it was played.";
+            else if (offset < 0)
+                text << "pushed " << ms << " ms later (" << -offset
+                     << " samples), which only the correction below asks for.";
+            else
+                text << "left where they arrive, because nothing here reports any latency "
+                        "to take off them.";
         }
 
         readout.setText (text, juce::dontSendNotification);

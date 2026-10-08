@@ -11,8 +11,10 @@
 // So the property is asserted directly rather than at a few hand picked
 // points, and over thousands of generated recordings including the degenerate
 // ones: loops shorter than one buffer, wrap lists that arrive out of order,
-// captures with every frame dropped, tempos and beats that are not numbers,
-// and trims dialled to both ends of their range.
+// captures shorter than the offset itself, tempos and beats that are not
+// numbers, and offsets of both signs. The negative sign has a check of its
+// own rather than sharing the property below, because it is handled
+// differently on purpose: see RecordAlign::passes.
 //
 // The property, in one sentence: capture frame f ends up at the beat the
 // transport was at when f arrived, less the offset. Everything else here is a
@@ -360,6 +362,27 @@ static void offsetIsTheSumOfItsParts()
     f.sampleRate = -48000.0;
     checkEqual (RecordAlign::captureOffsetSamples (f), 504,
                 "a negative sample rate turned the trim around");
+
+    // A driver that answers for one direction and goes quiet about the other
+    // is not a driver with no latency on the quiet side, and no round trip can
+    // be shorter than one buffer in and one out whatever is claimed.
+    f.trimMs        = 0.0;
+    f.engineLatency = 0;
+    f.inputLatency  = 240;
+    f.outputLatency = 0;
+    f.bufferSize    = 480;
+    checkEqual (RecordAlign::captureOffsetSamples (f), 960,
+                "a one sided report was believed on the side it went quiet about");
+
+    // And a report above that floor is used as reported rather than raised.
+    f.inputLatency  = 2000;
+    f.outputLatency = 2000;
+    checkEqual (RecordAlign::captureOffsetSamples (f), 4000,
+                "a round trip above the floor was dragged down or up to it");
+
+    f.inputLatency  = 240;
+    f.outputLatency = 264;
+    f.bufferSize    = 0;
 
     // Rounded rather than truncated, so a trim smaller than one sample still
     // moves by one rather than by nothing.

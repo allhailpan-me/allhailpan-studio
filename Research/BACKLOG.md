@@ -24,30 +24,44 @@ guitar and vocals through a UMC1820:
 
 ### What was chosen, and why
 
-**A take is recorded late by the full round trip, and nothing puts it back.**
+**A take does not land where it was played, and what put part of it back was
+in the wrong place and wrong in three ways.**
 
-`Recorder::push` stamps a capture with `beatAtBlockStart` and nothing else.
-There is no record offset anywhere in the engine. So every take lands later on
-the timeline than it was played, by the device's input latency plus its output
-latency plus whatever the project's plugin compensation adds.
+First pass at the diagnosis, recorded here because it was wrong and the
+correction is the useful part: the engine was searched for a record offset,
+none was found, and the conclusion drawn was that there had never been one.
+There had. `MainComponent::finishAudioRecording` read past the head of every
+pass by `engine.getRoundTripLatencySamples()` and set the clip's offset to it.
+The audit found it, after the first version of this change had been written
+and would have applied the correction twice, putting every take early by a
+whole round trip. **The lesson for later nights: grep the consumer, not only
+the producer.** `Recorder::Take` is produced in the engine and consumed in the
+window, and half the behaviour lived at the far end.
 
-Three things made this the night's work:
+What was actually wrong, once that was straight:
 
-1. **It is silent.** Nothing errors, nothing crackles. The take simply sits a
-   few milliseconds behind the part it was played against, and the player
-   assumes it was their timing. At a 480 sample buffer on plain Windows Audio
-   it is twenty milliseconds or more, which is a late guitar on every single
-   overdub.
-2. **A comment claimed it was already handled.** `mixMonitorInput` says
-   "the recorder already lines the take itself up with the arrangement", and
-   `CLAUDE.md` repeats it: "Aligning the take with the arrangement is handled
-   separately, by the recorder." Neither was true. That is precisely the shape
-   of fault `CLAUDE.md` warns about in the latency graph: two real bugs there
-   "had a comment above them claiming the opposite of what the code did".
-3. **It is standard everywhere.** Pro Tools has a record offset, Cubase has
-   "Adjust for Record Latency", Logic has a recording delay, Reaper has driver
-   reported latency plus a manual offset per direction, and Ardour does it from
-   its measured systemic latency.
+1. **The studio's own compensation was left out.** The offset used only the
+   device's reported round trip. Put a lookahead limiter on the master and
+   every take lands late again by its whole lookahead, because what a player
+   hears is the mix after that delay. Nothing says so.
+2. **A loop recording lost audio.** The head of each pass was read past, but
+   the split points stayed where the transport wrapped, so the last
+   milliseconds of each performance were handed to the next pass and then
+   trimmed off its head. The last note before the loop came round went in the
+   bin.
+3. **It was clamped to half a pass**, so a short take was quietly half
+   corrected rather than corrected or refused.
+4. **It had no test**, because it was in the window. The three above are each
+   exactly the kind of silent arithmetic `CLAUDE.md` says to keep out of
+   there.
+
+And the thing it has no answer for at all: **a driver that reports nothing.**
+JUCE's ASIO backend zeroes both figures when the driver's getLatencies call
+fails, so the old offset was zero on exactly that hardware, and there was no
+way for anybody to correct it. Every other studio offers one: Pro Tools has a
+record offset, Cubase has "Adjust for Record Latency", Logic a recording
+delay, Reaper a manual offset per direction, and Ardour its measured systemic
+latency.
 
 ### Where the behaviour came from
 
@@ -86,13 +100,18 @@ recording produces. `Recorder` keeps only the buffer copying.
 
 ### Deliberately left for later
 
-- **MIDI record alignment.** The same fault exists on the MIDI tap:
-  `midiRecordStart` and every event beat are stamped straight from the
-  transport. The offset is different and smaller: a MIDI note never passes
-  through the input converter, so it is the playback latency plus the output
-  latency and no input latency. Ardour does exactly this, setting
-  `_accumulated_capture_offset = _playback_offset` on the MIDI path. Not done
-  tonight to keep one change to one claim.
+- **MIDI record alignment.** The MIDI tap stamps `midiRecordStart` and every
+  event beat straight from the transport, with no offset at all, and never
+  had one. The figure is different and smaller than the audio one: a MIDI
+  note never passes through the input converter, so it is the studio's own
+  compensation plus the output latency and no input latency. Ardour does
+  exactly this, setting `_accumulated_capture_offset = _playback_offset` on
+  its MIDI path. Not done tonight, to keep one change to one claim, but note
+  the consequence: recording an instrument's audio and its notes in the same
+  take now leaves the two halves out of line by the compensation plus the
+  output latency, where before this change it was out of line by the input
+  latency instead. Both are nothing until a lookahead plugin is loaded, and
+  both are wrong. This is the next thing to do here.
 - **The last few milliseconds of a take.** Compensation is applied by starting
   the kept audio later in the capture, which means the tail now ends that much
   earlier, because the engine stops pushing the moment the transport stops.

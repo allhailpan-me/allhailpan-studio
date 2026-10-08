@@ -404,7 +404,6 @@ static void nothingAFileCanHoldBreaksAnything()
 }
 
 //==============================================================================
-//==============================================================================
 /** The correction has to default to nothing.
 
     The studio is meant to be right from the figures the driver reports, and a

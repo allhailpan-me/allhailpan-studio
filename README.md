@@ -145,7 +145,8 @@ To give each drum its own mixer strip, use **Route outs...** in the channel bar 
 - **Count-in:** the box next to the mode counts you in with the metronome for 1 or 2 bars before recording starts. The song stays silent during the count, the clock counts down in red, and recording begins exactly on the start marker. It's remembered between sessions.
 - Press **Rec** (**Ctrl+R**). It records onto the armed track, or the first empty one.
 - MIDI recording captures the notes you play **and every knob you grab in the plugin's window**. Only knobs you actually move are recorded: plugins that animate their own controls (Synplant, for one) would otherwise fill the clip with noise. Some plugins don't report knob grabs at all, and the status bar says so after recording. The result is a MIDI clip; double-click it to open the piano roll.
-- Audio takes are saved as 24-bit WAV in `Documents/ALLHAILPAN Studio/Recordings`, lined up for your interface's latency.
+- Audio takes are saved as 24-bit WAV in `Documents/ALLHAILPAN Studio/Recordings`.
+- **A take lands where you played it.** What you play arrives back at the studio later than your hands did, by the trip out through your interface and back in again plus anything the mixer is holding back for a lookahead plugin, so that much is taken off the front of every take. Preferences > Audio prints what is being applied, and has a correction for a driver that reports its own latency wrongly.
 - **Recording over a loop range keeps every pass.** Recording starts at the loop, playback repeats over it while you record, and each time round is kept as its own take rather than recording over the one before. The passes arrive as one **take folder** on the track: one clip holding several alternatives. Each pass still gets its own WAV in `Recordings`. Recording over the same loop again adds to the folder already there.
 
 ### Comping
@@ -263,7 +264,7 @@ Two kinds, for the two different things automation is asked to do.
 **Ctrl+,** or *File > Preferences*, in three tabs:
 
 - **General:** how often the autosave runs, how loud the metronome is, and the tempo a new project starts at. Each applies as you change it, so you can set the click level while it's running. There's a button to open the folder your settings, plugin list and autosave live in.
-- **Audio:** the device, sample rate and buffer size, with the monitoring round trip printed in milliseconds underneath and a note on what to change if it's too high.
+- **Audio:** the device, sample rate and buffer size, with the monitoring round trip printed in milliseconds underneath and a note on what to change if it's too high. Underneath that, how much is being taken off the front of a recorded take to line it up with the arrangement, and a correction to it for a driver that reports its latency wrongly or not at all.
 - **Plugins:** scanning for VST3 and the other formats your platform supports (*Options > Scan for new or updated VST3 plug-ins*).
 
 The **Audio** and **Plugins** buttons in the toolbar open the same window on those tabs, since picking a device and scanning for plugins are what a fresh install needs. Monitoring, the record mode and the count-in stay on the toolbar: they're decisions you make between takes, not settings you go looking for.

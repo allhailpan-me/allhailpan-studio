@@ -365,14 +365,7 @@ void AudioEngine::tightenBufferSize()
         deviceManager.setAudioDeviceSetup (previous, true);
 }
 
-int AudioEngine::getRoundTripLatencySamples()
-{
-    if (auto* d = deviceManager.getCurrentAudioDevice())
-        return d->getInputLatencyInSamples() + d->getOutputLatencyInSamples();
-    return 0;
-}
-
-RecordAlign::Figures AudioEngine::getRecordFigures()
+RecordAlign::Figures AudioEngine::getRecordFigures() const
 {
     RecordAlign::Figures f;
     f.engineLatency = totalLatency.load();
@@ -392,7 +385,7 @@ RecordAlign::Figures AudioEngine::getRecordFigures()
     return f;
 }
 
-int AudioEngine::getRecordOffsetSamples()
+int AudioEngine::getRecordOffsetSamples() const
 {
     return RecordAlign::captureOffsetSamples (getRecordFigures());
 }
@@ -1306,6 +1299,15 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     // ---- MIDI recording tap ----
+    // Deliberately not aligned, and worth saying so because the audio tap
+    // above is. A MIDI note never passes through the input converter, so its
+    // offset is not the same figure: it is the studio's own compensation plus
+    // the output latency and no input latency, which is what Ardour uses on
+    // its MIDI path. Left for its own change rather than guessed at here. The
+    // consequence to know about is that a take recording an instrument's
+    // audio and its notes at once comes back with the two halves out of line
+    // by that much, which is nothing at all until a lookahead plugin is
+    // loaded. See Research/BACKLOG.md.
     if (midiRecording.load() && sequencing && n > 0)
     {
         if (midiRecordStart.load() < 0.0)
@@ -2103,7 +2105,8 @@ void AudioEngine::processInsert (int index, int numSamples)
     up with each other; on a monitor path it would only add latency the player
     feels directly. Lining the take itself up with the arrangement is a
     separate job, done once per take at startAudioRecording with the figure
-    RecordAlign.h works out, and it was claimed here long before it was true.
+    RecordAlign.h works out. It used to be done in the window instead, which
+    is why that header is worth reading before changing anything here.
 
     The level ramps rather than switching, because changing input or turning
     monitoring on or off mid-performance would otherwise click, and a click

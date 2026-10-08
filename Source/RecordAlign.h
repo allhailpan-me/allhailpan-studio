@@ -10,15 +10,31 @@
     THE FAULT THIS EXISTS TO FIX
 
     A player hears the arrangement out of the speakers, plays along with it,
-    and their playing arrives back at the studio later than they played it. The
-    studio used to write the take down at the transport position of the block
-    the audio arrived in, which is not where it was played: it is where it was
-    played plus the whole way round the loop through both converters and
-    through whatever the mixer is holding back for a lookahead plugin. So every
-    overdub landed late, by five milliseconds on a good interface and by
-    twenty or more on plain Windows Audio with its 480 sample buffer.
+    and their playing arrives back at the studio later than they played it: the
+    whole way round through both converters, and behind whatever the mixer is
+    holding back for a lookahead plugin. A capture written down at the
+    transport position of the block it arrived in is therefore that much later
+    than the player's hands.
 
-    It is the worst kind of wrong, which is the kind that does not announce
+    Some of this was already being put back, but in the window rather than in
+    the engine: MainComponent's finishAudioRecording read past the head of each
+    pass by the device's reported round trip. Right idea, wrong place, and
+    wrong in four ways.
+
+      - It left out the studio's own compensation. Put a lookahead limiter on
+        the master and every take went back to landing late by its whole
+        lookahead, because what the player hears is the mix after that delay.
+      - It was clamped to half the length of a pass, so a short take was
+        quietly half corrected rather than corrected or refused.
+      - In a loop recording it threw audio away. The head of each pass was read
+        past, but the pass boundaries were left where the transport wrapped, so
+        the last few milliseconds of each performance were assigned to the next
+        pass and then trimmed off its head. The player's last note before the
+        loop came round went in the bin.
+      - It sat in the window with no test over it, which is how the first three
+        survived.
+
+    All of which is the worst kind of wrong, the kind that does not announce
     itself. Nothing errors, nothing crackles, no meter moves. The guitar is
     simply behind the drums, and since nobody else is going to take the blame
     for that, the player does.
@@ -148,8 +164,19 @@ namespace RecordAlign
     */
     inline int captureOffsetSamples (const Figures& f) noexcept
     {
-        const int roundTrip = AudioDefaults::roundTripSamples (f.inputLatency, f.outputLatency,
-                                                               f.bufferSize);
+        // Two buffers is the floor, applied here even when the driver did say
+        // something. A driver that answers for one direction and not the
+        // other, which is a real shape of answer, would otherwise be believed
+        // to be instant on the side it went quiet about, and the studio cannot
+        // physically have a round trip below one period in and one out. The
+        // same floor is deliberately not pushed back into the driver search's
+        // own ranking: that would change which device a first run picks, on
+        // hardware that cannot be tried from here.
+        const int roundTrip = std::max (AudioDefaults::roundTripSamples (f.inputLatency,
+                                                                         f.outputLatency,
+                                                                         f.bufferSize),
+                                        2 * std::clamp (f.bufferSize, 0,
+                                                        AudioDefaults::maxLatencySamples));
 
         const int engine = std::clamp (f.engineLatency, 0, AudioDefaults::maxLatencySamples);
 
@@ -181,6 +208,14 @@ namespace RecordAlign
         could produce. Tests/RecordAlignTest.cpp asserts the one line directly
         rather than any of the steps.
 
+        That line is stated for a positive offset, which is every offset a
+        working studio produces. A negative one, which needs a trim larger than
+        the whole round trip, is treated differently on purpose: the take moves
+        later as a whole rather than being re-cut. Taken literally the line
+        would send the audio just before a loop wrap forward past the loop end
+        and into the next pass, which is arithmetic winning an argument with
+        music. The test asserts that behaviour separately.
+
         A pass with no audio in it is dropped rather than returned empty, which
         is what happens when the transport wraps twice inside one block: a loop
         shorter than the buffer size does that.
@@ -206,8 +241,8 @@ namespace RecordAlign
         // because they are applied to different things. Dropping frames moves
         // audio earlier against the timeline and is how the ordinary positive
         // case is served; there is no way to drop frames backwards, so the
-        // other direction moves every beat stamp later instead. Exactly one of
-        // these is ever non-zero.
+        // other direction moves every beat stamp later instead. Never both at
+        // once, and neither of them when the offset is zero.
         const int    frameShift = std::max (0, offsetSamples);
         const double beatShift  = (double) (frameShift - offsetSamples) * beatsPerSample;
 

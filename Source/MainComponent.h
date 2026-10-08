@@ -151,7 +151,7 @@ private:
     /** Turns one source's passes into clips on one playlist track. Called
         once per armed insert, so several inputs recorded at once end up as
         several tracks rather than a heap on one. */
-    void finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface,
+    void finishAudioRecording (std::vector<Recorder::Take> passes,
                                int track, const juce::String& sourceName);
 
     // channels, instruments, effects

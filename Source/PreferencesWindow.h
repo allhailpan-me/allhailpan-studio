@@ -324,11 +324,12 @@ public:
         tabs.setOutline (0);
         tabs.setTabBarDepth (28);
 
-        // Copied rather than moved, because both panels apply every setting
-        // through the same applyPreferences call: one path from a stored
-        // setting to its effect cannot drift from another.
         auto& settings = pluginManager.settings();
 
+        // The actions are copied into both panels rather than moved into one,
+        // because both apply every setting through the same applyPreferences
+        // call: one path from a stored setting to its effect cannot drift
+        // from another.
         tabs.addTab ("General", Ahp::panel,
                      new GeneralPreferencesPanel (settings, actions), true);
 
@@ -360,7 +361,10 @@ public:
                                                     &pluginManager.settings(), true),
                      true);
 
-        setSize (820, 620);
+        // Taller than it was: the audio tab gained a line of readout and a
+        // correction, and the device chooser is the thing that must not be
+        // squeezed, since it is the one control in here somebody has to use.
+        setSize (820, 680);
     }
 
     void setTab (Tab t) { tabs.setCurrentTabIndex ((int) t); }
