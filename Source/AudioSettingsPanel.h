@@ -80,7 +80,10 @@ public:
                                "recorded takes earlier.\n"
                                "Record a click through a cable from an output back into an input, "
                                "look at where the recorded clicks sit against the metronome, and "
-                               "dial this until they line up. Takes already recorded do not move.");
+                               "dial this until they line up.\n"
+                               "Takes already recorded do not move, but nothing is lost either: "
+                               "everything captured is in the file, so a take's left edge can "
+                               "always be dragged back over it.");
         trimSlider.setValue (Prefs::number (initialTrimMs, Prefs::recordTrimMs),
                              juce::dontSendNotification);
         trimSlider.onValueChange = [this]
@@ -272,8 +275,8 @@ private:
                 text << "pushed " << ms << " ms later (" << -offset
                      << " samples), which only the correction below asks for.";
             else
-                text << "left where they arrive, because nothing here reports any latency "
-                        "to take off them.";
+                text << "left exactly where they arrive, which takes a correction below "
+                        "that cancels the latency being reported.";
         }
 
         readout.setText (text, juce::dontSendNotification);

@@ -31,6 +31,14 @@ public:
     {
         juce::AudioBuffer<float> audio;
         double startBeat = 0.0;
+
+        // How much of `audio` sits in front of startBeat: the player's
+        // response to something before the record point. Kept rather than
+        // dropped so a take has something to drag its left edge back into,
+        // and so a badly set record offset correction is recoverable. See
+        // RecordAlign.h.
+        int    preRollFrames = 0;
+
         int    droppedFrames = 0;
     };
 
@@ -157,6 +165,7 @@ public:
             take.audio.copyFrom (0, 0, takeL.data() + pass.firstFrame, pass.frames());
             take.audio.copyFrom (1, 0, takeR.data() + pass.firstFrame, pass.frames());
             take.startBeat     = pass.startBeat;
+            take.preRollFrames = pass.preRollFrames;
             take.droppedFrames = droppedFrames;
             takes.push_back (std::move (take));
         }

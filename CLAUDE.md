@@ -324,13 +324,14 @@ once per take in `startAudioRecording` from the figure `RecordAlign.h` works
 out.
 
 It used to be done in `MainComponent::finishAudioRecording` instead, by
-reading past the head of each pass by the device's reported round trip. That
-left out the studio's own compensation, so a lookahead plugin on the master
-put every take late again; it was clamped to half a pass; and it left the loop
-split points where the transport wrapped, so the last few milliseconds of
-each pass were trimmed off the front of the next one and lost. Worth knowing
-because all three survived for releases: the figure was in the window, where
-nothing tests it.
+reading past the head of each pass by the device's reported round trip. Three
+things were wrong with that: it left out the studio's own compensation, so a
+lookahead plugin on the master put every take late again; it was clamped to
+half a pass, so a short one was half corrected; and it left the loop split
+points where the transport wrapped, so the last milliseconds of every pass
+but the final one were handed to the next pass, skipped at its head, and
+lost. All three survived for releases, and the fourth thing wrong with it is
+why: the figure was in the window, where nothing tests it.
 
 Both halves matter. A send is a copy of the insert taken after its fader, so on
 a monitored insert it carries the player's own input, and compensating the copy

@@ -28,9 +28,9 @@
         quietly half corrected rather than corrected or refused.
       - In a loop recording it threw audio away. The head of each pass was read
         past, but the pass boundaries were left where the transport wrapped, so
-        the last few milliseconds of each performance were assigned to the next
-        pass and then trimmed off its head. The player's last note before the
-        loop came round went in the bin.
+        the last few milliseconds of every pass but the final one were handed
+        to the next pass and then skipped at its head. The player's last note
+        before the loop came round went in the bin.
       - It sat in the window with no test over it, which is how the first three
         survived.
 
@@ -76,18 +76,26 @@
     it is Ardour's CaptureTime case and gets no offset at all.
 
     Note the form of Ardour's fix, because it is the one adopted here. It does
-    not move the clip earlier. It starts keeping the capture that many samples
-    later in the incoming stream and writes it down at the transport position,
+    not move the clip earlier. It treats the capture as beginning that many
+    samples further in and writes that point down at the transport position,
     which is the same alignment arrived at from the other end and has two
     advantages: no take ever needs a negative start, and every pass of a loop
     recording comes out stamped with the beat it was actually recorded at, so
     the passes stay aligned with each other inside a take folder.
 
-    What it costs is the first few milliseconds of the capture, which is the
-    player's response to something before the record point and therefore
-    belongs before the record point. It also means the take now ends that much
-    earlier, because the studio stops capturing when the transport stops.
-    Ardour buys that back by keeping the capture running past the stop point
+    The audio in front of that point is kept rather than thrown away. It is
+    the player's response to something before the record point, so it is not
+    heard, but it is written to the file and reported as the pass's pre-roll,
+    which is what lets the left edge of a take be dragged back into it and
+    what makes a badly set trim recoverable instead of permanent. Only the
+    first pass of a loop recording has any: for every pass after it, the audio
+    in front of its start is the tail of the pass before, and it is already in
+    that pass's own file rather than duplicated into this one.
+
+    What this does cost is the other end. The take now ends a few milliseconds
+    earlier than it used to, because the studio stops capturing the moment the
+    transport stops and the last of the performance is still in flight. Ardour
+    buys that back by keeping the capture running past the stop point
     (_last_recordable_sample is moved by the same amount); here it is left
     alone, because it is five milliseconds of ring-out a second after the last
     note.
@@ -119,15 +127,40 @@ namespace RecordAlign
         double beat  = 0.0;
     };
 
-    /** One pass of the capture that is kept: the half open range of capture
-        frames it covers, and the beat its first frame is written down at. */
+    /** One pass of the capture that is kept.
+
+        `firstFrame` to `lastFrame` is the half open range of capture frames
+        the pass holds, which is what goes into its file. `preRollFrames` is
+        how many frames at the front of that belong before the pass's own
+        start, so the audio the pass is heard from begins at
+        `firstFrame + preRollFrames` and that is the frame written down at
+        `startBeat`.
+
+        The two are kept apart rather than collapsed into one number because
+        they answer different questions. Dropping the head would align the
+        take just as well, and that is what the first version of this did, but
+        it also means the audio is not written down anywhere: a trim set wrong
+        would then take the attack off every take recorded under it with no way
+        back. Keeping it in the file and starting the clip after it is what
+        every other studio does, and it leaves the left edge of a take
+        something to be dragged back into.
+    */
     struct Pass
     {
-        int    firstFrame = 0;
-        int    lastFrame  = 0;      // exclusive
-        double startBeat  = 0.0;
+        int    firstFrame    = 0;
+        int    lastFrame     = 0;      // exclusive
+        int    preRollFrames = 0;      // of those, how many sit before startBeat
+        double startBeat     = 0.0;
 
         int frames() const noexcept { return lastFrame - firstFrame; }
+
+        /** The first frame that is heard, which is the one placed at
+            startBeat. */
+        int audibleFrom() const noexcept { return firstFrame + preRollFrames; }
+
+        /** How much of the pass is heard. Zero means the whole of it belongs
+            before its own start, which is a pass with nothing in it. */
+        int audibleFrames() const noexcept { return lastFrame - audibleFrom(); }
     };
 
     /** Everything the offset is made of. All sample counts, except the trim,
@@ -165,13 +198,22 @@ namespace RecordAlign
     inline int captureOffsetSamples (const Figures& f) noexcept
     {
         // Two buffers is the floor, applied here even when the driver did say
-        // something. A driver that answers for one direction and not the
-        // other, which is a real shape of answer, would otherwise be believed
-        // to be instant on the side it went quiet about, and the studio cannot
-        // physically have a round trip below one period in and one out. The
-        // same floor is deliberately not pushed back into the driver search's
-        // own ranking: that would change which device a first run picks, on
-        // hardware that cannot be tried from here.
+        // something. A driver that answers for one direction and not the other
+        // is a real shape of answer, and it would otherwise be believed to be
+        // instant on the side it went quiet about.
+        //
+        // The floor is empirical rather than a law of physics: every backend
+        // JUCE 9.0.3 ships adds at least one period per direction whenever
+        // that direction's device exists. WASAPI returns the driver's figure
+        // plus the buffer size, CoreAudio its latency plus a safety offset
+        // plus the buffer, DirectSound one and a half buffers each way, ALSA
+        // frames times periods minus one, and JACK the port's own total. Only
+        // ASIO passes the driver's answer straight through, and that is the
+        // one that zeroes both figures when the driver will not answer.
+        //
+        // Deliberately not pushed back into the driver search's own ranking:
+        // that would change which device a first run picks, on hardware that
+        // cannot be tried from here.
         const int roundTrip = std::max (AudioDefaults::roundTripSamples (f.inputLatency,
                                                                          f.outputLatency,
                                                                          f.bufferSize),
@@ -268,41 +310,57 @@ namespace RecordAlign
             return (int) std::clamp (moved, (long long) notBefore, (long long) totalFrames);
         };
 
-        int    from     = std::min (frameShift, totalFrames);
+        // The first pass keeps the audio in front of its own start as
+        // pre-roll. Every pass after it does not: what is in front of its
+        // start is the previous pass's tail, which is already in the previous
+        // pass's own file.
+        int    from     = 0;
+        int    preRoll  = std::min (frameShift, totalFrames);
         double fromBeat = stamp (rawStartBeat);
 
-        auto emit = [&result] (int first, int last, double beat)
+        auto emit = [&result] (int first, int last, int pre, double beat)
         {
-            if (last > first)
-                result.push_back ({ first, last, beat });
+            // Something audible in it, rather than merely something in it. A
+            // pass that is all pre-roll is a pass that belongs entirely before
+            // its own start, which is what a stab at the record button
+            // shorter than the round trip produces.
+            if (last - first > pre)
+                result.push_back ({ first, last, pre, beat });
         };
 
         for (int i = 0; i < numWraps; ++i)
         {
-            const int at = shiftFrame (wraps[i].frame, from);
-            emit (from, at, fromBeat);
+            // Never before this pass's own audible start, so the boundaries
+            // stay in order and no pass is handed a negative length however
+            // the wrap list arrived.
+            const int at = shiftFrame (wraps[i].frame, from + preRoll);
+            emit (from, at, preRoll, fromBeat);
             from     = at;
+            preRoll  = 0;
             fromBeat = stamp (wraps[i].beat);
         }
 
-        emit (from, totalFrames, fromBeat);
+        emit (from, totalFrames, preRoll, fromBeat);
 
         return result;
     }
 
-    /** Where a frame of the capture ended up, or a negative number when it was
-        not kept at all.
+    /** Where a frame of the capture ended up, or `ifMissing` when it was not
+        kept at all. A frame inside a pass's pre-roll answers with where it
+        would have gone, which is before that pass's own start: it is in the
+        file and the clip's left edge can be dragged back over it.
 
         Here rather than in the test so that the property being asserted is
         written down next to the code that has to produce it. Linear, because
         it is only ever walked over by a test.
     */
-    inline double placementOf (const std::vector<Pass>& p, int frame, double beatsPerSample) noexcept
+    inline double placementOf (const std::vector<Pass>& p, int frame, double beatsPerSample,
+                               double ifMissing = -1.0e9) noexcept
     {
         for (const auto& pass : p)
             if (frame >= pass.firstFrame && frame < pass.lastFrame)
-                return pass.startBeat + (double) (frame - pass.firstFrame) * beatsPerSample;
+                return pass.startBeat + (double) (frame - pass.audibleFrom()) * beatsPerSample;
 
-        return -1.0;
+        return ifMissing;
     }
 }

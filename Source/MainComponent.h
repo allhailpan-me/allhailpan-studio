@@ -210,6 +210,10 @@ private:
     PreferencesActions preferenceActions();
     void setStatus (const juce::String&);
 
+    /** Adds to whatever the status bar is already saying, when that was set a
+        moment ago as part of the same action. */
+    void appendStatus (const juce::String&);
+
     void updateTypingLabel();
     void checkModulationLearn();
     void paintStatus (juce::Graphics&, juce::Rectangle<int>);

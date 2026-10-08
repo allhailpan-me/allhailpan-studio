@@ -100,18 +100,32 @@ recording produces. `Recorder` keeps only the buffer copying.
 
 ### Deliberately left for later
 
-- **MIDI record alignment.** The MIDI tap stamps `midiRecordStart` and every
-  event beat straight from the transport, with no offset at all, and never
-  had one. The figure is different and smaller than the audio one: a MIDI
-  note never passes through the input converter, so it is the studio's own
-  compensation plus the output latency and no input latency. Ardour does
-  exactly this, setting `_accumulated_capture_offset = _playback_offset` on
-  its MIDI path. Not done tonight, to keep one change to one claim, but note
-  the consequence: recording an instrument's audio and its notes in the same
-  take now leaves the two halves out of line by the compensation plus the
-  output latency, where before this change it was out of line by the input
-  latency instead. Both are nothing until a lookahead plugin is loaded, and
-  both are wrong. This is the next thing to do here.
+- **MIDI record alignment, and the instrument tap with it.** This is the next
+  thing to do here. The MIDI tap stamps `midiRecordStart` and every event beat
+  straight from the transport, with no offset, and never had one. The figure
+  is different and smaller than the audio one: a MIDI note never passes
+  through the input converter, so it is the studio's own compensation plus the
+  output latency and no input latency. Ardour does exactly that, setting
+  `_accumulated_capture_offset = _playback_offset` on its MIDI path.
+
+  Two consequences, derived rather than guessed:
+
+  - **Rec: Audio and MIDI** captures a socket and a keyboard into one take.
+    The audio half is now exact and the MIDI half is late by
+    `engine + output`, so they sit `engine + output` apart. Before this
+    change the audio half was late by `engine` and the MIDI half by
+    `engine + output`, so they sat `output` apart. The gap grew, and it is
+    never zero, because no device reports an output latency of zero.
+  - **The instrument recorder** has the same open question and gets no offset
+    for a reason that is a choice rather than a fact. It taps a channel's
+    output inside the mixer, so there is nothing to put back on the converter
+    side, but a player using the keyboard live is still following backing they
+    hear `engine + output` late, so their performance lands that much late.
+    When what is being bounced is a pattern off the arrangement there is
+    nothing to correct and an offset would drag the bounce off the grid. The
+    mode cannot tell a live performance from a bounce, and a bounce off the
+    grid is the worse failure, so zero stands. Solving MIDI properly probably
+    means knowing which of the two is happening, which is the real work here.
 - **The last few milliseconds of a take.** Compensation is applied by starting
   the kept audio later in the capture, which means the tail now ends that much
   earlier, because the engine stops pushing the moment the transport stops.

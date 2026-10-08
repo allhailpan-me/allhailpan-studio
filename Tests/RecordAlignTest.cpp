@@ -98,9 +98,9 @@ static void checkPassInvariants (const std::vector<RecordAlign::Pass>& passes,
                                  int totalFrames, int offsetSamples,
                                  const std::string& label)
 {
-    const int kept = std::max (0, totalFrames - std::min (std::max (0, offsetSamples), totalFrames));
+    const int dropped = std::min (std::max (0, offsetSamples), totalFrames);
 
-    if (kept <= 0)
+    if (totalFrames - dropped <= 0)
     {
         check (passes.empty(), label + ": a capture shorter than the offset should keep nothing");
         return;
@@ -110,12 +110,6 @@ static void checkPassInvariants (const std::vector<RecordAlign::Pass>& passes,
     if (passes.empty())
         return;
 
-    // Contiguous and in order, covering the kept range exactly once. Anything
-    // else means audio played once is heard twice, or a hole in the middle of
-    // a performance.
-    checkEqual (passes.front().firstFrame,
-                std::min (std::max (0, offsetSamples), totalFrames),
-                label + ": the first pass does not start where the offset leaves off");
     checkEqual (passes.back().lastFrame, totalFrames,
                 label + ": the last pass does not run to the end of the capture");
 
@@ -125,19 +119,43 @@ static void checkPassInvariants (const std::vector<RecordAlign::Pass>& passes,
     {
         const auto& p = passes[i];
 
-        check (p.lastFrame > p.firstFrame, label + ": an empty pass was returned rather than dropped");
+        check (p.audibleFrames() > 0, label + ": a pass with nothing audible in it was returned");
         check (p.firstFrame >= 0 && p.lastFrame <= totalFrames,
                label + ": a pass reads outside the capture");
+        check (p.preRollFrames >= 0 && p.preRollFrames < p.frames(),
+               label + ": a pass's pre-roll is not inside the pass");
         check (p.startBeat >= 0.0, label + ": a pass was placed before the start of the arrangement");
 
-        if (i > 0)
+        if (i == 0)
+        {
+            // Only the first pass may carry pre-roll, and only from the very
+            // start of the capture. For every pass after it, the audio in
+            // front of its start is the previous pass's tail and is already
+            // in the previous pass's own file: duplicating it would mean one
+            // performance in two files.
+            if (p.preRollFrames > 0)
+                checkEqual (p.firstFrame, 0,
+                            label + ": pre-roll was kept somewhere other than the capture's start");
+        }
+        else
+        {
             checkEqual (p.firstFrame, passes[i - 1].lastFrame,
                         label + ": a gap or an overlap between two passes");
+            checkEqual (p.preRollFrames, 0,
+                        label + ": a pass after the first was given pre-roll of its own");
+        }
 
-        covered += p.frames();
+        covered += p.audibleFrames();
     }
 
-    checkEqual (covered, kept, label + ": the passes do not account for every kept frame");
+    // Every frame from the first audible one to the end of the capture is
+    // heard exactly once. Anything else means audio played once is heard
+    // twice, or a hole in the middle of a performance.
+    checkEqual (covered, totalFrames - passes.front().audibleFrom(),
+                label + ": the passes do not account for every audible frame");
+
+    check (passes.front().audibleFrom() <= dropped,
+           label + ": more was put in front of the first pass than the offset asked for");
 }
 
 // ---------------------------------------------------------------------------
@@ -216,9 +234,12 @@ static void alignmentHoldsEverywhere()
 
         for (const auto& p : passes)
         {
+            // Over the whole of the pass's file, pre-roll included: a frame in
+            // front of the pass's start has a place too, before that start,
+            // and that is what the clip's left edge can be dragged back over.
             for (int frame = p.firstFrame; frame < p.lastFrame; ++frame)
             {
-                const double placed = p.startBeat + (double) (frame - p.firstFrame) * r.bps;
+                const double placed = p.startBeat + (double) (frame - p.audibleFrom()) * r.bps;
                 const double wanted = rawBeatAtFrame (r.totalFrames, r.startBeat, r.wraps,
                                                       frame - offset, r.bps);
 
@@ -235,13 +256,17 @@ static void alignmentHoldsEverywhere()
 
             // And the helper in the header agrees with the arithmetic above,
             // since that is what the end to end check below leans on.
-            checkClose (RecordAlign::placementOf (passes, p.firstFrame, r.bps), p.startBeat,
-                        1.0e-12, "placementOf disagrees about a pass's own first frame");
+            checkClose (RecordAlign::placementOf (passes, p.audibleFrom(), r.bps), p.startBeat,
+                        1.0e-12, "placementOf disagrees about where a pass starts");
         }
 
+        // A sentinel rather than "negative", because a pre-roll frame has a
+        // genuinely negative place when the take starts near the top of the
+        // arrangement.
         for (const int outside : { -1, r.totalFrames, r.totalFrames + 1 })
-            check (RecordAlign::placementOf (passes, outside, r.bps) < 0.0,
-                   "placementOf claims to have placed a frame outside the capture");
+            checkEqual ((long long) RecordAlign::placementOf (passes, outside, r.bps, -1.0e9),
+                        (long long) -1.0e9,
+                        "placementOf claims to have placed a frame outside the capture");
     }
 }
 
@@ -283,6 +308,8 @@ static void aNegativeOffsetMovesTheWholeTakeLater()
         {
             checkEqual (moved[i].firstFrame, plain[i].firstFrame,
                         label + ": moving a take later dropped audio off the front");
+            checkEqual (moved[i].preRollFrames, 0,
+                        label + ": moving a take later invented pre-roll for it");
             checkEqual (moved[i].lastFrame, plain[i].lastFrame,
                         label + ": moving a take later shortened it");
             checkClose (moved[i].startBeat, plain[i].startBeat + shift,
@@ -350,6 +377,12 @@ static void offsetIsTheSumOfItsParts()
                 504 + (int) std::lround (RecordAlign::maxTrimMs * 48.0),
                 "a trim beyond the range was not clamped to it");
 
+    // A trim that is not a number. Note for anybody mutation testing this:
+    // removing the std::isfinite guard in captureOffsetSamples does not fail
+    // here on glibc, because std::lround of a NaN happens to return zero,
+    // which is the same answer the guard gives. The standard leaves that
+    // return value unspecified and this studio also ships MSVC and Apple
+    // libm builds, so the guard stays whatever the mutation score says.
     f.trimMs = std::nan ("");
     checkEqual (RecordAlign::captureOffsetSamples (f), 504,
                 "a trim that is not a number was not treated as no trim");
@@ -559,9 +592,55 @@ static void degenerateCaptures()
     {
         checkEqual (late.front().firstFrame, 0, "a negative offset dropped audio off the front");
         checkEqual (late.front().lastFrame, 1000, "a negative offset shortened the take");
+        checkEqual (late.front().preRollFrames, 0, "a negative offset invented pre-roll");
         checkClose (late.front().startBeat, 4.0 + 480.0 * bps, 1.0e-12,
                     "a negative offset did not move the take later");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The pre-roll is kept rather than dropped, which is what makes a badly set
+// correction recoverable instead of permanent.
+
+static void theHeadOfACaptureIsKeptRatherThanDropped()
+{
+    const double bps = 120.0 / 60.0 / 48000.0;
+
+    const auto one = RecordAlign::passes (10000, 8.0, nullptr, 0, 480, bps);
+    checkEqual ((long long) one.size(), 1, "an ordinary capture did not make one pass");
+    if (one.empty())
+        return;
+
+    checkEqual (one.front().firstFrame, 0,
+                "the head of the capture was dropped instead of kept as pre-roll");
+    checkEqual (one.front().preRollFrames, 480,
+                "the pre-roll is not the offset that was asked for");
+    checkEqual (one.front().frames(), 10000,
+                "the pass does not hold the whole of the capture");
+    checkEqual (one.front().audibleFrames(), 10000 - 480,
+                "the audible part of the pass is the wrong length");
+    checkClose (one.front().startBeat, 8.0, 1.0e-12,
+                "the pass is not written down at the beat recording began at");
+
+    // Three times round a loop. Only the first pass has pre-roll: for the
+    // others, the audio in front of their start is the previous pass's tail
+    // and is already in the previous pass's file.
+    const int loopFrames = 20000;
+    std::vector<RecordAlign::Wrap> wraps { { loopFrames, 8.0 }, { 2 * loopFrames, 8.0 } };
+    const auto looped = RecordAlign::passes (3 * loopFrames, 8.0, wraps.data(), 2, 480, bps);
+
+    checkEqual ((long long) looped.size(), 3, "three times round the loop did not make three passes");
+
+    for (size_t i = 0; i < looped.size(); ++i)
+        checkEqual (looped[i].preRollFrames, i == 0 ? 480 : 0,
+                    "the wrong pass of a loop recording carries the pre-roll");
+
+    // And the passes between them hold every frame of the capture once, so
+    // nothing captured is in two files and nothing is in none.
+    int total = 0;
+    for (const auto& p : looped)
+        total += p.frames();
+    checkEqual (total, 3 * loopFrames, "the passes do not hold the capture exactly once");
 }
 
 int main()
@@ -572,6 +651,7 @@ int main()
     aNegativeOffsetMovesTheWholeTakeLater();
     offsetIsTheSumOfItsParts();
     aNotePlayedOnTheBeatLandsOnTheBeat();
+    theHeadOfACaptureIsKeptRatherThanDropped();
     degenerateCaptures();
 
     if (failures == 0)

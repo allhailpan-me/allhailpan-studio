@@ -761,9 +761,9 @@ void MainComponent::finishRecording()
             // round trip has no audio in it once the offset is removed.
             // Saying so beats a record button that appears to do nothing.
             if (captured.empty())
-                setStatus ("Nothing to keep. That take was shorter than the latency being "
-                           "compensated for, so once the offset came off the front there was "
-                           "no audio left in it.");
+                appendStatus ("Nothing to keep: that take was shorter than the latency being "
+                              "compensated for, so there was no audio left in it once the "
+                              "offset came off the front.");
 
             for (auto& capture : captured)
             {
@@ -805,15 +805,16 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
 
     const double sampleRate = engine.getSampleRate();
 
-    // Nothing is trimmed off a pass here. It used to be: the head of every
-    // pass was read past by the interface's round trip, which is the right
-    // idea in the wrong place. It left out the studio's own compensation, so
-    // a lookahead plugin on the master pushed every take late again; it was
-    // clamped to half a pass, so a short one was quietly half corrected; in a
-    // loop recording it threw away the last of each pass instead of keeping
-    // it, because the split points were never moved with it; and sitting up
-    // here in the window it had no test over it at all. It is now the
-    // recorder's own offset, worked out in RecordAlign.h and tested there.
+    // How far into a pass its own start sits is the recorder's answer, not
+    // one worked out here. It used to be worked out here, from the
+    // interface's reported round trip, which is the right idea in the wrong
+    // place: it left out the studio's own compensation, so a lookahead plugin
+    // on the master pushed every take late again; it was clamped to half a
+    // pass, so a short one was quietly half corrected; in a loop recording it
+    // read past the head of each pass without moving the split points, so the
+    // last of every performance but the final one was handed to the next pass
+    // and skipped there, which threw it away; and sitting up here in the
+    // window it had no test over it at all. See RecordAlign.h.
 
     // Named after whatever it came from, which with several inputs at once is
     // the difference between four files called Take and four that say which
@@ -844,7 +845,15 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
         auto sample = cache.adopt (std::move (pass.audio), sampleRate, file,
                                    file.getFileNameWithoutExtension());
         const double duration = sample->durationSeconds();
-        if (duration <= 0.01)
+
+        // The pass's own start, which is after whatever of it was played
+        // before the record point. That audio stays in the file so the left
+        // edge has somewhere to be dragged back to.
+        const double head = sampleRate > 0.0
+                              ? std::min (std::max (0.0, (double) pass.preRollFrames / sampleRate), duration)
+                              : 0.0;
+
+        if (duration - head <= 0.01)
             continue;                      // a pass too short to be one
 
         if (folderStart < 0.0)
@@ -853,8 +862,8 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
         Take take;
         take.name   = "Take " + juce::String ((int) takes.size() + 1);
         take.sample = sample;
-        take.offset = 0.0;
-        take.length = duration;
+        take.offset = head;
+        take.length = duration - head;
 
         // Where this pass sits inside the folder. Loop recording puts every
         // pass at the same place, and this is zero for all of them; a pass
@@ -866,7 +875,16 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
     }
 
     if (takes.empty())
+    {
+        // Silent until now, and reachable: every pass can be shorter than the
+        // offset being taken off its front, which is what a stab at the
+        // record button produces. A record button that appears to do nothing
+        // is worse than one that says why.
+        appendStatus ("Nothing to keep from " + (sourceName.isNotEmpty() ? sourceName
+                                                                        : juce::String ("that take"))
+                        + ": it was shorter than the latency being compensated for.");
         return;
+    }
 
     juce::String msg;
 
@@ -1846,6 +1864,18 @@ void MainComponent::setStatus (const juce::String& message)
     statusMessage = message;
     statusTime = juce::Time::currentTimeMillis();
     repaint (statusBar);
+}
+
+void MainComponent::appendStatus (const juce::String& message)
+{
+    // Stopping a recording can have two things to report: what the MIDI half
+    // made and what the audio half did not. Replacing the first with the
+    // second loses the clip that was actually created, which is the half the
+    // producer has to go and look at.
+    const bool fresh = statusMessage.isEmpty()
+                         || juce::Time::currentTimeMillis() - statusTime > 200;
+
+    setStatus (fresh ? message : statusMessage + "  " + message);
 }
 
 // ---------------------------------------------------------------------------

@@ -563,12 +563,21 @@ void AudioEngine::startAudioRecording()
     // ones are started.
     if (recordSource.load() >= 0)
     {
-        // And no offset either. There is no round trip in front of a tap
-        // taken inside the mixer: the audio is already in the studio, at the
-        // playhead, so putting a round trip back would move a bounce off the
-        // grid by the length of one. This is Ardour's CaptureTime alignment
-        // rather than its ExistingMaterial one, which it picks the same way,
-        // by whether a track is fed from a physical input.
+        // And no offset either, which is Ardour's CaptureTime alignment
+        // rather than its ExistingMaterial one: it picks between them the
+        // same way, by whether a track is fed from a physical input, and this
+        // one is fed from inside the mixer.
+        //
+        // Nothing to put back on the converter side, since the audio never
+        // leaves the studio. What is arguable is the rest of it: when the
+        // notes being bounced are a pattern playing off the arrangement there
+        // is nothing to correct and an offset would drag the bounce off the
+        // grid, but when somebody is playing the keyboard into it live they
+        // are following backing they hear late, so their performance lands
+        // late by the same amount a MIDI recording does. The mode cannot tell
+        // those apart, and a bounce that drifts off the grid is the worse of
+        // the two, so this stays at zero. It is the same open problem as the
+        // MIDI tap below. See Research/BACKLOG.md.
         recorder.setCaptureOffset (0, bps);
         recorder.begin();
         return;
@@ -1300,14 +1309,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // ---- MIDI recording tap ----
     // Deliberately not aligned, and worth saying so because the audio tap
-    // above is. A MIDI note never passes through the input converter, so its
-    // offset is not the same figure: it is the studio's own compensation plus
-    // the output latency and no input latency, which is what Ardour uses on
-    // its MIDI path. Left for its own change rather than guessed at here. The
-    // consequence to know about is that a take recording an instrument's
-    // audio and its notes at once comes back with the two halves out of line
-    // by that much, which is nothing at all until a lookahead plugin is
-    // loaded. See Research/BACKLOG.md.
+    // above now is. A MIDI note never passes through the input converter, so
+    // its offset is a different and smaller figure: the studio's own
+    // compensation plus the output latency, with no input latency in it,
+    // which is what Ardour uses on its MIDI path. Left for its own change
+    // rather than guessed at here.
+    //
+    // The consequence to know about is Rec: Audio and MIDI, which captures a
+    // socket and a keyboard in one take. The audio half is now aligned and
+    // the MIDI half is not, so the two sit apart by the compensation plus the
+    // output latency, where before they sat apart by the output latency
+    // alone. Both are wrong and the gap is not zero on any device, because no
+    // device has an output latency of zero. Rec: Instrument sound and its
+    // notes is not affected: neither half of that one is offset, so the two
+    // agree with each other, and they are late against the arrangement
+    // together. See Research/BACKLOG.md.
     if (midiRecording.load() && sequencing && n > 0)
     {
         if (midiRecordStart.load() < 0.0)
