@@ -378,6 +378,47 @@ static void estimatingWhenTheDriverWillNotSay()
                 "an unknown sample rate should stay zero rather than divide by it");
 }
 
+static void roundTripInSamples()
+{
+    checkEqual (AudioDefaults::roundTripSamples (240, 264, 128), 504,
+                "a reported round trip is not passed through in samples");
+
+    // A reported zero means the driver did not say, so the floor any round
+    // trip can have stands in for it. See roundTripOrEstimate.
+    checkEqual (AudioDefaults::roundTripSamples (0, 0, 128), 256,
+                "a driver that reported nothing was taken at its word");
+
+    checkEqual (AudioDefaults::roundTripSamples (0, 0, 0), 0,
+                "with nothing reported and no buffer there is nothing to guess from");
+
+    // A driver reporting something negative is reporting nonsense, and the
+    // answer has to be the floor rather than a round trip below zero, which
+    // would move a recorded take later for no reason at all.
+    check (AudioDefaults::roundTripSamples (-480, 0, 128) >= 0,
+           "a negative report produced a negative round trip");
+    check (AudioDefaults::roundTripSamples (-480, -480, 0) >= 0,
+           "a negative report with no buffer produced a negative round trip");
+
+    // Nothing a driver can claim may overflow the addition, which is what the
+    // bound is for rather than any musical reason.
+    const int huge = AudioDefaults::roundTripSamples (2147483647, 2147483647, 2147483647);
+    check (huge > 0 && huge <= 2 * AudioDefaults::maxLatencySamples,
+           "an absurd report was not bounded");
+
+    // The milliseconds version is the same rule divided by the sample rate,
+    // so the two can never disagree about whether a driver said anything.
+    for (const int buffer : { 0, 64, 128, 480, 2048 })
+        for (const int in : { 0, 1, 240, 4800 })
+            for (const int out : { 0, 1, 264, 4800 })
+            {
+                const double ms = AudioDefaults::roundTripOrEstimate (in, out, buffer, 48000.0);
+                const double expected = 1000.0 * AudioDefaults::roundTripSamples (in, out, buffer)
+                                          / 48000.0;
+                check (std::abs (ms - expected) < 1.0e-9,
+                       "the two round trip figures disagree");
+            }
+}
+
 static void roundTrip()
 {
     checkEqual ((int) std::lround (AudioDefaults::roundTripMs (256, 256, 48000.0) * 100.0),
@@ -503,6 +544,7 @@ int main()
     aDifferentTarget();
     defaultTargetIsPlayable();
     roundTrip();
+    roundTripInSamples();
     estimatingWhenTheDriverWillNotSay();
     thresholds();
     randomised();

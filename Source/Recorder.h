@@ -1,4 +1,5 @@
 #pragma once
+#include "RecordAlign.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 #include <algorithm>
@@ -9,6 +10,13 @@
 // Captures input audio without ever blocking the audio thread.
 // The audio thread writes into a ring buffer; a background thread
 // moves that audio into growing memory.
+//
+// Where a take ends up on the timeline is not this file's decision. A capture
+// arrives later than it was played, by both converters and by whatever the
+// mixer is holding back, and putting that back is arithmetic that fails
+// silently, so it lives in RecordAlign.h with no JUCE around it and a test
+// over thousands of generated recordings. What is left here is the buffer
+// copying, which fails loudly.
 //
 // Recording round a loop produces several takes rather than one. Rather than
 // starting and stopping a recording at every wrap, which would mean a gap at
@@ -23,16 +31,23 @@ public:
     {
         juce::AudioBuffer<float> audio;
         double startBeat = 0.0;
+
+        // How much of `audio` sits in front of startBeat: the player's
+        // response to something before the record point. Kept rather than
+        // dropped so a take has something to drag its left edge back into,
+        // and so a badly set record offset correction is recoverable. See
+        // RecordAlign.h.
+        int    preRollFrames = 0;
+
         int    droppedFrames = 0;
     };
 
     /** A point at which the transport jumped back to the start of the loop:
-        how far into the capture it happened, and the beat it landed on. */
-    struct LoopWrap
-    {
-        int    frame = 0;
-        double beat  = 0.0;
-    };
+        how far into the capture it happened, and the beat it landed on.
+
+        RecordAlign's own type, so the list the audio thread fills can be
+        handed to the alignment without being copied into a second shape. */
+    using LoopWrap = RecordAlign::Wrap;
 
     // Far more passes than anyone comps from, and fixed so that the audio
     // thread never allocates to record one.
@@ -54,6 +69,21 @@ public:
     bool isActive() const noexcept { return active.load(); }
 
     // ---- message thread ----
+    /** How far ahead of its arrival each frame of the capture belongs, and the
+        tempo to measure that in.
+
+        Latched before a take rather than read while one is running, which is
+        what Ardour does as well: it refuses an alignment change once a
+        DiskWriter is recording. A figure that moved partway through a capture
+        would put a join in the middle of a performance at the moment somebody
+        loaded a plugin on another track.
+    */
+    void setCaptureOffset (int offsetSamples, double newBeatsPerSample) noexcept
+    {
+        captureOffset  = offsetSamples;
+        beatsPerSample = newBeatsPerSample;
+    }
+
     void begin()
     {
         {
@@ -119,32 +149,26 @@ public:
         const int droppedFrames = dropped.load();
         const int wraps = std::min (wrapCount.load(), maxPasses);
 
-        int    from     = 0;
-        double fromBeat = std::max (0.0, startBeat.load());
+        // Which frames belong where, including the offset that puts a take back
+        // where it was played. Decided in RecordAlign.h, which has a test over
+        // it; all that happens here is the copying.
+        const auto passes = RecordAlign::passes (total, startBeat.load(),
+                                                 wrapFrames.data(), wraps,
+                                                 captureOffset, beatsPerSample);
 
-        auto emit = [&] (int first, int last, double beat)
+        takes.reserve (passes.size());
+
+        for (const auto& pass : passes)
         {
-            const int frames = last - first;
-            if (frames <= 0)
-                return;
-
             Take take;
-            take.audio.setSize (2, frames);
-            take.audio.copyFrom (0, 0, takeL.data() + first, frames);
-            take.audio.copyFrom (1, 0, takeR.data() + first, frames);
-            take.startBeat     = beat;
+            take.audio.setSize (2, pass.frames());
+            take.audio.copyFrom (0, 0, takeL.data() + pass.firstFrame, pass.frames());
+            take.audio.copyFrom (1, 0, takeR.data() + pass.firstFrame, pass.frames());
+            take.startBeat     = pass.startBeat;
+            take.preRollFrames = pass.preRollFrames;
             take.droppedFrames = droppedFrames;
             takes.push_back (std::move (take));
-        };
-
-        for (int i = 0; i < wraps; ++i)
-        {
-            const int at = std::clamp (wrapFrames[(size_t) i].frame, from, total);
-            emit (from, at, fromBeat);
-            from     = at;
-            fromBeat = wrapFrames[(size_t) i].beat;
         }
-        emit (from, total, fromBeat);
 
         takeL.clear(); takeL.shrink_to_fit();
         takeR.clear(); takeR.shrink_to_fit();
@@ -233,6 +257,11 @@ private:
     juce::CriticalSection    dataLock;
     std::vector<float>       takeL, takeR;
     double                   sampleRate = 44100.0;
+
+    // Message thread only: set before a take begins and read once it has
+    // ended, so the audio thread never touches either.
+    int                      captureOffset  = 0;
+    double                   beatsPerSample = 0.0;
 
     std::atomic<bool>   active    { false };
     std::atomic<double> startBeat { -1.0 };

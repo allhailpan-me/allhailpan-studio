@@ -726,13 +726,10 @@ void MainComponent::finishRecording()
     // ---- audio ----
     if (recordingAudio)
     {
-        // Read before they are cleared: whether the take came back through the
-        // interface is what decides if its head has to be trimmed, and
-        // clearing the flags first silently trimmed every instrument take by
-        // a round trip it never made. Reading wasInstrument after clearing it
-        // is how the instrument branch below became unreachable once, which
-        // lost the take and left the recorder running for the rest of the
-        // session.
+        // Read before they are cleared. Reading wasInstrument after clearing
+        // it is how the instrument branch below became unreachable once,
+        // which lost the take and left the recorder running for the rest of
+        // the session.
         const bool wasInstrument = recordingInstrument;
         recordingAudio = false;
         recordingInstrument = false;
@@ -740,7 +737,7 @@ void MainComponent::finishRecording()
 
         if (wasInstrument)
         {
-            finishAudioRecording (engine.stopInstrumentRecording(), false, audioTrack,
+            finishAudioRecording (engine.stopInstrumentRecording(), audioTrack,
                                   project.channels[(size_t) midiChannel].name);
         }
         else
@@ -758,6 +755,16 @@ void MainComponent::finishRecording()
             auto captured = engine.stopAudioRecording();
             int  track = audioTrack;
 
+            // A capture with nothing left in it is reachable now in a way it
+            // was not before: the alignment takes the round trip off the
+            // front, so a stab at the record button that lasted less than the
+            // round trip has no audio in it once the offset is removed.
+            // Saying so beats a record button that appears to do nothing.
+            if (captured.empty())
+                appendStatus ("Nothing to keep: that take was shorter than the latency being "
+                              "compensated for, so there was no audio left in it once the "
+                              "offset came off the front.");
+
             for (auto& capture : captured)
             {
                 if (! juce::isPositiveAndBelow (track, Project::numTracks))
@@ -768,7 +775,7 @@ void MainComponent::finishRecording()
                     break;
                 }
 
-                finishAudioRecording (std::move (capture.passes), true, track,
+                finishAudioRecording (std::move (capture.passes), track,
                                       engine.insert (capture.insert).name);
 
                 // Asked again each time, because the clip just added makes
@@ -790,7 +797,7 @@ void MainComponent::finishRecording()
 // Each pass still gets its own file in Recordings, so nothing about this is a
 // new way of storing audio, and a pass can be dragged out of the project and
 // used elsewhere.
-void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface,
+void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
                                           int track, const juce::String& sourceName)
 {
     if (passes.empty())
@@ -798,11 +805,16 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
 
     const double sampleRate = engine.getSampleRate();
 
-    // The interface's round trip is why a take lands late against the
-    // arrangement, so the head of every pass is trimmed by it. Recording an
-    // instrument's own output never goes out to the interface and back, so
-    // there is nothing to trim there.
-    const double latency = throughInterface ? engine.getRoundTripLatencySamples() / sampleRate : 0.0;
+    // How far into a pass its own start sits is the recorder's answer, not
+    // one worked out here. It used to be worked out here, from the
+    // interface's reported round trip, which is the right idea in the wrong
+    // place: it left out the studio's own compensation, so a lookahead plugin
+    // on the master pushed every take late again; it was clamped to half a
+    // pass, so a short one was quietly half corrected; in a loop recording it
+    // read past the head of each pass without moving the split points, so the
+    // last of every performance but the final one was handed to the next pass
+    // and skipped there, which threw it away; and sitting up here in the
+    // window it had no test over it at all. See RecordAlign.h.
 
     // Named after whatever it came from, which with several inputs at once is
     // the difference between four files called Take and four that say which
@@ -833,8 +845,15 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         auto sample = cache.adopt (std::move (pass.audio), sampleRate, file,
                                    file.getFileNameWithoutExtension());
         const double duration = sample->durationSeconds();
-        const double trim     = std::min (latency, duration * 0.5);
-        if (duration - trim <= 0.01)
+
+        // The pass's own start, which is after whatever of it was played
+        // before the record point. That audio stays in the file so the left
+        // edge has somewhere to be dragged back to.
+        const double head = sampleRate > 0.0
+                              ? std::min (std::max (0.0, (double) pass.preRollFrames / sampleRate), duration)
+                              : 0.0;
+
+        if (duration - head <= 0.01)
             continue;                      // a pass too short to be one
 
         if (folderStart < 0.0)
@@ -843,8 +862,8 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
         Take take;
         take.name   = "Take " + juce::String ((int) takes.size() + 1);
         take.sample = sample;
-        take.offset = trim;
-        take.length = duration - trim;
+        take.offset = head;
+        take.length = duration - head;
 
         // Where this pass sits inside the folder. Loop recording puts every
         // pass at the same place, and this is zero for all of them; a pass
@@ -856,7 +875,16 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes, bo
     }
 
     if (takes.empty())
+    {
+        // Silent until now, and reachable: every pass can be shorter than the
+        // offset being taken off its front, which is what a stab at the
+        // record button produces. A record button that appears to do nothing
+        // is worse than one that says why.
+        appendStatus ("Nothing to keep from " + (sourceName.isNotEmpty() ? sourceName
+                                                                        : juce::String ("that take"))
+                        + ": it was shorter than the latency being compensated for.");
         return;
+    }
 
     juce::String msg;
 
@@ -1785,6 +1813,17 @@ PreferencesActions MainComponent::preferenceActions()
             safeThis->project.startingBpm = bpm;
     };
 
+    actions.setRecordTrimMs = [safeThis] (double ms)
+    {
+        if (safeThis != nullptr)
+            safeThis->engine.setRecordTrimMs (ms);
+    };
+
+    actions.recordOffsetSamples = [safeThis]() -> int
+    {
+        return safeThis != nullptr ? safeThis->engine.getRecordOffsetSamples() : 0;
+    };
+
     actions.findFastestDevice = [safeThis]() -> juce::String
     {
         if (safeThis == nullptr)
@@ -1825,6 +1864,18 @@ void MainComponent::setStatus (const juce::String& message)
     statusMessage = message;
     statusTime = juce::Time::currentTimeMillis();
     repaint (statusBar);
+}
+
+void MainComponent::appendStatus (const juce::String& message)
+{
+    // Stopping a recording can have two things to report: what the MIDI half
+    // made and what the audio half did not. Replacing the first with the
+    // second loses the clip that was actually created, which is the half the
+    // producer has to go and look at.
+    const bool fresh = statusMessage.isEmpty()
+                         || juce::Time::currentTimeMillis() - statusTime > 200;
+
+    setStatus (fresh ? message : statusMessage + "  " + message);
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,16 @@ struct PreferencesActions
     /** The tempo a new project starts at. */
     std::function<void (double)> setDefaultTempo;
 
+    /** The correction to what the driver claims its latency is, in
+        milliseconds, positive pulling recorded takes earlier. */
+    std::function<void (double)> setRecordTrimMs;
+
+    /** How far ahead of its arrival a frame of a capture belongs, as the
+        engine works it out right now. Shown rather than set, so that a studio
+        applying nothing can be told apart from one applying the wrong
+        amount. */
+    std::function<int()> recordOffsetSamples;
+
     /** Asks the engine to go and find the fastest driver this machine has,
         and returns a sentence about what it found. Blocks while it works. */
     std::function<juce::String()> findFastestDevice;
@@ -94,6 +104,9 @@ inline void applyPreferences (juce::PropertiesFile& settings, const PreferencesA
 
     if (actions.setDefaultTempo)
         actions.setDefaultTempo (storedPreference (settings, Prefs::Key::defaultTempo, Prefs::defaultTempo));
+
+    if (actions.setRecordTrimMs)
+        actions.setRecordTrimMs (storedPreference (settings, Prefs::Key::recordTrimMs, Prefs::recordTrimMs));
 }
 
 //==============================================================================
@@ -311,14 +324,33 @@ public:
         tabs.setOutline (0);
         tabs.setTabBarDepth (28);
 
-        // Taken out before the rest of the actions are handed over below.
-        auto findFastest = actions.findFastestDevice;
+        auto& settings = pluginManager.settings();
 
+        // The actions are copied into both panels rather than moved into one,
+        // because both apply every setting through the same applyPreferences
+        // call: one path from a stored setting to its effect cannot drift
+        // from another.
         tabs.addTab ("General", Ahp::panel,
-                     new GeneralPreferencesPanel (pluginManager.settings(), std::move (actions)), true);
+                     new GeneralPreferencesPanel (settings, actions), true);
 
         tabs.addTab ("Audio", Ahp::panel,
-                     new AudioSettingsPanel (devices, std::move (findFastest)), true);
+                     new AudioSettingsPanel (devices,
+                                             actions.findFastestDevice,
+                                             actions.recordOffsetSamples,
+                                             storedPreference (settings, Prefs::Key::recordTrimMs,
+                                                               Prefs::recordTrimMs),
+                                             [store = &settings, actions] (double ms)
+                                             {
+                                                 store->setValue (Prefs::Key::recordTrimMs, ms);
+                                                 applyPreferences (*store, actions);
+
+                                                 // Written out now rather than at shutdown: a
+                                                 // correction somebody measured with a cable and
+                                                 // then lost to a crash is worse than one they
+                                                 // never found.
+                                                 store->saveIfNeeded();
+                                             }),
+                     true);
 
         // The same list component the Plugins button used to open on its own.
         // Scanning writes straight into the known plugin list, which saves
@@ -329,7 +361,10 @@ public:
                                                     &pluginManager.settings(), true),
                      true);
 
-        setSize (820, 620);
+        // Taller than it was: the audio tab gained a line of readout and a
+        // correction, and the device chooser is the thing that must not be
+        // squeezed, since it is the one control in here somebody has to use.
+        setSize (820, 680);
     }
 
     void setTab (Tab t) { tabs.setCurrentTabIndex ((int) t); }

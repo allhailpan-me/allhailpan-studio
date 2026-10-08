@@ -10,6 +10,7 @@
 #include "LatencyGraph.h"
 #include "AudioDefaults.h"
 #include "InputSource.h"
+#include "RecordAlign.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -107,7 +108,6 @@ public:
     float  getInputLevel() const noexcept        { return inputLevel.load(); }
     double getSampleRate() const noexcept        { return sampleRate; }
     int    getBlockSize() const noexcept         { return blockSize; }
-    int    getRoundTripLatencySamples();
 
     // ---- mix analysis ----
     // Measured on the master, after every effect, so it is what actually
@@ -128,6 +128,22 @@ public:
         plugins. Added to the interface's own round trip, this is the delay
         between a note being triggered and it leaving the outputs. */
     int    getPluginLatencySamples() const noexcept { return totalLatency.load(); }
+
+    // ---- where a recorded take lands ----
+    /** The correction to what the driver claims, in milliseconds, positive
+        pulling takes earlier. A preference rather than something the studio
+        can work out: see RecordAlign.h. */
+    void setRecordTrimMs (double ms) noexcept    { recordTrimMs.store (ms); }
+
+    /** Everything the record offset is made of, as the device and the mixer
+        report it right now. */
+    RecordAlign::Figures getRecordFigures() const;
+
+    /** How far ahead of its arrival a frame of a capture belongs, which is
+        what is taken off the front of every take. Here so that the audio
+        settings can show the figure rather than leave somebody guessing
+        whether anything is being applied at all. */
+    int    getRecordOffsetSamples() const;
 
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);
@@ -700,6 +716,10 @@ private:
     // preference is still that to a tenth of a decibel, so nobody's metronome
     // changes level because it became adjustable.
     std::atomic<float> clickGain { 0.35f };
+
+    // Read on the message thread when a take starts, so the alignment is
+    // latched for the whole of that take rather than changing under it.
+    std::atomic<double> recordTrimMs { 0.0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngine)
 };

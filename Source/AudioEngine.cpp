@@ -365,11 +365,29 @@ void AudioEngine::tightenBufferSize()
         deviceManager.setAudioDeviceSetup (previous, true);
 }
 
-int AudioEngine::getRoundTripLatencySamples()
+RecordAlign::Figures AudioEngine::getRecordFigures() const
 {
+    RecordAlign::Figures f;
+    f.engineLatency = totalLatency.load();
+    f.trimMs        = recordTrimMs.load();
+    f.sampleRate    = sampleRate;
+
     if (auto* d = deviceManager.getCurrentAudioDevice())
-        return d->getInputLatencyInSamples() + d->getOutputLatencyInSamples();
-    return 0;
+    {
+        f.inputLatency  = d->getInputLatencyInSamples();
+        f.outputLatency = d->getOutputLatencyInSamples();
+        f.bufferSize    = d->getCurrentBufferSizeSamples();
+
+        if (d->getCurrentSampleRate() > 0.0)
+            f.sampleRate = d->getCurrentSampleRate();
+    }
+
+    return f;
+}
+
+int AudioEngine::getRecordOffsetSamples() const
+{
+    return RecordAlign::captureOffsetSamples (getRecordFigures());
 }
 
 // ---------------------------------------------------------------------------
@@ -536,14 +554,39 @@ void AudioEngine::setMonitorMode (Monitor m)
 
 void AudioEngine::startAudioRecording()
 {
+    const auto   figures = getRecordFigures();
+    const double rate    = figures.sampleRate > 0.0 ? figures.sampleRate : sampleRate;
+    const double bps     = rate > 0.0 ? bpm.load() / 60.0 / rate : 0.0;
+
     // An instrument recording taps a channel's own output and has nothing to
     // do with sockets, so it keeps its own recorder and none of the input
     // ones are started.
     if (recordSource.load() >= 0)
     {
+        // And no offset either, which is Ardour's CaptureTime alignment
+        // rather than its ExistingMaterial one: it picks between them the
+        // same way, by whether a track is fed from a physical input, and this
+        // one is fed from inside the mixer.
+        //
+        // Nothing to put back on the converter side, since the audio never
+        // leaves the studio. What is arguable is the rest of it: when the
+        // notes being bounced are a pattern playing off the arrangement there
+        // is nothing to correct and an offset would drag the bounce off the
+        // grid, but when somebody is playing the keyboard into it live they
+        // are following backing they hear late, so their performance lands
+        // late by the same amount a MIDI recording does. The mode cannot tell
+        // those apart, and a bounce that drifts off the grid is the worse of
+        // the two, so this stays at zero. It is the same open problem as the
+        // MIDI tap below. See Research/BACKLOG.md.
+        recorder.setCaptureOffset (0, bps);
         recorder.begin();
         return;
     }
+
+    // Latched here, once, for every armed strip: the figure has to be the same
+    // on all of them or two microphones on one performance would come back
+    // out of phase with each other.
+    const int offset = RecordAlign::captureOffsetSamples (figures);
 
     for (int i = 1; i < kNumInserts; ++i)
     {
@@ -552,7 +595,10 @@ void AudioEngine::startAudioRecording()
         // Armed and wired. Armed with nothing plugged in would produce a file
         // of silence and a clip nobody asked for.
         if (assignment.assigned && insertArmed[(size_t) i].load())
+        {
+            inputRecorders[(size_t) i].setCaptureOffset (offset, bps);
             inputRecorders[(size_t) i].begin();
+        }
     }
 }
 
@@ -1262,6 +1308,22 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     // ---- MIDI recording tap ----
+    // Deliberately not aligned, and worth saying so because the audio tap
+    // above now is. A MIDI note never passes through the input converter, so
+    // its offset is a different and smaller figure: the studio's own
+    // compensation plus the output latency, with no input latency in it,
+    // which is what Ardour uses on its MIDI path. Left for its own change
+    // rather than guessed at here.
+    //
+    // The consequence to know about is Rec: Audio and MIDI, which captures a
+    // socket and a keyboard in one take. The audio half is now aligned and
+    // the MIDI half is not, so the two sit apart by the compensation plus the
+    // output latency, where before they sat apart by the output latency
+    // alone. Both are wrong and the gap is not zero on any device, because no
+    // device has an output latency of zero. Rec: Instrument sound and its
+    // notes is not affected: neither half of that one is offset, so the two
+    // agree with each other, and they are late against the arrangement
+    // together. See Research/BACKLOG.md.
     if (midiRecording.load() && sequencing && n > 0)
     {
         if (midiRecordStart.load() < 0.0)
@@ -2057,8 +2119,10 @@ void AudioEngine::processInsert (int index, int numSamples)
 
     Deliberately not delay compensated. That compensation lines internal paths
     up with each other; on a monitor path it would only add latency the player
-    feels directly, and the recorder already lines the take itself up with the
-    arrangement.
+    feels directly. Lining the take itself up with the arrangement is a
+    separate job, done once per take at startAudioRecording with the figure
+    RecordAlign.h works out. It used to be done in the window instead, which
+    is why that header is worth reading before changing anything here.
 
     The level ramps rather than switching, because changing input or turning
     monitoring on or off mid-performance would otherwise click, and a click

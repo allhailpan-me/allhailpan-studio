@@ -2,7 +2,9 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "AhpLookAndFeel.h"
 #include "AudioDefaults.h"
+#include "Preferences.h"
 
+#include <cmath>
 #include <functional>
 #include <utility>
 
@@ -28,19 +30,69 @@
     and they have tests on them there. Two copies would drift, and the window
     disagreeing with the engine about whether a setting is playable is a
     worse bug than either being wrong.
+
+    The same two figures also decide where a recorded take lands, so the
+    offset being applied to takes is printed here and the correction to it
+    lives here too. Both belong next to the latency they are derived from: a
+    guitarist who thinks their overdubs are landing late wants to see what the
+    studio believes before they start nudging clips by hand, and a build that
+    is quietly applying nothing looks exactly like one that is applying the
+    wrong amount. Three days went into that distinction once already, over
+    whether a Windows build had ASIO compiled in.
 */
 class AudioSettingsPanel : public juce::Component,
                            private juce::Timer
 {
 public:
+    /** The trim arrives as a number and leaves through a callback rather than
+        this panel reaching into the settings file itself, because the file
+        lives behind the preferences window that owns this panel and reading it
+        from both would be two paths to one setting. */
     AudioSettingsPanel (juce::AudioDeviceManager& manager,
-                        std::function<juce::String()> findFastest)
+                        std::function<juce::String()> findFastest,
+                        std::function<int()> recordOffset,
+                        double initialTrimMs,
+                        std::function<void (double)> setTrimMs)
         : devices (manager),
           selector (manager, 0, 8, 0, 8, true, false, true, false),
-          findFastestDevice (std::move (findFastest))
+          findFastestDevice (std::move (findFastest)),
+          recordOffsetSamples (std::move (recordOffset)),
+          onTrimChanged (std::move (setTrimMs))
     {
         addAndMakeVisible (selector);
         addAndMakeVisible (readout);
+        addAndMakeVisible (trimLabel);
+        addAndMakeVisible (trimSlider);
+
+        trimLabel.setJustificationType (juce::Justification::centredRight);
+        trimLabel.setColour (juce::Label::textColourId, Ahp::muted);
+        trimLabel.setFont (juce::FontOptions (12.0f));
+
+        trimSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        trimSlider.setRange (Prefs::recordTrimMs.minimum, Prefs::recordTrimMs.maximum, 0.1);
+        trimSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 76, 22);
+        trimSlider.setDoubleClickReturnValue (true, Prefs::recordTrimMs.fallback);
+        trimSlider.textFromValueFunction = [] (double ms)
+        {
+            return (ms > 0.0 ? juce::String ("+") : juce::String()) + juce::String (ms, 1) + " ms";
+        };
+        trimSlider.setTooltip ("Only for a driver that reports its latency wrongly. Positive pulls "
+                               "recorded takes earlier.\n"
+                               "Record a click through a cable from an output back into an input, "
+                               "look at where the recorded clicks sit against the metronome, and "
+                               "dial this until they line up.\n"
+                               "Takes already recorded do not move, but nothing is lost either: "
+                               "everything captured is in the file, so a take's left edge can "
+                               "always be dragged back over it.");
+        trimSlider.setValue (Prefs::number (initialTrimMs, Prefs::recordTrimMs),
+                             juce::dontSendNotification);
+        trimSlider.onValueChange = [this]
+        {
+            if (onTrimChanged != nullptr)
+                onTrimChanged (trimSlider.getValue());
+
+            refresh();
+        };
 
         readout.setJustificationType (juce::Justification::topLeft);
         readout.setFont (juce::FontOptions (12.0f));
@@ -81,13 +133,22 @@ public:
         auto area = getLocalBounds();
 
         // Bottom upwards, which reads top down as: the chooser, then what you
-        // have in milliseconds, then the button, then what it did. Taken in
+        // have in milliseconds and what is being taken off a take, then the
+        // correction to that, then the button, then what it did. Taken in
         // that order because the button is only worth pressing once the
-        // number above it has told you that you want to.
+        // number above it has told you that you want to, and the correction
+        // is only worth reaching for once the line above it has said what is
+        // already being applied.
         outcome.setBounds (area.removeFromBottom (112).reduced (10, 2));
         findButton.setBounds (area.removeFromBottom (34).reduced (10, 4)
                                   .removeFromLeft (210));
-        readout.setBounds (area.removeFromBottom (80).reduced (10, 6));
+
+        auto trimRow = area.removeFromBottom (28).reduced (10, 2);
+        trimLabel .setBounds (trimRow.removeFromLeft (190));
+        trimRow.removeFromLeft (6);
+        trimSlider.setBounds (trimRow.removeFromLeft (300));
+
+        readout.setBounds (area.removeFromBottom (96).reduced (10, 6));
         selector.setBounds (area);
     }
 
@@ -195,6 +256,29 @@ private:
            #endif
         }
 
+        // What is actually being taken off a take, which is the round trip
+        // above plus whatever the mixer is holding back for a lookahead
+        // plugin plus the correction below. Said in milliseconds and in
+        // samples: milliseconds is what anybody feels, and samples is what
+        // has to be compared against another studio's record offset.
+        if (recordOffsetSamples != nullptr)
+        {
+            const int offset = recordOffsetSamples();
+            const juce::String ms = juce::String (std::abs (1000.0 * offset / rate), 1);
+
+            text << "\nRecorded takes are ";
+
+            if (offset > 0)
+                text << "pulled " << ms << " ms earlier (" << offset
+                     << " samples), so a part lands where it was played.";
+            else if (offset < 0)
+                text << "pushed " << ms << " ms later (" << -offset
+                     << " samples), which only the correction below asks for.";
+            else
+                text << "left exactly where they arrive, which takes a correction below "
+                        "that cancels the latency being reported.";
+        }
+
         readout.setText (text, juce::dontSendNotification);
     }
 
@@ -205,6 +289,11 @@ private:
     juce::TextButton findButton { "Find the fastest device" };
 
     std::function<juce::String()> findFastestDevice;
+    std::function<int()>          recordOffsetSamples;
+    std::function<void (double)>  onTrimChanged;
+
+    juce::Label  trimLabel { {}, "Record offset correction" };
+    juce::Slider trimSlider;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioSettingsPanel)
 };

@@ -151,7 +151,7 @@ private:
     /** Turns one source's passes into clips on one playlist track. Called
         once per armed insert, so several inputs recorded at once end up as
         several tracks rather than a heap on one. */
-    void finishAudioRecording (std::vector<Recorder::Take> passes, bool throughInterface,
+    void finishAudioRecording (std::vector<Recorder::Take> passes,
                                int track, const juce::String& sourceName);
 
     // channels, instruments, effects
@@ -209,6 +209,10 @@ private:
     // the window owns the controls and this owns the effect.
     PreferencesActions preferenceActions();
     void setStatus (const juce::String&);
+
+    /** Adds to whatever the status bar is already saying, when that was set a
+        moment ago as part of the same action. */
+    void appendStatus (const juce::String&);
 
     void updateTypingLabel();
     void checkModulationLearn();
