@@ -1,6 +1,6 @@
-Takes now land where you played them, which they did not quite before. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+Takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
-## Since v0.6.1
+## Since v0.7.0
 
 **A take now lands where you played it.** What you play arrives back at the
 studio later than your hands did. It has to go out through your interface, be
@@ -40,6 +40,22 @@ leaves the two halves slightly apart. And the very **end** of a take now
 stops a few milliseconds earlier than it used to, because the studio stops
 listening the moment the transport does and the last of what you played is
 still on its way back.
+
+**The app icon shows up now.** The mark is white line art, and it was sitting
+on a transparent background with nothing behind it, so on the Windows light
+theme, which is the default, there was nothing to see: a blank space in the
+taskbar, in Explorer, in Alt-Tab and in the title bar. It now has its own
+black background, so it reads on a light theme and a dark one alike.
+
+It was also mush at small sizes. Windows asks for the icon at 16, 32 and 48
+pixels as well as 256, and the mark's lines are a tenth of a pixel wide once
+it is that small. There is now a second drawing of it made for those sizes,
+using the mark's silhouette rather than its outline, so the shape survives
+down to about 32. At 16 pixels it is a bright mark rather than a readable
+one, which is as far as line art of this kind goes without drawing a simpler
+version of the logo.
+
+## Since v0.6.1
 
 **Every mixer strip can take its own input, and they all record at once.**
 This is what the studio needed in order to record more than one person at a

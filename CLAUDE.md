@@ -301,6 +301,7 @@ braces on their own line.
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
+| `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
 
 ## Things worth knowing about the design
 
@@ -446,3 +447,23 @@ that would not answer and then falls back to the slow one. `playable` therefore
 requires a round trip above zero, and `roundTripOrEstimate` falls back to two
 buffers, which is the floor any device can have. An audit caught this before it
 shipped; the first version of the ASIO support would have been defeated by it.
+
+**The app icon is plated, and there are two masters.** The mark is white line
+art on transparency, which is invisible on a light background, and a Win32
+`.ico` carries one image with no light and dark variants. So the icon was
+there in the file and absent on screen for anybody on the Windows light
+theme, which is the default. It now sits on its own black background.
+
+The second master exists because JUCE writes 16, 32, 48 and 256 into the
+`.ico` and, with only `ICON_BIG` set, builds all four by downscaling the one
+file. A 7 pixel stroke is a tenth of a pixel at 16, so the three small entries
+were grey mush. `getBestIconForSize` picks the smaller of the two drawables
+when both are large enough, so a 48 pixel `ICON_SMALL` covers 16, 32 and 48
+while the 1024 covers 256. The small one is the mark's silhouette rather than
+its outline, which keeps what identifies it and drops lines that are gone at
+that size anyway.
+
+Regenerate both with `python3 Assets/make_app_icon.py` rather than exporting
+by hand, and check the result by looking at it at 16, 32, 48 and 256 on a
+light background as well as a dark one. An icon has no other test, and the
+light background is the one that found this.

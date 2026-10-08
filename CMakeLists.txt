@@ -48,7 +48,16 @@ juce_add_gui_app(AllHailPanStudio
     COMPANY_NAME "AllHailPan"
     BUNDLE_ID    com.allhailpan.studio
     VERSION      ${PROJECT_VERSION}
+    # Two masters, because JUCE writes 16, 32, 48 and 256 into the .ico and
+    # picks the smaller of these two for each one that it is big enough for.
+    # So the 48 covers 16, 32 and 48, and the 1024 covers 256. The small one
+    # is the mark's silhouette rather than its outline: a 7 pixel stroke is a
+    # tenth of a pixel at 16, and the three small entries used to be mush.
+    # Both carry their own black background, because a white only mark on
+    # transparency cannot be seen on a light theme and a .ico has no light
+    # and dark variants. Assets/make_app_icon.py builds both and says why.
     ICON_BIG     "${CMAKE_CURRENT_SOURCE_DIR}/Assets/app_icon.png"
+    ICON_SMALL   "${CMAKE_CURRENT_SOURCE_DIR}/Assets/app_icon_small.png"
 )
 
 # Release builds should run on any machine, without Visual Studio or the
