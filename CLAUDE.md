@@ -300,6 +300,7 @@ braces on their own line.
 | `CompModel.h` | Take folders: which take is heard where, and the equal-power crossfade at each join. In seconds, not beats, so a comp survives a tempo change. No JUCE |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
+| `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
 
@@ -467,3 +468,47 @@ Regenerate both with `python3 Assets/make_app_icon.py` rather than exporting
 by hand, and check the result by looking at it at 16, 32, 48 and 256 on a
 light background as well as a dark one. An icon has no other test, and the
 light background is the one that found this.
+
+**Describing a waveform and reading one need different numbers of samples.**
+`Synth/WaveTable.h` stores each mipmap level sixteen times longer than the
+sampling theorem asks and reads it with a cubic, and both halves of that were
+measured rather than chosen.
+
+The first version used the obvious reading of the theorem: a waveform of H
+harmonics is fully described by 2H samples, so each level was 2H samples long
+and was read with linear interpolation. Every check about harmonic counts
+passed, because the harmonic counts were right. The oscillator measured 28 dB
+below its own fundamental, which is as bad as the naive sawtooth the design
+exists to avoid.
+
+A read lands between stored samples, and what the interpolator does in
+between is an error that is not a harmonic of anything. Enough samples to
+reconstruct the waveform with an exact reconstruction filter is not enough to
+reconstruct it with four points and a cubic. `Tests/WaveTableProbe.cpp` has
+the table of error against oversampling and interpolation order that settled
+the numbers, kept so the choice can be rechecked.
+
+Two things about testing this, both learned by watching deliberate breakages
+walk through:
+
+Not aliasing and being accurate are different claims. Interpolation error is
+a periodic distortion, so most of it lands on harmonics of the note, where a
+check for stray partials cannot see it. Halving the table length and replacing
+the cubic with a linear read both stayed under the aliasing threshold while
+putting the real error up by more than twenty decibels. There is now a check
+that compares against additive synthesis, which sees everything wherever it
+lands.
+
+A test waveform has to exercise the join. The stored cycle carries a guard
+sample either side so a four point read never has to wrap, and those guards
+only matter where the waveform is doing something across the join. The first
+test built its sawtooth from cosines with alternating signs, which has the
+right spectrum and a perfectly smooth join, and three separate breakages of
+the guards went unnoticed. The saw is built from sines now, which puts the
+edge at the join.
+
+And when comparing a normalised table against an unnormalised reference,
+divide out the best fitting scale first. The table normalises by its loudest
+stored sample and a continuous peak sits between samples, so the two differ
+by about a tenth of a percent, which reads as -60 dB and hides everything the
+check is for.
