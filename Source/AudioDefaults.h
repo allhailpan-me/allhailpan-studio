@@ -231,6 +231,41 @@ namespace AudioDefaults
         return 1000.0 * (inputLatencySamples + outputLatencySamples) / sampleRate;
     }
 
+    /** The widest latency figure worth believing from a driver, as a bound
+        rather than as a judgement.
+
+        Nothing legitimate comes near it: a minute and a half of latency at
+        48 kHz. It is here so that a driver reporting something absurd, or a
+        settings file edited by hand, cannot overflow an addition further down
+        rather than merely give a wrong answer.
+    */
+    inline constexpr int maxLatencySamples = 1 << 22;
+
+    /** The round trip in samples: what the driver reported, or two buffers
+        when it reported nothing.
+
+        The rule lives here, once, and roundTripOrEstimate below is this
+        divided into milliseconds. Record alignment needs the figure in
+        samples and exactly, because it is used to count frames of a capture
+        rather than to rank one driver against another, and a figure that went
+        through milliseconds and back would arrive a sample or two out.
+
+        See roundTripOrEstimate for why a reported zero has to mean "the
+        driver did not say" rather than "instant".
+    */
+    inline int roundTripSamples (int inputLatencySamples, int outputLatencySamples,
+                                 int bufferSizeSamples) noexcept
+    {
+        auto believable = [] (int v) { return std::clamp (v, -maxLatencySamples, maxLatencySamples); };
+
+        const int reported = believable (inputLatencySamples) + believable (outputLatencySamples);
+
+        if (reported > 0)
+            return reported;
+
+        return 2 * std::clamp (bufferSizeSamples, 0, maxLatencySamples);
+    }
+
     /** A round trip the search can rank, falling back to the buffer when the
         driver will not say.
 
@@ -257,15 +292,8 @@ namespace AudioDefaults
         if (sampleRate <= 0.0)
             return 0.0;
 
-        const double reported = roundTripMs (inputLatencySamples, outputLatencySamples, sampleRate);
-
-        if (reported > 0.0)
-            return reported;
-
-        if (bufferSizeSamples <= 0)
-            return 0.0;
-
-        return 2000.0 * bufferSizeSamples / sampleRate;
+        return 1000.0 * roundTripSamples (inputLatencySamples, outputLatencySamples,
+                                          bufferSizeSamples) / sampleRate;
     }
 
     /** Whether a round trip is low enough to stop looking for something

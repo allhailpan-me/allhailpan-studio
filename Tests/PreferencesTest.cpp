@@ -71,7 +71,8 @@ static std::vector<double> hostileNumbers()
 
 static std::vector<Prefs::Range> everyRange()
 {
-    return { Prefs::autosaveMinutes, Prefs::metronomeLevelDb, Prefs::defaultTempo };
+    return { Prefs::autosaveMinutes, Prefs::metronomeLevelDb, Prefs::defaultTempo,
+             Prefs::recordTrimMs };
 }
 
 //==============================================================================
@@ -361,6 +362,26 @@ static void nothingAFileCanHoldBreaksAnything()
         check (std::isfinite (tempo) && Prefs::defaultTempo.holds (tempo),
                "the default tempo left its range");
 
+        const double trim = Prefs::number (stored, Prefs::recordTrimMs);
+        check (std::isfinite (trim) && Prefs::recordTrimMs.holds (trim),
+               "the record offset correction left its range");
+
+        // Whatever the file held, the figure the engine ends up applying has
+        // to be the one the control could have produced. A correction the
+        // window offers and the arithmetic then clamps is a control that
+        // stops working partway along its travel.
+        RecordAlign::Figures f;
+        f.sampleRate = 48000.0;
+        f.trimMs     = trim;
+        const int offsetWithTrim = RecordAlign::captureOffsetSamples (f);
+
+        f.trimMs = 0.0;
+        const int offsetWithout = RecordAlign::captureOffsetSamples (f);
+
+        check (offsetWithTrim - offsetWithout
+                 == (int) std::lround (trim * 48.0),
+               "a correction inside the control's own range was clamped by the arithmetic");
+
         for (const auto& c : { Prefs::monitorMode, Prefs::recordMode, Prefs::countIn,
                                Prefs::autosaveChoice })
         {
@@ -383,6 +404,30 @@ static void nothingAFileCanHoldBreaksAnything()
 }
 
 //==============================================================================
+//==============================================================================
+/** The correction has to default to nothing.
+
+    The studio is meant to be right from the figures the driver reports, and a
+    correction with a default in it would be a thumb on the scale that nobody
+    put there. Zero also has to be inside the range, or the control cannot
+    return to it.
+*/
+static void theRecordTrimDefaultsToDoingNothing()
+{
+    check (Prefs::recordTrimMs.fallback == 0.0,
+           "the record offset correction does not default to nothing");
+    check (Prefs::recordTrimMs.holds (0.0),
+           "the record offset correction cannot be returned to nothing");
+    check (Prefs::recordTrimMs.minimum < 0.0 && Prefs::recordTrimMs.maximum > 0.0,
+           "the record offset correction only goes one way");
+
+    // The same bounds the arithmetic clamps to, by construction rather than by
+    // coincidence: two copies of a range drift.
+    check (Prefs::recordTrimMs.minimum == RecordAlign::minTrimMs
+             && Prefs::recordTrimMs.maximum == RecordAlign::maxTrimMs,
+           "the control's range and the arithmetic's range have drifted apart");
+}
+
 int main()
 {
     std::printf ("preferences\n");
@@ -408,6 +453,8 @@ int main()
     theLevelIsBoundedAndRises();
 
     nothingAFileCanHoldBreaksAnything();
+
+    theRecordTrimDefaultsToDoingNothing();
 
     if (failures > 0)
     {

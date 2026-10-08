@@ -1,5 +1,6 @@
 #pragma once
 
+#include "RecordAlign.h"
 #include <algorithm>
 #include <cmath>
 
@@ -38,6 +39,7 @@ namespace Key
     inline constexpr const char* autosaveInterval = "autosaveInterval";
     inline constexpr const char* metronomeLevelDb = "metronomeLevelDb";
     inline constexpr const char* defaultTempo     = "defaultTempo";
+    inline constexpr const char* recordTrimMs     = "recordTrimMs";
 
     // Already written by the transport controls before this header existed, so
     // the spellings have to stay as they are to keep existing settings files
@@ -73,6 +75,20 @@ inline constexpr Range autosaveMinutes { 0.0, 30.0, 2.0 };
     and a full scale sine burst is already louder than anyone wants.
 */
 inline constexpr Range metronomeLevelDb { -48.0, 0.0, -9.1 };
+
+/** The correction to what the driver claims its latency is, in milliseconds,
+    positive pulling recorded takes earlier.
+
+    Zero by default, because the studio should be right without anybody
+    touching this: the figures the driver reports are believed, and the only
+    reason to reach for this is a driver that reports them wrongly or not at
+    all. Ardour's manual is blunt about how common that is: "the only way to
+    accurately learn about the total (additional) latency is to measure it."
+
+    The bounds are RecordAlign's, so the control cannot offer a correction the
+    arithmetic would then clamp. See RecordAlign.h for what it corrects.
+*/
+inline constexpr Range recordTrimMs { RecordAlign::minTrimMs, RecordAlign::maxTrimMs, 0.0 };
 
 /** The tempo a new project starts at.
 

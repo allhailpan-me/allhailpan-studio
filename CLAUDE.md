@@ -289,6 +289,7 @@ braces on their own line.
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
+| `RecordAlign.h` | Where a recorded take belongs: the round trip taken back off a capture, and the split into loop passes. No JUCE |
 | `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
 | `InputSource.h` | Which input channel feeds which mixer insert, Auto-map, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
@@ -318,8 +319,11 @@ back in the arrangement rather than through a delay line, which costs nothing.
 Input monitoring deliberately skips delay compensation, and so do the sends
 out of the insert being monitored through. That compensation aligns internal
 paths with each other; on a monitor path it would only be latency the player
-feels. Aligning the take with the arrangement is handled separately, by the
-recorder.
+feels. Aligning the take itself with the arrangement is a separate job, done
+once per take in `startAudioRecording` from the figure `RecordAlign.h` works
+out. It is worth knowing that this file claimed that job was already being
+done for several releases before it was: nothing in the recorder put the round
+trip back, so every overdub landed late by it, silently.
 
 Both halves matter. A send is a copy of the insert taken after its fader, so on
 a monitored insert it carries the player's own input, and compensating the copy
@@ -403,6 +407,14 @@ A few consequences worth keeping straight:
 - A recorder that cannot read its input for a block is **padded with silence**,
   not skipped. Skipping shortens the take and shifts everything after it
   earlier against the arrangement with nothing to say so.
+- **A take is written down earlier than it arrived, by the round trip plus the
+  mixer's own compensation.** The arithmetic is `RecordAlign.h` and the figure
+  is latched once when recording starts, the way Ardour refuses an alignment
+  change while a `DiskWriter` is running: a figure that moved partway through
+  a capture would put a join in the middle of a performance the moment
+  somebody loaded a plugin on another track. The instrument recorder is the
+  exception and gets no offset, because it taps a channel's output inside the
+  mixer rather than a socket, and there is no round trip in front of that.
 
 **One instrument in one socket is a mono input, and mono means centred.** The
 engine took input channel 1 as the left of a stereo pair and input channel 2 as

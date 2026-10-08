@@ -372,6 +372,31 @@ int AudioEngine::getRoundTripLatencySamples()
     return 0;
 }
 
+RecordAlign::Figures AudioEngine::getRecordFigures()
+{
+    RecordAlign::Figures f;
+    f.engineLatency = totalLatency.load();
+    f.trimMs        = recordTrimMs.load();
+    f.sampleRate    = sampleRate;
+
+    if (auto* d = deviceManager.getCurrentAudioDevice())
+    {
+        f.inputLatency  = d->getInputLatencyInSamples();
+        f.outputLatency = d->getOutputLatencyInSamples();
+        f.bufferSize    = d->getCurrentBufferSizeSamples();
+
+        if (d->getCurrentSampleRate() > 0.0)
+            f.sampleRate = d->getCurrentSampleRate();
+    }
+
+    return f;
+}
+
+int AudioEngine::getRecordOffsetSamples()
+{
+    return RecordAlign::captureOffsetSamples (getRecordFigures());
+}
+
 // ---------------------------------------------------------------------------
 // Delay compensation
 //
@@ -536,14 +561,30 @@ void AudioEngine::setMonitorMode (Monitor m)
 
 void AudioEngine::startAudioRecording()
 {
+    const auto   figures = getRecordFigures();
+    const double rate    = figures.sampleRate > 0.0 ? figures.sampleRate : sampleRate;
+    const double bps     = rate > 0.0 ? bpm.load() / 60.0 / rate : 0.0;
+
     // An instrument recording taps a channel's own output and has nothing to
     // do with sockets, so it keeps its own recorder and none of the input
     // ones are started.
     if (recordSource.load() >= 0)
     {
+        // And no offset either. There is no round trip in front of a tap
+        // taken inside the mixer: the audio is already in the studio, at the
+        // playhead, so putting a round trip back would move a bounce off the
+        // grid by the length of one. This is Ardour's CaptureTime alignment
+        // rather than its ExistingMaterial one, which it picks the same way,
+        // by whether a track is fed from a physical input.
+        recorder.setCaptureOffset (0, bps);
         recorder.begin();
         return;
     }
+
+    // Latched here, once, for every armed strip: the figure has to be the same
+    // on all of them or two microphones on one performance would come back
+    // out of phase with each other.
+    const int offset = RecordAlign::captureOffsetSamples (figures);
 
     for (int i = 1; i < kNumInserts; ++i)
     {
@@ -552,7 +593,10 @@ void AudioEngine::startAudioRecording()
         // Armed and wired. Armed with nothing plugged in would produce a file
         // of silence and a clip nobody asked for.
         if (assignment.assigned && insertArmed[(size_t) i].load())
+        {
+            inputRecorders[(size_t) i].setCaptureOffset (offset, bps);
             inputRecorders[(size_t) i].begin();
+        }
     }
 }
 
@@ -2057,8 +2101,9 @@ void AudioEngine::processInsert (int index, int numSamples)
 
     Deliberately not delay compensated. That compensation lines internal paths
     up with each other; on a monitor path it would only add latency the player
-    feels directly, and the recorder already lines the take itself up with the
-    arrangement.
+    feels directly. Lining the take itself up with the arrangement is a
+    separate job, done once per take at startAudioRecording with the figure
+    RecordAlign.h works out, and it was claimed here long before it was true.
 
     The level ramps rather than switching, because changing input or turning
     monitoring on or off mid-performance would otherwise click, and a click

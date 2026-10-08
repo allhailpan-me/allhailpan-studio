@@ -1785,6 +1785,17 @@ PreferencesActions MainComponent::preferenceActions()
             safeThis->project.startingBpm = bpm;
     };
 
+    actions.setRecordTrimMs = [safeThis] (double ms)
+    {
+        if (safeThis != nullptr)
+            safeThis->engine.setRecordTrimMs (ms);
+    };
+
+    actions.recordOffsetSamples = [safeThis]() -> int
+    {
+        return safeThis != nullptr ? safeThis->engine.getRecordOffsetSamples() : 0;
+    };
+
     actions.findFastestDevice = [safeThis]() -> juce::String
     {
         if (safeThis == nullptr)
