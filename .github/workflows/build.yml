@@ -1,7 +1,21 @@
 name: Build
 
 on:
+  # Branches rather than everything, and tags so that pushing one still cuts
+  # a release. An unfiltered `push` beside `pull_request` builds every branch
+  # with an open pull request twice, once for each event, and the second run
+  # is an exact duplicate of the first.
+  #
+  # That is not merely wasteful. Free macOS runners are the scarce resource
+  # in this account by a long way: the Linux and Windows jobs start within
+  # seconds and finish in five minutes, while a macOS job that cannot get a
+  # runner queues and is eventually cancelled. Doubling the demand for them
+  # is what turned every macOS build on every branch into a cancellation for
+  # most of a day, including on main, which left the three platform builds
+  # reporting two successes and a cancellation and nothing saying why.
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
 
   # Cutting a release from the Actions tab: run this workflow, fill in a tag
@@ -24,6 +38,17 @@ on:
         type: boolean
         required: false
         default: false
+
+# A new push to a pull request makes the run already going on it pointless,
+# so it is stopped rather than left competing for the same scarce macOS
+# runner as its own replacement.
+#
+# Only for pull requests. A release is a dispatch, and cancelling one of
+# those halfway through would leave a published tag with some of its three
+# platforms attached to it and no sign that the rest are missing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
