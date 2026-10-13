@@ -300,9 +300,14 @@ braces on their own line.
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
 | `CompModel.h` | Take folders: which take is heard where, and the equal-power crossfade at each join. In seconds, not beats, so a comp survives a tempo change. No JUCE |
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
+| `Fx/Oversampler.h` | Running a nonlinearity at a multiple of the sample rate and bringing it back, with the filter design that decides whether that is worth doing. No JUCE |
+| `Fx/WaveFolder.h` | The west coast wavefolder: the characteristic, its two antiderivatives, and the antialiasing they are there for. No JUCE |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
+| `Synth/LowPassGate.h` | The west coast gate: one control taking brightness and level together, through a vactrol that is slow and lopsided. No JUCE |
+| `Synth/Slope.h` | A rise and a fall that will go round forever: an envelope, an LFO and an oscillator depending only on how fast it is set. No JUCE |
+| `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
 
@@ -560,3 +565,144 @@ the bounds checks in here looked like they survived, and every one of them
 was an out of bounds read that the suite catches and a plain `-O2` build does
 not. A mutation harness that is weaker than the real test run will report
 gaps that are not there and hide the ones that are.
+
+**A wavetable is built from a definition, never sampled from somewhere.**
+`Synth/WaveBank.h` writes every table as either a known harmonic series or a
+waveform as a function of phase, and takes the spectrum of the second kind by
+transform. A sampled wavetable carries whatever harmonic content the
+recording happened to have, including the aliasing of whatever made it, and
+cannot then be band limited honestly.
+
+Where a shape was invented here rather than taken from somewhere established,
+the comment says so. A vowel table and a bell table are deliberately missing
+rather than present with plausible numbers in them, because formant
+frequencies and the partial ratios of a tuned bell are measured facts about
+the world and guessing them is exactly the failure the research section is
+about.
+
+Two faults it shipped with before the test was written, both of the shape
+this file keeps warning about:
+
+A pulse had its amplitude divided by the width, which is the right shape
+across the harmonics for a fixed width and so looks correct, and carries a
+factor that depends on the width. A table sweeping from a square to a narrow
+pulse came out with the narrow end six times louder, and since a table is
+normalised as a whole that made the wide end six times quieter: sweeping the
+width was a fade. The same function also turned every harmonic a quarter
+back, which is what makes a sawtooth, where a pulse's turn grows with both
+the harmonic and the width. At half width that is right for harmonic 1 and
+wrong for 3 and 7, so the square had a square's amplitudes with some of its
+harmonics inverted. It looked like a plausible waveform, which is why it
+needed checking against the series rather than looking at.
+
+The lesson for testing one of these: check a generated spectrum against a
+closed form, not against another implementation of itself. The strongest
+check in `WaveBankTest` is the phase modulation table against the
+Jacobi-Anger expansion, because its amplitudes are not monotonic and nothing
+about it is a simple series, so almost any error in the transform shows up
+somewhere in it. Collect that expansion by harmonic carefully: the terms
+below minus one fold back onto positive harmonics with their sign reversed,
+so harmonic k carries `J(k-1) + (-1)^k J(k+1)` and not `J(k-1)` alone.
+
+**Nothing in the instrument is built lazily.** Every wavetable is built when
+the studio starts, not the first time a patch asks for one. That costs about
+forty megabytes held from launch and a few hundred transforms at startup, and
+it buys never pausing in the middle of somebody's work. Memory is cheap and
+a hitch while playing is not.
+
+**A wavefolder is the one nonlinearity that really needs both kinds of
+antialiasing.** `Fx/WaveFolder.h` runs at four times the sample rate and
+evaluates its characteristic by second order antiderivative antialiasing, and
+both halves were arrived at by measurement rather than by choosing a round
+number.
+
+Folding generates far more harmonic content than an ordinary distortion, so
+each remedy on its own falls short and for a different reason. Oversampling
+alone stops improving past four times, because what is left is the order of
+the antialiasing. First order antialiasing alone, or with any amount of
+oversampling, leaves stray partials around 40 dB down on the harder settings.
+Together they measure 95 to 105 dB down across the whole range the folder
+claims.
+
+Three things in there are worth not relearning.
+
+**A triangle fold cannot be shipped.** The sharp cornered idealisation was
+built, measured and taken out. Its clean range collapses to 371 Hz at two
+times drive and to nothing above four, because a corner is a break in the
+slope rather than in the value and throws harmonics that fall away only as
+one over the square of their number. Eight and sixteen times oversampling
+give the same answer. It is no loss: the circuits in the literature fold
+through transistor curves, which are rounded, so the sharp triangle models
+nothing that exists.
+
+**The second antiderivative of a periodic nonlinearity is not periodic.** The
+first one is, because the fold averages to nothing over a period, so it can
+be written as a function of the wrapped input. The second integrates the
+input times the fold, whose integrand still carries the unwrapped input, so a
+term proportional to the number of whole periods goes missing if it is built
+the same way. It is wrong by exactly four times the period count times the
+fold, the folder still runs and still folds, and the aliasing is twenty
+decibels worse. Check an antiderivative by differentiating it numerically and
+comparing against the function, which finds this in one line.
+
+**An interpolating filter has to be normalised per phase.** Scaling all the
+taps so they add to one is right for decimation and wrong for interpolation:
+the interpolator sees a zero between every input sample, so only every other
+tap has anything under it and the two sets take turns, and each set has to
+add to one on its own. Normalised together, a steady input comes out with a
+ripple on it, which measured as five parts in a million and meant a folder
+fed a steady voltage did not give back the fold of that voltage.
+
+And two things about measuring any of this. A filter's own stopband is the
+floor under every measurement behind it: an early probe used a Blackman
+window, whose sidelobes are 58 dB down, and every reading sat at -55 dB
+however much oversampling was thrown at it. And measure levels as a mean
+square rather than a peak, because these filters delay by half a sample at
+some factors, and at 18 kHz there are under three samples to a cycle, so a
+half sample shift moves every sampled point off the top of the wave and the
+peak reads 0.69 dB low with nothing wrong at all.
+
+**A low pass gate is not a filter and an amplifier sharing an envelope.**
+`Synth/LowPassGate.h` is one control taking brightness and level together,
+through a vactrol, and both halves of that matter.
+
+The pairing is why it sounds like something struck rather than switched on:
+real objects lose their high partials faster than their fundamental, so quiet
+and dark arrive together. A voice with a separate filter and amplifier can be
+set up to imitate it and almost nobody does, because it means drawing the same
+envelope twice and matching them by ear.
+
+The vactrol is the other half. A lamp lights almost at once and the light
+dependent resistor beside it takes a long time to relax, so the gate strikes
+fast and releases slowly whatever the control does, and no envelope setting
+reproduces that. Modelled from Parker and D'Angelo, "A Digital Model of the
+Buchla Lowpass-Gate", DAFx-13: the time constant switches on the sign of the
+control's slope and is further modulated by the current output, and the
+measured constants from the VTL5C3/2 datasheet are about 12 ms rising against
+250 ms falling. Twenty times slower to let go than to light up is the figure
+that gives the sound its shape.
+
+What is deliberately not taken from that paper is its component values. It
+models one particular circuit down to its zener breakdown voltage, and
+copying those would be claiming to be that module.
+
+Test it by what identifies it rather than by its arithmetic: strike it, feed
+it something rich, and measure the spectral centroid of the output falling as
+the level falls. It measures a factor of 7.8 of darkening over a 43 dB decay.
+Stop asking once the centroid reaches the fundamental, because the centre of
+gravity of a spectrum cannot go below its lowest partial and what the
+measurement reads after that is its own noise floor.
+
+**One module is honestly three.** `Synth/Slope.h` is a rise and a fall that
+will either happen once or go round forever: an envelope fired once, an LFO
+left cycling, and an oscillator cycled fast, from the same arithmetic rather
+than three code paths sharing a name. That is not a convenience. The slow
+sweep in a west coast patch is an envelope that never stops, and the vibrato
+is the same module turned up, and the growl is the same module turned up
+again. `Envelope.h` cannot do it because an ADSR holds while a note is held,
+and an LFO with a fixed shape cannot have a rise of one length and a fall of
+another.
+
+Its shape control bends the path and leaves both ends fixed, so changing it
+while something runs changes the sound and not the level, and its centre is
+exactly straight rather than nearly straight.
