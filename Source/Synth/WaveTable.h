@@ -2,6 +2,7 @@
 #include "RealFFT.h"
 
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <vector>
 

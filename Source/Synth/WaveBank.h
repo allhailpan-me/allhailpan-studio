@@ -2,6 +2,7 @@
 #include "WaveTable.h"
 
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <cstring>
 #include <vector>
