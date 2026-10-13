@@ -255,6 +255,37 @@ Describe it by what it does: patterns, a channel rack and step sequencer, a
 piano roll, a playlist, a mixer with sends, plugin hosting, and an engine that
 gets delay compensation and loudness right.
 
+## The team
+
+`.claude/agents/` holds job descriptions for specialists. They are checked in
+rather than kept anywhere personal, because they encode this project's
+standards and a session that does not have them produces work that has to be
+sent back.
+
+| Who | When to hand it to them |
+|---|---|
+| `dsp-researcher` | Before implementing anything with an established definition. Returns the specification and its source, and writes no code |
+| `test-author` | After new arithmetic lands, or when a test is suspected of being weaker than it looks. Writes the test and mutation tests it |
+| `auditor` | Before merging anything touching audio, timing, file format or the audio thread. Reviews and reports; does not fix |
+| `build-doctor` | When CI goes red on a platform that cannot be compiled here, including telling a real failure from a runner that fell over |
+| `release-manager` | When a user visible change has merged and the studio should ship |
+
+Two rules about using them.
+
+**Hand out work that is independent and well specified.** Research, test
+writing, auditing and triage all fan out well, because each produces a result
+that does not depend on what the others found. Anything where one measurement
+decides the next question does not: the wavefolder took a chain of
+measurements where the oversampling plateaued, so the antialiasing order
+became the suspect, so an antiderivative needed checking, which found a
+missing term. Split across four agents that would have produced four partial
+answers.
+
+**The auditor must not be the author.** The point of it is a reader who has
+not spent the last hour convincing themselves the code is right. That has
+caught shipped-breaking faults here more than once, including the one where a
+driver reporting zero latency would have defeated the entire ASIO fix.
+
 ## Conventions
 
 Comments explain **why**, not what. A comment restating the code is noise; a
