@@ -338,6 +338,7 @@ braces on their own line.
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
 | `Synth/LowPassGate.h` | The west coast gate: one control taking brightness and level together, through a vactrol that is slow and lopsided. No JUCE |
 | `Synth/Slope.h` | A rise and a fall that will go round forever: an envelope, an LFO and an oscillator depending only on how fast it is set. No JUCE |
+| `Synth/Voice.h` | One voice with everything wired through the matrix: the oscillators, the folder, the gate, the envelopes and the slopes meeting. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -737,3 +738,37 @@ another.
 Its shape control bends the path and leaves both ends fixed, so changing it
 while something runs changes the sound and not the level, and its centre is
 exactly straight rather than nearly straight.
+
+**In the voice, nothing is soldered except the one thing that has to be.**
+`Synth/Voice.h` has four envelopes and two slopes and none of them is wired to
+anything: what they reach is whatever the patch says. A patch can put envelope
+one on the gate, envelope two on the fold, a slope on the wavetable position
+and nothing at all on the amplifier, which is an ordinary west coast patch and
+was not expressible with the old voice.
+
+The exception is the amplitude, and it is written down rather than hidden.
+Something has to tell the allocator a note has finished, and the only thing
+that knows is the envelope that was released when the key came up, so envelope
+one always scales the output. Without that a patch could route nothing to the
+amplitude, the voice would never report itself finished, and sixteen notes
+would exhaust the instrument with nothing audible to show for it.
+
+The signal path is fixed even though the modulation is not: the folder is
+before the gate. A folder after a gate is being fed something already made
+quiet, so it stops folding as the note decays and the patch loses its
+character exactly where it was interesting.
+
+**A destination's modulation has to be clamped to that destination's own
+range.** This bit on the first run of the new voice and it is worth knowing
+the shape of it. The helper that applies a modulation sum defaults to clamping
+between nothing and one, which is right for a level and wrong for everything
+that is not one. Pointed at the fold, whose useful travel is to sixty four,
+and at the pitch, which is in semitones either side of nothing, the routing
+stayed wired, the matrix was evaluated, the sum was computed, and the result
+was flattened back to the number it started at.
+
+Nothing failed. The test that caught it measured the spectrum with and without
+the routing and got the same centroid to four decimal places, which is what
+sent somebody to look at the matrix rather than at the one line that was
+wrong. Every call in the voice now passes the range its parameter actually
+has.

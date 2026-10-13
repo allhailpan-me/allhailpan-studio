@@ -130,6 +130,18 @@ inline const std::vector<SourceInfo>& sources()
         { "lfo3",     "LFO 3",      Polarity::bipolar },
         { "lfo4",     "LFO 4",      Polarity::bipolar },
 
+        // The cycling slopes. Unipolar because a slope is a rise and a fall
+        // between nothing and everything rather than a wave about a centre,
+        // and because what it is usually pointed at, a fold or a gate, has
+        // nothing below zero to go to.
+        //
+        // They are sources as well as being modules in their own right for
+        // the reason the whole module exists: the slow sweep in a west coast
+        // patch is an envelope that never stops, and it has to be able to
+        // drive anything rather than being soldered to one destination.
+        { "slope1",   "Slope 1",    Polarity::unipolar },
+        { "slope2",   "Slope 2",    Polarity::unipolar },
+
         { "velocity", "Velocity",   Polarity::unipolar },
         { "keytrack", "Key",        Polarity::bipolar },    // zero at middle C
         { "modwheel", "Mod wheel",  Polarity::unipolar },
@@ -200,6 +212,25 @@ inline const std::vector<DestinationInfo>& destinations()
         { "resonance",   "Resonance",      "",      1.0f },
         { "drive",       "Drive",          "",      1.0f },
 
+        // Eight is most of the folder's useful travel. Full depth has to be
+        // the difference between barely folding and folding many times a
+        // cycle, because sweeping that is the entire point of having one.
+        { "fold",        "Fold",           "",      8.0f },
+
+        // The whole of the symmetry control, so full depth takes it from one
+        // side to the other and brings the even harmonics in and out.
+        { "foldsymmetry","Fold symmetry",  "",      1.0f },
+
+        // The gate, from shut to open. This is what an envelope points at on
+        // a west coast patch instead of pointing at the amplifier, and it is
+        // deliberately a destination of its own rather than being folded into
+        // amp, because it takes the brightness with it and amp does not.
+        { "gateopen",    "Gate",           "",      1.0f },
+
+        // Four octaves of how far the gate opens, which is a different thing
+        // from how far open it is: it sets how much darker quiet gets.
+        { "gaterange",   "Gate range",     " oct",  4.0f },
+
         { "amp",         "Amp",            "",      1.0f },
         { "pan",         "Pan",            "",      1.0f },
 
@@ -212,6 +243,11 @@ inline const std::vector<DestinationInfo>& destinations()
         { "lfo2rate",    "LFO 2 rate",     " oct",  6.0f },
         { "lfo3rate",    "LFO 3 rate",     " oct",  6.0f },
         { "lfo4rate",    "LFO 4 rate",     " oct",  6.0f },
+
+        // The same six octaves for the slopes, which is what lets one slope
+        // speed another up and is how a patch gets a sweep that accelerates.
+        { "slope1rate",  "Slope 1 rate",   " oct",  6.0f },
+        { "slope2rate",  "Slope 2 rate",   " oct",  6.0f },
 
         { "glide",       "Glide",          "",      1.0f },
     };
@@ -328,6 +364,33 @@ struct Patch
         r.via = via;
 
         return add (r);
+    }
+
+    /** Whether anything at all drives this destination.
+
+        Worth asking, because some destinations need a default when nothing
+        is pointed at them and need that default to get out of the way the
+        moment something is. The voice's gate is the example: with nothing
+        wired to it the amplitude envelope opens it, so an instrument nobody
+        has patched yet still makes a sound, and as soon as a patch points
+        anything at the gate the envelope stops interfering with it.
+
+        Telling those two apart by looking at the sum does not work. A sum of
+        zero is what a wired route sitting at zero produces, and it is also
+        what no route at all produces, and the difference between them is the
+        difference between a gate held shut on purpose and a gate nobody has
+        connected.
+    */
+    bool anyRouteTo (int destination) const noexcept
+    {
+        if (destination < 0)
+            return false;
+
+        for (int i = 0; i < count && i < maxRoutes; ++i)
+            if (routes[i].destination == destination && routes[i].isWired())
+                return true;
+
+        return false;
     }
 };
 
