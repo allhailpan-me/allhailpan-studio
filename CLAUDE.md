@@ -303,6 +303,7 @@ braces on their own line.
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
+| `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
 
@@ -560,3 +561,47 @@ the bounds checks in here looked like they survived, and every one of them
 was an out of bounds read that the suite catches and a plain `-O2` build does
 not. A mutation harness that is weaker than the real test run will report
 gaps that are not there and hide the ones that are.
+
+**A wavetable is built from a definition, never sampled from somewhere.**
+`Synth/WaveBank.h` writes every table as either a known harmonic series or a
+waveform as a function of phase, and takes the spectrum of the second kind by
+transform. A sampled wavetable carries whatever harmonic content the
+recording happened to have, including the aliasing of whatever made it, and
+cannot then be band limited honestly.
+
+Where a shape was invented here rather than taken from somewhere established,
+the comment says so. A vowel table and a bell table are deliberately missing
+rather than present with plausible numbers in them, because formant
+frequencies and the partial ratios of a tuned bell are measured facts about
+the world and guessing them is exactly the failure the research section is
+about.
+
+Two faults it shipped with before the test was written, both of the shape
+this file keeps warning about:
+
+A pulse had its amplitude divided by the width, which is the right shape
+across the harmonics for a fixed width and so looks correct, and carries a
+factor that depends on the width. A table sweeping from a square to a narrow
+pulse came out with the narrow end six times louder, and since a table is
+normalised as a whole that made the wide end six times quieter: sweeping the
+width was a fade. The same function also turned every harmonic a quarter
+back, which is what makes a sawtooth, where a pulse's turn grows with both
+the harmonic and the width. At half width that is right for harmonic 1 and
+wrong for 3 and 7, so the square had a square's amplitudes with some of its
+harmonics inverted. It looked like a plausible waveform, which is why it
+needed checking against the series rather than looking at.
+
+The lesson for testing one of these: check a generated spectrum against a
+closed form, not against another implementation of itself. The strongest
+check in `WaveBankTest` is the phase modulation table against the
+Jacobi-Anger expansion, because its amplitudes are not monotonic and nothing
+about it is a simple series, so almost any error in the transform shows up
+somewhere in it. Collect that expansion by harmonic carefully: the terms
+below minus one fold back onto positive harmonics with their sign reversed,
+so harmonic k carries `J(k-1) + (-1)^k J(k+1)` and not `J(k-1)` alone.
+
+**Nothing in the instrument is built lazily.** Every wavetable is built when
+the studio starts, not the first time a patch asks for one. That costs about
+forty megabytes held from launch and a few hundred transforms at startup, and
+it buys never pausing in the middle of somebody's work. Memory is cheap and
+a hitch while playing is not.
