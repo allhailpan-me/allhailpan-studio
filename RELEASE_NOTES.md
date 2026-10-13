@@ -1,6 +1,48 @@
-Takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**Panning a guitar or a vocal no longer makes it quieter.** Move a mono track
+off centre and it lost 3 dB. Not because anything was broken: the pan knob was
+a balance control, which is the right thing for a stereo recording, where it
+sets how much of the left you hear against the right. Put a mono source through
+it and the maths is different. A guitar in one socket of your interface is the
+same signal in both halves of the strip, so panning it hard over multiplies one
+of those halves by nothing and you are left with half the sound. Then you ride
+the fader back up and wonder why you had to.
+
+So the knob is now one control or the other, and you pick which per strip:
+right click a mixer strip and there is **Pan control** with **Balance (stereo
+source)** and **Pan (mono source)** in it. A strip in pan mode has a brighter
+ring round its knob so you can see at a glance which is which, and the tooltip
+says so too.
+
+**Balance stays the default, so nothing you have already mixed has moved.** If
+you open an old project it sounds exactly as you left it. It turns out the old
+behaviour is precisely what Logic calls a 0 dB pan law, so keeping it as the
+default is the same thing as keeping that law.
+
+Set your guitar and vocal strips to pan mode and they will hold their level
+right across the sweep. There is also a **Pan law** menu on the same right
+click, which applies to the whole project and offers the same seven choices
+Logic does, from 0 dB through -3, -4.5 and -6 dB with and without
+compensation. The default is -3 dB compensated, which is the one that both
+holds the level all the way across and leaves a centred track exactly where it
+was, so switching a strip over while it sits in the middle changes nothing you
+can hear. If you prefer things a little more forward in the middle, -4.5 dB is
+the usual compromise and is worth a try.
+
+The master strip does not get this, deliberately. It is where everything is
+added together, so there is no single thing sitting on it to place, and a pan
+law there would just move the level of your whole mix.
+
+Two things worth knowing. A compensated law is louder than unity everywhere
+except dead centre, by up to 6 dB at the ends of the -6 dB law, so a strip
+panned hard over can clip where it did not before. Watch the strip meter if you
+go to the extremes. And a bounce gets whatever law you were listening to: the
+studio locks the law for the length of the export, so you cannot end up with
+half a mixdown done one way and half the other.
+
 
 **A take now lands where you played it.** What you play arrives back at the
 studio later than your hands did. It has to go out through your interface, be
