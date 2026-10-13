@@ -305,6 +305,8 @@ braces on their own line.
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
+| `Synth/LowPassGate.h` | The west coast gate: one control taking brightness and level together, through a vactrol that is slow and lopsided. No JUCE |
+| `Synth/Slope.h` | A rise and a fall that will go round forever: an envelope, an LFO and an oscillator depending only on how fast it is set. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -659,3 +661,48 @@ square rather than a peak, because these filters delay by half a sample at
 some factors, and at 18 kHz there are under three samples to a cycle, so a
 half sample shift moves every sampled point off the top of the wave and the
 peak reads 0.69 dB low with nothing wrong at all.
+
+**A low pass gate is not a filter and an amplifier sharing an envelope.**
+`Synth/LowPassGate.h` is one control taking brightness and level together,
+through a vactrol, and both halves of that matter.
+
+The pairing is why it sounds like something struck rather than switched on:
+real objects lose their high partials faster than their fundamental, so quiet
+and dark arrive together. A voice with a separate filter and amplifier can be
+set up to imitate it and almost nobody does, because it means drawing the same
+envelope twice and matching them by ear.
+
+The vactrol is the other half. A lamp lights almost at once and the light
+dependent resistor beside it takes a long time to relax, so the gate strikes
+fast and releases slowly whatever the control does, and no envelope setting
+reproduces that. Modelled from Parker and D'Angelo, "A Digital Model of the
+Buchla Lowpass-Gate", DAFx-13: the time constant switches on the sign of the
+control's slope and is further modulated by the current output, and the
+measured constants from the VTL5C3/2 datasheet are about 12 ms rising against
+250 ms falling. Twenty times slower to let go than to light up is the figure
+that gives the sound its shape.
+
+What is deliberately not taken from that paper is its component values. It
+models one particular circuit down to its zener breakdown voltage, and
+copying those would be claiming to be that module.
+
+Test it by what identifies it rather than by its arithmetic: strike it, feed
+it something rich, and measure the spectral centroid of the output falling as
+the level falls. It measures a factor of 7.8 of darkening over a 43 dB decay.
+Stop asking once the centroid reaches the fundamental, because the centre of
+gravity of a spectrum cannot go below its lowest partial and what the
+measurement reads after that is its own noise floor.
+
+**One module is honestly three.** `Synth/Slope.h` is a rise and a fall that
+will either happen once or go round forever: an envelope fired once, an LFO
+left cycling, and an oscillator cycled fast, from the same arithmetic rather
+than three code paths sharing a name. That is not a convenience. The slow
+sweep in a west coast patch is an envelope that never stops, and the vibrato
+is the same module turned up, and the growl is the same module turned up
+again. `Envelope.h` cannot do it because an ADSR holds while a note is held,
+and an LFO with a fixed shape cannot have a rise of one length and a fall of
+another.
+
+Its shape control bends the path and leaves both ends fixed, so changing it
+while something runs changes the sound and not the level, and its centre is
+exactly straight rather than nearly straight.
