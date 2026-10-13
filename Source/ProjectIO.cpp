@@ -5,10 +5,13 @@ namespace
     const juce::String rootTag  { "ALLHAILPAN_PROJECT" };
     const juce::String hostedTag { "HOSTED" };
     // Version 2 added automation clips on the playlist. Version 3 added take
-    // folders, the comp over them, and the playlist loop range. Older files
-    // load unchanged: they simply have no TAKES or LOOP in them, and an audio
-    // clip without a folder is still an ordinary audio clip.
-    constexpr int formatVersion = 3;
+    // folders, the comp over them, and the playlist loop range. Version 4
+    // added the pan mode on each insert and the project's pan law. Older files
+    // load unchanged: they simply have no TAKES or LOOP in them, an audio clip
+    // without a folder is still an ordinary audio clip, and an insert without
+    // a pan mode is a balance control, which is what every version up to 3
+    // did to every insert.
+    constexpr int formatVersion = 4;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -267,6 +270,12 @@ juce::File ProjectIO::autosaveFile()
 
 void ProjectIO::resetEngine (AudioEngine& engine)
 {
+    // The pan law belongs to the project, so a new project starts on the
+    // default rather than keeping whatever the last one was open with. This is
+    // the one of the four that survives testing: a law left behind would make
+    // the same session sound different depending on what was loaded before it.
+    engine.setPanLaw (PanLaw::defaultLaw);
+
     for (int c = 0; c < kNumChannels; ++c)
     {
         engine.setChannelPlugin (c, nullptr);
@@ -281,6 +290,7 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         ctl.name = i == 0 ? juce::String ("Master") : "Insert " + juce::String (i);
         ctl.volume.store (0.8f);
         ctl.pan.store (0.0f);
+        ctl.panMode.store (PanLaw::defaultMode);
         ctl.mute.store (false);
 
         // Reset, which is the one of the four that survives testing and then
@@ -371,6 +381,12 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
 
     // ---- mixer ----
     auto* mixerXml = root.createNewChildElement ("MIXER");
+
+    // The law belongs to the project rather than to a strip, the way Logic and
+    // Reaper both keep it, so it is written once here rather than sixteen
+    // times below.
+    mixerXml->setAttribute ("panLaw", PanLaw::lawToStored (engine.getPanLaw()));
+
     for (int i = 0; i < kNumInserts; ++i)
     {
         auto& ctl = engine.insert (i);
@@ -379,6 +395,7 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("name", ctl.name);
         e->setAttribute ("volume", (double) ctl.volume.load());
         e->setAttribute ("pan", (double) ctl.pan.load());
+        e->setAttribute ("panMode", PanLaw::modeToStored (ctl.panMode.load()));
         e->setAttribute ("mute", ctl.mute.load());
 
         // Which socket feeds this strip, and whether it records. Saved with
@@ -661,6 +678,12 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     // ---- mixer ----
     if (auto* mixerXml = root->getChildByName ("MIXER"))
     {
+        // A project written before version 4 has no law in it, and every
+        // insert in it was a balance control, so the law it gets back cannot
+        // change how it sounds whatever it is.
+        engine.setPanLaw (PanLaw::lawFromStored (
+            mixerXml->getIntAttribute ("panLaw", PanLaw::lawToStored (PanLaw::defaultLaw))));
+
         for (auto* e : mixerXml->getChildWithTagNameIterator ("INSERT"))
         {
             const int i = e->getIntAttribute ("index", -1);
@@ -670,6 +693,15 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             ctl.name = e->getStringAttribute ("name", ctl.name);
             ctl.volume.store ((float) juce::jlimit (0.0, 1.25, e->getDoubleAttribute ("volume", 0.8)));
             ctl.pan.store ((float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0)));
+            // Insert 0 is always a balance control whatever the file says.
+            // The master is what every other insert is summed into, so there
+            // is no source on it to place, and a law there would move the
+            // level of the whole mix. The menu does not offer it either; this
+            // is the half that a hand edited or newer file cannot get past.
+            ctl.panMode.store (i == 0 ? PanLaw::defaultMode
+                                      : PanLaw::modeFromStored (
+                                            e->getIntAttribute ("panMode",
+                                                PanLaw::modeToStored (PanLaw::defaultMode))));
             ctl.mute.store (e->getBoolAttribute ("mute"));
 
             // Routed through the engine so the delay compensation is

@@ -11,6 +11,7 @@
 #include "AudioDefaults.h"
 #include "InputSource.h"
 #include "RecordAlign.h"
+#include "PanLaw.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -182,6 +183,13 @@ public:
         juce::String name;
         std::atomic<float> volume { 0.8f };     // fader position 0..1.25 (0.8 = 0 dB)
         std::atomic<float> pan    { 0.0f };     // -1..1
+
+        // Whether that pan control is a balance control or a panner. Balance
+        // is the default because it is what every version of this studio has
+        // done, so no project already mixed in it moves. PanLaw.h has the
+        // reasoning and the arithmetic.
+        std::atomic<PanLaw::Mode> panMode { PanLaw::defaultMode };
+
         std::atomic<bool>  mute   { false };
         std::atomic<float> peakL  { 0.0f }, peakR { 0.0f };
         std::array<std::atomic<bool>, kNumFxSlots> bypass {};
@@ -194,6 +202,19 @@ public:
         std::array<std::atomic<float>, kNumSends> sendLevel {};
     };
     InsertControls& insert (int index) noexcept { return controls[(size_t) juce::jlimit (0, kNumInserts - 1, index)]; }
+
+    /** How a panner turns a position into two gains.
+
+        One law for the whole project, which is where Logic and Reaper both
+        keep it. A law that varied per strip would make a session harder to
+        reason about rather than easier, and the choice of whether a strip is
+        panned or balanced is already per strip.
+
+        It only reaches an insert whose pan mode is `pan`: a balance control
+        takes no law, for the reason PanLaw.h gives.
+    */
+    void setPanLaw (PanLaw::Law law) noexcept { panLaw.store (law); }
+    PanLaw::Law getPanLaw() const noexcept    { return panLaw.load(); }
 
     void setFx (int insert, int slot, std::unique_ptr<juce::AudioPluginInstance>);
 
@@ -554,7 +575,7 @@ private:
     static int channelsFor (const juce::AudioPluginInstance&);
     int  bufferCapacity() const noexcept { return std::max (blockSize * 2, 8192); }
     void updateLatency();
-    void processInsert (int index, int numSamples);
+    void processInsert (int index, int numSamples, PanLaw::Law law);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
     // ---- first run device configuration, all message thread ----
@@ -684,6 +705,7 @@ private:
     std::atomic<double> loopRangeStart { 0.0 }, loopRangeEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
     std::atomic<int>    selectedChannel { 0 }, recordSource { -1 };
+    std::atomic<PanLaw::Law> panLaw { PanLaw::defaultLaw };
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;

@@ -454,6 +454,22 @@ private:
             auto& ctl = owner.engine.insert (index);
             fader.setValue (ctl.volume.load(), juce::dontSendNotification);
             pan.setValue (ctl.pan.load(), juce::dontSendNotification);
+
+            // A pan control and a balance control do different things to the
+            // level, and a strip set the wrong way is silent about it, so the
+            // knob says which it is: a brighter ring in pan mode, and the
+            // tooltip names the mode and the law it is running under.
+            const auto mode = ctl.panMode.load();
+
+            pan.setColour (juce::Slider::rotarySliderOutlineColourId,
+                           mode == PanLaw::Mode::pan ? Ahp::muted : Ahp::panel3);
+
+            pan.setTooltip (juce::String (PanLaw::name (mode))
+                                + (mode == PanLaw::Mode::pan
+                                       ? ", law " + juce::String (PanLaw::name (owner.engine.getPanLaw()))
+                                       : juce::String())
+                                + ". Right click the strip to change it.");
+
             mute.setButtonText (ctl.mute.load() ? "muted" : "on");
             mute.setToggleState (! ctl.mute.load(), juce::dontSendNotification);
 
@@ -674,6 +690,55 @@ private:
             m.addItem (2, "Reset volume and pan");
             m.addItem (3, "Remove all effects", fxCount > 0);
 
+            // Ardour, Cubase and Reaper all let the panner be chosen rather
+            // than inferred from the audio, and all three put the choice on
+            // the pan control's own context menu.
+            //
+            // Inferring it would be wrong for most of what reaches an insert.
+            // A strip fed from a socket does know, because `InputSource.h`
+            // knows whether that choice was mono, and Logic and Cubase would
+            // use it. But an insert also carries playlist audio, an instrument
+            // channel's output and the sum of several of those, and for all of
+            // those the buffer is two channels whatever is on it, so the
+            // studio cannot tell a centred mono take from a stereo recording
+            // that happens to be quiet on one side. A control that changed the
+            // level depending on the material would be worse than one that
+            // needs telling.
+            //
+            // Not offered on insert 0. The master is what every other insert
+            // is summed into after each has been lined up, so there is no
+            // source on it to place: under an uncompensated law it would drop
+            // the whole mix by the law's own figure, and a compensated one
+            // would raise the ends of a bus that has no headroom to give.
+            // Insert 0 is carved out of input routing for the same shape of
+            // reason.
+            const auto mode = owner.engine.insert (index).panMode.load();
+
+            if (index > 0)
+            {
+                m.addSeparator();
+                m.addSectionHeader ("Pan control");
+                m.addItem (20, PanLaw::name (PanLaw::Mode::balance), true, mode == PanLaw::Mode::balance);
+                m.addItem (21, PanLaw::name (PanLaw::Mode::pan),     true, mode == PanLaw::Mode::pan);
+            }
+
+            // One law for the project, which is where Logic and Reaper keep
+            // it. Said so on the item rather than left to be discovered after
+            // somebody has set it on eight strips in turn.
+            juce::PopupMenu laws;
+            const auto current = owner.engine.getPanLaw();
+
+            if (index == 0)
+                m.addSeparator();
+
+            for (int i = 0; i < PanLaw::numLaws; ++i)
+            {
+                const auto law = PanLaw::lawAt (i);
+                laws.addItem (30 + i, PanLaw::name (law), true, law == current);
+            }
+
+            m.addSubMenu ("Pan law, for the whole project", laws);
+
             // Image-Line's manual calls this Auto-map: "This will
             // automatically map each input on your audio device to a unique
             // Mixer Track Input, starting on the Mixer track where the
@@ -703,6 +768,18 @@ private:
                 {
                     safe->owner.mapInputsFrom (safe->index, result == 11, result == 12);
                     return;
+                }
+
+                if ((result == 20 || result == 21) && safe->index > 0)
+                {
+                    ctl.panMode.store (result == 21 ? PanLaw::Mode::pan : PanLaw::Mode::balance);
+                }
+                else if (result >= 30 && result < 30 + PanLaw::numLaws)
+                {
+                    // Every strip's tooltip names the law, and a law reaches
+                    // every strip set to pan, so the whole mixer is refreshed
+                    // rather than this one.
+                    safe->owner.engine.setPanLaw (PanLaw::lawAt (result - 30));
                 }
 
                 if (result == 2)
