@@ -1444,11 +1444,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // player feels.
             mixMonitorInput (inputChannelData, numInputChannels, numSamples);
 
+            // One law for the whole block, read once. Read inside the loop
+            // instead and a change arriving mid block would be applied to some
+            // inserts and not others, so the mix would be momentarily mixed
+            // under two laws at once.
+            const auto blockLaw = panLaw.load();
+
             // inserts into master
             auto& master = insertSlots[0].buffer;
             for (int i = 1; i < kNumInserts; ++i)
             {
-                processInsert (i, numSamples);
+                processInsert (i, numSamples, blockLaw);
 
                 auto& slot = insertSlots[(size_t) i];
 
@@ -1462,7 +1468,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 master.addFrom (0, 0, slot.buffer, 0, 0, numSamples);
                 master.addFrom (1, 0, slot.buffer, 1, 0, numSamples);
             }
-            processInsert (0, numSamples);
+            processInsert (0, numSamples, blockLaw);
 
             // Measured here, after every effect: this is what actually leaves
             // the studio, which is what a loudness figure has to describe.
@@ -2062,7 +2068,7 @@ void AudioEngine::renderAudioClips (int numSamples)
     }
 }
 
-void AudioEngine::processInsert (int index, int numSamples)
+void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
 {
     auto& slot = insertSlots[(size_t) index];
     auto& ctl  = controls[(size_t) index];
@@ -2087,12 +2093,31 @@ void AudioEngine::processInsert (int index, int numSamples)
         slot.buffer.copyFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
     }
 
-    // fader (0.8 = unity) and balance
+    // Fader (0.8 = unity), then the pan control.
+    //
+    // Which pair of gains a position means is in PanLaw.h, which has no JUCE
+    // in it and is tested, because nothing here can announce that it is wrong:
+    // a pan law a decibel out does not error, does not crackle and looks
+    // perfectly normal on a meter. All that is left here is the load and the
+    // two gains, and because the export goes through this same function a
+    // bounce gets the law without being told about it.
     const float v    = ctl.volume.load();
     const float gain = ctl.mute.load() ? 0.0f : (v / 0.8f) * (v / 0.8f);
     const float pan  = ctl.pan.load();
-    slot.buffer.applyGain (0, 0, numSamples, gain * std::min (1.0f, 1.0f - pan));
-    slot.buffer.applyGain (1, 0, numSamples, gain * std::min (1.0f, 1.0f + pan));
+
+    // Worked out per block rather than kept somewhere. In balance mode that is
+    // a comparison; in pan mode it is three sines and two divisions, and three
+    // square roots on top of that under the -4.5 dB law, which is still
+    // nothing next to a block of audio. A cached pair would be a second copy
+    // of the pan position, updated from the message thread, free to disagree
+    // with the atomic it came from.
+    //
+    // The law comes in as an argument rather than being read here, so that one
+    // block, and one whole bounce, uses one law. See the call sites.
+    const auto panGain = PanLaw::gains (ctl.panMode.load(), law, (double) pan);
+
+    slot.buffer.applyGain (0, 0, numSamples, gain * (float) panGain.left);
+    slot.buffer.applyGain (1, 0, numSamples, gain * (float) panGain.right);
 
     ctl.peakL.store (std::max (slot.buffer.getMagnitude (0, 0, numSamples), ctl.peakL.load() * 0.9f));
     ctl.peakR.store (std::max (slot.buffer.getMagnitude (1, 0, numSamples), ctl.peakR.load() * 0.9f));
@@ -2454,6 +2479,15 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     // sound different from what was heard, and the honest reading of that is
     // that it must not inherit a tracking compromise either.
     exportingFullyCompensated = true;
+
+    // The law is latched for the whole render rather than read per block, for
+    // the same reason the record alignment figure is latched when recording
+    // starts: an export runs on its own thread while the mixer stays live, and
+    // a law changed halfway through would put the join in the middle of the
+    // bounce, with the first half mixed under one law and the second under
+    // another. Taking the graph lock in setPanLaw would prevent it too and
+    // would spin the message thread for the length of the export.
+    const auto renderLaw = panLaw.load();
     updateLatency();
 
     struct RestoreCompensation
@@ -2555,7 +2589,7 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         auto& master = insertSlots[0].buffer;
         for (int i = 1; i < kNumInserts; ++i)
         {
-            processInsert (i, n);
+            processInsert (i, n, renderLaw);
 
             auto& slot = insertSlots[(size_t) i];
             routeSends (i, n);
@@ -2567,7 +2601,7 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
             if (std::find (stemInserts.begin(), stemInserts.end(), i) != stemInserts.end())
                 sink (i, slot.buffer.getArrayOfReadPointers(), n);
         }
-        processInsert (0, n);
+        processInsert (0, n, renderLaw);
         sink (-1, master.getArrayOfReadPointers(), n);
 
         if (progress && ! progress (juce::jlimit (0.0, 1.0, (position - fromBeat) / totalBeats)))

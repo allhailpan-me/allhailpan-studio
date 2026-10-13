@@ -288,6 +288,7 @@ braces on their own line.
 | `PreferencesWindow.h` | The preferences window, and the one path from a stored setting to its effect |
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
+| `PanLaw.h` | What the pan control means: a balance control or a panner, and the law a panner follows. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `RecordAlign.h` | Where a recorded take belongs: the round trip taken back off a capture, and the split into loop passes. No JUCE |
 | `LatencyGraph.h` | Which path gets which delay, including the monitoring exemption. No JUCE, so the whole compensation graph is tested |
@@ -350,6 +351,21 @@ The monitored insert is never insert 0. The master is what every other insert
 is lined up to, so there is nothing to exempt it from, and a monitor routed
 there would run through the whole master chain and pick up its lookahead, which
 is the exact thing the exemption exists to avoid.
+
+**Panning a mono source and balancing a stereo one are two different
+controls.** An insert's pan knob is one or the other, chosen per insert in its
+context menu, and balance is the default because it is what every version up
+to now did to every insert, so no saved project moves. Balance leaves a centred
+signal alone and attenuates the opposite side in proportion, which is right for
+a stereo recording and costs a mono source 3 dB the moment it is moved off
+centre, because a mono source is the same signal in both halves of the buffer.
+The panner is what fixes that, and the law it follows is one setting for the
+project, the way Logic and Reaper keep it. The arithmetic and the sources are
+in `PanLaw.h`. Insert 0 is always a balance control: the master is what every
+other insert is summed into, so there is no source on it to place, and a law
+there would move the level of the whole mix. The law is latched once per block
+in the device callback and once per render in `renderOffline`, so one block, and
+one whole bounce, is mixed under one law.
 
 **On Windows, the driver decides the monitoring latency and the buffer size
 control cannot rescue it.** JUCE registers three WASAPI modes, and in the plain

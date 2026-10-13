@@ -6,6 +6,185 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-13: pan law, and the difference between panning and balancing
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **Pan law, and a mono panner distinct from the stereo balance control** | **Chosen.** |
+| MIDI record alignment, and the instrument tap with it | Deferred again, and the reason is the one the last night named rather than a new one: the figure is easy and the hard part is knowing whether the keyboard is being played live or a pattern is being bounced off the grid. Getting that wrong drags a bounce off the beat, which is worse than the few milliseconds it would fix. Still the right next thing once that distinction exists. |
+| Clip fade in and fade out handles, and splice crossfades | Deferred again. Still the largest real gap, still reaches `Project`, `ProjectIO`, the playlist's drag handling and both render paths at once, and most of the work is in the window where nothing tests it. Worth a night that does only that. |
+| A tuner | Deferred. Needs a published pitch detector, which is a night on its own, and the useful half is a window. |
+| Punch in and punch out recording | Deferred. |
+| Fader law | Noted as a real gap for a later night, not chosen. `processInsert` turns the fader position into gain with `(v / 0.8)^2`, so the travel is a squared taper with unity at 0.8 and about +7.75 dB at the top of the range. Every studio tapers a fader in decibels instead, so equal travel is equal decibels through the useful region and the number next to the fader means something. Smaller daily cost than panning, because a fader is ridden by ear anyway, and it changes the meaning of every stored `volume` in every saved project, which needs a version check. |
+| A true stereo panner, with position and width | Rejected for tonight, recorded because it came out of the research. Ardour's `2in2out` panner treats each side of a stereo signal as its own mono source and panes both through the same law, which is what gives it a width control; Cubase calls the same idea the Stereo Combined Panner and warns in its own manual that collapsing the two positions to one point "increases the volume of the signal". It is a real feature and the groundwork below is what it would be built on, but it is of little use to somebody recording mono guitar and mono vocals, which is what this studio is for. |
+
+### What was chosen, and why
+
+**Panning a mono source off centre makes it quieter, and there is nothing to
+set against that.**
+
+`processInsert` turns the pan control into gain with `min(1, 1 - p)` and
+`min(1, 1 + p)`. That is not an approximation of anything: it is exactly
+Ardour's stereo balance panner, which does the same thing in
+`Pannerbalance::update` (centre leaves both sides alone, and moving off centre
+linearly attenuates the opposite side). As a balance control it is correct and
+there is nothing wrong with it.
+
+The problem is that it is the only thing here, and it is applied to every
+insert whatever is on it. A guitar in one socket of a UMC1820 arrives as a
+mono source, centred, which means the same signal in both halves of the
+insert's buffer. Pan that hard left and the right half is multiplied by zero,
+so the power halves: the guitar drops 3.01 dB the moment it is moved off
+centre, and the fader has to be ridden back up to put it where it was. Every
+mono track in the session has this, which for somebody who records guitar and
+vocals is every track that carries a performance.
+
+Every studio researched treats these as two different controls, chosen by what
+is on the track:
+
+- **Logic** gives a mono channel strip a Pan knob and a stereo strip a Balance
+  knob by default, and says Balance "differs from Stereo Pan mode in that it
+  controls the relative levels of two signals (Left and Right) at their
+  outputs".
+- **Ardour** ships three separate panners and lets the panner be chosen by
+  right clicking it: `1in2out` for a mono source, `2in2out` for a stereo one,
+  and `stereobalance` for the case where the content is arbitrary. Its manual
+  recommends balance when the content cannot be trusted, because it "works
+  with arbitrary content without danger of introducing comb filter artefacts".
+- **Cubase** picks the panner per channel from its input and output
+  configuration and lets it be changed from the pan control's context menu.
+- **Reaper**'s default track pan mode is named for both halves at once,
+  stereo balance for a stereo track and mono pan for a mono one.
+
+So the gap is not a wrong formula, it is a missing control. What was built is
+the mono panner, and the law it uses, with the balance control left exactly as
+it is and still the default.
+
+### Where the behaviour came from
+
+- **The named laws and what each one means** come from Logic's own General
+  Audio project settings page, which is the clearest published statement of
+  the set and is where the word "compensated" is defined. It offers 0 dB,
+  -3 dB, -3 dB Compensated, -4.5 dB, -4.5 dB Compensated, -6 dB and -6 dB
+  Compensated, and defines them by the centre: -3 dB routes a centred signal
+  "to the left and right output channels with a -3 dB level decrease" while
+  the extremes pass "without any level change", and -3 dB Compensated routes a
+  centred signal at "the same level" while the extremes get "a +3 dB level
+  increase". So the number in a law's name is the gain applied to each side at
+  centre, and "compensated" moves the whole curve up so that centre is unity
+  instead.
+- **The curves** come from Oland and Dannenberg's pan law reading for Carnegie
+  Mellon's Introduction to Computer Music, which gives all three with their
+  formulas: linear, `L = (pi/2 - theta)(2/pi)` and `R = theta(2/pi)`, half gain
+  at centre and a "hole-in-the-middle"; constant power, `L = cos(theta)` and
+  `R = sin(theta)`, about 0.71 at centre and total power flat at every
+  position; and the -4.5 dB compromise, "the square root of the product of the
+  linear and constant power laws", about 0.59 at centre. Those centre gains
+  are 0.5, 0.707107 and 0.594604, which are -6.0206 dB, -3.0103 dB and
+  -4.5154 dB, so each curve lands on the law Logic names it by without any
+  fitting. Nothing here was chosen; the arithmetic was read and checked.
+- **Logic's 0 dB law turns out to be the formula already here.** A centred
+  signal passing at full level on both sides and an extreme passing at full
+  level on one is `min(1, 1 - p)` and `min(1, 1 + p)` exactly. That is worth
+  recording because it makes the change safe: the studio has been running
+  Logic's 0 dB pan law all along, so keeping it as the default changes no
+  existing mix, and Logic's own warning about it, that "a signal panned to the
+  center position may sound louder than signals panned hard left or right", is
+  a description of the complaint.
+- **Constant power as the sensible default for the new mode** is derived here
+  rather than copied, because the studios disagree about defaults. -3 dB
+  Compensated is the only one of the seven that is both flat in power across
+  the sweep, so moving a track does not change its loudness, and unity at
+  centre, so switching an insert from balance to pan while it sits centred
+  changes nothing at all and cannot click. Every other option fails one of
+  those two.
+
+### What was built
+
+`Source/PanLaw.h`, with no JUCE in it: the two modes, the seven laws, the
+stored round trip, and the gain pair for a position. `processInsert` keeps only
+the load and the two `applyGain` calls, and because playback and `renderOffline`
+both go through it, a bounce gets the law for free.
+
+### Deliberately left for later
+
+- **A true stereo panner with width**, as above.
+- **Clip gain and the fader law**, both noted above.
+- **A per-insert law, rather than one for the project.** Logic and Reaper both
+  put the law in project settings, which is what was followed, and a law that
+  varied per strip would make a session harder to reason about rather than
+  easier.
+- **Clipping at the extremes under a compensated law.** A compensated law is
+  above unity everywhere but the centre, by up to +6.02 dB at the ends of the
+  -6 dB law, which is inherent to what "compensated" means and is what Logic
+  documents. Nothing warns about it. A meter already exists on every strip, so
+  it is visible, but a strip that clips only when panned is worth a thought
+  later.
+- **Putting a strip fed from a mono socket into pan mode by itself.** Logic and
+  Cubase both pick the panner from the channel's configuration, and
+  `InputSource.h` already knows whether an input choice was mono, so the one
+  case the studio could infer is exactly the case that matters most here. It
+  was left out tonight because assigning an input would then change the level
+  of a strip already panned off centre, with nothing to say so, which is the
+  shape of fault this file keeps a record of. Worth doing with a visible
+  notice, not silently.
+- **Smoothing the pan gains.** `processInsert` applies one gain for the whole
+  block, so changing the mode or the law during playback steps it at a block
+  boundary. Under a compensated law or the 0 dB law a mode change at centre is
+  silent, which is the case that matters, but an uncompensated law jumps by its
+  own figure. The fader and the pan position already behave this way, so this
+  is the mixer's existing habit rather than something new, and it should be
+  fixed for all of them at once rather than for the pan law alone.
+- **`MixerComponent.h` opens by naming another product to say what this mixer
+  is.** Out of scope for a pan law change, and against this project's own rule
+  about how to describe itself. One line, worth a tidy pass.
+
+### What the audit found
+
+Twenty five deliberate breakages of `PanLaw.h` were tried and twenty four
+failed the test. The survivor is a genuine no-op and is now documented as one
+in both the header and the test: taking the pan mode out of the compensation
+condition changes nothing, because balance mode has already forced the flat
+curve and the flat curve is unity at centre.
+
+A separate agent audited the change against the real JUCE 9.0.3 headers and
+found four things worth recording here, all fixed before merging:
+
+1. **The test pinned the properties of every law and the shape of none of
+   them.** Constant power could be replaced by a square root crossfade and
+   every check still passed: same centre gain, same extremes, same flat power,
+   same monotonicity, and 2.89 dB out at half pan. That is the exact failure
+   `CLAUDE.md` describes as a number that is present, plausible and wrong, in
+   the default law. The test now checks every law against its published curve
+   at four thousand positions, which kills that and two more of the same kind.
+2. **The law was read inside the insert loop**, so a change arriving mid block
+   would have been applied to some inserts and not others, and an export, which
+   runs on its own thread while the mixer stays live, could have been mixed
+   under one law for its first half and another for its second. It is now read
+   once per block and latched once per render, the way the record alignment
+   figure is latched when recording starts.
+3. **The master strip was offered a pan mode.** Meaningless by definition and
+   actively harmful: an uncompensated law there would drop the whole mix by the
+   law's figure into every bounce. The menu no longer offers it and the loader
+   forces insert 0 to balance whatever the file says.
+4. **Three comments described something other than what the code did**,
+   including one above `centreGainDb` claiming it returns the figure in a
+   law's name when for a compensated law it returns zero. That is the same
+   fault `CLAUDE.md` records twice for `updateLatency`, so it is worth naming
+   rather than quietly fixing.
+
+The audit also raised the format version bump as a judgement call rather than a
+defect: it is unconditional, so a project saved by this build is refused by the
+previous release even when every insert is still a balance control, which will
+be almost all of them for a while. Writing 3 in that case would keep those
+files openable. It was left unconditional, matching versions 2 and 3, because a
+format version that depends on the contents of the file is a rule that will be
+got wrong by whoever adds the next piece of state.
+
+---
+
 ## 2026-10-08: where a recorded take lands on the timeline
 
 ### What was looked at
