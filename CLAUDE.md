@@ -68,6 +68,27 @@ gh api -X POST repos/allhailpan-me/allhailpan-studio/actions/workflows/build.yml
 The notes come from `RELEASE_NOTES.md`, so they are written and reviewed
 alongside the code they describe.
 
+**A quoted include in a subdirectory of `Source` must be written relative to
+its own file.** The tests compile with `-I Source`, so `#include "RealFFT.h"`
+from inside `Source/Synth` resolves there and the suite is perfectly happy.
+The application build has no such flag, and the two compilers then disagree:
+MSVC searches the directories of every file in the include chain, so being
+reached from `MainComponent.cpp` in `Source` is enough for it, while GCC and
+Clang search only the directory of the file doing the including. So it builds
+on Windows, passes every test, and fails on Linux and macOS with a missing
+header.
+
+Write `#include "../RealFFT.h"`, the way `Synth/Voice.h` already writes
+`#include "../Envelope.h"`. Worth checking after adding any header under
+`Source/Synth` or `Source/Fx`:
+
+```
+for f in Source/Synth/*.h Source/Fx/*.h; do d=$(dirname "$f")
+  grep -o '#include "[^"]*"' "$f" | sed 's/#include "//;s/"//' |
+  while read -r i; do [ -f "$d/$i" ] || echo "$f -> $i"; done
+done
+```
+
 ## How the audio flows
 
 ```
