@@ -233,6 +233,108 @@ namespace PanOneParams
         return list;
     }
 
+    inline const std::vector<Choice>& lfoShapes()
+    {
+        static const std::vector<Choice> list
+        {
+            { "sine",     "Sine" },
+            { "triangle", "Triangle" },
+            { "sawup",    "Saw up" },
+            { "sawdown",  "Saw down" },
+            { "square",   "Square" },
+            { "pulse",    "Pulse" },
+            { "sandh",    "Sample and hold" },
+            { "random",   "Smooth random" }
+        };
+
+        return list;
+    }
+
+    /** How long one cycle of a synced LFO takes, in beats.
+
+        Listed longest first, which is a menu order rather than a safety
+        order, and that is a deliberate exception to the rule the other
+        lists follow. There is no entry here that is safe to fall back to:
+        if an id is not recognised then the file came from a version that
+        had a division this one does not, and arriving at eight bars is no
+        more or less wrong than arriving at a sixteenth. The rule earns its
+        keep on the lists that genuinely change, the wavetables and the
+        matrix, where "none" and "the first table" are real answers.
+    */
+    struct Division
+    {
+        const char* id;
+        const char* name;
+        double beats;       /**< a beat being a quarter note */
+    };
+
+    inline const std::vector<Division>& divisionTable()
+    {
+        static const std::vector<Division> list
+        {
+            { "8bars",  "8 bars",  32.0 },
+            { "4bars",  "4 bars",  16.0 },
+            { "2bars",  "2 bars",   8.0 },
+            { "1bar",   "1 bar",    4.0 },
+            { "half",   "1/2",      2.0 },
+            { "halft",  "1/2 T",    4.0 / 3.0 },
+            { "quartd", "1/4 D",    1.5 },
+            { "quart",  "1/4",      1.0 },
+            { "quartt", "1/4 T",    2.0 / 3.0 },
+            { "eighd",  "1/8 D",    0.75 },
+            { "eigh",   "1/8",      0.5 },
+            { "eight",  "1/8 T",    1.0 / 3.0 },
+            { "sixtd",  "1/16 D",   0.375 },
+            { "sixt",   "1/16",     0.25 },
+            { "sixtt",  "1/16 T",   1.0 / 6.0 },
+            { "thirty", "1/32",     0.125 }
+        };
+
+        return list;
+    }
+
+    inline const std::vector<Choice>& lfoDivisions()
+    {
+        static const std::vector<Choice> list = []
+        {
+            std::vector<Choice> out;
+
+            for (const auto& d : divisionTable())
+                out.push_back ({ d.id, d.name });
+
+            return out;
+        }();
+
+        return list;
+    }
+
+    /** The division nearest a number of beats.
+
+        Nearest rather than exact, so that a patch carrying a value from
+        somewhere else, or one that has been through a float parameter,
+        lands on a real entry instead of on the first one.
+    */
+    inline int divisionFromBeats (double beats)
+    {
+        const auto& table = divisionTable();
+
+        int best = 0;
+        double closest = 1.0e9;
+
+        for (int i = 0; i < (int) table.size(); ++i)
+        {
+            const double away = std::fabs (table[(std::size_t) i].beats - beats);
+
+            if (away < closest)
+            {
+                closest = away;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
     inline const std::vector<Choice>& gateModes()
     {
         static const std::vector<Choice> list
@@ -369,6 +471,26 @@ namespace PanOneParams
             continuous ("noiselevel", "Noise", "", 0.0f, 1.0f, 0.5f,
                         [] (const Patch& p) { return (float) p.noiseLevel; },
                         [] (Patch& p, float v) { p.noiseLevel = v; });
+
+            // White at nothing, pink at a half, brown at one, and a real
+            // slope at every point between rather than a blend of three
+            // sounds. The arithmetic is in Fx/Tilt.h and is measured
+            // against pink's own definition, equal energy per octave.
+            continuous ("noisecolour", "Colour", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.noiseColour; },
+                        [] (Patch& p, float v) { p.noiseColour = v; });
+
+            // Where each oscillator starts when a note does. The
+            // oscillators are reset to these rather than left free
+            // running, which is what makes a short percussive attack the
+            // same shape every time.
+            continuous ("osc1phase", "Phase 1", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.osc1Phase; },
+                        [] (Patch& p, float v) { p.osc1Phase = v; });
+
+            continuous ("osc2phase", "Phase 2", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.osc2Phase; },
+                        [] (Patch& p, float v) { p.osc2Phase = v; });
 
             //------------------------------------------------------------------
             // The folder.
@@ -549,6 +671,95 @@ namespace PanOneParams
             }
 
             //------------------------------------------------------------------
+            // Where the voice goes and how it gets to its pitch.
+
+            // Skewed hard towards the short end, because a tenth of a
+            // second is a lot of glide and ten is a special effect, so a
+            // linear control would put everything usable in the first
+            // millimetre.
+            continuous ("glide", "Glide", " s", 0.0f, 10.0f, 0.2f,
+                        [] (const Patch& p) { return (float) p.glideSeconds; },
+                        [] (Patch& p, float v) { p.glideSeconds = v; });
+
+            continuous ("pan", "Pan", "", -1.0f, 1.0f, 0.0f,
+                        [] (const Patch& p) { return (float) p.pan; },
+                        [] (Patch& p, float v) { p.pan = v; });
+
+            //------------------------------------------------------------------
+            // The four LFOs.
+
+            for (int i = 0; i < 4; ++i)
+            {
+                const std::string prefix = "lfo" + std::to_string (i + 1);
+                const std::string which = "LFO " + std::to_string (i + 1) + " ";
+
+                pick (keep (prefix + "shape"), keep (which + "shape"), lfoShapes,
+                      [i] (const Patch& p) { return (float) (int) p.lfos[i].shape; },
+                      [i] (Patch& p, float v)
+                      {
+                          p.lfos[i].shape = toEnum<Synth::Lfo::Shape> (v, 8);
+                      });
+
+                // A hundredth of a hertz to a hundred, which is a cycle
+                // every hundred seconds at one end and well into the
+                // audible at the other, and the matrix can drive it six
+                // octaves past that.
+                continuous (keep (prefix + "rate"), keep (which + "rate"), " Hz",
+                            0.01f, 100.0f, 2.0f,
+                            [i] (const Patch& p) { return (float) p.lfos[i].rateHz; },
+                            [i] (Patch& p, float v) { p.lfos[i].rateHz = v; });
+
+                pick (keep (prefix + "sync"), keep (which + "sync"), offOrOn,
+                      [i] (const Patch& p) { return p.lfos[i].synced ? 1.0f : 0.0f; },
+                      [i] (Patch& p, float v) { p.lfos[i].synced = v > 0.5f; });
+
+                pick (keep (prefix + "div"), keep (which + "division"), lfoDivisions,
+                      [i] (const Patch& p)
+                      { return (float) divisionFromBeats (p.lfos[i].beatsPerCycle); },
+                      [i] (Patch& p, float v)
+                      {
+                          const auto& table = divisionTable();
+                          const int index = toIndex (v, (int) table.size());
+
+                          p.lfos[i].beatsPerCycle = table[(std::size_t) index].beats;
+                      });
+
+                continuous (keep (prefix + "width"), keep (which + "width"), "",
+                            0.02f, 0.98f, 0.5f,
+                            [i] (const Patch& p) { return (float) p.lfos[i].pulseWidth; },
+                            [i] (Patch& p, float v) { p.lfos[i].pulseWidth = v; });
+
+                continuous (keep (prefix + "phase"), keep (which + "phase"), "",
+                            0.0f, 1.0f, 0.5f,
+                            [i] (const Patch& p) { return (float) p.lfos[i].phaseOffset; },
+                            [i] (Patch& p, float v) { p.lfos[i].phaseOffset = v; });
+
+                pick (keep (prefix + "trig"), keep (which + "retrigger"), offOrOn,
+                      [i] (const Patch& p) { return p.lfos[i].retrigger ? 1.0f : 0.0f; },
+                      [i] (Patch& p, float v) { p.lfos[i].retrigger = v > 0.5f; });
+
+                continuous (keep (prefix + "fade"), keep (which + "fade"), " s",
+                            0.0f, 20.0f, 1.0f,
+                            [i] (const Patch& p) { return (float) p.lfos[i].fadeSeconds; },
+                            [i] (Patch& p, float v) { p.lfos[i].fadeSeconds = v; });
+            }
+
+            //------------------------------------------------------------------
+            // The four macros.
+            //
+            // In the patch and therefore in the table, because where a
+            // macro is sitting is part of a sound. The mod wheel and the
+            // pressure are not: they are what a player is doing at the
+            // time, so they arrive from MIDI and are never saved.
+
+            for (int i = 0; i < 4; ++i)
+                continuous (keep ("macro" + std::to_string (i + 1)),
+                            keep ("Macro " + std::to_string (i + 1)), "",
+                            0.0f, 1.0f, 0.5f,
+                            [i] (const Patch& p) { return (float) p.macros[i]; },
+                            [i] (Patch& p, float v) { p.macros[i] = v; });
+
+            //------------------------------------------------------------------
             // The matrix, generated rather than written out.
             //
             // A row's source and destination are stored as a matrix index,
@@ -635,7 +846,7 @@ namespace PanOneParams
     // struct is pinned, and growing it is a compile error that says to come
     // and look here. Update the number once the new field has a line in the
     // table, or a comment saying why it deliberately has none.
-    static_assert (sizeof (Patch) == 1152,
+    static_assert (sizeof (Patch) == 1480,
                    "Synth::Voice::Patch has changed. Does the new field need a line in "
                    "PanOneParams::all()? If not, say why here and update the size.");
 
@@ -846,12 +1057,16 @@ namespace PanOneParams
             // laptop. Six is seven hundred, and a row of ten knobs across
             // eight hundred is seventy four pixels each, which is what one
             // of them needs.
-            add ("Oscillators", 10);
+            add ("Oscillators", 13);
             add ("Folder and drive", 6);
             add ("Filter and gate", 8);
             add ("Envelopes 1 and 2", 8);
             add ("Envelopes 3 and 4", 8);
             add ("Slopes", 8);
+            add ("Glide and pan", 2);
+            add ("LFO 1 and 2", 16);
+            add ("LFO 3 and 4", 16);
+            add ("Macros", 4);
             add ("Matrix", (std::size_t) (Synth::ModMatrix::maxRoutes * controlsPerRoute),
                  Group::Kind::matrix);
 

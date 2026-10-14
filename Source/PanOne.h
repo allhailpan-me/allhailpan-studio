@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -163,10 +164,19 @@ public:
         // that notices.
         const auto patch = currentPatch();
 
-        for (auto& v : voices)
+        for (std::size_t i = 0; i < voices.size(); ++i)
         {
+            auto& v = voices[i];
+
             v.setSampleRate (sampleRate);
             v.setBank (&bank());
+
+            // Each voice seeded with its own number, so that the random
+            // source and the two random LFO shapes give every note of a
+            // chord something different. Seeded from the index rather than
+            // from a clock, so the same project sounds the same twice.
+            v.setSeed ((std::uint64_t) i + 1);
+
             v.setPatch (patch);
         }
 
@@ -194,6 +204,7 @@ public:
         buffer.clear();
 
         refreshPatchIfChanged();
+        refreshTempo();
 
         const int numSamples = buffer.getNumSamples();
         int position = 0;
@@ -467,8 +478,86 @@ private:
             v.setPatch (patch);
     }
 
+    /** The tempo, for any LFO that is synced to it.
+
+        Read once a block and pushed into the voices rather than fetched by
+        each of them, and defaulted rather than left alone when the host
+        does not say: a host that reports no tempo is common, and an LFO
+        set to one cycle a bar has to run at something.
+    */
+    void refreshTempo()
+    {
+        double beatsPerMinute = 120.0;
+
+        if (auto* head = getPlayHead())
+            if (const auto position = head->getPosition())
+                if (const auto bpm = position->getBpm())
+                    beatsPerMinute = *bpm;
+
+        if (beatsPerMinute == appliedTempo)
+            return;
+
+        appliedTempo = beatsPerMinute;
+
+        for (auto& v : voices)
+            v.setTempo (beatsPerMinute);
+    }
+
     void handle (const juce::MidiMessage& message)
     {
+        // What the player is doing, which is not patch state and is never
+        // saved: it reaches every voice, including ones already sounding,
+        // because that is what a wheel moved during a held chord means.
+        if (message.isController() && message.getControllerNumber() == 1)
+        {
+            const double value = (double) message.getControllerValue() / 127.0;
+
+            for (auto& v : voices)
+                v.setModWheel (value);
+
+            return;
+        }
+
+        if (message.isChannelPressure())
+        {
+            const double value = (double) message.getChannelPressureValue() / 127.0;
+
+            for (auto& v : voices)
+                v.setPressure (value);
+
+            return;
+        }
+
+        if (message.isAftertouch())
+        {
+            // Pressure for one key rather than for the channel, so it only
+            // reaches the voices playing that key. A keyboard that sends
+            // this is saying something per note and flattening it across
+            // the chord would throw away the whole point of it.
+            const double value = (double) message.getAfterTouchValue() / 127.0;
+            const int note = message.getNoteNumber();
+
+            for (int i = 0; i < numVoices; ++i)
+                if (allocator.voice (i).held && allocator.voice (i).note == note)
+                    voices[(std::size_t) i].setPressure (value);
+
+            return;
+        }
+
+        if (message.isPitchWheel())
+        {
+            // Minus one to one rather than in semitones. How far a bend
+            // goes is the depth of whatever routing it is pointed at,
+            // which is what lets the same wheel be a whole tone on one
+            // patch and an octave on another.
+            const double value = ((double) message.getPitchWheelValue() - 8192.0) / 8192.0;
+
+            for (auto& v : voices)
+                v.setBend (value < -1.0 ? -1.0 : (value > 1.0 ? 1.0 : value));
+
+            return;
+        }
+
         if (message.isNoteOn())
         {
             int stolen = -1;
@@ -527,11 +616,17 @@ private:
 
             for (int n = 0; n < count; ++n)
             {
-                const float s = voice.nextSample() * 0.25f;   // room for sixteen of them
-                left[n] += s;
+                // A frame rather than a sample, because a voice places
+                // itself across the stereo field: its pan is a modulation
+                // destination like any other, so two notes of the same
+                // chord can sit in different places and a routing from the
+                // per note random source scatters a whole stack of them.
+                const auto frame = voice.nextFrame();
+
+                left[n] += frame.left * 0.25f;        // room for sixteen of them
 
                 if (right != nullptr)
-                    right[n] += s;
+                    right[n] += frame.right * 0.25f;
             }
         }
     }
@@ -545,6 +640,10 @@ private:
     // Audio thread only, both of them, and both sized before a block ever
     // runs so that comparing them cannot allocate.
     std::vector<float> applied, scratch;
+
+    /** What the voices were last told the tempo was, so that reading it
+        every block does not push it into sixteen voices every block. */
+    double appliedTempo = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PanOne)
 };

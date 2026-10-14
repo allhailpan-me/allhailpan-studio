@@ -355,6 +355,7 @@ braces on their own line.
 | `Fx/Oversampler.h` | Running a nonlinearity at a multiple of the sample rate and bringing it back, with the filter design that decides whether that is worth doing. No JUCE |
 | `Fx/WaveFolder.h` | The west coast wavefolder: the characteristic, its two antiderivatives, and the antialiasing they are there for. No JUCE |
 | `Fx/Saturator.h` | Drive: three curves, the antialiasing each one can carry, and the makeup that keeps the level where it was. No JUCE |
+| `Fx/Tilt.h` | A response that falls at a chosen number of decibels per octave, designed at whatever sample rate it is given: a noise colour, and pink when asked for minus three. No JUCE |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
@@ -364,6 +365,7 @@ braces on their own line.
 | `PanOne.{h,cpp}` | The built in instrument: the parameters built from the table, the state saved by id, the shared wavetables and the MIDI plumbing |
 | `PanOneParams.h` | Every control PAN One has and every preset, as data: the ranges, the choice lists, the groups, and the translation of what version one saved. No JUCE |
 | `PanOneEditor.h` | The front panel, laid out from the table |
+| `Synth/Lfo.h` | The four modulators that are oscillators when driven hard enough: the shapes, the antialiased edges, and the two random ones. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -1001,6 +1003,141 @@ over a fixed stretch of it. No fixed stretch suits both a drone with a two
 and a half second attack and a struck sound that has finished in seventy
 milliseconds: measured over the second half of three seconds, five presets
 read as silent and none of them was.
+
+**An LFO here is an oscillator that happens to be slow.** The matrix
+declares six octaves of rate modulation for each of the four, which takes
+one from a sweep to an audio rate tone, so `Synth/Lfo.h` antialiases its
+edges rather than stepping between samples. The correction is PolyBLEP, the
+polynomial band limited step, from the line of work surveyed in Välimäki,
+Pekonen and Nam, JASA 131(1), 2012. Measured on a sawtooth and a square at
+2.4 kHz it is worth 11 and 14 dB of stray partials, which is what first
+order PolyBLEP gives and is not the same as clean: it removes the first
+order of the aliasing and leaves the rest.
+
+It is not `Synth/Slope.h` and neither can do the other's job. A slope is a
+rise and a fall with independent times, unipolar, whose rate is those two
+times added together. An LFO is a waveform about a centre with one rate and
+one shape, and it has a phase offset, a retrigger choice, a fade and two
+random shapes that a slope has no meaning for.
+
+**The first sample after retriggering an antialiased waveform sits on its
+discontinuity, and reads the middle of the jump.** That is what the
+correction is for, and it caught two tests out: a retrigger check read 0.0
+where it expected the bottom of the ramp, and a check that a sawtooth ramps
+read its first sample as 0.0. Read a sample or two later, or a quarter of
+the way in.
+
+**A macro's position is patch state. A mod wheel's is not.** The four macros
+live in the patch, so a preset can set them, the table saves them and a host
+can automate them. The wheel, the pressure and the pitch bend arrive from
+MIDI, reach every voice including ones already sounding, and are never
+saved: they are what a player is doing at the time and belong to no patch.
+The bend arrives as minus one to one rather than in semitones, because how
+far a bend goes is the depth of whatever routing it is pointed at, which is
+what lets the same wheel be a whole tone on one patch and an octave on
+another.
+
+**Check that every declared source drives something, as well as every
+destination.** It is the same failure in the other direction: a source the
+menu offers and nothing reads is a modulator that saves, loads and does
+nothing. The check needs more setting up than the destination one, because
+several sources are inputs rather than generators: a mod wheel nobody has
+moved is zero, and a routing from zero is indistinguishable from no routing.
+So every input is pushed somewhere definite first, and the note is played
+away from middle C so that key tracking is not sitting at its own zero.
+
+**Two modulators that should differ are checked by cancellation.** The four
+LFOs in a voice are seeded from one number each so their random shapes are
+four sequences rather than one. The voice shipped with a default that seeded
+all four identically, and the only way to see that from outside is to point
+two of them at the same destination with opposite depths: identical
+sequences subtract exactly, and the output is then indistinguishable from no
+routing at all. It measured 0.0000 and now measures 3.27.
+
+**A faster LFO makes the sound vary less from one stretch to the next, not
+more.** Worth knowing before measuring one. A level taken over chunks of a
+fifth of a second reads a 40 Hz LFO as almost steady, because every chunk
+contains a whole cycle and averages to the same thing: that measure reported
+a 13 per cent change from an LFO going round four hundred times faster. Read
+the energy the envelope has at the rate in question instead.
+
+And do not measure an LFO through a filter that the same patch change just
+closed. A check that changed the cutoff to 400 Hz and the LFO's rate in one
+step read no change from the LFO, and was right to: the filter had removed
+everything the LFO was doing.
+
+**Pink noise has a definition, so the filter for it is designed and not
+approximated.** `Fx/Tilt.h` is a response that falls at a chosen number of
+decibels per octave: nothing is white, minus three is pink, minus six is
+brown, and every point between is a real slope rather than a crossfade.
+
+Three different wrong things all look right from the code. A single pole
+falls at six decibels an octave, a shelf flattens out, and blending white
+noise with a filtered copy of it has no particular slope anywhere. None of
+them would announce itself, which is why the test measures: it fits a least
+squares line through the response in log frequency and reads both the
+gradient and the scatter about it. Falling, at 44.1, 48, 96 and 192 kHz, it
+measures -1.48, -2.97, -4.47 and -5.98 for -1.5, -3, -4.5 and -6, with
+0.11 to 0.17 dB of ripple.
+
+It is designed rather than copied for one reason: every coefficient set in
+circulation is specified at one sample rate. The best known, Paul Kellett's,
+is for 44.1 kHz, and the musicdsp page carrying it has a comment giving four
+different pole sets for four sample rate ranges precisely because using one
+at another rate degrades it. This studio runs at five rates.
+
+**A rising slope is looser than a falling one, and the header says so rather
+than quoting one figure.** A section is flat below its pole and at `k` above
+it, so its transition runs between the pole and the pole over `k`, which
+lands on the far side of the pole once `k` rises. Shifting the pole up by
+half the section spacing recovers most of it, 0.64 dB of ripple down to
+0.30, and the rest does not improve with more sections: one every octave and
+one every three quarters of an octave both measure 0.30 too.
+
+**Measuring a noise spectrum needs a transform, not a handful of sines.** A
+single reading of a noise spectrum at one frequency is a random quantity
+with as much spread as it has size, so twelve of them per octave give an
+estimate good to about thirty per cent. Measured that way, white noise
+through a flat filter read 5.4 where doubling the bandwidth says 8, and the
+check failed a filter that was correct. A transform gives every bin at once
+and averaging eight blocks brings the spread to a couple of per cent: white
+then reads 0.51, 1.00, 1.98, 3.92, 7.98, 15.88, 31.87 across seven octaves,
+which is what says the measurement is sound before it is used to judge
+anything, and pink reads 1.02, 1.00, 0.99, 0.98, 1.01, 1.04, 1.08.
+
+And band energy is an integral, not an average. With readings spaced
+geometrically each one stands for a slice of bandwidth proportional to its
+own frequency, so each has to be weighted by it. Averaging instead gives the
+mean power density, which for pink noise halves every octave rather than
+staying level.
+
+**A glide moves the pitch in semitones, and its time is the whole
+interval.** Both halves are conventions worth getting right. A knob marked
+in seconds means the interval takes that long, which is what hardware
+marked "glide" has meant since the Minimoog; a rate in semitones a second is
+the other convention and makes a wide leap take proportionally longer.
+Moving the pitch in semitones rather than in hertz is what makes an octave
+up and an octave down take the same time: in hertz an octave up is twice as
+far. Measured, three tenths of the way through a 0.4 second glide, an octave
+up has travelled 0.870 of the interval and an octave down 0.868.
+
+The coefficient is set so the pitch arrives within a thousandth of the
+target in the time given, the same convention `Envelope.h` uses, and the
+measurement reads 0.9990 of the interval after exactly that time.
+
+**Follow a moving pitch by interpolating zero crossings, one reading per
+cycle.** Counting crossings inside a window cannot do it: at 110 Hz a
+fiftieth of a second holds five cycles, so the best it resolves is about
+eighteen per cent, and a downward octave glide never appeared to arrive at
+all.
+
+**A destination whose range is a whole cycle does nothing at full depth.**
+The two oscillator phase destinations are declared as one complete
+rotation, which is right, and adding one complete rotation to a phase
+leaves it exactly where it was. The completeness check tried plus and minus
+one and read both as unreached while they were perfectly connected. It
+tries a half as well now, which is the general lesson: a check that pushes
+every destination to its limit is testing the one value most likely to wrap.
 
 **A destination's modulation has to be clamped to that destination's own
 range.** This bit on the first run of the new voice and it is worth knowing
