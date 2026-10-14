@@ -144,6 +144,24 @@ public:
         reset();
     }
 
+    /** For a caller that does its own oversampling and will call
+        `processOneAtCurrentRate`, with `oversampledRate` being the rate it
+        will call at.
+
+        Worth having as its own entry point rather than leaving a caller to
+        use `prepare` and then not use the oversampler it built. An instrument
+        voice runs the whole of its nonlinear section at a multiple of the
+        sample rate, so the folder inside it must not oversample again, and it
+        must still know the rate it is actually running at: `foldsCleanlyBelow`
+        is a figure about a sample rate, and a folder told 48 kHz while
+        running at 192 would report a quarter of the range it really has.
+    */
+    void prepareAtRate (double oversampledRate) noexcept
+    {
+        rate = oversampledRate > 0.0 ? oversampledRate : 44100.0;
+        history = {};
+    }
+
     void reset() noexcept
     {
         oversampler.reset();

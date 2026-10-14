@@ -321,8 +321,19 @@ public:
         waveform that is nearly square. */
     void setDrive (double amount) noexcept
     {
-        drive = amount < smallestDrive ? smallestDrive
-                                       : (amount > 64.0 ? 64.0 : amount);
+        const double wanted = amount < smallestDrive ? smallestDrive
+                                                     : (amount > 64.0 ? 64.0 : amount);
+
+        // Unchanged is the common case and it has to be free. A voice calls
+        // this once a sample, because the drive is a modulation destination
+        // and might be moving, and on the great majority of patches it is
+        // not moving at all. Recomputing anyway cost a hyperbolic tangent
+        // and a pair of exponentials per sample per voice for nothing, which
+        // measured as a fifth of a processor core across sixteen voices.
+        if (wanted == drive)
+            return;
+
+        drive = wanted;
         recompute();
     }
 
@@ -331,7 +342,16 @@ public:
         the curve and the sound is close to a rectifier. */
     void setBias (double offset) noexcept
     {
-        bias = offset < -1.0 ? -1.0 : (offset > 1.0 ? 1.0 : offset);
+        const double wanted = offset < -1.0 ? -1.0 : (offset > 1.0 ? 1.0 : offset);
+
+        // As with the drive, and more so: a bias change also re-reads the
+        // history, so an unconditional setter called once a sample pays for
+        // four evaluations of the antiderivatives to arrive at the numbers
+        // it already had.
+        if (wanted == bias)
+            return;
+
+        bias = wanted;
         recompute();
         reseedHistory();
     }
@@ -399,6 +419,13 @@ private:
 
     double biasedSecondIntegral (double u) const noexcept
     {
+        // Nothing reads this for a curve that has no second antiderivative,
+        // and computing it anyway is not free: the expression below calls
+        // `integral` twice, which for the tangent is an exponential and a
+        // logarithm each time, to scale a term that is zero.
+        if (! hasSecondIntegral (curve))
+            return 0.0;
+
         return secondIntegral (curve, u + bias) - secondAtBias
                  - bias * (integral (curve, u + bias) - integralAtBias)
                  - 0.5 * atBias * u * u;

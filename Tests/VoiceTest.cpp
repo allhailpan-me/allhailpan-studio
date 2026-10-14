@@ -28,6 +28,7 @@
 #include <complex>
 #include <cstdio>
 #include <random>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -120,6 +121,73 @@ double rmsOf (const std::vector<double>& v, std::size_t from = 0, std::size_t to
     }
 
     return counted > 0 ? std::sqrt (sum / (double) counted) : 0.0;
+}
+
+double frequencyOfNote (int note)
+{
+    return 440.0 * std::pow (2.0, ((double) note - 69.0) / 12.0);
+}
+
+/** How much of the output is not a harmonic of the note, in decibels.
+
+    The same measurement the wavefolder's and the saturator's tests use, so
+    the three sets of numbers can be read against one another. Everything
+    within eight bins of a harmonic is treated as signal, and only what lands
+    below 20 kHz is counted: the oversampler's filters are specified to push
+    what folds above that on purpose, so counting it would be measuring the
+    thing that is working.
+*/
+double aliasFloorDb (const std::vector<double>& rendered, double frequency)
+{
+    const int n = (int) rendered.size();
+
+    std::vector<double> windowed ((std::size_t) n);
+
+    const double a0 = 0.35875, a1 = 0.48829, a2 = 0.14128, a3 = 0.01168;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = 2.0 * 3.14159265358979323846 * (double) i / (double) (n - 1);
+
+        windowed[(std::size_t) i] = rendered[(std::size_t) i]
+            * (a0 - a1 * std::cos (t) + a2 * std::cos (2.0 * t) - a3 * std::cos (3.0 * t));
+    }
+
+    const double binHz = rate / (double) n;
+
+    double loudest = 0.0, stray = 0.0;
+    int strayBins = 0;
+
+    for (int k = 10; k <= n / 2; ++k)
+    {
+        std::complex<double> sum (0.0, 0.0);
+
+        for (int i = 0; i < n; ++i)
+            sum += windowed[(std::size_t) i]
+                 * std::exp (std::complex<double> (0.0,
+                       -2.0 * 3.14159265358979323846 * (double) k * (double) i / (double) n));
+
+        const double hz = (double) k * binHz;
+        const double magnitude = std::abs (sum);
+        const double nearest = std::floor (hz / frequency + 0.5);
+
+        if (nearest >= 1.0 && std::fabs (hz - nearest * frequency) / binHz <= 8.0)
+        {
+            loudest = std::max (loudest, magnitude);
+            continue;
+        }
+
+        if (hz > 20000.0)
+            continue;
+
+        ++strayBins;
+        stray = std::max (stray, magnitude);
+    }
+
+    if (strayBins < 30 || ! (loudest > 0.0))
+        return -1000.0;
+
+    return 20.0 * std::log10 (stray / loudest + 1e-300);
 }
 
 /** The centre of gravity of the spectrum, for telling brightness apart. */
@@ -264,6 +332,14 @@ void aRoutingReachesWhatItPointsAt()
     quiet.osc1Position = 0.0;           // a sine, so the fold has clean work to do
     quiet.foldDrive = 1.0;
 
+    // The folder is crossfaded in rather than always in circuit, and the mix
+    // rests at nothing so that an untouched patch is clean. A patch that
+    // wants to hear the fold has to ask, which is the whole point of the
+    // control, and it is also why this line is here: without it the routing
+    // below reaches the fold's drive perfectly well and the fold is not in
+    // the signal for it to matter to.
+    quiet.foldMix = 1.0;
+
     auto driven = quiet;
 
     // Envelope three held wide open, pointed at the fold.
@@ -286,6 +362,709 @@ void aRoutingReachesWhatItPointsAt()
     if (! (foldedCentroid > flatCentroid * 2.0))
         fail ("routing an envelope to the fold barely changed the sound: "
               + show (flatCentroid) + " Hz to " + show (foldedCentroid));
+}
+
+/** Every destination the matrix declares either changes the sound or is on
+    the list of ones that do not exist yet, and the list is measured rather
+    than believed.
+
+    This is the check that closes a whole class of fault rather than one
+    instance of it. A destination that is declared and unreached is the exact
+    shape this project keeps meeting: the menu offers it, the patch accepts
+    it, the routing saves and reloads, and nothing happens. Nothing errors,
+    so the only way anybody finds out is by wiring one up and listening hard
+    enough to be sure.
+
+    It works in both directions, which is what stops the list rotting. Adding
+    a destination to the matrix and forgetting to reach it fails here until
+    somebody writes down that it is not reached yet. Reaching one and
+    forgetting to take it off the list fails here too. So the list cannot
+    quietly become a lie, which is the usual fate of a list of known gaps.
+
+    The method is to play the same patch twice, once with one extra routing
+    pointed at the destination under test, and see whether the output moved
+    at all. Both signs of depth are tried, because some destinations sit at
+    one end of their range in the base patch and can only be pushed one way.
+*/
+void everyDestinationIsReachedOrSaidNotToBe()
+{
+    std::printf ("every destination\n");
+
+    // The destinations that are declared and that the voice does not reach,
+    // with the reason. Each of these is a module that is not built rather
+    // than a wire that is missing, which is why they are listed here instead
+    // of being quietly dropped from the matrix: the engine is going to have
+    // them, and taking them out of the menu now would mean every patch
+    // written in the meantime loses its routing when they arrive.
+    struct NotYet { const char* id; const char* why; };
+
+    const NotYet notYet[]
+    {
+        { "osc1phase",    "the oscillators have no settable phase yet" },
+        { "osc2phase",    "the oscillators have no settable phase yet" },
+        { "noisecolour",  "the noise source has one colour" },
+        { "pan",          "a voice is mono until the instrument places it" },
+        { "unisondetune", "unison belongs to the instrument, not one voice" },
+        { "unisonspread", "unison belongs to the instrument, not one voice" },
+        { "lfo1rate",     "the four LFOs are not built" },
+        { "lfo2rate",     "the four LFOs are not built" },
+        { "lfo3rate",     "the four LFOs are not built" },
+        { "lfo4rate",     "the four LFOs are not built" },
+        { "glide",        "there is no glide" },
+    };
+
+    const int env3 = Synth::ModMatrix::sourceFromId ("env3");
+    const int slope1 = Synth::ModMatrix::sourceFromId ("slope1");
+
+    // A patch with something going on in every part of the voice, so that
+    // moving any one of them is visible. Anything resting at zero, or any
+    // section crossfaded out, would make the destinations that feed it look
+    // unreached when they are merely inaudible.
+    auto base = plainPatch();
+
+    base.osc1Table = Synth::WaveBank::indexFromId ("analogue");
+    base.osc2Table = Synth::WaveBank::indexFromId ("harmonics");
+    base.osc1Position = 0.5;
+    base.osc2Position = 0.5;
+    base.osc1Level = 0.5;
+    base.osc2Level = 0.3;
+    base.subLevel = 0.2;
+    base.noiseLevel = 0.05;
+    base.osc2Semitones = 7.0;
+    base.fmAmount = 0.5;
+
+    base.foldDrive = 2.0;
+    base.foldMix = 0.4;
+    base.driveAmount = 2.0;
+
+    base.cutoff = 1500.0;
+    base.resonance = 2.0;
+
+    base.gateRange = 4.0;
+    base.gateResting = 300.0;
+
+    // Held open, so the voice is steady for the whole measurement and a
+    // difference is a difference in the sound rather than in the envelope.
+    base.envelopes[0] = { 0.002, 0.050, 1.0, 0.150 };
+    base.envelopes[2] = { 0.001, 0.001, 1.0, 0.100 };
+
+    // Both slopes cycling and both wired to something, because a slope's
+    // rate can only be seen through whatever the slope is driving. Without
+    // these two lines the two slope rate destinations would measure as
+    // unreached while being perfectly well connected.
+    base.slopes[0] = { 0.05, 0.05, 0.0, true };
+    base.slopes[1] = { 0.03, 0.09, 0.0, true };
+
+    base.matrix.add (slope1, Synth::ModMatrix::destinationFromId ("osc1pos"), 0.3f);
+    base.matrix.add (Synth::ModMatrix::sourceFromId ("slope2"),
+                     Synth::ModMatrix::destinationFromId ("foldmix"), 0.3f);
+
+    const int samples = 6000;
+    const auto reference = play (base, 57, samples);
+    const double referenceLevel = rmsOf (reference);
+
+    const auto movedBy = [&] (int destination, float depth)
+    {
+        auto patch = base;
+
+        if (! patch.matrix.add (env3, destination, depth))
+            return 0.0;
+
+        const auto rendered = play (patch, 57, samples);
+
+        double worst = 0.0;
+
+        for (std::size_t i = 0; i < rendered.size(); ++i)
+            worst = std::max (worst, std::fabs (rendered[i] - reference[i]));
+
+        return worst / (referenceLevel + 1e-12);
+    };
+
+    int reached = 0;
+    std::vector<std::string> wrongWayRound;
+
+    for (int d = 0; d < Synth::ModMatrix::numDestinations(); ++d)
+    {
+        const char* id = Synth::ModMatrix::destinationId (d);
+
+        const double moved = std::max (movedBy (d, 1.0f), movedBy (d, -1.0f));
+
+        bool listed = false;
+        const char* why = "";
+
+        for (const auto& entry : notYet)
+            if (std::strcmp (entry.id, id) == 0)
+            {
+                listed = true;
+                why = entry.why;
+            }
+
+        // A thousandth of the signal's own level. Far below anything
+        // audible, so a destination that is connected at all clears it by
+        // orders of magnitude, and nothing clears it by accident: the voice
+        // is deterministic, including its noise, so an unrouted destination
+        // moves the output by exactly nothing.
+        const bool works = moved > 1e-3;
+
+        if (works)
+            ++reached;
+
+        if (works && listed)
+            wrongWayRound.push_back (std::string (id) + " is listed as not built ("
+                                     + why + ") and moves the output by "
+                                     + show (moved));
+
+        if (! works && ! listed)
+            wrongWayRound.push_back (std::string (id)
+                                     + " is declared by the matrix and reaches nothing:"
+                                       " moved the output by " + show (moved));
+    }
+
+    std::printf ("    %d of %d destinations reach the voice, %d declared not built\n",
+                 reached, Synth::ModMatrix::numDestinations(),
+                 (int) (sizeof (notYet) / sizeof (notYet[0])));
+
+    for (const auto& problem : wrongWayRound)
+        fail (problem);
+}
+
+/** The filter filters, the resonance resonates, and the key tracking tracks.
+
+    Separate from the check above, which only proves that pointing something
+    at a destination changes the output. A filter wired to the wrong tap of
+    the state variable, or fed hertz where it wanted octaves, would pass that
+    check easily and would still not be a filter.
+*/
+void theFilterIsAFilter()
+{
+    std::printf ("the filter\n");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("analogue");
+    base.osc1Position = 0.45;               // a sawtooth: plenty to take away
+    base.osc1Level = 0.8;
+    base.envelopes[0] = { 0.002, 0.050, 1.0, 0.150 };
+    base.gateRange = 0.0;                   // the gate out of the way
+    base.gateMode = Synth::LowPassGate::Mode::amplitude;
+
+    // Closing the filter has to darken the sound, every step of the way.
+    double previous = 1e9;
+
+    std::printf ("    centroid as the cutoff closes:");
+
+    for (double cutoff : { 16000.0, 8000.0, 4000.0, 2000.0, 1000.0, 500.0 })
+    {
+        auto patch = base;
+        patch.cutoff = cutoff;
+
+        const auto rendered = play (patch, 45, 8192);
+        const double centroid = centroidOf (rendered);
+
+        std::printf (" %.0f:%.0f", cutoff, centroid);
+
+        if (! (centroid < previous))
+            fail ("closing the filter to " + show (cutoff) + " Hz did not darken the"
+                  " sound: centroid " + show (centroid) + " against " + show (previous));
+
+        previous = centroid;
+    }
+
+    std::printf ("\n");
+
+    // Resonance has to lift what is at the cutoff. Measured as the level of
+    // the whole output with the cutoff sitting on a harmonic, which rises as
+    // the peak sharpens.
+    double quietest = 1e9, loudest = 0.0;
+
+    std::printf ("    level as the resonance rises:");
+
+    for (double q : { 0.7, 2.0, 6.0, 14.0 })
+    {
+        auto patch = base;
+        patch.cutoff = 880.0;               // the fourth harmonic of the note
+        patch.resonance = q;
+
+        const auto rendered = play (patch, 45, 8192);
+        const double level = rmsOf (rendered, 2000);
+
+        std::printf (" %.1f:%.4f", q, level);
+
+        quietest = std::min (quietest, level);
+        loudest = std::max (loudest, level);
+    }
+
+    std::printf ("\n");
+
+    if (! (loudest > quietest * 1.3))
+        fail ("resonance barely changed the output: " + show (quietest) + " to "
+              + show (loudest));
+
+    // Key tracking. With it at one the filter moves with the note, so the
+    // sound is the same distance above its own fundamental everywhere on the
+    // keyboard; with it at nothing the filter stays put and high notes come
+    // out darker relative to themselves.
+    const auto brightnessAgainstPitch = [&] (double keyTrack)
+    {
+        auto patch = base;
+        patch.cutoff = 600.0;
+        patch.filterKeyTrack = keyTrack;
+
+        const double low = centroidOf (play (patch, 36, 8192))
+                             / frequencyOfNote (36);
+        const double high = centroidOf (play (patch, 60, 8192))
+                             / frequencyOfNote (60);
+
+        return high / low;
+    };
+
+    const double tracked = brightnessAgainstPitch (1.0);
+    const double fixed = brightnessAgainstPitch (0.0);
+
+    std::printf ("    two octaves up, brightness against the note: tracking %s,"
+                 " fixed %s\n", show (tracked).c_str(), show (fixed).c_str());
+
+    // Tracking keeps the ratio near one. Not exactly one, because the
+    // oscillator's own harmonics run out against Nyquist differently at the
+    // two pitches, but far nearer than leaving the filter where it was.
+    if (! (tracked > 0.6))
+        fail ("key tracking did not keep the timbre with the note: ratio "
+              + show (tracked));
+
+    if (! (fixed < tracked * 0.8))
+        fail ("turning key tracking off changed nothing: fixed " + show (fixed)
+              + " against tracked " + show (tracked));
+}
+
+/** The nonlinear section does not alias, which is the whole reason it costs
+    what it costs.
+
+    Measured on the voice rather than on the folder and the saturator
+    separately, because the thing that would go wrong here is in the joining:
+    an oversampler prepared at the wrong rate, a module told the base rate
+    while running at four times it, or a nonlinearity accidentally left
+    outside the section. Each of those leaves both modules passing their own
+    tests and the instrument dirty.
+*/
+void theVoiceDoesNotAlias()
+{
+    std::printf ("aliasing\n");
+
+    auto patch = plainPatch();
+    patch.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    patch.osc1Position = 0.0;               // a sine in, so everything out is made here
+    patch.osc1Level = 0.9;
+    patch.noiseLevel = 0.0;
+
+    // The note and the drive are chosen from a measurement rather than for
+    // looking hard. A low note folded gently aliases at the floor of this
+    // measurement whatever the oversampling is, so a test written there
+    // proves nothing: at 110 Hz and a fold of four, one times, two times and
+    // four times all read the same number. Across notes and drives:
+    //
+    //     note             1x        2x        4x
+    //     110 Hz, fold 4  -100      -101      -101
+    //     523 Hz, fold 8   -42       -71      -104
+    //    1046 Hz, fold 8   -38       -61       -86
+    //    2093 Hz, fold 8   -33       -52       -68
+    //
+    // 523 Hz at a fold of eight is where the three separate by the most, so
+    // it is the case that holds the oversampling in place. The last row is
+    // the honest limit: folding is a bass and midrange instrument, and the
+    // folder says where its own edge is in `foldsCleanlyBelow`.
+    patch.foldDrive = 8.0;
+    patch.foldMix = 1.0;
+    patch.driveAmount = 6.0;
+
+    patch.cutoff = 18000.0;
+    patch.gateRange = 0.0;
+    patch.gateMode = Synth::LowPassGate::Mode::amplitude;
+    patch.envelopes[0] = { 0.001, 0.010, 1.0, 0.100 };
+
+    const double hz = frequencyOfNote (72);
+
+    const auto rendered = play (patch, 72, 16384);
+
+    std::vector<double> steady (rendered.begin() + 4096, rendered.end());
+
+    const double db = aliasFloorDb (steady, hz);
+
+    std::printf ("    a folded and driven sine at %.1f Hz: strays at %s dB\n",
+                 hz, show (db).c_str());
+
+    // Measured at -104 dB. Held to -90, which leaves room for the ordinary
+    // drift of a measurement with an oscillator, a gate and an envelope in
+    // front of it, and still fails by a wide margin on anything that breaks
+    // the section: half the oversampling reads -71 here and none of it
+    // reads -42.
+    if (! (db < -90.0))
+        fail ("the voice aliases: strays at " + show (db) + " dB");
+}
+
+/** Driving a slope's rate upward makes it faster, and by the amount the
+    destination says.
+
+    The direction is the point. A rate destination declared in octaves whose
+    positive end slows the slope down is the complete opposite of what every
+    patch written against it will expect, and it is invisible to any check
+    that only asks whether the routing changed the sound: it changes it
+    either way. Inverting the sign survived every other check in this file.
+*/
+void drivingASlopeFasterMakesItFaster()
+{
+    std::printf ("a slope driven faster\n");
+
+    const int slope1 = Synth::ModMatrix::sourceFromId ("slope1");
+    const int env3 = Synth::ModMatrix::sourceFromId ("env3");
+    const int gateOpen = Synth::ModMatrix::destinationFromId ("gateopen");
+    const int slope1Rate = Synth::ModMatrix::destinationFromId ("slope1rate");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("analogue");
+    base.osc1Level = 0.8;
+    base.envelopes[0] = { 0.002, 0.020, 1.0, 0.100 };
+
+    // Five times a second, and pointed at the gate, so the output pulses at
+    // whatever rate the slope is actually running at.
+    base.slopes[0] = { 0.1, 0.1, 0.0, true };
+    base.matrix.add (slope1, gateOpen, 1.0f);
+
+    // How fast the output is swelling, read off the envelope's own spectrum
+    // rather than by counting crossings.
+    //
+    // Counting was tried first and is not good enough here. The level has to
+    // be taken over a window, the window has to be short enough to see a
+    // swell five times a second, and at that length it is also short enough
+    // to see the note itself going up and down inside it: a window of 128
+    // samples on a 110 Hz note read fifty swells a second where there were
+    // five. Smoothing the rectified signal and asking which low frequency
+    // has the most energy in it has no such argument to lose.
+    const auto swellsPerSecond = [] (const std::vector<double>& rendered)
+    {
+        // A one pole follower at about 30 ms, which passes a few swells a
+        // second and holds still across a cycle of any note.
+        const double coefficient = 1.0 - std::exp (-1.0 / (0.03 * rate));
+
+        std::vector<double> envelope;
+        double level = 0.0;
+
+        for (std::size_t i = 0; i < rendered.size(); ++i)
+        {
+            level += coefficient * (std::fabs (rendered[i]) - level);
+
+            if (i % 64 == 0)
+                envelope.push_back (level);
+        }
+
+        double mean = 0.0;
+
+        for (double v : envelope)
+            mean += v;
+
+        mean /= (double) std::max<std::size_t> (1, envelope.size());
+
+        const double envelopeRate = rate / 64.0;
+
+        double best = 0.0, strongest = 0.0;
+
+        for (double hz = 0.5; hz < 40.0; hz += 0.05)
+        {
+            double real = 0.0, imaginary = 0.0;
+
+            for (std::size_t i = 0; i < envelope.size(); ++i)
+            {
+                const double angle = 2.0 * 3.14159265358979323846 * hz
+                                       * (double) i / envelopeRate;
+
+                real += (envelope[i] - mean) * std::cos (angle);
+                imaginary -= (envelope[i] - mean) * std::sin (angle);
+            }
+
+            const double magnitude = std::sqrt (real * real + imaginary * imaginary);
+
+            if (magnitude > strongest)
+            {
+                strongest = magnitude;
+                best = hz;
+            }
+        }
+
+        return best;
+    };
+
+    const int samples = (int) (rate * 2.0);
+
+    const double resting = swellsPerSecond (play (base, 45, samples));
+
+    // Envelope three held wide open, pointed at the rate. The destination
+    // declares six octaves at full depth, so a sixth of full depth is one
+    // octave, which is exactly twice the speed.
+    auto faster = base;
+    faster.envelopes[2] = { 0.0005, 0.001, 1.0, 0.050 };
+    faster.matrix.add (env3, slope1Rate, 1.0f / 6.0f);
+
+    const double driven = swellsPerSecond (play (faster, 45, samples));
+
+    std::printf ("    resting %s swells a second, driven up an octave %s\n",
+                 show (resting).c_str(), show (driven).c_str());
+
+    if (! (resting > 3.0 && resting < 7.0))
+    {
+        fail ("the slope is not running at the five a second it was set to: "
+              + show (resting));
+        return;
+    }
+
+    // Twice, give or take what counting swells in windows can resolve.
+    if (! (driven > resting * 1.6 && driven < resting * 2.5))
+        fail ("an octave of rate modulation took the slope from " + show (resting)
+              + " a second to " + show (driven) + " rather than to about twice");
+}
+
+/** The voice reports the folder's clean range, and reports it for the rate
+    the folder is really running at.
+
+    Worth a check of its own because it is the only number in the voice that
+    depends on the folder having been told it is running at four times the
+    sample rate. Told the base rate instead, every sample the folder produces
+    is still exactly right, and this figure is quietly a quarter of what it
+    should be, so an interface built on it would warn about notes that are
+    perfectly clean.
+*/
+void theFoldsCleanlyFigureKnowsTheRate()
+{
+    std::printf ("the fold's clean range\n");
+
+    Synth::Voice voice;
+    voice.setSampleRate (48000.0);
+    voice.setBank (&sharedBank());
+
+    for (double drive : { 2.0, 4.0, 8.0 })
+    {
+        auto patch = plainPatch();
+        patch.foldDrive = drive;
+        voice.setPatch (patch);
+
+        const double reported = voice.foldsCleanlyBelow();
+
+        // What the folder says at the base rate, which is what it would
+        // report if the voice had not told it about the oversampling.
+        Fx::WaveFolder atBaseRate;
+        atBaseRate.prepareAtRate (48000.0);
+        atBaseRate.setDrive (drive);
+
+        const double unoversampled = atBaseRate.foldsCleanlyBelow();
+
+        std::printf ("    drive %.0f: %.0f Hz, against %.0f Hz without the"
+                     " oversampling\n", drive, reported, unoversampled);
+
+        if (! (std::fabs (reported - unoversampled * 4.0) < 1.0))
+            fail ("the voice reports a clean range of " + show (reported)
+                  + " Hz where four times the base rate figure is "
+                  + show (unoversampled * 4.0));
+    }
+}
+
+/** The delay the oversampling costs is reported, and is the delay it really
+    costs. A figure nobody checks is a figure that drifts from the thing it
+    describes, and this one is handed to the studio to line the instrument up
+    with everything else. */
+void theReportedLatencyIsReal()
+{
+    std::printf ("latency\n");
+
+    Synth::Voice voice;
+    voice.setSampleRate (rate);
+    voice.setBank (&sharedBank());
+
+    auto patch = plainPatch();
+    patch.envelopes[0] = { 0.0001, 0.050, 1.0, 0.100 };   // as near a step as it gets
+
+    voice.setPatch (patch);
+
+    const double claimed = voice.latencySamples();
+
+    voice.start (57, 1.0f);
+
+    int firstHeard = -1;
+
+    for (int i = 0; i < 4096 && firstHeard < 0; ++i)
+        if (std::fabs ((double) voice.nextSample()) > 1e-4)
+            firstHeard = i;
+
+    std::printf ("    claims %s samples, first sample above nothing at %d\n",
+                 show (claimed).c_str(), firstHeard);
+
+    if (firstHeard < 0)
+    {
+        fail ("the voice never made a sound");
+        return;
+    }
+
+    // The filters ring before their peak as well as after it, so sound
+    // arrives a little before the group delay rather than exactly at it.
+    // What this catches is a figure that is zero, or wrong by a factor.
+    if (! (claimed > 1.0 && (double) firstHeard > claimed * 0.3
+                         && (double) firstHeard < claimed * 2.5))
+        fail ("the reported latency of " + show (claimed) + " samples does not match"
+              " the " + std::to_string (firstHeard) + " it took to make a sound");
+}
+
+/** A patch changed while a note is held takes effect on that note.
+
+    This is not a corner case, it is the ordinary path: the instrument reads
+    its knobs once a block and pushes a patch into every voice whenever any
+    of them has moved, so turning a filter knob during a held chord arrives
+    here. The voice skips retuning and recomputing its filter when nothing it
+    depends on has moved, which is most of the time and is worth a fifth of a
+    processor core, and the whole of that saving rests on those caches being
+    forgotten whenever a patch or a note changes.
+
+    Forgetting to forget is silent and selective: notes started after the
+    change are right, notes already sounding keep the old filter and the old
+    tuning until something happens to modulate them. Deliberately breaking it
+    survived every other check in this file, because every one of them plays
+    a note on a fresh voice.
+*/
+void changingThePatchWhileANoteIsHeldTakesEffect()
+{
+    std::printf ("a patch changed under a held note\n");
+
+    auto first = plainPatch();
+    first.osc1Table = Synth::WaveBank::indexFromId ("analogue");
+    first.osc1Position = 0.45;
+    first.osc1Level = 0.5;
+    first.osc2Table = Synth::WaveBank::indexFromId ("analogue");
+    first.osc2Position = 0.45;
+    first.osc2Level = 0.5;
+    first.osc2Semitones = 0.0;
+    first.cutoff = 16000.0;
+    first.envelopes[0] = { 0.002, 0.050, 1.0, 0.150 };
+    first.gateRange = 0.0;
+    first.gateMode = Synth::LowPassGate::Mode::amplitude;
+
+    Synth::Voice voice;
+    voice.setSampleRate (rate);
+    voice.setBank (&sharedBank());
+    voice.setPatch (first);
+    voice.start (45, 1.0f);
+
+    std::vector<double> before, after;
+
+    for (int i = 0; i < 8192; ++i)
+        before.push_back ((double) voice.nextSample());
+
+    // The filter slammed shut and the second oscillator moved a fifth, with
+    // the note never released.
+    auto second = first;
+    second.cutoff = 400.0;
+    second.osc2Semitones = 7.0;
+
+    voice.setPatch (second);
+
+    for (int i = 0; i < 8192; ++i)
+        after.push_back ((double) voice.nextSample());
+
+    const double was = centroidOf (before);
+    const double now = centroidOf (after);
+
+    std::printf ("    centroid before %.0f Hz, after %.0f Hz\n", was, now);
+
+    if (! (now < was * 0.6))
+        fail ("closing the filter under a held note did nothing: centroid "
+              + show (was) + " Hz to " + show (now));
+
+    // And the pitch half of it, separately, because the two are cached
+    // separately and one can be forgotten without the other. The second
+    // oscillator moved up a fifth, so there is now energy at a frequency
+    // that was not there before.
+    const double fifth = frequencyOfNote (45) * 1.4983;
+
+    const auto levelAt = [] (const std::vector<double>& block, double hz)
+    {
+        double real = 0.0, imaginary = 0.0;
+
+        for (std::size_t i = 0; i < block.size(); ++i)
+        {
+            const double angle = 2.0 * 3.14159265358979323846 * hz
+                                   * (double) i / rate;
+
+            real += block[i] * std::cos (angle);
+            imaginary -= block[i] * std::sin (angle);
+        }
+
+        return std::sqrt (real * real + imaginary * imaginary) / (double) block.size();
+    };
+
+    const double wasThere = levelAt (before, fifth);
+    const double isThere = levelAt (after, fifth);
+
+    std::printf ("    at the fifth: %.5f before, %.5f after\n", wasThere, isThere);
+
+    if (! (isThere > wasThere * 3.0))
+        fail ("moving an oscillator under a held note did not retune it: "
+              + show (wasThere) + " to " + show (isThere) + " at the fifth");
+}
+
+/** Bringing the fold in from nothing does not click.
+
+    The folder is skipped while it is mixed out, which is most patches most
+    of the time and is most of the saving. The cost of skipping is that its
+    history is stale when it comes back, and the antialiasing is a difference
+    across that history, so the first sample would be computed from a signal
+    that stopped being true some time ago.
+*/
+void bringingTheFoldInDoesNotClick()
+{
+    std::printf ("bringing the fold in\n");
+
+    const int env3 = Synth::ModMatrix::sourceFromId ("env3");
+    const int foldMix = Synth::ModMatrix::destinationFromId ("foldmix");
+
+    auto patch = plainPatch();
+    patch.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    patch.osc1Position = 0.0;
+    patch.osc1Level = 0.8;
+    patch.foldDrive = 6.0;
+    patch.foldMix = 0.0;
+    patch.cutoff = 18000.0;
+    patch.gateRange = 0.0;
+    patch.gateMode = Synth::LowPassGate::Mode::amplitude;
+    patch.envelopes[0] = { 0.001, 0.010, 1.0, 0.100 };
+
+    // Held at nothing for a while, then opened quickly, so the moment the
+    // folder comes back is sharp and lands where the signal is moving.
+    patch.envelopes[2] = { 0.0005, 0.001, 1.0, 0.100 };
+    patch.matrix.add (env3, foldMix, 1.0f);
+
+    const auto ramped = play (patch, 45, 8192);
+
+    // The same patch with the folder in circuit the whole way, for what an
+    // ordinary step between samples looks like on this sound.
+    auto steady = patch;
+    steady.matrix.clear();
+    steady.foldMix = 1.0;
+
+    const auto always = play (steady, 45, 8192);
+
+    const auto largestStep = [] (const std::vector<double>& v, std::size_t from)
+    {
+        double worst = 0.0;
+
+        for (std::size_t i = from + 1; i < v.size(); ++i)
+            worst = std::max (worst, std::fabs (v[i] - v[i - 1]));
+
+        return worst;
+    };
+
+    const double ordinary = largestStep (always, 2000);
+    const double crossing = largestStep (ramped, 100);
+
+    std::printf ("    largest step with the fold always in %s, across the entry %s\n",
+                 show (ordinary).c_str(), show (crossing).c_str());
+
+    if (! (crossing < ordinary * 1.5))
+        fail ("bringing the fold in stepped by " + show (crossing)
+              + " against an ordinary " + show (ordinary));
 }
 
 /** The gate's default gets out of the way when something is pointed at it. */
@@ -491,6 +1270,14 @@ int main()
     theTablesFit();
     aNoteStartsAndEnds();
     aRoutingReachesWhatItPointsAt();
+    everyDestinationIsReachedOrSaidNotToBe();
+    theFilterIsAFilter();
+    theVoiceDoesNotAlias();
+    drivingASlopeFasterMakesItFaster();
+    theFoldsCleanlyFigureKnowsTheRate();
+    theReportedLatencyIsReal();
+    changingThePatchWhileANoteIsHeldTakesEffect();
+    bringingTheFoldInDoesNotClick();
     theGateDefaultYields();
     phaseModulationDoesNotDetune();
     nothingUnreasonableBreaksIt();
