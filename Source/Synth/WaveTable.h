@@ -1,5 +1,5 @@
 #pragma once
-#include "RealFFT.h"
+#include "../RealFFT.h"
 
 #include <cmath>
 #include <complex>

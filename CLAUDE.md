@@ -68,6 +68,27 @@ gh api -X POST repos/allhailpan-me/allhailpan-studio/actions/workflows/build.yml
 The notes come from `RELEASE_NOTES.md`, so they are written and reviewed
 alongside the code they describe.
 
+**A quoted include in a subdirectory of `Source` must be written relative to
+its own file.** The tests compile with `-I Source`, so `#include "RealFFT.h"`
+from inside `Source/Synth` resolves there and the suite is perfectly happy.
+The application build has no such flag, and the two compilers then disagree:
+MSVC searches the directories of every file in the include chain, so being
+reached from `MainComponent.cpp` in `Source` is enough for it, while GCC and
+Clang search only the directory of the file doing the including. So it builds
+on Windows, passes every test, and fails on Linux and macOS with a missing
+header.
+
+Write `#include "../RealFFT.h"`, the way `Synth/Voice.h` already writes
+`#include "../Envelope.h"`. Worth checking after adding any header under
+`Source/Synth` or `Source/Fx`:
+
+```
+for f in Source/Synth/*.h Source/Fx/*.h; do d=$(dirname "$f")
+  grep -o '#include "[^"]*"' "$f" | sed 's/#include "//;s/"//' |
+  while read -r i; do [ -f "$d/$i" ] || echo "$f -> $i"; done
+done
+```
+
 ## How the audio flows
 
 ```
@@ -340,6 +361,9 @@ braces on their own line.
 | `Synth/LowPassGate.h` | The west coast gate: one control taking brightness and level together, through a vactrol that is slow and lopsided. No JUCE |
 | `Synth/Slope.h` | A rise and a fall that will go round forever: an envelope, an LFO and an oscillator depending only on how fast it is set. No JUCE |
 | `Synth/Voice.h` | One voice with everything wired through the matrix: the oscillators, the folder, the drive, the filter, the gate, the envelopes and the slopes meeting, and the oversampled section they run in. No JUCE |
+| `PanOne.{h,cpp}` | The built in instrument: the parameters built from the table, the state saved by id, the shared wavetables and the MIDI plumbing |
+| `PanOneParams.h` | Every control PAN One has and every preset, as data: the ranges, the choice lists, the groups, and the translation of what version one saved. No JUCE |
+| `PanOneEditor.h` | The front panel, laid out from the table |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -598,6 +622,30 @@ the bounds checks in here looked like they survived, and every one of them
 was an out of bounds read that the suite catches and a plain `-O2` build does
 not. A mutation harness that is weaker than the real test run will report
 gaps that are not there and hide the ones that are.
+
+**A band of energy in a spectrum has to be a ratio, not a number of
+harmonics.** The harmonics table's own comment said its first frame was a
+sine. It was not: the band was three harmonics wide either side, and sitting
+on the fundamental, three harmonics either side reaches upward only, so the
+frame advertised as a sine had harmonics two and three on it at two thirds
+and a third. The bank contained no sine at all, which is the one waveform a
+wavefolder wants in front of it, because folding a sine gives almost entirely
+odd harmonics and folding something with an octave already in it gives a
+mess. A comment claiming the opposite of what the code does, again.
+
+The band is measured in octaves now, and the centre climbs geometrically so
+every frame is the same musical distance from the last. Linearly from
+harmonic one to twenty four, the first step is more than an octave and the
+last is a twentieth of one.
+
+Fixing it showed why it had been written the wrong way. A constant ratio band
+holds one partial at the bottom of the sweep and thirty at the top, and
+thirty partials make a far larger peak than one, so sweeping the table became
+a volume ride of 25 dB and the existing check caught it. A table is
+normalised as a whole by its loudest stored sample, which cannot fix a
+difference between its own frames: it only makes the quiet end quieter. So
+each frame of that table is normalised to the same peak, which costs a 4096
+point synthesis per frame at startup and nothing afterwards.
 
 **A wavetable is built from a definition, never sampled from somewhere.**
 `Synth/WaveBank.h` writes every table as either a known harmonic series or a
@@ -900,6 +948,59 @@ zero and whatever the stale history produces is multiplied by nearly zero.
 They are kept as insurance for the discontinuous case, a preset change that
 takes the mix from nothing to most of the way in one sample, and they cost
 two evaluations once.
+
+**Every choice in the instrument is saved by its id, and that includes the
+modulation matrix's own rows.** `PanOneParams.h` is the whole control surface
+of PAN One as a table: 240 controls, of which 192 are the matrix at six
+controls a row, and 22 presets.
+
+The matrix is in the table rather than beside it, and that is a decision
+rather than a convenience. A routing's source and destination are useless as
+automation lanes, so keeping them out looks tidier. It would also mean a
+second mechanism for saving them, restoring them, writing them when a preset
+is chosen and handing them to the audio thread, and the whole argument for
+the table is that one mechanism cannot be half implemented. A preset that
+moved every knob and left the previous patch's wiring in place is exactly the
+fault the table exists to prevent.
+
+Every choice list is ordered so that its **first** entry is the one that is
+safe to fall back to, because an id nobody recognises lands there: "none" for
+a source or a destination, which drops the routing the way the matrix says an
+unresolvable routing should be dropped, and the plainest setting for
+everything else.
+
+**A project from version one is translated, not just partly loaded.** Four of
+its controls have no equivalent: two oscillator shapes, a pulse width, and a
+filter envelope depth in octaves. Dropped, a project opens with the right
+envelope times and entirely the wrong sound. They become a wavetable and a
+position in it, a position in the pulse table, and a routing from envelope
+two to the cutoff at the depth that means the same thing, and the check is to
+play each of version one's four shapes and measure what comes out: the sine's
+third harmonic at 0.006, the square's second at 0.012, the triangle's third
+at the ninth it should be.
+
+**Play every preset in the test.** It is not a check on the table at all and
+it is the one that found the most. Three faults, each of which loads without
+complaint and sounds wrong:
+
+- **Pointing anything at the gate replaces the amplitude envelope**, by
+  design, because a patch that has wired the gate deliberately does not want
+  an envelope fighting it. So a preset that routed only the velocity there
+  left the gate at one fixed opening for the whole note, and its amplitude is
+  the square of the opening: 46 dB down.
+- **An east coast patch has to turn the vactrol off.** The gate as a plain
+  amplifier still has the lamp and the light dependent resistor in it, which
+  take twelve milliseconds to light, and a hat with a half millisecond attack
+  and a seventy millisecond decay cannot get through them. 26 dB down.
+- **Four presets would have clipped on a chord** while sounding fine on one
+  note. The instrument divides by four for its sixteen voices, so a voice is
+  held to a peak of 1.5.
+
+Measure the loudest tenth of a second anywhere in the render, not the level
+over a fixed stretch of it. No fixed stretch suits both a drone with a two
+and a half second attack and a struck sound that has finished in seventy
+milliseconds: measured over the second half of three seconds, five presets
+read as silent and none of them was.
 
 **A destination's modulation has to be clamped to that destination's own
 range.** This bit on the first run of the new voice and it is worth knowing
