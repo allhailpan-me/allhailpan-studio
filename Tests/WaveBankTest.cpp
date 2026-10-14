@@ -553,6 +553,119 @@ void everyFrameIsDifferentFromItsNeighbour()
 }
 
 /** The whole bank built, and what it costs. */
+/** The harmonics table starts on a single partial.
+
+    Worth its own check for two reasons. The bank has to contain a sine
+    somewhere, because it is the most basic waveform there is and is what a
+    wavefolder wants in front of it: fold a sine and the result is almost
+    entirely odd harmonics, which is the whole character of a west coast
+    patch, and fold something that already has an octave in it and the result
+    is a mess.
+
+    And because this is exactly where it went wrong. The table's own comment
+    said the first frame was a sine while the code gave it harmonics two and
+    three at two thirds and a third, because the band was three harmonics
+    wide either side and, sitting on the fundamental, three harmonics either
+    side reaches upward only. A band measured as a ratio cannot do that.
+*/
+void theHarmonicsTableStartsOnASine()
+{
+    std::printf ("the harmonics table's first frame\n");
+
+    const int index = Synth::WaveBank::indexFromId ("harmonics");
+
+    if (index < 0)
+    {
+        fail ("there is no harmonics table");
+        return;
+    }
+
+    const auto frames = Synth::WaveBank::framesFor (index);
+
+    if (frames.empty())
+    {
+        fail ("the harmonics table has no frames");
+        return;
+    }
+
+    const auto& first = frames.front();
+
+    if (first.amplitude.empty())
+    {
+        fail ("the first frame has no harmonics at all");
+        return;
+    }
+
+    double loudestAbove = 0.0;
+    int where = 0;
+
+    for (std::size_t h = 1; h < first.amplitude.size(); ++h)
+        if ((double) first.amplitude[h] > loudestAbove)
+        {
+            loudestAbove = (double) first.amplitude[h];
+            where = (int) h + 1;
+        }
+
+    const double fundamental = (double) first.amplitude[0];
+
+    std::printf ("    fundamental %.4f, loudest harmonic above it %.4f at %d\n",
+                 fundamental, loudestAbove, where);
+
+    if (! (fundamental > 0.5))
+        fail ("the first frame's fundamental is only " + show (fundamental));
+
+    // A thousandth of the fundamental, which is 60 dB down and is as near a
+    // single partial as a generated spectrum gets.
+    if (! (loudestAbove < fundamental * 0.001))
+        fail ("the first frame is not a sine: harmonic " + std::to_string (where)
+              + " is at " + show (loudestAbove / fundamental) + " of the fundamental");
+
+    // And the band climbs by the same ratio every frame, which is what
+    // keeps the sweep even. Measured as the centre of gravity of each
+    // frame's spectrum and not as its loudest harmonic: a loudest harmonic
+    // has to land on a whole number, so at the bottom of the sweep it
+    // quantises badly and reads as a jump of a whole octave where the band
+    // has moved a third of one.
+    std::printf ("    the band's centre of gravity, frame by frame:");
+
+    double previous = 0.0;
+    double smallestStep = 1e9, largestStep = 0.0;
+
+    for (const auto& frame : frames)
+    {
+        double weighted = 0.0, total = 0.0;
+
+        for (std::size_t h = 0; h < frame.amplitude.size(); ++h)
+        {
+            weighted += (double) (h + 1) * (double) frame.amplitude[h];
+            total += (double) frame.amplitude[h];
+        }
+
+        const double centroid = total > 0.0 ? weighted / total : 0.0;
+
+        std::printf (" %.1f", centroid);
+
+        if (previous > 0.0)
+        {
+            const double step = centroid / previous;
+            smallestStep = std::min (smallestStep, step);
+            largestStep = std::max (largestStep, step);
+        }
+
+        previous = centroid;
+    }
+
+    std::printf ("\n");
+
+    // Sixteen frames spanning harmonic one to twenty four geometrically is a
+    // step of 24 to the power of a fifteenth, which is 1.23. Held loosely,
+    // because a band clipped against the fundamental at the bottom of the
+    // sweep pulls its own centre of gravity upward.
+    if (! (smallestStep > 1.1 && largestStep < 1.45))
+        fail ("the band's centre does not climb evenly: steps from "
+              + show (smallestStep) + " to " + show (largestStep));
+}
+
 void theBankBuildsWithinItsBudget()
 {
     std::printf ("the whole bank\n");
@@ -592,6 +705,7 @@ int main()
     theAnalysisFoldIsFarEnoughDown();
     everyFrameIsDifferentFromItsNeighbour();
     sweepingATableIsNotAVolumeRide();
+    theHarmonicsTableStartsOnASine();
     theBankBuildsWithinItsBudget();
 
     std::printf ("\n");

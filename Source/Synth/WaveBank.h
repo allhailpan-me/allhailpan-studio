@@ -1,6 +1,7 @@
 #pragma once
 #include "WaveTable.h"
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -100,6 +101,52 @@ namespace WaveShapes
         }
 
         return out;
+    }
+
+    /** Scales a spectrum so the waveform it describes peaks at one.
+
+        For a table whose frames hold very different numbers of partials.
+        A band of energy whose width is a ratio rather than a fixed number of
+        harmonics covers one partial at the bottom of the spectrum and thirty
+        at the top, and thirty partials make a far larger peak than one, so
+        sweeping such a table without this is a volume ride of twenty five
+        decibels. A table is normalised as a whole by its loudest stored
+        sample, which cannot fix a difference between its own frames: it just
+        makes the quiet end quieter.
+
+        The zeros are skipped, which is the difference between this costing
+        nothing and costing a second at startup: these spectra are five
+        hundred entries long and only a few dozen of them are ever non zero.
+    */
+    inline void normalisePeak (Spectrum& s)
+    {
+        constexpr int points = 4096;
+
+        double peak = 0.0;
+
+        for (int i = 0; i < points; ++i)
+        {
+            const double phase = (double) i / (double) points;
+
+            double sum = 0.0;
+
+            for (std::size_t h = 0; h < s.amplitude.size(); ++h)
+            {
+                if (s.amplitude[h] == 0.0f)
+                    continue;
+
+                const double offset = h < s.phase.size() ? (double) s.phase[h] : 0.0;
+
+                sum += (double) s.amplitude[h]
+                         * std::cos (2.0 * pi * (double) (h + 1) * phase + offset);
+            }
+
+            peak = std::max (peak, std::fabs (sum));
+        }
+
+        if (peak > 1.0e-12)
+            for (auto& a : s.amplitude)
+                a = (float) ((double) a / peak);
     }
 
     //==========================================================================
@@ -347,13 +394,37 @@ public:
             }
             else if (std::strcmp (id, "harmonics") == 0)
             {
-                // Climbs the harmonic series: the first frame is a sine, and
-                // each one after it moves the energy up to the next harmonic
-                // with its neighbours fading in and out around it. Sweeping
-                // the position is a formant moving up through the spectrum.
+                // Climbs the harmonic series: the first frame is a single
+                // partial, a sine, and each one after it moves a band of
+                // energy up the spectrum. Sweeping the position is a formant
+                // moving upward.
+                //
+                // Two things here are measured in ratios rather than in
+                // harmonic numbers, and both of them matter.
+                //
+                // The centre moves geometrically, so every frame is the same
+                // musical distance from the last: a third of an octave.
+                // Linearly from 1 to 24 instead, the first step is more than
+                // an octave and the last is a twentieth of one, so the bottom
+                // of the sweep lurches and the top of it barely moves.
+                //
+                // And the band's width is a ratio too, which is what a
+                // formant is and is what makes the first frame honestly a
+                // sine. A width of three harmonics either side cannot be:
+                // sitting on harmonic one it reaches harmonics two and three
+                // as well, at two thirds and a third, so the frame advertised
+                // as a sine was a sine with a fifth and an octave and a fifth
+                // stacked on it. Nothing in the bank was a sine at all, and
+                // the comment above this said otherwise, which is the shape
+                // of fault CLAUDE.md keeps warning about.
                 Spectrum s;
 
-                const double centre = 1.0 + t * 23.0;
+                const double centre = std::pow (24.0, t);
+
+                // Just under an octave, so a band centred on the fundamental
+                // excludes the octave above it and the frames still overlap
+                // by three to one as the position is swept.
+                const double halfWidth = 0.9;
 
                 for (int h = 1; h <= harmonics; ++h)
                 {
@@ -363,12 +434,17 @@ public:
                     // part of one: it made the frame sitting on harmonic 24
                     // twenty seven decibels quieter than the frame sitting on
                     // harmonic 1, so sweeping the table faded it out.
-                    const double distance = std::fabs ((double) h - centre);
-                    const double level = distance >= 3.0 ? 0.0 : 1.0 - distance / 3.0;
+                    const double octaves = std::fabs (std::log2 ((double) h / centre));
+                    const double level = octaves >= halfWidth
+                                           ? 0.0 : 1.0 - octaves / halfWidth;
 
                     s.amplitude.push_back ((float) level);
                     s.phase.push_back ((float) (-pi * 0.5));
                 }
+
+                // Each frame to the same peak, because the band holds one
+                // partial at the bottom of the sweep and thirty at the top.
+                normalisePeak (s);
 
                 frames.push_back (s);
             }

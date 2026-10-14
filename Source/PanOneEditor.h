@@ -90,8 +90,14 @@ public:
                 // Before the attachment, which maps the selected index onto
                 // the parameter's range and so has to know how many there
                 // are. An empty box here divides by zero items.
-                for (int s = 0; s < PanOneParams::numShapes; ++s)
-                    control->choice.addItem (PanOneParams::shapeNames[s], s + 1);
+                //
+                // Each choice draws from its own list. One shared list was
+                // enough when the only choices were four oscillator shapes,
+                // and would now offer wavetable names in the filter's menu.
+                int item = 1;
+
+                for (const auto& choice : specs[i].choices())
+                    control->choice.addItem (choice.name, item++);
 
                 if (parameter != nullptr)
                     control->choiceAttachment
@@ -102,7 +108,7 @@ public:
             {
                 addAndMakeVisible (control->slider);
                 control->slider.setSliderStyle (juce::Slider::RotaryVerticalDrag);
-                control->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 74, 14);
+                control->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 14);
                 control->slider.setColour (juce::Slider::textBoxOutlineColourId,
                                            juce::Colours::transparentBlack);
                 control->slider.setColour (juce::Slider::textBoxTextColourId, Ahp::bone);
@@ -118,7 +124,10 @@ public:
         }
 
         startTimerHz (4);
-        setSize (600, 480);
+        // Six rows of a hundred, a header, and the margins. The width is
+        // set by the widest row: ten knobs need seventy four pixels each
+        // before their value text runs into the next one.
+        setSize (800, 700);
     }
 
     //==========================================================================
@@ -133,6 +142,15 @@ public:
 
         for (const auto& group : PanOneParams::groups())
         {
+            // The matrix is a hundred and ninety two controls and wants a
+            // view shaped like a routing table rather than a row of knobs.
+            // Until it has one it is reachable as ordinary parameters, from
+            // a host's own list and from this studio's modulators, and is
+            // left off the panel rather than laid out in sixteen unreadable
+            // rows.
+            if (group.kind == PanOneParams::Group::Kind::matrix)
+                continue;
+
             auto box = area.removeFromTop (groupHeight);
             area.removeFromTop (groupGap);
 
@@ -160,6 +178,17 @@ public:
 
         for (const auto& group : PanOneParams::groups())
         {
+            if (group.kind == PanOneParams::Group::Kind::matrix)
+            {
+                // Nowhere to put them, so nowhere they can be clicked by
+                // accident either.
+                for (std::size_t i = group.first;
+                     i < group.first + group.count && i < controls.size(); ++i)
+                    hide (*controls[i]);
+
+                continue;
+            }
+
             auto box = area.removeFromTop (groupHeight);
             area.removeFromTop (groupGap);
 
@@ -199,6 +228,19 @@ private:
         std::unique_ptr<juce::SliderParameterAttachment>   sliderAttachment;
         std::unique_ptr<juce::ComboBoxParameterAttachment> choiceAttachment;
     };
+
+    /** Takes a control off the panel without destroying it.
+
+        Its parameter attachment stays, so the control still follows the
+        parameter and the parameter still follows a preset change: nothing
+        about it is dead, it simply has nowhere on this panel to be drawn.
+    */
+    static void hide (Control& control)
+    {
+        control.name.setBounds ({});
+        control.slider.setBounds ({});
+        control.choice.setBounds ({});
+    }
 
     void timerCallback() override
     {

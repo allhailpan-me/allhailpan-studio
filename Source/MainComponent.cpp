@@ -3,6 +3,7 @@
 #include "MidiFileIO.h"
 #include "AhpLookAndFeel.h"
 #include "DarkTitleBar.h"
+#include "PanOne.h"
 #include "Recorder.h"
 #include <cmath>
 
@@ -23,6 +24,14 @@ namespace
 
 MainComponent::MainComponent()
 {
+    // The built in instrument's wavetables, built here rather than the first
+    // time somebody loads it. It is a few hundred transforms and forty
+    // megabytes, which is a third of a second at launch where nobody is
+    // listening, against a third of a second in the middle of somebody's
+    // work. Nothing in the instrument is built lazily, and this is where
+    // that promise is actually kept.
+    PanOne::prepareSharedResources();
+
     auto savedDevice = plugins.settings().getXmlValue ("audioDevice");
     startupError = engine.start (savedDevice.get());
 
