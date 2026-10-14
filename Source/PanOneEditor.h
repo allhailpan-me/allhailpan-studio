@@ -108,7 +108,7 @@ public:
             {
                 addAndMakeVisible (control->slider);
                 control->slider.setSliderStyle (juce::Slider::RotaryVerticalDrag);
-                control->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 64, 14);
+                control->slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 52, 13);
                 control->slider.setColour (juce::Slider::textBoxOutlineColourId,
                                            juce::Colours::transparentBlack);
                 control->slider.setColour (juce::Slider::textBoxTextColourId, Ahp::bone);
@@ -124,10 +124,15 @@ public:
         }
 
         startTimerHz (4);
-        // Six rows of a hundred, a header, and the margins. The width is
-        // set by the widest row: ten knobs need seventy four pixels each
-        // before their value text runs into the next one.
-        setSize (800, 700);
+        // Nine rows, a header, and the margins. The width is set by the
+        // widest row, which is sixteen controls for a pair of LFOs, and
+        // the row height is as short as a knob with a name above it and a
+        // value below it can be.
+        //
+        // This is the shape the panel has to be while it is one row per
+        // group, and it is most of the reason the panel is being rebuilt:
+        // nine rows of eleven controls is a wall, not an instrument.
+        setSize (1000, 820);
     }
 
     //==========================================================================
@@ -294,7 +299,7 @@ private:
 
     static constexpr int headerHeight  = 36;
     static constexpr int headingHeight = 18;
-    static constexpr int groupHeight   = 100;
+    static constexpr int groupHeight   = 80;
     static constexpr int groupGap      = 6;
 
     PanOne& synth;

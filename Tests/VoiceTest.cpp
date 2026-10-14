@@ -406,10 +406,6 @@ void everyDestinationIsReachedOrSaidNotToBe()
         { "pan",          "a voice is mono until the instrument places it" },
         { "unisondetune", "unison belongs to the instrument, not one voice" },
         { "unisonspread", "unison belongs to the instrument, not one voice" },
-        { "lfo1rate",     "the four LFOs are not built" },
-        { "lfo2rate",     "the four LFOs are not built" },
-        { "lfo3rate",     "the four LFOs are not built" },
-        { "lfo4rate",     "the four LFOs are not built" },
         { "glide",        "there is no glide" },
     };
 
@@ -458,6 +454,28 @@ void everyDestinationIsReachedOrSaidNotToBe()
     base.matrix.add (slope1, Synth::ModMatrix::destinationFromId ("osc1pos"), 0.3f);
     base.matrix.add (Synth::ModMatrix::sourceFromId ("slope2"),
                      Synth::ModMatrix::destinationFromId ("foldmix"), 0.3f);
+
+    // And all four LFOs wired to something, for exactly the reason the two
+    // slopes are: an LFO's rate destination can only be seen through
+    // whatever the LFO is driving. Without these four lines the four rate
+    // destinations measure as unreached while being perfectly connected,
+    // and the test agrees with a list that says they are not built, which
+    // is two wrongs reading as a right.
+    const char* const lfoSources[4] { "lfo1", "lfo2", "lfo3", "lfo4" };
+    const char* const lfoTargets[4] { "osc2pos", "cutoff", "foldsymmetry",
+                                      "noiselevel" };
+
+    const double lfoRates[4] { 7.0, 11.0, 3.0, 5.0 };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        base.lfos[i].rateHz = lfoRates[i];
+        base.lfos[i].shape = Synth::Lfo::Shape::triangle;
+
+        base.matrix.add (Synth::ModMatrix::sourceFromId (lfoSources[i]),
+                         Synth::ModMatrix::destinationFromId (lfoTargets[i]),
+                         0.3f);
+    }
 
     const int samples = 6000;
     const auto reference = play (base, 57, samples);
@@ -526,6 +544,124 @@ void everyDestinationIsReachedOrSaidNotToBe()
 
     for (const auto& problem : wrongWayRound)
         fail (problem);
+}
+
+/** Every source the matrix declares actually drives something.
+
+    The mirror of the destination check above, and worth having for the same
+    reason in the other direction: a source that is declared and never read
+    offers a patch a modulator that does nothing. The menu lists it, the
+    routing saves, and the sound never moves.
+
+    It needs a little more setting up than the destination check, because
+    several of these are inputs rather than generators: a mod wheel nobody
+    has moved is zero, and a routing from zero is indistinguishable from no
+    routing at all. So every input is pushed somewhere definite first, and
+    what is then measured is whether pointing it at something changes the
+    sound.
+*/
+void everySourceDrivesSomething()
+{
+    std::printf ("every source\n");
+
+    // The destination they are all pointed at. The fold's drive is a good
+    // choice: it is audible in the spectrum, it is not already being driven
+    // by the base patch, and it responds across its whole range rather than
+    // saturating at one end.
+    const int toFold = Synth::ModMatrix::destinationFromId ("fold");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    base.osc1Position = 0.0;
+    base.osc1Level = 0.8;
+    base.foldDrive = 2.0;
+    base.foldMix = 0.8;
+    base.cutoff = 18000.0;
+    base.gateRange = 0.0;
+    base.gateMode = Synth::LowPassGate::Mode::amplitude;
+    base.gateLag = 0.0;
+    base.envelopes[0] = { 0.002, 0.050, 1.0, 0.150 };
+
+    // The generators need to be doing something, and the four envelopes
+    // need to be open rather than resting at nothing.
+    for (int i = 1; i < 4; ++i)
+        base.envelopes[i] = { 0.002, 0.050, 1.0, 0.150 };
+
+    base.slopes[0] = { 0.03, 0.03, 0.0, true };
+    base.slopes[1] = { 0.05, 0.02, 0.0, true };
+
+    for (int i = 0; i < 4; ++i)
+    {
+        base.lfos[i].rateHz = 6.0 + 3.0 * (double) i;
+        base.lfos[i].shape = Synth::Lfo::Shape::triangle;
+    }
+
+    for (int i = 0; i < 4; ++i)
+        base.macros[i] = 0.3 + 0.15 * (double) i;
+
+    const int samples = 6000;
+
+    // Every input pushed off its resting value, so that a routing from one
+    // has something to carry.
+    const auto play = [&] (const Synth::Voice::Patch& patch)
+    {
+        Synth::Voice voice;
+        voice.setSampleRate (rate);
+        voice.setBank (&sharedBank());
+        voice.setSeed (7);
+        voice.setPatch (patch);
+
+        voice.setModWheel (0.8);
+        voice.setPressure (0.6);
+        voice.setBend (0.5);
+        voice.setUnisonPosition (-0.7);
+
+        // Not middle C, so key tracking is not sitting at its own zero.
+        voice.start (52, 0.75f);
+
+        std::vector<double> out;
+        out.reserve ((std::size_t) samples);
+
+        for (int i = 0; i < samples; ++i)
+            out.push_back ((double) voice.nextSample());
+
+        return out;
+    };
+
+    const auto reference = play (base);
+    const double referenceLevel = rmsOf (reference);
+
+    std::vector<std::string> dead;
+
+    for (int s = 0; s < Synth::ModMatrix::numSources(); ++s)
+    {
+        double moved = 0.0;
+
+        for (float depth : { 1.0f, -1.0f })
+        {
+            auto patch = base;
+
+            if (! patch.matrix.add (s, toFold, depth))
+                continue;
+
+            const auto rendered = play (patch);
+
+            for (std::size_t i = 0; i < rendered.size(); ++i)
+                moved = std::max (moved, std::fabs (rendered[i] - reference[i]));
+        }
+
+        moved /= referenceLevel + 1e-12;
+
+        if (! (moved > 1e-3))
+            dead.push_back (std::string (Synth::ModMatrix::sourceId (s))
+                            + " moved the output by " + show (moved));
+    }
+
+    std::printf ("    %d sources, %d of them driving nothing\n",
+                 Synth::ModMatrix::numSources(), (int) dead.size());
+
+    for (const auto& one : dead)
+        fail ("a source the matrix declares drives nothing: " + one);
 }
 
 /** The filter filters, the resonance resonates, and the key tracking tracks.
@@ -820,6 +956,153 @@ void drivingASlopeFasterMakesItFaster()
               + " a second to " + show (driven) + " rather than to about twice");
 }
 
+/** A synced LFO runs at the tempo, and a rate driven upward goes faster.
+
+    Two claims with the same shape as the slope's and the same reason for
+    being checked separately from whether the routing works at all. A sync
+    that divided where it should multiply still moves the sound, just at the
+    wrong speed, and nobody finds that by listening to one patch: they find
+    it when a patch that was in time at 120 is not at 140.
+*/
+void aSyncedLfoFollowsTheTempo()
+{
+    std::printf ("an LFO against the tempo\n");
+
+    const int lfo1 = Synth::ModMatrix::sourceFromId ("lfo1");
+    const int env3 = Synth::ModMatrix::sourceFromId ("env3");
+    const int gateOpen = Synth::ModMatrix::destinationFromId ("gateopen");
+    const int lfo1Rate = Synth::ModMatrix::destinationFromId ("lfo1rate");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("analogue");
+    base.osc1Level = 0.8;
+    base.envelopes[0] = { 0.002, 0.020, 1.0, 0.100 };
+
+    // One cycle a beat, pointed at the gate so the output swells at
+    // whatever rate the LFO is really running at.
+    base.lfos[0].shape = Synth::Lfo::Shape::sine;
+    base.lfos[0].synced = true;
+    base.lfos[0].beatsPerCycle = 1.0;
+    base.matrix.add (lfo1, gateOpen, 1.0f);
+
+    const auto swellsAt = [&] (const Synth::Voice::Patch& patch, double bpm)
+    {
+        Synth::Voice voice;
+        voice.setSampleRate (rate);
+        voice.setBank (&sharedBank());
+        voice.setTempo (bpm);
+        voice.setPatch (patch);
+        voice.start (45, 1.0f);
+
+        std::vector<double> rendered;
+
+        const int samples = (int) (rate * 4.0);
+
+        for (int i = 0; i < samples; ++i)
+            rendered.push_back ((double) voice.nextSample());
+
+        // The envelope's own spectrum, as the slope's rate is measured.
+        const double coefficient = 1.0 - std::exp (-1.0 / (0.02 * rate));
+
+        std::vector<double> envelope;
+        double level = 0.0;
+
+        for (std::size_t i = 0; i < rendered.size(); ++i)
+        {
+            level += coefficient * (std::fabs (rendered[i]) - level);
+
+            if (i % 64 == 0)
+                envelope.push_back (level);
+        }
+
+        double mean = 0.0;
+
+        for (double v : envelope)
+            mean += v;
+
+        mean /= (double) std::max<std::size_t> (1, envelope.size());
+
+        const double envelopeRate = rate / 64.0;
+
+        double best = 0.0, strongest = 0.0;
+
+        for (double hz = 0.3; hz < 30.0; hz += 0.02)
+        {
+            double real = 0.0, imaginary = 0.0;
+
+            for (std::size_t i = 0; i < envelope.size(); ++i)
+            {
+                const double angle = 2.0 * 3.14159265358979323846 * hz
+                                       * (double) i / envelopeRate;
+
+                real += (envelope[i] - mean) * std::cos (angle);
+                imaginary -= (envelope[i] - mean) * std::sin (angle);
+            }
+
+            const double magnitude = std::sqrt (real * real + imaginary * imaginary);
+
+            if (magnitude > strongest)
+            {
+                strongest = magnitude;
+                best = hz;
+            }
+        }
+
+        return best;
+    };
+
+    for (double bpm : { 90.0, 120.0, 150.0 })
+    {
+        const double measured = swellsAt (base, bpm);
+        const double wanted = bpm / 60.0;
+
+        std::printf ("    at %.0f bpm, one cycle a beat measures %s Hz against %s\n",
+                     bpm, show (measured).c_str(), show (wanted).c_str());
+
+        if (std::fabs (measured - wanted) > wanted * 0.12)
+            fail ("a synced LFO at " + show (bpm) + " bpm runs at " + show (measured)
+                  + " Hz where a beat is " + show (wanted));
+    }
+
+    // Half a beat a cycle is twice the rate, not half of it.
+    {
+        auto faster = base;
+        faster.lfos[0].beatsPerCycle = 0.5;
+
+        const double measured = swellsAt (faster, 120.0);
+
+        std::printf ("    half a beat a cycle at 120 bpm measures %s Hz\n",
+                     show (measured).c_str());
+
+        if (std::fabs (measured - 4.0) > 0.5)
+            fail ("half a beat a cycle at 120 bpm runs at " + show (measured)
+                  + " Hz rather than four");
+    }
+
+    // And the rate destination drives it faster, not slower. Six octaves at
+    // full depth, so a sixth of full depth is one octave.
+    {
+        auto driven = base;
+        driven.lfos[0].synced = false;
+        driven.lfos[0].rateHz = 3.0;
+        driven.envelopes[2] = { 0.0005, 0.001, 1.0, 0.050 };
+        driven.matrix.add (env3, lfo1Rate, 1.0f / 6.0f);
+
+        auto resting = driven;
+        resting.matrix.routes[resting.matrix.count - 1] = Synth::ModMatrix::Route {};
+
+        const double at = swellsAt (resting, 120.0);
+        const double up = swellsAt (driven, 120.0);
+
+        std::printf ("    3 Hz driven up an octave measures %s Hz against %s\n",
+                     show (up).c_str(), show (at).c_str());
+
+        if (! (up > at * 1.6 && up < at * 2.5))
+            fail ("an octave of rate modulation took an LFO from " + show (at)
+                  + " Hz to " + show (up) + " rather than to about twice");
+    }
+}
+
 /** The voice reports the folder's clean range, and reports it for the rate
     the folder is really running at.
 
@@ -909,6 +1192,8 @@ void theReportedLatencyIsReal()
               " the " + std::to_string (firstHeard) + " it took to make a sound");
 }
 
+void theLfoRateFollowsAPatchChange();
+
 /** A patch changed while a note is held takes effect on that note.
 
     This is not a corner case, it is the ordinary path: the instrument reads
@@ -953,8 +1238,9 @@ void changingThePatchWhileANoteIsHeldTakesEffect()
     for (int i = 0; i < 8192; ++i)
         before.push_back ((double) voice.nextSample());
 
-    // The filter slammed shut and the second oscillator moved a fifth, with
-    // the note never released.
+    // The filter slammed shut and the second oscillator moved a fifth,
+    // with the note never released. Two separate caches, each of which can
+    // be forgotten on its own.
     auto second = first;
     second.cutoff = 400.0;
     second.osc2Semitones = 7.0;
@@ -1003,6 +1289,189 @@ void changingThePatchWhileANoteIsHeldTakesEffect()
     if (! (isThere > wasThere * 3.0))
         fail ("moving an oscillator under a held note did not retune it: "
               + show (wasThere) + " to " + show (isThere) + " at the fifth");
+
+    theLfoRateFollowsAPatchChange();
+}
+
+/** And the same for an LFO's rate, which is a third cache of its own.
+
+    In its own check rather than piled onto the one above, because the
+    patch change there closes the filter to 400 Hz, and a filter at 400 Hz
+    removes everything the fold was doing. The first version of this
+    measured the LFO through that filter, read no change, and was right to:
+    there was nothing left to hear.
+*/
+void theLfoRateFollowsAPatchChange()
+{
+    std::printf ("an LFO rate changed under a held note\n");
+
+    auto slow = plainPatch();
+    slow.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    slow.osc1Position = 0.0;
+    slow.osc1Level = 0.8;
+    slow.foldMix = 0.9;
+    slow.foldDrive = 3.0;
+    slow.cutoff = 20000.0;
+    slow.gateRange = 0.0;
+    slow.gateMode = Synth::LowPassGate::Mode::amplitude;
+    slow.gateLag = 0.0;
+    slow.envelopes[0] = { 0.002, 0.020, 1.0, 0.100 };
+
+    // Slow enough to barely move across the measurement.
+    slow.lfos[0].rateHz = 0.1;
+    slow.lfos[0].shape = Synth::Lfo::Shape::triangle;
+
+    // Pointed at the amplitude rather than at the fold, because what is
+    // measured below is how much the level moves about. Pointed at the
+    // fold the LFO changes the timbre far more than the level, and the
+    // first version of this read a 13 per cent change in level from an
+    // LFO that was going round four hundred times faster.
+    slow.matrix.add (Synth::ModMatrix::sourceFromId ("lfo1"),
+                     Synth::ModMatrix::destinationFromId ("amp"), -0.8f);
+
+    auto fast = slow;
+    fast.lfos[0].rateHz = 40.0;
+
+    Synth::Voice voice;
+    voice.setSampleRate (rate);
+    voice.setBank (&sharedBank());
+    voice.setPatch (slow);
+    voice.start (45, 1.0f);
+
+    std::vector<double> before, after;
+
+    for (int i = 0; i < 8192; ++i)
+        before.push_back ((double) voice.nextSample());
+
+    voice.setPatch (fast);
+
+    for (int i = 0; i < 8192; ++i)
+        after.push_back ((double) voice.nextSample());
+
+    // How much energy the envelope has at the new rate.
+    //
+    // Not how much the level varies from one stretch of the sound to the
+    // next, which was tried first and is the wrong tool entirely: a faster
+    // LFO fits a whole cycle inside every stretch, so every stretch
+    // averages to the same thing and the measure reads less variation
+    // rather than more. It reported a 13 per cent change from an LFO going
+    // round four hundred times faster.
+    const auto energyAt = [] (const std::vector<double>& block, double hz)
+    {
+        // A follower at two milliseconds, which passes forty hertz.
+        const double coefficient = 1.0 - std::exp (-1.0 / (0.002 * rate));
+
+        std::vector<double> envelope;
+        double level = 0.0;
+
+        for (double v : block)
+        {
+            level += coefficient * (std::fabs (v) - level);
+            envelope.push_back (level);
+        }
+
+        double mean = 0.0;
+
+        for (double v : envelope)
+            mean += v;
+
+        mean /= (double) std::max<std::size_t> (1, envelope.size());
+
+        double real = 0.0, imaginary = 0.0;
+
+        for (std::size_t i = 0; i < envelope.size(); ++i)
+        {
+            const double angle = 2.0 * 3.14159265358979323846 * hz
+                                   * (double) i / rate;
+
+            real += (envelope[i] - mean) * std::cos (angle);
+            imaginary -= (envelope[i] - mean) * std::sin (angle);
+        }
+
+        return 2.0 * std::sqrt (real * real + imaginary * imaginary)
+                 / (double) envelope.size();
+    };
+
+    const double still = energyAt (before, 40.0);
+    const double moving = energyAt (after, 40.0);
+
+    std::printf ("    the envelope's energy at 40 Hz: %s before, %s after\n",
+                 show (still).c_str(), show (moving).c_str());
+
+    // Measured at 0.019 before and 0.128 after, a factor of seven. The
+    // reading before is not zero because a sixth of a second is too short
+    // a window to resolve a tenth of a hertz, so the envelope's slow drift
+    // leaks into the bin. Held to four, which separates seven cleanly from
+    // the one that a forgotten cache would give.
+    if (! (moving > still * 4.0))
+        fail ("speeding an LFO to 40 Hz under a held note put " + show (moving)
+              + " at 40 Hz against " + show (still) + " when it was at a tenth"
+                " of a hertz");
+}
+
+/** Two LFOs in one voice draw different random numbers.
+
+    Seeded from one number each, so that sample and hold on LFO one and on
+    LFO two are two different sequences rather than the same one twice.
+    Seeded identically they move together, and a patch using both to
+    scatter two things ends up scattering them in lockstep, which looks
+    like a modulation that is somehow correlated with itself.
+
+    Measured by cancellation, which is the only way to see it from outside:
+    two LFOs pointed at the same destination with opposite depths subtract
+    exactly if their sequences are the same, and the output is then
+    indistinguishable from no routing at all.
+*/
+void twoLfosInAVoiceDoNotAgree()
+{
+    std::printf ("two LFOs in one voice\n");
+
+    const int lfo1 = Synth::ModMatrix::sourceFromId ("lfo1");
+    const int lfo2 = Synth::ModMatrix::sourceFromId ("lfo2");
+    const int toFold = Synth::ModMatrix::destinationFromId ("fold");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    base.osc1Position = 0.0;
+    base.osc1Level = 0.8;
+    base.foldDrive = 3.0;
+    base.foldMix = 0.9;
+    base.gateRange = 0.0;
+    base.gateMode = Synth::LowPassGate::Mode::amplitude;
+    base.gateLag = 0.0;
+    base.envelopes[0] = { 0.002, 0.020, 1.0, 0.100 };
+
+    // Both set identically, so the only thing that can tell them apart is
+    // the sequence they draw from.
+    for (int i = 0; i < 2; ++i)
+    {
+        base.lfos[i].shape = Synth::Lfo::Shape::sampleAndHold;
+        base.lfos[i].rateHz = 60.0;
+        base.lfos[i].retrigger = true;
+    }
+
+    auto opposed = base;
+    opposed.matrix.add (lfo1, toFold, 0.6f);
+    opposed.matrix.add (lfo2, toFold, -0.6f);
+
+    const int samples = 8000;
+
+    const auto plain = play (base, 45, samples);
+    const auto both = play (opposed, 45, samples);
+
+    double worst = 0.0;
+
+    for (std::size_t i = 0; i < plain.size(); ++i)
+        worst = std::max (worst, std::fabs (plain[i] - both[i]));
+
+    worst /= rmsOf (plain) + 1e-12;
+
+    std::printf ("    two opposed sample and holds move the sound by %s\n",
+                 show (worst).c_str());
+
+    if (! (worst > 0.05))
+        fail ("two LFOs in one voice cancel each other, so they are drawing the"
+              " same random numbers: they moved the output by " + show (worst));
 }
 
 /** Bringing the fold in from nothing does not click.
@@ -1271,12 +1740,15 @@ int main()
     aNoteStartsAndEnds();
     aRoutingReachesWhatItPointsAt();
     everyDestinationIsReachedOrSaidNotToBe();
+    everySourceDrivesSomething();
     theFilterIsAFilter();
     theVoiceDoesNotAlias();
     drivingASlopeFasterMakesItFaster();
+    aSyncedLfoFollowsTheTempo();
     theFoldsCleanlyFigureKnowsTheRate();
     theReportedLatencyIsReal();
     changingThePatchWhileANoteIsHeldTakesEffect();
+    twoLfosInAVoiceDoNotAgree();
     bringingTheFoldInDoesNotClick();
     theGateDefaultYields();
     phaseModulationDoesNotDetune();

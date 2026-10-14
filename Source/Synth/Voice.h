@@ -1,5 +1,6 @@
 #pragma once
 #include "WaveBank.h"
+#include "Lfo.h"
 #include "LowPassGate.h"
 #include "Slope.h"
 #include "ModMatrix.h"
@@ -88,6 +89,28 @@ class Voice
 {
 public:
     //==========================================================================
+    /** Everything one LFO decides.
+
+        The rate is in hertz, or in beats a cycle when it is synced, and the
+        voice turns the second into the first from the tempo it is told. An
+        LFO that knew about tempo itself would need a clock, and then four
+        of them in each of sixteen voices would each be tracking the same
+        clock separately.
+    */
+    struct LfoSettings
+    {
+        Lfo::Shape shape = Lfo::Shape::sine;
+
+        double rateHz = 2.0;
+        bool   synced = false;
+        double beatsPerCycle = 1.0;
+
+        double pulseWidth = 0.5;
+        double phaseOffset = 0.0;
+        bool   retrigger = true;
+        double fadeSeconds = 0.0;
+    };
+
     struct SlopeSettings
     {
         double riseSeconds = 0.01;
@@ -154,11 +177,35 @@ public:
 
         Envelope::Settings envelopes[4];
         SlopeSettings slopes[2];
+        LfoSettings lfos[4];
+
+        /** Where the four macro knobs are sitting.
+
+            In the patch rather than pushed in from outside, unlike the mod
+            wheel and the pressure, because a macro's position is part of a
+            sound: a preset that puts a macro at three quarters means it,
+            and keeping it anywhere else would be a second place for patch
+            state to live. The wheel and the pressure are what a player is
+            doing at the time and belong to no patch. */
+        double macros[4] {};
 
         ModMatrix::Patch matrix;
     };
 
     //==========================================================================
+    Voice()
+    {
+        // Four different random sequences before anybody has seeded this
+        // voice at all. Without it the four LFOs share one default, so two
+        // of them set to sample and hold draw the same numbers and move in
+        // lockstep: pointed at the same destination with opposite depths
+        // they cancel exactly, which is how the test found it.
+        //
+        // The instrument seeds each voice with its own number on top of
+        // this, which is what stops every note of a chord agreeing.
+        setSeed (0x5bf03635u);
+    }
+
     void setSampleRate (double newRate)
     {
         sampleRate = newRate > 0.0 ? newRate : 44100.0;
@@ -172,6 +219,9 @@ public:
 
         for (auto& s : slopes)
             s.setSampleRate (sampleRate);
+
+        for (auto& l : lfos)
+            l.setSampleRate (sampleRate);
 
         gate.setSampleRate (sampleRate);
 
@@ -235,6 +285,64 @@ public:
         applyTables();
     }
 
+    /** The tempo, for any LFO that is synced to it.
+
+        Pushed in rather than fetched, because a voice has no business
+        knowing about a transport and because sixteen voices each asking
+        would be sixteen answers to the same question.
+    */
+    void setTempo (double beatsPerMinute) noexcept
+    {
+        tempo = beatsPerMinute > 1.0 ? beatsPerMinute : 120.0;
+    }
+
+    /** Seeds everything in this voice that draws random numbers.
+
+        Called once per voice with its own number, so that the random
+        source and the two random LFO shapes give every voice of a chord
+        something different. Without it sixteen voices drawing from
+        identical sequences move as one, which is the opposite of what a
+        random modulation is for.
+    */
+    void setSeed (std::uint64_t seed) noexcept
+    {
+        randomState = seed * 6364136223846793005ull + 1442695040888963407ull;
+        noiseState = randomState ^ 0x9e3779b97f4a7c15ull;
+
+        for (int i = 0; i < 4; ++i)
+            lfos[(std::size_t) i].setSeed (seed * 4ull + (std::uint64_t) i + 1ull);
+    }
+
+    //==========================================================================
+    /** What the player is doing.
+
+        These are inputs rather than anything the voice decides, and they
+        are held rather than smoothed here: a controller arrives
+        as a step from a MIDI message, and whether that step should be
+        smoothed is a question about the destination, not about the source.
+        Pointed at a filter it wants smoothing; pointed at a wavetable
+        position a step is often exactly right.
+
+        The bend is in minus one to one rather than in semitones, because a
+        source has no business knowing the range a patch wants from it: that
+        is the depth of whatever routing it is pointed at, which is what
+        makes the same wheel a whole tone on one patch and an octave on
+        another.
+    */
+    void setModWheel (double value) noexcept  { modWheel = clamped (value, 0.0, 1.0); }
+    void setPressure (double value) noexcept  { pressure = clamped (value, 0.0, 1.0); }
+    void setBend (double value) noexcept      { bend = clamped (value, -1.0, 1.0); }
+
+    /** Where this voice sits in a stack of them, from the far left to the
+        far right, for the instrument to set when it plays one note on
+        several voices. Nothing in the voice decides it, and the voice is
+        where it has to be read, so it is here before the instrument that
+        will set it exists. */
+    void setUnisonPosition (double value) noexcept
+    {
+        unison = clamped (value, -1.0, 1.0);
+    }
+
     void setPatch (const Patch& p)
     {
         patch = p;
@@ -249,6 +357,23 @@ public:
                                               patch.slopes[i].fallSeconds);
             slopes[(std::size_t) i].setShape (patch.slopes[i].shape);
             slopes[(std::size_t) i].setCycling (patch.slopes[i].cycling);
+        }
+
+        for (int i = 0; i < 4; ++i)
+        {
+            auto& lfo = lfos[(std::size_t) i];
+
+            lfo.setShape (patch.lfos[i].shape);
+            lfo.setPulseWidth (patch.lfos[i].pulseWidth);
+            lfo.setPhaseOffset (patch.lfos[i].phaseOffset);
+            lfo.setRetrigger (patch.lfos[i].retrigger);
+            lfo.setFadeSeconds (patch.lfos[i].fadeSeconds);
+
+            // The rate is set per sample, because it is a modulation
+            // destination, so the cached figure has to be forgotten here or
+            // a patch change would leave the old rate until something
+            // happened to modulate it.
+            lastLfoOctaves[(std::size_t) i] = std::numeric_limits<double>::quiet_NaN();
         }
 
         gate.setMode (patch.gateMode);
@@ -285,6 +410,9 @@ public:
         for (auto& s : slopes)
             s.trigger();
 
+        for (auto& l : lfos)
+            l.noteOn();
+
         // One random value per note, held for the life of it. A random source
         // that moved during a note would be noise rather than a modulation
         // source: the point of it is that every note is a little different
@@ -310,6 +438,9 @@ public:
 
         for (auto& s : slopes)
             s.reset();
+
+        for (auto& l : lfos)
+            l.reset();
 
         gate.reset();
         folder.reset();
@@ -568,6 +699,32 @@ private:
             sourceValues[source.slope[i]] = (float) slopes[(std::size_t) i].nextSample();
         }
 
+        for (int i = 0; i < 4; ++i)
+        {
+            // The same guard the pitch and the filter use, and for the same
+            // reason: setting a rate recomputes an increment and, when the
+            // LFO is synced, divides by a tempo, and on almost every patch
+            // the answer is the same for the whole note.
+            const double octaves = modulated (destination.lfoRate[i], 0.0, -8.0, 8.0);
+
+            if (octaves != lastLfoOctaves[(std::size_t) i])
+            {
+                lastLfoOctaves[(std::size_t) i] = octaves;
+
+                const auto& settings = patch.lfos[i];
+
+                const double base = settings.synced
+                                      ? (tempo / 60.0)
+                                          / (settings.beatsPerCycle > 1.0e-6
+                                               ? settings.beatsPerCycle : 1.0)
+                                      : settings.rateHz;
+
+                lfos[(std::size_t) i].setRateHz (base * std::exp2 (octaves));
+            }
+
+            sourceValues[source.lfo[i]] = (float) lfos[(std::size_t) i].nextSample();
+        }
+
         sourceValues[source.velocity] = (float) velocity;
 
         // Zero at middle C and plus or minus one at the ends of the keyboard,
@@ -577,6 +734,14 @@ private:
 
         sourceValues[source.random] = (float) perNote;
         sourceValues[source.gate] = held ? 1.0f : 0.0f;
+
+        sourceValues[source.modWheel] = (float) modWheel;
+        sourceValues[source.pressure] = (float) pressure;
+        sourceValues[source.bend] = (float) bend;
+        sourceValues[source.unison] = (float) unison;
+
+        for (int i = 0; i < 4; ++i)
+            sourceValues[source.macro[i]] = (float) clamped (patch.macros[i], 0.0, 1.0);
     }
 
     /** The patched value of a destination, with the matrix's sum applied. */
@@ -650,6 +815,7 @@ private:
         {
             const char* envIds[4] = { "env1", "env2", "env3", "env4" };
             const char* slopeIds[2] = { "slope1", "slope2" };
+            const char* lfoIds[4] = { "lfo1", "lfo2", "lfo3", "lfo4" };
 
             for (int i = 0; i < 4; ++i)
                 envelope[i] = ModMatrix::sourceFromId (envIds[i]);
@@ -657,14 +823,28 @@ private:
             for (int i = 0; i < 2; ++i)
                 slope[i] = ModMatrix::sourceFromId (slopeIds[i]);
 
+            for (int i = 0; i < 4; ++i)
+                lfo[i] = ModMatrix::sourceFromId (lfoIds[i]);
+
             velocity = ModMatrix::sourceFromId ("velocity");
             keyTrack = ModMatrix::sourceFromId ("keytrack");
             random   = ModMatrix::sourceFromId ("random");
             gate     = ModMatrix::sourceFromId ("gate");
+            modWheel = ModMatrix::sourceFromId ("modwheel");
+            pressure = ModMatrix::sourceFromId ("pressure");
+            bend     = ModMatrix::sourceFromId ("bend");
+            unison   = ModMatrix::sourceFromId ("unison");
+
+            const char* macroIds[4] { "macro1", "macro2", "macro3", "macro4" };
+
+            for (int i = 0; i < 4; ++i)
+                macro[i] = ModMatrix::sourceFromId (macroIds[i]);
         }
 
-        int envelope[4] {}, slope[2] {};
+        int envelope[4] {}, slope[2] {}, lfo[4] {};
         int velocity = -1, keyTrack = -1, random = -1, gate = -1;
+        int modWheel = -1, pressure = -1, bend = -1, unison = -1;
+        int macro[4] { -1, -1, -1, -1 };
     };
 
     struct DestinationIndices
@@ -692,6 +872,12 @@ private:
             amp          = ModMatrix::destinationFromId ("amp");
             slopeRate[0] = ModMatrix::destinationFromId ("slope1rate");
             slopeRate[1] = ModMatrix::destinationFromId ("slope2rate");
+
+            const char* lfoRateIds[4] { "lfo1rate", "lfo2rate", "lfo3rate",
+                                        "lfo4rate" };
+
+            for (int i = 0; i < 4; ++i)
+                lfoRate[i] = ModMatrix::destinationFromId (lfoRateIds[i]);
         }
 
         int osc1Pitch = -1, osc2Pitch = -1;
@@ -701,6 +887,7 @@ private:
         int drive = -1, driveBias = -1, cutoff = -1, resonance = -1;
         int gateOpen = -1, gateRange = -1, amp = -1;
         int slopeRate[2] { -1, -1 };
+        int lfoRate[4] { -1, -1, -1, -1 };
     };
 
     static const SourceIndices& sourceIndices()
@@ -737,6 +924,7 @@ private:
     LowPassGate gate;
     Envelope envelopes[4];
     Slope slopes[2];
+    Lfo lfos[4];
 
     /** What the pitch and the filter were last set from, so that setting
         them again can be skipped when nothing moved. Seeded as quiet NaNs,
@@ -747,8 +935,26 @@ private:
     double lastOctaves = std::numeric_limits<double>::quiet_NaN();
     double lastQ = std::numeric_limits<double>::quiet_NaN();
 
+    double lastLfoOctaves[4]
+    {
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::quiet_NaN()
+    };
+
+    double tempo = 120.0;
+
+    static double clamped (double v, double low, double high) noexcept
+    {
+        return v < low ? low : (v > high ? high : v);
+    }
+
     double sampleRate = 44100.0;
     double velocity = 1.0;
+
+    /** What the player and the panel are doing, held until told otherwise. */
+    double modWheel = 0.0, pressure = 0.0, bend = 0.0, unison = 0.0;
     double perNote = 0.0;
     double noiseFilter = 0.0;
 

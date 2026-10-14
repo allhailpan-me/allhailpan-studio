@@ -364,6 +364,7 @@ braces on their own line.
 | `PanOne.{h,cpp}` | The built in instrument: the parameters built from the table, the state saved by id, the shared wavetables and the MIDI plumbing |
 | `PanOneParams.h` | Every control PAN One has and every preset, as data: the ranges, the choice lists, the groups, and the translation of what version one saved. No JUCE |
 | `PanOneEditor.h` | The front panel, laid out from the table |
+| `Synth/Lfo.h` | The four modulators that are oscillators when driven hard enough: the shapes, the antialiased edges, and the two random ones. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -1001,6 +1002,68 @@ over a fixed stretch of it. No fixed stretch suits both a drone with a two
 and a half second attack and a struck sound that has finished in seventy
 milliseconds: measured over the second half of three seconds, five presets
 read as silent and none of them was.
+
+**An LFO here is an oscillator that happens to be slow.** The matrix
+declares six octaves of rate modulation for each of the four, which takes
+one from a sweep to an audio rate tone, so `Synth/Lfo.h` antialiases its
+edges rather than stepping between samples. The correction is PolyBLEP, the
+polynomial band limited step, from the line of work surveyed in Välimäki,
+Pekonen and Nam, JASA 131(1), 2012. Measured on a sawtooth and a square at
+2.4 kHz it is worth 11 and 14 dB of stray partials, which is what first
+order PolyBLEP gives and is not the same as clean: it removes the first
+order of the aliasing and leaves the rest.
+
+It is not `Synth/Slope.h` and neither can do the other's job. A slope is a
+rise and a fall with independent times, unipolar, whose rate is those two
+times added together. An LFO is a waveform about a centre with one rate and
+one shape, and it has a phase offset, a retrigger choice, a fade and two
+random shapes that a slope has no meaning for.
+
+**The first sample after retriggering an antialiased waveform sits on its
+discontinuity, and reads the middle of the jump.** That is what the
+correction is for, and it caught two tests out: a retrigger check read 0.0
+where it expected the bottom of the ramp, and a check that a sawtooth ramps
+read its first sample as 0.0. Read a sample or two later, or a quarter of
+the way in.
+
+**A macro's position is patch state. A mod wheel's is not.** The four macros
+live in the patch, so a preset can set them, the table saves them and a host
+can automate them. The wheel, the pressure and the pitch bend arrive from
+MIDI, reach every voice including ones already sounding, and are never
+saved: they are what a player is doing at the time and belong to no patch.
+The bend arrives as minus one to one rather than in semitones, because how
+far a bend goes is the depth of whatever routing it is pointed at, which is
+what lets the same wheel be a whole tone on one patch and an octave on
+another.
+
+**Check that every declared source drives something, as well as every
+destination.** It is the same failure in the other direction: a source the
+menu offers and nothing reads is a modulator that saves, loads and does
+nothing. The check needs more setting up than the destination one, because
+several sources are inputs rather than generators: a mod wheel nobody has
+moved is zero, and a routing from zero is indistinguishable from no routing.
+So every input is pushed somewhere definite first, and the note is played
+away from middle C so that key tracking is not sitting at its own zero.
+
+**Two modulators that should differ are checked by cancellation.** The four
+LFOs in a voice are seeded from one number each so their random shapes are
+four sequences rather than one. The voice shipped with a default that seeded
+all four identically, and the only way to see that from outside is to point
+two of them at the same destination with opposite depths: identical
+sequences subtract exactly, and the output is then indistinguishable from no
+routing at all. It measured 0.0000 and now measures 3.27.
+
+**A faster LFO makes the sound vary less from one stretch to the next, not
+more.** Worth knowing before measuring one. A level taken over chunks of a
+fifth of a second reads a 40 Hz LFO as almost steady, because every chunk
+contains a whole cycle and averages to the same thing: that measure reported
+a 13 per cent change from an LFO going round four hundred times faster. Read
+the energy the envelope has at the rate in question instead.
+
+And do not measure an LFO through a filter that the same patch change just
+closed. A check that changed the cutoff to 400 Hz and the LFO's rate in one
+step read no change from the LFO, and was right to: the filter had removed
+everything the LFO was doing.
 
 **A destination's modulation has to be clamped to that destination's own
 range.** This bit on the first run of the new voice and it is worth knowing
