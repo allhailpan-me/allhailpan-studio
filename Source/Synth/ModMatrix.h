@@ -209,8 +209,24 @@ inline const std::vector<DestinationInfo>& destinations()
         // Eight octaves is the whole audible range, so an envelope at full
         // depth takes the filter from shut to open wherever it is resting.
         { "cutoff",      "Cutoff",         " oct",  8.0f },
-        { "resonance",   "Resonance",      "",      1.0f },
-        { "drive",       "Drive",          "",      1.0f },
+
+        // Eight, so full depth takes a filter from barely resonant to
+        // ringing. One was too little to be worth a slot: a sweep from a Q
+        // of 0.7 to 1.7 is the difference between two settings nobody would
+        // describe differently.
+        { "resonance",   "Resonance",      "",      8.0f },
+
+        // The same eight the fold has, and for the same reason: the useful
+        // travel of a drive control is a factor rather than an increment, so
+        // full depth has to be the difference between clean and obviously
+        // driven.
+        { "drive",       "Drive",          "",      8.0f },
+
+        // The whole of the drive's bias control, which is what decides
+        // whether a driven signal is hollow or full: a symmetric curve fed a
+        // symmetric waveform has only odd harmonics, and pushing it off
+        // centre is the only thing that brings the even ones in.
+        { "drivebias",   "Drive bias",     "",      1.0f },
 
         // Eight is most of the folder's useful travel. Full depth has to be
         // the difference between barely folding and folding many times a
@@ -220,6 +236,13 @@ inline const std::vector<DestinationInfo>& destinations()
         // The whole of the symmetry control, so full depth takes it from one
         // side to the other and brings the even harmonics in and out.
         { "foldsymmetry","Fold symmetry",  "",      1.0f },
+
+        // All the way from the unfolded signal to the folded one. A folder
+        // is a colour rather than something a voice is always wearing, and
+        // the crossfade is how the hardware presents it too: the Timbre
+        // control on a Buchla 259 sweeps into the folds rather than
+        // switching them on.
+        { "foldmix",     "Fold mix",       "",      1.0f },
 
         // The gate, from shut to open. This is what an envelope points at on
         // a west coast patch instead of pointing at the amplifier, and it is

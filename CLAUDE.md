@@ -339,7 +339,7 @@ braces on their own line.
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
 | `Synth/LowPassGate.h` | The west coast gate: one control taking brightness and level together, through a vactrol that is slow and lopsided. No JUCE |
 | `Synth/Slope.h` | A rise and a fall that will go round forever: an envelope, an LFO and an oscillator depending only on how fast it is set. No JUCE |
-| `Synth/Voice.h` | One voice with everything wired through the matrix: the oscillators, the folder, the gate, the envelopes and the slopes meeting. No JUCE |
+| `Synth/Voice.h` | One voice with everything wired through the matrix: the oscillators, the folder, the drive, the filter, the gate, the envelopes and the slopes meeting, and the oversampled section they run in. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
 | `Assets/make_app_icon.py` | Builds both app icon masters from the logo, and carries the reasoning for how they are built |
@@ -818,6 +818,88 @@ The signal path is fixed even though the modulation is not: the folder is
 before the gate. A folder after a gate is being fed something already made
 quiet, so it stops folding as the note decays and the patch loses its
 character exactly where it was interesting.
+
+**A declared destination that nothing reaches is the failure this project
+keeps meeting, so the voice's test asserts there are none.** The matrix
+declares thirty two destinations and the voice reaches twenty one. The other
+eleven are modules that are not built yet, and they are listed by name in
+`VoiceTest`, with the reason, and the check works both ways: adding a
+destination without reaching it fails until somebody writes down that it is
+not built, and building one without taking it off the list fails too. So the
+list of known gaps cannot quietly become a lie, which is the usual fate of
+one.
+
+The method is to play the same patch twice with one extra routing pointed at
+the destination under test and see whether the output moved at all. The base
+patch has to have something going on in every part of the voice or the test
+lies: a slope's rate destination is only visible through whatever the slope
+is driving, so the base patch wires both slopes to something before asking.
+
+**Changing a destination's sound is not the same as changing it the right
+way.** The completeness check above cannot tell a rate control that speeds a
+slope up from one that slows it down, because both change the sound. The sign
+was inverted deliberately and survived every other check in the file. A
+destination declared in octaves now has its direction and its amount checked
+against the figure it declares: an octave of modulation takes a slope from
+five swells a second to ten.
+
+And measure a swell rate off the envelope's spectrum rather than by counting
+crossings of a windowed level. The window has to be short to see five swells
+a second, and at that length it also sees the note going up and down inside
+it: a window of 128 samples on a 110 Hz note read fifty swells a second where
+there were five.
+
+**Skipping work the patch is not using is most of the instrument's
+performance, and the measurement is the only reason to believe any of it.**
+The voice started at 161 per cent of a processor core for sixteen voices,
+which does not run at all, and the simplest possible patch cost the same as
+the busiest one. Three things fixed it, and none of them was the one that
+looked obvious:
+
+- **The folder and the saturator were in circuit even when mixed out.** The
+  fold rests at a mix of nothing and the drive rests at zero, and running
+  them anyway was two thirds of the cost of everything. Skipping is exact at
+  a mix of nothing, and at the smallest drive the saturator's makeup gain
+  cancels its curve to a part in ten thousand.
+- **Setters called once a sample recomputed things that had not moved.**
+  `Saturator::setDrive` costs a hyperbolic tangent and a pair of
+  exponentials, and `setBias` also re-reads the history, which is four more
+  evaluations. They are modulation destinations so the voice calls them every
+  sample, and on almost every patch they are constant. Returning early when
+  the value is unchanged took a fifth of a core off.
+- **The voice retuned and recomputed its filter every sample.** Three powers
+  of two for the pitches, three logarithms to pick the mipmap level, and a
+  tangent inside the filter, all arriving at the same answers for the whole
+  length of a note. Guarded on the modulated value having actually moved,
+  that is another fifth of a core.
+
+Sixty per cent for sixteen voices of a plain patch and a hundred for the
+busiest. The oversampling is now the largest single item at a third of a
+core, and the obvious next step is a polyphase form: the interpolating filter
+multiplies by a zero every other tap, and the decimating one computes an
+output that is thrown away, so each is exactly twice the work it needs to be.
+
+**A guard like that is only safe if it is forgotten at the right moments.**
+Both caches are seeded as quiet NaNs, which compare unequal to everything
+including themselves, and are reset whenever the note or the patch changes.
+Deliberately removing that reset survived every other check in the voice's
+test, because they all play a note on a fresh voice. The real path does not:
+the instrument reads its knobs once a block and pushes a patch into every
+voice, so turning a filter knob during a held chord goes straight through it,
+and the fault would have been that notes started after the change are right
+and notes already sounding keep the old filter and the old tuning.
+
+**Two deliberate breakages of the voice survive on purpose**, which is worth
+writing down so nobody goes looking for the test that should have caught
+them. Running the folder while it is mixed out produces identical output,
+because the folded signal is multiplied by nothing: that one is a performance
+regression and nothing else. And the two throwaway evaluations that fill a
+skipped nonlinearity's history when it comes back cannot be measured on a
+mix that ramps up, because at the moment it comes back the mix is nearly
+zero and whatever the stale history produces is multiplied by nearly zero.
+They are kept as insurance for the discontinuous case, a preset change that
+takes the mix from nothing to most of the way in one sample, and they cost
+two evaluations once.
 
 **A destination's modulation has to be clamped to that destination's own
 range.** This bit on the first run of the new voice and it is worth knowing
