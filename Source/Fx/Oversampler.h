@@ -46,15 +46,80 @@ public:
 
         The transition from passband to stopband has to happen somewhere, and
         every hertz of it is either lost from the top of the audible band or
-        spent on taps. 20 kHz is above what anybody hears and leaves the whole
-        span from there to 24 kHz to turn over in.
+        spent on taps. 20 kHz is above what anybody hears, and at a 48 kHz
+        base rate it leaves the span from there to 28 kHz, which is where the
+        stopband has to start, to turn over in.
+
+        This is what the filters aim at. What they are actually given is
+        `passbandEdgeHz`, which is this wherever the rate has room for it.
     */
     static constexpr double passbandHz = 20000.0;
 
-    /** How far down the stopband has to be. A hundred decibels is below
-        anything the nonlinearity in front of this will produce, so the filter
-        is never what sets the floor. */
+    /** How far down the stopband is designed to be, which is not quite the
+        same as how far down it measures.
+
+        A hundred decibels is below anything the nonlinearity in front of this
+        will produce, so the filter is not what sets the floor. It is the
+        figure both Kaiser's window parameter and his tap estimate are taken
+        from, and the tap estimate is asymptotic: it is least accurate exactly
+        at the stop edge, which is also the one frequency that matters, since
+        content a hair above the stop edge is what folds to a hair below the
+        passband edge. So the design figure is not the measured one.
+
+        What it measures, at the stop edge, over every rate from 22.05 to 192
+        kHz and every factor from two to eight, is 91.9 dB or better, worst at
+        48 kHz by a tone at 28 kHz. `OversamplerTest` holds it to 90 and
+        prints the figure, so this stays a number that came from a measurement
+        rather than a number somebody wrote down. Designing for 110 instead
+        was measured too and brings the worst case to 97.8 dB for about twelve
+        per cent more taps. It was not taken: six decibels at one frequency,
+        a hundred below the signal, is not worth that where the oversampler is
+        already the largest single cost in the instrument.
+    */
     static constexpr double stopbandDb = 100.0;
+
+    /** What the filters are really asked to pass at a given rate, which is
+        20 kHz wherever the rate has room for it and less where it does not.
+
+        The stopband starts at the rate minus the passband edge, derived
+        below, so the turnover has from the edge up to that to happen in. At
+        44.1 kHz and above there is a real span there and the edge is 20 kHz
+        exactly, so none of the rates this studio is normally opened at is
+        affected by any of this.
+
+        It stops being a real span as the rate comes down. At 40 kHz the
+        stopband would start at 20 kHz, which is where the passband ends, so
+        there is no transition at all, and below 40 kHz the specification
+        inverts: the stopband would start below the passband. `design` then
+        hit its own guard and returned no taps, and a filter with no taps
+        passes its input through, so a device opened at 32 kHz ran the
+        wavefolder and the saturator with no antialiasing filter whatever.
+        Measured: a tone at 19.25 kHz of the oversampled rate came back into
+        the audible band at 0.00 dB, which is to say entirely, and the
+        reported latency went negative at 16 kHz. Nothing errored and nothing
+        said so, which is the shape of fault this project keeps meeting.
+
+        So the edge comes down with the rate instead of the filter going
+        away, and how far down is not a choice. `mostTaps` and `stopbandDb`
+        between them fix the narrowest transition that can be turned over at
+        the depth this claims, and the edge is as high as that transition
+        allows. A low rate therefore loses a little off the top of its own
+        band, which it can afford, rather than losing the thing that makes
+        oversampling worth doing.
+    */
+    static double passbandEdgeHz (double rateOut) noexcept
+    {
+        // Kaiser's tap estimate inverted for the transition `mostTaps` can
+        // carry. With the stopband at R - e and the passband at e, the
+        // transition in radians per produced sample is pi (R - 2e) / R, and
+        // taps = (A - 8) / (2.285 dw), so requiring taps <= mostTaps gives
+        // e <= (R / 2) (1 - (A - 8) / (2.285 mostTaps pi)).
+        const double widest = 0.5 * rateOut
+                            * (1.0 - (stopbandDb - 8.0)
+                                     / (2.285 * (double) mostTaps * pi));
+
+        return passbandHz < widest ? passbandHz : widest;
+    }
 
     /** Taps are not fixed: each stage is given what Kaiser's own estimate
         says it needs for the transition it actually has to make, which
@@ -62,8 +127,20 @@ public:
         over between 20 and 28 kHz and needs about eighty taps. The one above
         it has from 20 to 76 kHz to do it in and needs about twenty. Giving
         them all the same number would mean paying the outermost stage's
-        price four times over for nothing. */
-    static constexpr int fewestTaps = 16;
+        price four times over for nothing.
+
+        The floor is twenty four rather than sixteen because that is where
+        Kaiser's estimate stops delivering what it promises. The estimate is
+        asymptotic, and the inner stages have such a wide transition to make
+        that it asks them for seventeen taps: measured at the stop edge, a
+        seventeen tap stage reaches 82 dB where the estimate claims a hundred,
+        and at 88.2 kHz by four times, and at 44.1 kHz by eight, that stage is
+        the one the worst fold lands on. Twenty four taps brings every rate
+        and every factor to 92 dB or better. It cost eight taps on the cheap
+        stages and nothing on the expensive one, which never reaches the
+        floor.
+    */
+    static constexpr int fewestTaps = 24;
     static constexpr int mostTaps = 256;
 
     /** `factor` is rounded down to a power of two, because the whole point of
@@ -109,10 +186,19 @@ public:
             // which is seven times. Aiming every stage at Nyquist instead
             // measured a stopband of -34 dB with the taps that the right
             // specification reaches -100 dB with.
+            //
+            // That figure is for a fixed number of taps, and worth reading
+            // carefully, because the taps here are not fixed. Asking for the
+            // stopband to start at Nyquist and then letting the estimate pay
+            // for it is not worse, it is twice the price: 154 taps at 48 kHz
+            // rather than 77, for a filter that stops 4 kHz lower than
+            // anything needs. No measurement can fail that, which is why it
+            // is written down rather than left to the test.
             const double produced = rate * 2.0;
-            const double stop = rate - passbandHz;
+            const double edge = passbandEdgeHz (rate);
+            const double stop = rate - edge;
 
-            const auto taps = design (passbandHz, stop, produced);
+            const auto taps = design (edge, stop, produced);
 
             tapsUsed[(std::size_t) i] = (int) taps.size();
 
@@ -269,6 +355,13 @@ private:
 
         if (taps % 2 == 0)
             ++taps;             // odd, so the delay is a whole number of samples
+
+        // Stepping up to odd can step past the ceiling, so come back down by
+        // two and stay odd. With the passband edge derived from `mostTaps` the
+        // estimate does not reach the ceiling at any rate, so this is a
+        // backstop rather than a path anything takes.
+        if (taps > mostTaps)
+            taps -= 2;
 
         std::vector<double> h ((std::size_t) taps, 0.0);
 
