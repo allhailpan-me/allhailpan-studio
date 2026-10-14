@@ -333,6 +333,7 @@ braces on their own line.
 | `PluginScanner.h` | Scanning in a child process, so a crashing plugin cannot take the studio down |
 | `Fx/Oversampler.h` | Running a nonlinearity at a multiple of the sample rate and bringing it back, with the filter design that decides whether that is worth doing. No JUCE |
 | `Fx/WaveFolder.h` | The west coast wavefolder: the characteristic, its two antiderivatives, and the antialiasing they are there for. No JUCE |
+| `Fx/Saturator.h` | Drive: three curves, the antialiasing each one can carry, and the makeup that keeps the level where it was. No JUCE |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
@@ -693,6 +694,66 @@ square rather than a peak, because these filters delay by half a sample at
 some factors, and at 18 kHz there are under three samples to a cycle, so a
 half sample shift moves every sampled point off the top of the wave and the
 peak reads 0.69 dB low with nothing wrong at all.
+
+**Say which band an aliasing figure is about, or it will mislead you.**
+`Fx/Saturator.h` was nearly shipped with half the oversampling it has,
+because the first measurement counted every stray partial up to Nyquist. Read
+that way the figures stop improving after two times oversampling and sit
+around -50 to -67 dB, which looks like a wall that nothing can climb and an
+obvious place to stop paying. Read up to 20 kHz instead, every curve at every
+drive goes under the floor of the measurement at four times.
+
+Both numbers are true. The oversampler's filters are specified to stop at the
+oversampled rate minus 20 kHz rather than at Nyquist, exactly so that what
+folds lands above 20 kHz where nothing can hear it, so the wider reading was
+measuring that deliberate fold and nothing else. The wider band is the right
+one to look at for a filter and the wrong one for a nonlinearity sitting
+behind that filter.
+
+**The drive on a filter, the distortions and any saturation on a bus are one
+object.** `Fx/Saturator.h` is it, with three curves, and the curves differ in
+more than their sound.
+
+The hyperbolic tangent is the curve a transistor differential pair has, which
+is why the published ladder filter models apply it at every stage
+(Huovilainen, DAFx-04). **It can only carry first order antiderivative
+antialiasing**, and that is a fact about the function rather than a corner
+cut: its first antiderivative is `log(cosh x)`, exact and cheap, and its
+second contains a dilogarithm and has no elementary form at all. The cubic
+soft clipper and the plain clip have exact piecewise antiderivatives to any
+order, so they get the second order form. At four times oversampling all
+three disappear under the measurement floor anyway, which is the answer to
+the obvious worry.
+
+Three things in there worth not relearning.
+
+**Write `log(cosh x)` as `|x| + log1p(exp(-2|x|)) - log 2`.** The naive form
+overflows `cosh` past about 710 and has lost most of its significant figures
+a long way before that, and a full scale signal at a drive of sixty-four
+reaches those inputs in ordinary use.
+
+**A bias belongs to the curve, not to the input.** The shaper is
+`g(u) = f(u + bias) - f(bias)`, so it passes through the origin and leaves no
+constant behind: a DC offset into a filter wastes its headroom and into a
+gate it is a thump at every note. Written the other way, with the offset
+added to the input, the antialiasing sees the whole bias change as a step in
+the signal, so a bias sweep is a sequence of clicks and the first sample
+after any reset is wrong by however far the bias sits from zero. Measured at
+a bias of 0.8 that first sample came out at 0.30 with silence going in. For
+the same reason, anything that changes the shaper, a curve or a bias, has to
+re-read the antiderivatives the history is holding rather than clear them:
+left stale, the next difference quotient subtracts an integral of the old
+shaper from an integral of the new one and divides the mismatch by however
+far the signal happened to move. Deliberately breaking that measured 545
+times full scale on a slow signal.
+
+**Test an antialiased nonlinearity against the integral it claims to
+compute.** The first order form is the shaper averaged evenly across the step
+and the second is it averaged under a triangle two samples wide, and with the
+input linear between samples both are ordinary integrals that Simpson's rule
+does to more places than the closed forms need. That one check killed six
+deliberate breakages on its own, including both of the fallbacks that only
+fire on nearly steady signals, where no other check is looking.
 
 **A low pass gate is not a filter and an amplifier sharing an envelope.**
 `Synth/LowPassGate.h` is one control taking brightness and level together,
