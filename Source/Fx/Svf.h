@@ -1,4 +1,6 @@
 #pragma once
+#include "BellMatch.h"
+
 #include <cmath>
 
 //==============================================================================
@@ -41,8 +43,10 @@
 
     Every response is then a weighted sum of the input, the bandpass v1 and
     the lowpass v2, which is the part that makes this worth generalising: one
-    filter structure, nine responses, and switching between them is three
-    numbers rather than a different object.
+    filter structure, every response a two pole section has, and switching
+    between them is three numbers rather than a different object. It is also
+    why the equaliser's matched bell in `BellMatch.h` needs no filter of its
+    own: a published design in `s` is five numbers for this one.
 
         output = m0 * input + m1 * v1 + m2 * v2
 
@@ -79,7 +83,15 @@ public:
         allpass,
         bell,           /**< a boost or cut around the centre, flat at both ends */
         lowShelf,
-        highShelf
+        highShelf,
+
+        /** The same bell, designed to keep its skirt at the top of the band
+            rather than being crushed to nothing at Nyquist. `BellMatch.h`
+            says what that means, why a plain bell is five decibels wrong at
+            12 kHz, and where the correction runs out. Above the frequency it
+            runs out at, this is the plain bell, and `isMatched` says which
+            one is running. */
+        bellMatched
     };
 
     void setSampleRate (double newRate) noexcept
@@ -153,6 +165,74 @@ public:
 
     Coefficients coefficients() const noexcept { return { a1, a2, a3, m0, m1, m2 }; }
 
+    /** Whether a `bellMatched` band really got the matched design, or fell
+        back to the conventional one because the correction does not reach
+        where it was asked to work. Always false for every other type.
+
+        Worth exposing rather than hiding: it is the difference between a
+        twelve kilohertz bell being a tenth of a decibel out and five
+        decibels out, and an equaliser that draws its own curve should draw
+        the one it is running. */
+    bool isMatched() const noexcept { return matched; }
+
+    /** The magnitude of the response at a frequency, exactly, from the
+        filter as it is set right now.
+
+        Here rather than in whatever wants to draw a curve, because the
+        answer depends on the same six numbers the filter runs on and a
+        second copy of that algebra somewhere else is a second copy that can
+        disagree. An equaliser's curve is the product of its bands' answers.
+
+        The whole of it follows from the structure. The two integrator taps
+        are a bandpass and a lowpass over the same two pole denominator, and
+        the output is `m0` of the input plus `m1` of the first plus `m2` of
+        the second, so
+
+            H(s) = [ m0 (s^2 + k s + 1) + m1 s + m2 ] / (s^2 + k s + 1)
+
+        where `s` is the frequency normalised to the cutoff. The filter is
+        digital, so the frequency axis is the prewarped one the bilinear
+        transform gives: `s` is `j tan(pi f / fs) / g`, with `g` the same
+        tangent taken at the cutoff. Which is why this reads `g` and `k` back
+        out of the coefficients rather than keeping its own copies: those are
+        what the running filter is actually using, including every clamp that
+        was applied on the way in.
+    */
+    double magnitudeAt (double hz) const noexcept
+    {
+        if (! (a2 != 0.0) || ! (a1 != 0.0))
+            return 1.0;
+
+        // a2 is g times a1 and a3 is g times a2, so either ratio gives g,
+        // and a1 is one over (1 + g(g + k)), which gives k.
+        const double g = a3 / a2;
+        const double k = (1.0 / a1 - 1.0 - g * g) / (g != 0.0 ? g : 1.0);
+
+        const double highest = sampleRate * 0.5;
+        const double at = hz < 0.0 ? 0.0 : (hz > highest ? highest : hz);
+
+        // The tangent runs to infinity at Nyquist, so the top of the range
+        // is approached rather than reached.
+        const double t = std::tan (pi * std::fmin (at, sampleRate * 0.4999) / sampleRate);
+
+        // s = j w, with w the prewarped frequency over the prewarped cutoff.
+        const double w = t / (g != 0.0 ? g : 1.0);
+
+        // s^2 is minus w squared, so the real and imaginary parts separate.
+        const double denominatorReal = 1.0 - w * w;
+        const double denominatorImaginary = k * w;
+
+        const double numeratorReal = m0 * denominatorReal + m2;
+        const double numeratorImaginary = m0 * denominatorImaginary + m1 * w;
+
+        const double top = std::sqrt (numeratorReal * numeratorReal
+                                        + numeratorImaginary * numeratorImaginary);
+        const double bottom = std::sqrt (denominatorReal * denominatorReal
+                                           + denominatorImaginary * denominatorImaginary);
+
+        return bottom > 0.0 ? top / bottom : 1.0;
+    }
+
 private:
     void update() noexcept
     {
@@ -206,7 +286,38 @@ private:
                 m1 = k * (1.0 - A) * A;
                 m2 = 1.0 - A * A;
                 break;
+
+            case Type::bellMatched:
+            {
+                const auto design = matchedBell (frequency, resonance, gain, sampleRate);
+
+                matched = design.matched;
+
+                if (matched)
+                {
+                    g  = design.g;
+                    k  = design.k;
+                    m0 = design.m0;
+                    m1 = design.m1;
+                    m2 = design.m2;
+                    break;
+                }
+
+                // Out of reach, so the conventional bell, unchanged, rather
+                // than something approximate with nothing to say so. The
+                // same three lines as above deliberately: two bells that
+                // differ by a typo would be worse than one that is known to
+                // be wrong above 13 kHz.
+                k  = 1.0 / (resonance * A);
+                m0 = 1.0;
+                m1 = k * (A * A - 1.0);
+                m2 = 0.0;
+                break;
+            }
         }
+
+        if (type != Type::bellMatched)
+            matched = false;
 
         a1 = 1.0 / (1.0 + g * (g + k));
         a2 = g * a1;
@@ -224,6 +335,8 @@ private:
     double a1 = 0.0, a2 = 0.0, a3 = 0.0;
     double m0 = 0.0, m1 = 0.0, m2 = 1.0;
     double ic1eq = 0.0, ic2eq = 0.0;
+
+    bool matched = false;
 };
 
 } // namespace Fx
