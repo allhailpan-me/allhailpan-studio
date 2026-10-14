@@ -6,9 +6,12 @@
 #include "ModMatrix.h"
 
 #include "../Envelope.h"
+#include "../PanLaw.h"
+
 #include "../Fx/Oversampler.h"
 #include "../Fx/Saturator.h"
 #include "../Fx/Svf.h"
+#include "../Fx/Tilt.h"
 #include "../Fx/WaveFolder.h"
 
 #include <cmath>
@@ -140,6 +143,39 @@ public:
         double osc2Semitones = 0.0;     /**< against osc 1, for detune or an interval */
         double fmAmount = 0.0;          /**< osc 2 into osc 1's phase, in cycles */
 
+        /** Where each oscillator starts when a note does, as a fraction of
+            a cycle.
+
+            The oscillators are reset to these when a note begins rather
+            than left running free, which is what makes the control mean
+            anything and what makes a percussive attack the same every
+            time: free running, the first cycle of a pluck is a different
+            shape on every note, and on a short one that is the whole
+            sound. The cost is that the slight variation a free running
+            oscillator gives is gone, and a patch that wants it has the per
+            note random source to do it with. */
+        double osc1Phase = 0.0;
+        double osc2Phase = 0.0;
+
+        /** How dark the noise is, from white at nothing to brown at one,
+            through pink at a half. A real slope rather than a blend: see
+            `Fx/Tilt.h`. */
+        double noiseColour = 0.0;
+
+        /** How long the pitch takes to arrive from the note before it, in
+            seconds, and nothing for no glide.
+
+            The time is how long it takes whatever the interval is, which
+            is the convention a knob marked in seconds implies and which
+            hardware marked "glide" has meant since the Minimoog. A rate in
+            semitones a second is the other convention and is not this one:
+            it would make a wide leap take proportionally longer. */
+        double glideSeconds = 0.0;
+
+        /** Where the voice sits across the stereo field, from the far left
+            to the far right. */
+        double pan = 0.0;
+
         // Folder. The mix rests at nothing, so an untouched patch is clean:
         // see the class comment.
         double foldDrive = 1.0;
@@ -224,6 +260,7 @@ public:
             l.setSampleRate (sampleRate);
 
         gate.setSampleRate (sampleRate);
+        noiseTilt.prepare (sampleRate);
 
         // One oversampler for the whole nonlinear section, prepared for a
         // single sample at a time. The stages are plain finite impulse
@@ -398,6 +435,23 @@ public:
     //==========================================================================
     void start (int midiNote, float velocity) noexcept
     {
+        // Where the pitch starts from, which is the note before it when
+        // there was one and this one when there was not. A first note has
+        // nothing to glide from, and starting it at some remembered pitch
+        // from before the voice was last silent would be a swoop out of
+        // nowhere.
+        if (note >= 0 && patch.glideSeconds > 0.0)
+        {
+            glideFrom = soundingNote;
+            gliding = true;
+        }
+        else
+        {
+            glideFrom = (double) midiNote;
+            soundingNote = (double) midiNote;
+            gliding = false;
+        }
+
         note = midiNote;
         this->velocity = velocity < 0.0f ? 0.0f : (velocity > 1.0f ? 1.0f : velocity);
 
@@ -412,6 +466,13 @@ public:
 
         for (auto& l : lfos)
             l.noteOn();
+
+        // Reset to where the patch says the cycle starts, which is what
+        // makes a percussive attack the same shape every time. See
+        // `Patch::osc1Phase`.
+        osc1.reset (patch.osc1Phase);
+        osc2.reset (patch.osc2Phase);
+        sub.reset (patch.osc1Phase);
 
         // One random value per note, held for the life of it. A random source
         // that moved during a note would be noise rather than a modulation
@@ -447,18 +508,46 @@ public:
         saturator.reset();
         filter.reset();
         oversampler.reset();
+        noiseTilt.reset();
         note = -1;
         held = false;
+        gliding = false;
     }
 
     bool isActive() const noexcept { return envelopes[0].isActive(); }
     int  getNote() const noexcept  { return note; }
 
     //==========================================================================
+    /** One frame of output, placed across the stereo field.
+
+        A voice is a mono source being put somewhere, which is a panner and
+        not a balance control, so it goes through `PanLaw` with the law the
+        studio defaults to rather than a second idea of what pan means.
+    */
+    struct Frame
+    {
+        float left = 0.0f, right = 0.0f;
+    };
+
+    /** The mono sum of a frame, for anything measuring one signal.
+
+        A centred voice puts the same value in both halves, so the mean of
+        them is the value: this is the number the voice gave before it could
+        be panned, and it stays that number for every patch that does not
+        pan. A hard panned voice reads half, which is what a mono fold of a
+        panned source is.
+    */
     float nextSample() noexcept
     {
+        const auto frame = nextFrame();
+
+        return 0.5f * (frame.left + frame.right);
+    }
+
+    Frame nextFrame() noexcept
+    {
         if (! envelopes[0].isActive())
-            return 0.0f;
+            return {};
 
         gatherSources();
 
@@ -490,31 +579,48 @@ public:
         // first sample of every note always retunes: NaN compares unequal to
         // everything including itself, which is exactly the "no idea, do it"
         // this wants and is why it is not a separate flag.
-        if (bend1 != lastBend1 || bend2 != lastBend2)
+        // The glide, which moves the note the oscillators are tuned to
+        // rather than the note the voice thinks it is playing. Everything
+        // else, key tracking included, still reads the note that was asked
+        // for: a filter that tracked the glide would slide its cutoff
+        // along with the pitch, which is a different effect and not one
+        // anybody asked for.
+        const double glide = modulated (destination.glide, patch.glideSeconds, 0.0, 10.0);
+
+        advanceGlide (glide);
+
+        if (bend1 != lastBend1 || bend2 != lastBend2 || gliding)
         {
             lastBend1 = bend1;
             lastBend2 = bend2;
 
-            const double first = frequencyOf ((double) note + bend1);
+            const double first = frequencyOf (soundingNote + bend1);
 
             osc1.setFrequency (first);
-            osc2.setFrequency (frequencyOf ((double) note + patch.osc2Semitones + bend2));
+            osc2.setFrequency (frequencyOf (soundingNote + patch.osc2Semitones + bend2));
             sub.setFrequency (first * 0.5);
         }
 
         osc1.setPosition (modulated (destination.osc1Position, patch.osc1Position));
         osc2.setPosition (modulated (destination.osc2Position, patch.osc2Position));
 
-        const double second = osc2.nextSample();
+        // The phase offsets, which reach the same input the modulation
+        // index does: the oscillator adds an offset to its read rather than
+        // to its accumulator, so pushing it does not move the pitch.
+        const double phase1 = modulated (destination.osc1Phase, patch.osc1Phase, -4.0, 4.0);
+        const double phase2 = modulated (destination.osc2Phase, patch.osc2Phase, -4.0, 4.0);
+
+        const double second = osc2.nextSample (phase2);
 
         // Phase modulation, not frequency modulation. See the class comment.
         const double index = modulated (destination.fm, patch.fmAmount, 0.0, 8.0);
-        const double first = osc1.nextSample (second * index);
+        const double first = osc1.nextSample (second * index + phase1);
 
         double mixed = first * modulated (destination.osc1Level, patch.osc1Level)
                      + second * modulated (destination.osc2Level, patch.osc2Level)
                      + sub.nextSample() * modulated (destination.subLevel, patch.subLevel)
-                     + nextNoise() * modulated (destination.noiseLevel, patch.noiseLevel);
+                     + nextNoise (modulated (destination.noiseColour, patch.noiseColour))
+                         * modulated (destination.noiseLevel, patch.noiseLevel);
 
         folder.setDrive (modulated (destination.fold, patch.foldDrive, 0.0, 64.0));
         folder.setSymmetry (modulated (destination.foldSymmetry, patch.foldSymmetry, -1.0));
@@ -563,7 +669,13 @@ public:
 
         mixed = gate.process (mixed, opening);
 
-        return (float) (mixed * amplitudeFor());
+        mixed *= amplitudeFor();
+
+        const double place = modulated (destination.pan, patch.pan, -1.0, 1.0);
+
+        const auto gains = PanLaw::gains (PanLaw::Mode::pan, PanLaw::defaultLaw, place);
+
+        return { (float) (mixed * gains.left), (float) (mixed * gains.right) };
     }
 
 private:
@@ -754,23 +866,77 @@ private:
                                           (float) lowest, (float) highest);
     }
 
-    /** Pink enough to be useful rather than white and brittle.
+    /** Moves the sounding pitch toward the note, if it is not there yet.
+
+        An exponential approach, and the time is how long the whole
+        interval takes rather than how long each semitone takes: see
+        `Patch::glideSeconds`. The coefficient is set so the pitch arrives
+        within a thousandth of the target in that time, which is the same
+        convention `Envelope.h` uses for its decay and release, so the two
+        numbers mean the same kind of thing.
+
+        In semitones rather than in hertz, so that the same glide time
+        covers an octave up and an octave down at the same speed. In hertz
+        an octave up is twice as far as an octave down and would take twice
+        as long, which is not what anybody means by a glide time.
+    */
+    void advanceGlide (double seconds) noexcept
+    {
+        if (! gliding)
+            return;
+
+        const double target = (double) note;
+
+        if (seconds <= 0.0)
+        {
+            soundingNote = target;
+            gliding = false;
+            return;
+        }
+
+        // A thousandth of the way left, in `seconds`.
+        const double coefficient = 1.0 - std::pow (0.001, 1.0 / (seconds * sampleRate));
+
+        soundingNote += (target - soundingNote) * coefficient;
+
+        // Within a thousandth of a semitone is closer than anybody can
+        // hear, and stopping there is what lets the pitch guard above go
+        // back to doing nothing for the rest of the note.
+        if (std::fabs (target - soundingNote) < 0.001)
+        {
+            soundingNote = target;
+            gliding = false;
+        }
+    }
+
+    /** Noise, coloured.
 
         One pole of lowpass on a white source, which is 3 dB per octave rather
         than the 3 dB per octave pink is, and is the difference between noise
         that sits under a sound and noise that sits on top of it. It is not
         pink and does not claim to be.
     */
-    double nextNoise() noexcept
+    double nextNoise (double colour) noexcept
     {
         noiseState = noiseState * 6364136223846793005ull + 1442695040888963407ull;
 
         const double white = (double) ((noiseState >> 33) & 0xffffff)
                            / (double) 0x7fffff - 1.0;
 
-        noiseFilter += 0.12 * (white - noiseFilter);
+        // Nothing is white, a half is pink and one is brown, which is a
+        // slope of nothing, minus three and minus six decibels an octave.
+        // A real slope: the filter is designed for it rather than blending
+        // between three recordings of it, and the test measures the energy
+        // per octave against pink's own definition.
+        const double slope = -6.0 * (colour < 0.0 ? 0.0 : (colour > 1.0 ? 1.0 : colour));
 
-        return noiseFilter * 2.0;
+        if (slope != lastNoiseSlope)
+        {
+            lastNoiseSlope = slope;
+            noiseTilt.setSlope (slope);
+        }
+
+        return noiseTilt.process (white);
     }
 
     void applyTables() noexcept
@@ -870,6 +1036,11 @@ private:
             gateOpen     = ModMatrix::destinationFromId ("gateopen");
             gateRange    = ModMatrix::destinationFromId ("gaterange");
             amp          = ModMatrix::destinationFromId ("amp");
+            pan          = ModMatrix::destinationFromId ("pan");
+            glide        = ModMatrix::destinationFromId ("glide");
+            osc1Phase    = ModMatrix::destinationFromId ("osc1phase");
+            osc2Phase    = ModMatrix::destinationFromId ("osc2phase");
+            noiseColour  = ModMatrix::destinationFromId ("noisecolour");
             slopeRate[0] = ModMatrix::destinationFromId ("slope1rate");
             slopeRate[1] = ModMatrix::destinationFromId ("slope2rate");
 
@@ -886,6 +1057,8 @@ private:
         int fm = -1, fold = -1, foldSymmetry = -1, foldMix = -1;
         int drive = -1, driveBias = -1, cutoff = -1, resonance = -1;
         int gateOpen = -1, gateRange = -1, amp = -1;
+        int pan = -1, glide = -1, noiseColour = -1;
+        int osc1Phase = -1, osc2Phase = -1;
         int slopeRate[2] { -1, -1 };
         int lfoRate[4] { -1, -1, -1, -1 };
     };
@@ -922,6 +1095,7 @@ private:
     Fx::Saturator saturator;
     Fx::Svf filter;
     LowPassGate gate;
+    Fx::Tilt noiseTilt;
     Envelope envelopes[4];
     Slope slopes[2];
     Lfo lfos[4];
@@ -944,6 +1118,15 @@ private:
     };
 
     double tempo = 120.0;
+
+    /** The pitch the oscillators are actually tuned to, which is the note
+        once a glide has arrived and somewhere between two notes while it
+        has not. */
+    double soundingNote = -1.0;
+    double glideFrom = -1.0;
+    bool   gliding = false;
+
+    double lastNoiseSlope = 1.0;    /**< outside the range, so the first call sets it */
 
     static double clamped (double v, double low, double high) noexcept
     {

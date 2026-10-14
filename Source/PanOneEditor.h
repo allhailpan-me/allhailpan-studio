@@ -124,7 +124,7 @@ public:
         }
 
         startTimerHz (4);
-        // Nine rows, a header, and the margins. The width is set by the
+        // Ten rows, a header, and the margins. The width is set by the
         // widest row, which is sixteen controls for a pair of LFOs, and
         // the row height is as short as a knob with a name above it and a
         // value below it can be.
@@ -132,7 +132,7 @@ public:
         // This is the shape the panel has to be while it is one row per
         // group, and it is most of the reason the panel is being rebuilt:
         // nine rows of eleven controls is a wall, not an instrument.
-        setSize (1000, 820);
+        setSize (1000, 840);
     }
 
     //==========================================================================
@@ -299,7 +299,7 @@ private:
 
     static constexpr int headerHeight  = 36;
     static constexpr int headingHeight = 18;
-    static constexpr int groupHeight   = 80;
+    static constexpr int groupHeight   = 72;
     static constexpr int groupGap      = 6;
 
     PanOne& synth;

@@ -400,13 +400,8 @@ void everyDestinationIsReachedOrSaidNotToBe()
 
     const NotYet notYet[]
     {
-        { "osc1phase",    "the oscillators have no settable phase yet" },
-        { "osc2phase",    "the oscillators have no settable phase yet" },
-        { "noisecolour",  "the noise source has one colour" },
-        { "pan",          "a voice is mono until the instrument places it" },
         { "unisondetune", "unison belongs to the instrument, not one voice" },
         { "unisonspread", "unison belongs to the instrument, not one voice" },
-        { "glide",        "there is no glide" },
     };
 
     const int env3 = Synth::ModMatrix::sourceFromId ("env3");
@@ -477,8 +472,40 @@ void everyDestinationIsReachedOrSaidNotToBe()
                          0.3f);
     }
 
+    // A glide long enough to still be arriving across the measurement.
+    base.glideSeconds = 0.25;
+
     const int samples = 6000;
-    const auto reference = play (base, 57, samples);
+
+    // Two notes rather than one, because a glide has nothing to do on a
+    // first note: there is no pitch to come from. Without the note before
+    // it, the glide destination measures as unreached while being
+    // perfectly connected, which is the same trap the slope and LFO rates
+    // set.
+    const auto playFromAnotherNote = [] (const Synth::Voice::Patch& patch, int count)
+    {
+        Synth::Voice voice;
+        voice.setSampleRate (rate);
+        voice.setBank (&sharedBank());
+        voice.setPatch (patch);
+
+        voice.start (45, 0.9f);
+
+        for (int i = 0; i < 2000; ++i)
+            voice.nextSample();
+
+        voice.start (57, 0.9f);
+
+        std::vector<double> out;
+        out.reserve ((std::size_t) count);
+
+        for (int i = 0; i < count; ++i)
+            out.push_back ((double) voice.nextSample());
+
+        return out;
+    };
+
+    const auto reference = playFromAnotherNote (base, samples);
     const double referenceLevel = rmsOf (reference);
 
     const auto movedBy = [&] (int destination, float depth)
@@ -488,7 +515,7 @@ void everyDestinationIsReachedOrSaidNotToBe()
         if (! patch.matrix.add (env3, destination, depth))
             return 0.0;
 
-        const auto rendered = play (patch, 57, samples);
+        const auto rendered = playFromAnotherNote (patch, samples);
 
         double worst = 0.0;
 
@@ -505,7 +532,14 @@ void everyDestinationIsReachedOrSaidNotToBe()
     {
         const char* id = Synth::ModMatrix::destinationId (d);
 
-        const double moved = std::max (movedBy (d, 1.0f), movedBy (d, -1.0f));
+        // Three depths, not two. Full depth is the one value that does
+        // nothing to a destination whose range is a whole cycle: adding
+        // one complete rotation to an oscillator's phase leaves it exactly
+        // where it was, so the two phase destinations measured as
+        // unreached at plus and minus one while being perfectly connected.
+        const double moved = std::max (movedBy (d, 1.0f),
+                                       std::max (movedBy (d, -1.0f),
+                                                 movedBy (d, 0.5f)));
 
         bool listed = false;
         const char* why = "";
@@ -662,6 +696,191 @@ void everySourceDrivesSomething()
 
     for (const auto& one : dead)
         fail ("a source the matrix declares drives nothing: " + one);
+}
+
+/** A glide takes the time it is given, and takes it whichever way the
+    interval goes.
+
+    Two claims. The time is how long the whole interval takes rather than
+    how long each semitone takes, which is what a knob marked in seconds
+    implies and is what hardware marked "glide" has meant since the
+    Minimoog. And because the pitch is moved in semitones rather than in
+    hertz, an octave up and an octave down take the same time: moved in
+    hertz an octave up is twice as far and would take twice as long, which
+    is not what anybody means by a glide time.
+*/
+void aGlideTakesTheTimeItIsGiven()
+{
+    std::printf ("glide\n");
+
+    auto base = plainPatch();
+    base.osc1Table = Synth::WaveBank::indexFromId ("harmonics");
+    base.osc1Position = 0.0;            // a sine, so the pitch is easy to read
+    base.osc1Level = 0.9;
+    base.cutoff = 20000.0;
+    base.gateRange = 0.0;
+    base.gateMode = Synth::LowPassGate::Mode::amplitude;
+    base.gateLag = 0.0;
+    base.envelopes[0] = { 0.001, 0.020, 1.0, 0.100 };
+
+    /** The pitch through time, one reading per cycle.
+
+        Counting crossings inside a window was tried first and cannot do
+        this: at 110 Hz a fiftieth of a second holds five cycles, so the
+        best it can resolve is about eighteen per cent, and a glide of an
+        octave downward never appeared to arrive at all. Interpolating each
+        upward crossing and taking the period to the next one gives a
+        reading every cycle, accurate to a fraction of a per cent, which is
+        what following a moving pitch needs.
+    */
+    struct Reading { double seconds, hz; };
+
+    const auto track = [] (const std::vector<double>& block)
+    {
+        std::vector<Reading> out;
+        double previous = -1.0;
+
+        for (std::size_t i = 1; i < block.size(); ++i)
+        {
+            if (! (block[i - 1] <= 0.0 && block[i] > 0.0))
+                continue;
+
+            // Where between the two samples it really crossed.
+            const double span = block[i] - block[i - 1];
+            const double at = (double) (i - 1)
+                                + (span != 0.0 ? -block[i - 1] / span : 0.0);
+
+            if (previous >= 0.0)
+            {
+                const double period = (at - previous) / rate;
+
+                if (period > 0.0)
+                    out.push_back ({ at / rate, 1.0 / period });
+            }
+
+            previous = at;
+        }
+
+        return out;
+    };
+
+    const auto glideBetween = [&] (double seconds, int from, int to, int count)
+    {
+        auto patch = base;
+        patch.glideSeconds = seconds;
+
+        Synth::Voice voice;
+        voice.setSampleRate (rate);
+        voice.setBank (&sharedBank());
+        voice.setPatch (patch);
+
+        voice.start (from, 0.9f);
+
+        for (int i = 0; i < (int) (rate * 0.3); ++i)
+            voice.nextSample();
+
+        voice.start (to, 0.9f);
+
+        std::vector<double> out;
+        out.reserve ((std::size_t) count);
+
+        for (int i = 0; i < count; ++i)
+            out.push_back ((double) voice.nextSample());
+
+        return out;
+    };
+
+    /** How far along the interval the pitch has travelled at a moment, as
+        a fraction, measured in semitones because that is the domain the
+        glide moves in. */
+    const auto progressAt = [&] (const std::vector<Reading>& readings,
+                                  int from, int to, double seconds)
+    {
+        const double startNote = (double) from;
+        const double endNote = (double) to;
+
+        double closest = 1e9, note = startNote;
+
+        for (const auto& reading : readings)
+        {
+            const double away = std::fabs (reading.seconds - seconds);
+
+            if (away < closest && reading.hz > 20.0)
+            {
+                closest = away;
+                note = 69.0 + 12.0 * std::log2 (reading.hz / 440.0);
+            }
+        }
+
+        return (note - startNote) / (endNote - startNote);
+    };
+
+    // Notes high enough that a cycle is short against the glide, and an
+    // octave apart so the interval is large and easy to read.
+    const int low = 69, high = 81;
+
+    for (double seconds : { 0.1, 0.4, 1.0 })
+    {
+        const int count = (int) (rate * (seconds * 2.5 + 0.2));
+        const auto readings = track (glideBetween (seconds, low, high, count));
+
+        const double tenth = progressAt (readings, low, high, seconds * 0.1);
+        const double whole = progressAt (readings, low, high, seconds);
+        const double twice = progressAt (readings, low, high, seconds * 2.0);
+
+        std::printf ("    set to %s s: a tenth of the way through it is %s of the"
+                     " way there, after the whole time %s, after twice %s\n",
+                     show (seconds).c_str(), show (tenth).c_str(),
+                     show (whole).c_str(), show (twice).c_str());
+
+        // The exponential leaves a thousandth of the interval after the
+        // time it was given, so by then it has arrived; a tenth of the way
+        // through it is about half way, which is the shape of an
+        // exponential and is nowhere near arrived.
+        if (! (tenth < 0.75))
+            fail ("a glide set to " + show (seconds) + " s was already "
+                  + show (tenth) + " of the way there after a tenth of it");
+
+        if (! (whole > 0.9 && twice > 0.98))
+            fail ("a glide set to " + show (seconds) + " s was only " + show (whole)
+                  + " of the way there after the whole time");
+    }
+
+    // An octave up and an octave down travel the same fraction in the same
+    // time, which is what says the pitch is moved in semitones and not in
+    // hertz: in hertz an octave up is twice as far and would take twice as
+    // long.
+    {
+        const double seconds = 0.4;
+        const int count = (int) (rate * 1.2);
+
+        const auto upReadings = track (glideBetween (seconds, low, high, count));
+        const auto downReadings = track (glideBetween (seconds, high, low, count));
+
+        const double up = progressAt (upReadings, low, high, seconds * 0.3);
+        const double down = progressAt (downReadings, high, low, seconds * 0.3);
+
+        std::printf ("    three tenths in, an octave up is %s of the way and an"
+                     " octave down is %s\n", show (up).c_str(), show (down).c_str());
+
+        if (! (std::fabs (up - down) < 0.12))
+            fail ("an octave up is " + show (up) + " of the way and an octave down "
+                  + show (down) + ", so the pitch is not being moved in semitones");
+    }
+
+    // And no glide means the note is simply there.
+    {
+        const auto readings = track (glideBetween (0.0, low, high, (int) (rate * 0.3)));
+
+        const double straightAway = progressAt (readings, low, high, 0.01);
+
+        std::printf ("    with no glide the note is %s of the way there at once\n",
+                     show (straightAway).c_str());
+
+        if (! (straightAway > 0.98))
+            fail ("with no glide the note was only " + show (straightAway)
+                  + " of the way there");
+    }
 }
 
 /** The filter filters, the resonance resonates, and the key tracking tracks.
@@ -1741,6 +1960,7 @@ int main()
     aRoutingReachesWhatItPointsAt();
     everyDestinationIsReachedOrSaidNotToBe();
     everySourceDrivesSomething();
+    aGlideTakesTheTimeItIsGiven();
     theFilterIsAFilter();
     theVoiceDoesNotAlias();
     drivingASlopeFasterMakesItFaster();

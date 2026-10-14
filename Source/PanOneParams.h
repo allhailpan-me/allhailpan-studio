@@ -472,6 +472,26 @@ namespace PanOneParams
                         [] (const Patch& p) { return (float) p.noiseLevel; },
                         [] (Patch& p, float v) { p.noiseLevel = v; });
 
+            // White at nothing, pink at a half, brown at one, and a real
+            // slope at every point between rather than a blend of three
+            // sounds. The arithmetic is in Fx/Tilt.h and is measured
+            // against pink's own definition, equal energy per octave.
+            continuous ("noisecolour", "Colour", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.noiseColour; },
+                        [] (Patch& p, float v) { p.noiseColour = v; });
+
+            // Where each oscillator starts when a note does. The
+            // oscillators are reset to these rather than left free
+            // running, which is what makes a short percussive attack the
+            // same shape every time.
+            continuous ("osc1phase", "Phase 1", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.osc1Phase; },
+                        [] (Patch& p, float v) { p.osc1Phase = v; });
+
+            continuous ("osc2phase", "Phase 2", "", 0.0f, 1.0f, 0.5f,
+                        [] (const Patch& p) { return (float) p.osc2Phase; },
+                        [] (Patch& p, float v) { p.osc2Phase = v; });
+
             //------------------------------------------------------------------
             // The folder.
 
@@ -651,6 +671,21 @@ namespace PanOneParams
             }
 
             //------------------------------------------------------------------
+            // Where the voice goes and how it gets to its pitch.
+
+            // Skewed hard towards the short end, because a tenth of a
+            // second is a lot of glide and ten is a special effect, so a
+            // linear control would put everything usable in the first
+            // millimetre.
+            continuous ("glide", "Glide", " s", 0.0f, 10.0f, 0.2f,
+                        [] (const Patch& p) { return (float) p.glideSeconds; },
+                        [] (Patch& p, float v) { p.glideSeconds = v; });
+
+            continuous ("pan", "Pan", "", -1.0f, 1.0f, 0.0f,
+                        [] (const Patch& p) { return (float) p.pan; },
+                        [] (Patch& p, float v) { p.pan = v; });
+
+            //------------------------------------------------------------------
             // The four LFOs.
 
             for (int i = 0; i < 4; ++i)
@@ -811,7 +846,7 @@ namespace PanOneParams
     // struct is pinned, and growing it is a compile error that says to come
     // and look here. Update the number once the new field has a line in the
     // table, or a comment saying why it deliberately has none.
-    static_assert (sizeof (Patch) == 1440,
+    static_assert (sizeof (Patch) == 1480,
                    "Synth::Voice::Patch has changed. Does the new field need a line in "
                    "PanOneParams::all()? If not, say why here and update the size.");
 
@@ -1022,12 +1057,13 @@ namespace PanOneParams
             // laptop. Six is seven hundred, and a row of ten knobs across
             // eight hundred is seventy four pixels each, which is what one
             // of them needs.
-            add ("Oscillators", 10);
+            add ("Oscillators", 13);
             add ("Folder and drive", 6);
             add ("Filter and gate", 8);
             add ("Envelopes 1 and 2", 8);
             add ("Envelopes 3 and 4", 8);
             add ("Slopes", 8);
+            add ("Glide and pan", 2);
             add ("LFO 1 and 2", 16);
             add ("LFO 3 and 4", 16);
             add ("Macros", 4);

@@ -616,11 +616,17 @@ private:
 
             for (int n = 0; n < count; ++n)
             {
-                const float s = voice.nextSample() * 0.25f;   // room for sixteen of them
-                left[n] += s;
+                // A frame rather than a sample, because a voice places
+                // itself across the stereo field: its pan is a modulation
+                // destination like any other, so two notes of the same
+                // chord can sit in different places and a routing from the
+                // per note random source scatters a whole stack of them.
+                const auto frame = voice.nextFrame();
+
+                left[n] += frame.left * 0.25f;        // room for sixteen of them
 
                 if (right != nullptr)
-                    right[n] += s;
+                    right[n] += frame.right * 0.25f;
             }
         }
     }

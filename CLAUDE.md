@@ -355,6 +355,7 @@ braces on their own line.
 | `Fx/Oversampler.h` | Running a nonlinearity at a multiple of the sample rate and bringing it back, with the filter design that decides whether that is worth doing. No JUCE |
 | `Fx/WaveFolder.h` | The west coast wavefolder: the characteristic, its two antiderivatives, and the antialiasing they are there for. No JUCE |
 | `Fx/Saturator.h` | Drive: three curves, the antialiasing each one can carry, and the makeup that keeps the level where it was. No JUCE |
+| `Fx/Tilt.h` | A response that falls at a chosen number of decibels per octave, designed at whatever sample rate it is given: a noise colour, and pink when asked for minus three. No JUCE |
 | `Fx/Svf.h` | The filter the effects are built on: two poles, every response a two pole section has, plus the bell and shelf forms an equaliser needs. No JUCE |
 | `Synth/WaveTable.h` | Band limited wavetables and the oscillator that reads them: the mipmap, the morph between frames, and the interpolation. No JUCE |
 | `Synth/ModMatrix.h` | What drives what in the instrument: the named sources and destinations, the routing table, and the arithmetic that turns one into the other. No JUCE |
@@ -1064,6 +1065,79 @@ And do not measure an LFO through a filter that the same patch change just
 closed. A check that changed the cutoff to 400 Hz and the LFO's rate in one
 step read no change from the LFO, and was right to: the filter had removed
 everything the LFO was doing.
+
+**Pink noise has a definition, so the filter for it is designed and not
+approximated.** `Fx/Tilt.h` is a response that falls at a chosen number of
+decibels per octave: nothing is white, minus three is pink, minus six is
+brown, and every point between is a real slope rather than a crossfade.
+
+Three different wrong things all look right from the code. A single pole
+falls at six decibels an octave, a shelf flattens out, and blending white
+noise with a filtered copy of it has no particular slope anywhere. None of
+them would announce itself, which is why the test measures: it fits a least
+squares line through the response in log frequency and reads both the
+gradient and the scatter about it. Falling, at 44.1, 48, 96 and 192 kHz, it
+measures -1.48, -2.97, -4.47 and -5.98 for -1.5, -3, -4.5 and -6, with
+0.11 to 0.17 dB of ripple.
+
+It is designed rather than copied for one reason: every coefficient set in
+circulation is specified at one sample rate. The best known, Paul Kellett's,
+is for 44.1 kHz, and the musicdsp page carrying it has a comment giving four
+different pole sets for four sample rate ranges precisely because using one
+at another rate degrades it. This studio runs at five rates.
+
+**A rising slope is looser than a falling one, and the header says so rather
+than quoting one figure.** A section is flat below its pole and at `k` above
+it, so its transition runs between the pole and the pole over `k`, which
+lands on the far side of the pole once `k` rises. Shifting the pole up by
+half the section spacing recovers most of it, 0.64 dB of ripple down to
+0.30, and the rest does not improve with more sections: one every octave and
+one every three quarters of an octave both measure 0.30 too.
+
+**Measuring a noise spectrum needs a transform, not a handful of sines.** A
+single reading of a noise spectrum at one frequency is a random quantity
+with as much spread as it has size, so twelve of them per octave give an
+estimate good to about thirty per cent. Measured that way, white noise
+through a flat filter read 5.4 where doubling the bandwidth says 8, and the
+check failed a filter that was correct. A transform gives every bin at once
+and averaging eight blocks brings the spread to a couple of per cent: white
+then reads 0.51, 1.00, 1.98, 3.92, 7.98, 15.88, 31.87 across seven octaves,
+which is what says the measurement is sound before it is used to judge
+anything, and pink reads 1.02, 1.00, 0.99, 0.98, 1.01, 1.04, 1.08.
+
+And band energy is an integral, not an average. With readings spaced
+geometrically each one stands for a slice of bandwidth proportional to its
+own frequency, so each has to be weighted by it. Averaging instead gives the
+mean power density, which for pink noise halves every octave rather than
+staying level.
+
+**A glide moves the pitch in semitones, and its time is the whole
+interval.** Both halves are conventions worth getting right. A knob marked
+in seconds means the interval takes that long, which is what hardware
+marked "glide" has meant since the Minimoog; a rate in semitones a second is
+the other convention and makes a wide leap take proportionally longer.
+Moving the pitch in semitones rather than in hertz is what makes an octave
+up and an octave down take the same time: in hertz an octave up is twice as
+far. Measured, three tenths of the way through a 0.4 second glide, an octave
+up has travelled 0.870 of the interval and an octave down 0.868.
+
+The coefficient is set so the pitch arrives within a thousandth of the
+target in the time given, the same convention `Envelope.h` uses, and the
+measurement reads 0.9990 of the interval after exactly that time.
+
+**Follow a moving pitch by interpolating zero crossings, one reading per
+cycle.** Counting crossings inside a window cannot do it: at 110 Hz a
+fiftieth of a second holds five cycles, so the best it resolves is about
+eighteen per cent, and a downward octave glide never appeared to arrive at
+all.
+
+**A destination whose range is a whole cycle does nothing at full depth.**
+The two oscillator phase destinations are declared as one complete
+rotation, which is right, and adding one complete rotation to a phase
+leaves it exactly where it was. The completeness check tried plus and minus
+one and read both as unreached while they were perfectly connected. It
+tries a half as well now, which is the general lesson: a check that pushes
+every destination to its limit is testing the one value most likely to wrap.
 
 **A destination's modulation has to be clamped to that destination's own
 range.** This bit on the first run of the new voice and it is worth knowing
