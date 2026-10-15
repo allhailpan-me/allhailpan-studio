@@ -84,12 +84,16 @@ private:
         // Which pass of a take folder is under the mouse. Swiping across one
         // is what comps from it, which is the whole gesture.
         int    takeLane = -1;
+
+        // A fade handle on a selected audio clip, at the end the ramp belongs
+        // to. `Edge::left` is the fade in and `Edge::right` the fade out.
+        Edge   fadeHandle = Edge::none;
     };
 
     struct DragState
     {
         enum class Mode { none, move, trimLeft, trimRight, stretchLeft, stretchRight, erase, marquee, warp,
-                          autoPoint, autoBend, comp, loopRange } mode = Mode::none;
+                          autoPoint, autoBend, comp, loopRange, fadeIn, fadeOut } mode = Mode::none;
         int    takeLane = -1;
         // The comp as it was when the swipe began. A swipe is applied from
         // this rather than from whatever the last mouse move left behind, so
@@ -126,6 +130,34 @@ private:
     float  warpMarkerX (const Clip&, int index) const;
     bool   warpVisible (const Clip&) const;
     void   stretchClipTo (Clip&, const Clip& original, double wantedBeats);
+
+    // ---- clip fades ----
+    //
+    // Handles are only shown and only grabbable on a selected clip, which is
+    // the rule the warp markers and the automation handles already follow,
+    // because the top of an unselected clip is the grab handle for moving it.
+    // Reaper and Ardour both show fade handles on hover with no selection, so
+    // this costs one click that they do not; it is recorded in the backlog as
+    // worth revisiting rather than defended.
+    bool   fadeVisible (const Clip&) const;
+
+    /** Where the ramp reaches unity, which is the point the handle sits at.
+        Built from the resolved length rather than the stored one, so the
+        automatic de-click fade is visible and grabbable too instead of being
+        state with nothing on screen to say it is there. */
+    float  fadeHandleX (const Clip&, Edge) const;
+
+    /** The longest that end's fade may be, in seconds of output time. The
+        two may not overlap, which is Ableton's documented rule, so each is
+        limited by what the other is already using. */
+    double maxFadeSeconds (const Clip&, Edge) const;
+
+    void   paintFades (juce::Graphics&, const Clip&, juce::Rectangle<float> r, bool dim);
+
+    /** Right clicking a fade handle chooses its shape, which is where Ardour
+        puts the same menu. Plain right click elsewhere on a clip is the erase
+        gesture, so the handle is the only place this can live. */
+    void   showFadeMenu (int clipId, Edge);
 
     // ---- automation curves ----
     //
