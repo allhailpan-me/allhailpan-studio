@@ -267,6 +267,9 @@ bool PlaylistComponent::isEditing() const noexcept
         || drag.mode == DragState::Mode::stretchLeft || drag.mode == DragState::Mode::stretchRight
         || drag.mode == DragState::Mode::warp
         || drag.mode == DragState::Mode::autoPoint || drag.mode == DragState::Mode::autoBend
+        // Dragging a fade handle is one edit, not one per mouse move, the
+        // same rule everything else here follows.
+        || drag.mode == DragState::Mode::fadeIn || drag.mode == DragState::Mode::fadeOut
         // A swipe across a take folder is one edit, not one per mouse move,
         // so nothing is committed to the undo history until the mouse comes
         // up. Setting a loop range is not an arrangement edit at all.
@@ -1008,6 +1011,11 @@ void PlaylistComponent::paintClip (juce::Graphics& g, const Clip& c, juce::Recta
                     juce::Justification::topRight);
     }
 
+    // The fades, over whatever the body is showing and under the warp
+    // markers, so a marker sitting inside a ramp is still visible.
+    if (c.isAudio())
+        paintFades (g, c, r, dim);
+
     // Warp markers, on top of the waveform they pin.
     if (warpVisible (c))
     {
@@ -1369,6 +1377,202 @@ float PlaylistComponent::warpMarkerX (const Clip& c, int index) const
 }
 
 // ---------------------------------------------------------------------------
+// Clip fades
+
+bool PlaylistComponent::fadeVisible (const Clip& c) const
+{
+    return c.isAudio() && project.selection.count (c.id) > 0;
+}
+
+double PlaylistComponent::maxFadeSeconds (const Clip& c, Edge which) const
+{
+    const double total = c.outputSeconds (project.bpm);
+    const auto   r     = project.resolvedFadeFor (c);
+    const double other = which == Edge::left ? r.out : r.in;
+    return std::max (0.0, total - other);
+}
+
+float PlaylistComponent::fadeHandleX (const Clip& c, Edge which) const
+{
+    const auto   r   = project.resolvedFadeFor (c);
+    const double bps = project.bpm / 60.0;
+    return which == Edge::left
+         ? beatToX (c.start + r.in * bps)
+         : beatToX (c.endBeat (project.bpm) - r.out * bps);
+}
+
+void PlaylistComponent::paintFades (juce::Graphics& g, const Clip& c, juce::Rectangle<float> r, bool dim)
+{
+    const auto   rf  = project.resolvedFadeFor (c);
+    const double bps = project.bpm / 60.0;
+    const float  top = r.getY() + 15.0f;
+    const float  bot = r.getBottom() - 1.0f;
+    const float  h   = bot - top;
+    if (h <= 1.0f)
+        return;
+
+    // The ramp drawn at its own shape, with the attenuated part shaded, so
+    // what the gain is doing is visible rather than implied. Sampled per
+    // pixel, which for a ramp that is usually a handful of pixels wide is
+    // cheaper than solving the curve for a path.
+    auto drawRamp = [&] (float rampFrom, float rampTo, ClipFade::Shape shape, bool rising)
+    {
+        // The ramp's own ends are what the curve is measured against; the
+        // visible range is only what is drawn. Measuring from the clipped
+        // edge instead would draw a clip scrolled half off the left with its
+        // fade in restarted at the viewport edge, at the wrong shape, which
+        // is a picture that disagrees with the sound.
+        const float span = std::max (0.5f, rampTo - rampFrom);
+        const float x0   = std::max (rampFrom, (float) grid.getX());
+        const float x1   = std::min (rampTo,   (float) grid.getRight());
+        if (x1 - x0 < 0.5f)
+            return;
+
+        juce::Path shade, curve;
+        shade.startNewSubPath (x0, top);
+        bool first = true;
+
+        for (float x = x0; x <= x1; x += 1.0f)
+        {
+            const double u = (double) (x - rampFrom) / (double) span;
+            const double gain = ClipFade::risingGain (shape, rising ? u : 1.0 - u);
+            const float  y = bot - (float) gain * h;
+            shade.lineTo (x, y);
+            if (first) { curve.startNewSubPath (x, y); first = false; }
+            else       curve.lineTo (x, y);
+        }
+
+        shade.lineTo (x1, top);
+        shade.closeSubPath();
+
+        g.setColour (Ahp::panel.withAlpha (dim ? 0.35f : 0.62f));
+        g.fillPath (shade);
+        g.setColour (Ahp::bone.withAlpha (dim ? 0.35f : 0.85f));
+        g.strokePath (curve, juce::PathStrokeType (1.2f));
+    };
+
+    const double endBeat = c.endBeat (project.bpm);
+
+    if (rf.in > 0.0)
+        drawRamp (beatToX (c.start), beatToX (c.start + rf.in * bps), rf.inShape, true);
+    if (rf.out > 0.0)
+        drawRamp (beatToX (endBeat - rf.out * bps), beatToX (endBeat), rf.outShape, false);
+
+    if (! fadeVisible (c))
+        return;
+
+    // The grab handles, at the top of the body where each ramp reaches unity,
+    // wide enough to hit without aiming. Same shape and size as a warp
+    // marker's handle, because they are the same gesture.
+    g.setColour (Ahp::bone);
+    for (auto which : { Edge::left, Edge::right })
+    {
+        const float hx = fadeHandleX (c, which);
+        if (hx < r.getX() - 1.0f || hx > r.getRight() + 1.0f)
+            continue;
+        g.fillRect (hx - 3.5f, top, 7.0f, 5.0f);
+    }
+}
+
+void PlaylistComponent::showFadeMenu (int clipId, Edge which)
+{
+    auto* c = project.find (clipId);
+    if (c == nullptr || which == Edge::none)
+        return;
+
+    const bool  in     = which == Edge::left;
+    const auto  shape  = in ? c->fadeInShape : c->fadeOutShape;
+    const bool  isAuto = (in ? c->fadeIn : c->fadeOut) <= 0.0;
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader (in ? "Fade in" : "Fade out");
+
+    // The laws named by what they do to a join rather than only by their
+    // shape, because the choice is about the material: Avid recommends equal
+    // power "for material that is not phase coherent" and equal gain "for
+    // material that is phase-coherent or nearly phase-coherent", and the name
+    // is the only place that can be said on screen.
+    menu.addItem (1, "Linear (equal gain)",   true, ! isAuto && shape == ClipFade::Shape::linear);
+    menu.addItem (2, "Equal power",           true, ! isAuto && shape == ClipFade::Shape::equalPower);
+    menu.addItem (3, "S-curve (equal gain)",  true, ! isAuto && shape == ClipFade::Shape::sCurve);
+    menu.addSeparator();
+    menu.addItem (4, "Automatic de-click only", true, isAuto);
+
+    // The automatic length lives here too, marked as what it is, because it is
+    // the only control over it there is and a setting nothing can write is not
+    // a setting. Reaper keeps the same figure in its project defaults, which
+    // is the scope it has here. Off is offered because a studio that cannot be
+    // told to leave a clip's edges alone is one you have to work around.
+    juce::PopupMenu automatic;
+    const double current = project.autoFadeSeconds;
+    automatic.addItem (10, "Off",   true, current <= 0.0);
+    automatic.addItem (11, "1 ms",  true, std::abs (current - 0.001) < 1.0e-9);
+    automatic.addItem (12, "2 ms",  true, std::abs (current - 0.002) < 1.0e-9);
+    automatic.addItem (13, "4 ms",  true, std::abs (current - 0.004) < 1.0e-9);
+    automatic.addItem (14, "10 ms", true, std::abs (current - 0.010) < 1.0e-9);
+    menu.addSeparator();
+    menu.addSubMenu ("Automatic de-click fade (whole project)", automatic);
+
+    juce::Component::SafePointer<PlaylistComponent> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options(), [safeThis, clipId, in] (int result)
+    {
+        if (safeThis == nullptr || result == 0)
+            return;
+        auto* clip = safeThis->project.find (clipId);
+        if (clip == nullptr)
+            return;
+
+        if (result >= 10 && result <= 14)
+        {
+            // The project-wide de-click length. Not an arrangement edit, so it
+            // is changed() to rebuild the snapshot and markDirty is left to
+            // the same path the loop range uses; it is deliberately outside
+            // the undo history, for the reason Project::autoFadeSeconds gives.
+            // Bounded above as well as below, because this indexes an array
+            // and a menu id added later must not read off the end of it.
+            const double lengths[] = { 0.0, 0.001, 0.002, 0.004, 0.010 };
+            safeThis->project.autoFadeSeconds = lengths[result - 10];
+            safeThis->project.changed();
+            safeThis->repaint();
+            return;
+        }
+
+        if (result == 4)
+        {
+            // Back to the automatic fade, which is what Ableton's delete of a
+            // fade handle does. Zero is how an edge says it has no fade of its
+            // own, so this is the one gesture that can give one back.
+            if (in) clip->fadeIn  = 0.0;
+            else    clip->fadeOut = 0.0;
+        }
+        else
+        {
+            const auto shape = ClipFade::shapeFromId (result - 1);
+            if (in) clip->fadeInShape  = shape;
+            else    clip->fadeOutShape = shape;
+
+            // Choosing a shape on an edge that has no fade of its own would
+            // otherwise be invisible and unheard, because the automatic fade
+            // carries the de-click shape rather than the stored one. So the
+            // choice makes the fade explicit, at the length it was already
+            // sounding, which is what the person looking at the handle thinks
+            // they are changing the shape of.
+            const double autoLen = safeThis->project.autoFadeSeconds;
+            if (in  && clip->fadeIn  <= 0.0) clip->fadeIn  = autoLen;
+            if (! in && clip->fadeOut <= 0.0) clip->fadeOut = autoLen;
+        }
+
+        // changed(), not commit(): commit() only folds the edit into the undo
+        // history, and it is changed() that reaches MainComponent and rebuilds
+        // the arrangement snapshot. Without it the picture changed shape and
+        // the engine carried on with the old curve, with nothing on screen to
+        // say the two had parted company.
+        safeThis->project.changed();
+        safeThis->repaint();
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Mouse
 
 PlaylistComponent::Hit PlaylistComponent::hitTest (juce::Point<float> p) const
@@ -1434,7 +1638,24 @@ PlaylistComponent::Hit PlaylistComponent::hitTest (juce::Point<float> p) const
             if (it->isTakeFolder() && p.y > r.getY() + 15.0f)
                 h.takeLane = takeLaneAt (*it, r, p.y);
 
-            if (h.warpIndex < 0 && h.autoPoint < 0 && h.autoBend < 0 && r.getWidth() > 18.0f)
+            // The fade handles, in an 8 pixel band at the top of the body.
+            // They take precedence over the trim edges there for the same
+            // reason a warp marker does: the handle of a fade a few
+            // milliseconds long sits inside the trim zone and would otherwise
+            // be impossible to grab. The rest of the edge's height still
+            // trims, and on a folder this costs two small patches of the top
+            // lane's swipe area at the two ends.
+            if (h.warpIndex < 0 && h.autoPoint < 0 && h.autoBend < 0 && r.getWidth() > 18.0f
+                && fadeVisible (*it) && p.y >= r.getY() + 15.0f && p.y < r.getY() + 23.0f)
+            {
+                if (std::abs (p.x - fadeHandleX (*it, Edge::left)) < 5.0f)
+                    h.fadeHandle = Edge::left;
+                else if (std::abs (p.x - fadeHandleX (*it, Edge::right)) < 5.0f)
+                    h.fadeHandle = Edge::right;
+            }
+
+            if (h.warpIndex < 0 && h.autoPoint < 0 && h.autoBend < 0
+                && h.fadeHandle == Edge::none && r.getWidth() > 18.0f)
             {
                 if (r.getRight() - p.x < 7.0f)  h.edge = Edge::right;
                 else if (p.x - r.getX() < 7.0f) h.edge = Edge::left;
@@ -1473,6 +1694,7 @@ void PlaylistComponent::mouseMove (const juce::MouseEvent& e)
     {
         if (tool == Tool::slice)             cursor = juce::MouseCursor::CrosshairCursor;
         else if (tool == Tool::erase)        cursor = juce::MouseCursor::NormalCursor;
+        else if (h.fadeHandle != Edge::none) cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.warpIndex >= 0)           cursor = juce::MouseCursor::LeftRightResizeCursor;
         else if (h.autoPoint >= 0)           cursor = juce::MouseCursor::DraggingHandCursor;
         else if (h.autoBend >= 0)            cursor = juce::MouseCursor::UpDownResizeCursor;
@@ -1543,6 +1765,46 @@ void PlaylistComponent::mouseDown (const juce::MouseEvent& e)
         drag.clipId    = h.clipId;
         drag.ctrlClick = true;
         return;
+    }
+
+    // A fade handle is grabbed before the erase, slice and comp gestures,
+    // because it sits inside all three of their areas. Right clicking it
+    // chooses the shape, which is where Ardour puts the same menu and the only
+    // place it can live here: a plain right click on a clip is the erase
+    // gesture, so there is no clip context menu to hang it off.
+    if (h.fadeHandle != Edge::none && tool == Tool::draw)
+    {
+        if (auto* grabbed = project.find (h.clipId))
+        {
+            project.selection = { grabbed->id };
+
+            if (e.mods.isPopupMenu())
+            {
+                showFadeMenu (grabbed->id, h.fadeHandle);
+                updateClipBar();
+                repaint();
+                return;
+            }
+
+            drag.mode   = h.fadeHandle == Edge::left ? DragState::Mode::fadeIn
+                                                     : DragState::Mode::fadeOut;
+            drag.clipId = grabbed->id;
+
+            // Where the mouse sat relative to the handle, so the fade does not
+            // jump by up to the grab tolerance on the first mouse move. The
+            // handle is five pixels wide either side, which at an ordinary
+            // zoom is tens of milliseconds of fade appearing from nowhere.
+            drag.grab = xToBeat (e.position.x)
+                      - xToBeat (fadeHandleX (*grabbed, h.fadeHandle));
+
+            // No originals are kept, unlike a trim. A fade length is measured
+            // from the clip's own edges, and neither edge moves during the
+            // drag, so the answer does not depend on where the gesture
+            // started and dragging back over it cannot accumulate.
+            updateClipBar();
+            repaint();
+            return;
+        }
     }
 
     if (e.mods.isPopupMenu() || tool == Tool::erase)
@@ -1937,6 +2199,58 @@ void PlaylistComponent::mouseDrag (const juce::MouseEvent& e)
             break;
         }
 
+        case DragState::Mode::fadeIn:
+        case DragState::Mode::fadeOut:
+        {
+            auto* c = project.find (drag.clipId);
+            if (c == nullptr) return;
+
+            const bool   in  = drag.mode == DragState::Mode::fadeIn;
+            const double bps = std::max (1.0e-9, project.bpm / 60.0);
+
+            // Deliberately not snapped. Snap here is a musical grid and a fade
+            // is a length of time: with snap at a sixteenth, a four
+            // millisecond de-click fade could not be set at all, and the one
+            // fade anybody wants on the grid is long enough to place by eye.
+            const double at  = xToBeat (e.position.x) - drag.grab;
+            const double raw = in ? (at - c->start) / bps
+                                  : (c->endBeat (project.bpm) - at) / bps;
+
+            // Clamped against the other end rather than against the clip, so
+            // the two can never overlap. Ableton states that rule: "A clip's
+            // start and end fades cannot overlap each other."
+            const double want = juce::jlimit (0.0, maxFadeSeconds (*c, in ? Edge::left : Edge::right), raw);
+
+            // An edge with no fade of its own is sounding and drawing the
+            // de-click shape rather than the stored one, so the moment the
+            // drag makes it explicit it adopts that shape. Otherwise the curve
+            // on screen and in the engine would both change shape at the first
+            // pixel of the drag, with nothing to say why. Done here rather
+            // than when the handle was grabbed, so that a click which turns
+            // out not to be a drag changes nothing at all.
+            if (in)
+            {
+                if (c->fadeIn <= 0.0 && want > 0.0)
+                    c->fadeInShape = ClipFade::declickShape;
+                c->fadeIn = want;
+            }
+            else
+            {
+                if (c->fadeOut <= 0.0 && want > 0.0)
+                    c->fadeOutShape = ClipFade::declickShape;
+                c->fadeOut = want;
+            }
+
+            // Dragging the handle back to the edge is how an edge gives its
+            // fade up and takes the automatic de-click one again, which is
+            // what deleting a fade handle does in Ableton. Anything above zero
+            // is an explicit fade, including one shorter than the automatic
+            // length, because somebody who drags it there means it.
+            drag.moved = true;
+            project.changed();
+            break;
+        }
+
         case DragState::Mode::trimLeft:
         {
             auto* c = project.find (drag.clipId);
@@ -2059,7 +2373,8 @@ void PlaylistComponent::mouseUp (const juce::MouseEvent& e)
     // Doing it during the drag would re-render on every mouse move. This covers
     // dragging a marker, trimming and stretching alike, and does nothing to a
     // clip that is not warped.
-    if (drag.moved && drag.clipId != 0 && drag.mode != DragState::Mode::comp)
+    if (drag.moved && drag.clipId != 0 && drag.mode != DragState::Mode::comp
+        && drag.mode != DragState::Mode::fadeIn && drag.mode != DragState::Mode::fadeOut)
         project.retuneWarpRatio (drag.clipId);
 
     const bool edited = drag.moved && drag.mode != DragState::Mode::loopRange;
@@ -2074,6 +2389,11 @@ void PlaylistComponent::mouseUp (const juce::MouseEvent& e)
 void PlaylistComponent::mouseDoubleClick (const juce::MouseEvent& e)
 {
     const auto h = hitTest (e.position);
+
+    // A fade handle is not a place to drop a warp marker. Double clicking one
+    // does nothing rather than quietly pinning the clip at its own edge.
+    if (h.fadeHandle != Edge::none)
+        return;
 
     // Double clicking the ruler takes the loop range off again. Dragging a
     // range shorter than a sixteenth note does the same, but that is a thing

@@ -260,6 +260,14 @@ public:
         // windows, which is every clip that is not comped, cost two
         // comparisons per sample. See CompModel.h.
         CompFade fade;
+
+        // The clip's own two edges, in absolute beats. One clip becomes one of
+        // these per comped stretch, and every stretch carries the same window,
+        // so the folder's outer edges fade while the crossfades at its
+        // internal joins are left to `fade` above and the two multiply rather
+        // than fight. A stretch wholly inside the clip is outside both ramps
+        // and costs two comparisons per sample. See ClipFade.h.
+        ClipFade::Window edgeFade;
     };
     struct NoteRT  { double on = 0.0, off = 0.0; int note = 60; juce::uint8 velocity = 100; };
     struct LaneRT

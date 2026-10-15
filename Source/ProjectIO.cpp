@@ -6,12 +6,21 @@ namespace
     const juce::String hostedTag { "HOSTED" };
     // Version 2 added automation clips on the playlist. Version 3 added take
     // folders, the comp over them, and the playlist loop range. Version 4
-    // added the pan mode on each insert and the project's pan law. Older files
-    // load unchanged: they simply have no TAKES or LOOP in them, an audio clip
-    // without a folder is still an ordinary audio clip, and an insert without
-    // a pan mode is a balance control, which is what every version up to 3
-    // did to every insert.
-    constexpr int formatVersion = 4;
+    // added the pan mode on each insert and the project's pan law. Version 5
+    // added a fade in and a fade out on every clip, with a shape for each, and
+    // the project's automatic de-click length. Older files load unchanged:
+    // they simply have no TAKES or LOOP in them, an audio clip without a
+    // folder is still an ordinary audio clip, an insert without a pan mode is
+    // a balance control, which is what every version up to 3 did to every
+    // insert, and a clip without a fade takes the automatic one.
+    //
+    // The bump is unconditional, as 2, 3 and 4 were, so the previous release
+    // refuses a project saved by this build rather than opening it. That is
+    // the point: an older loader would ignore the four fade attributes without
+    // complaint, so a two second fade out somebody drew would simply not be
+    // there, and a mix that quietly lost an edit is worse than one that will
+    // not open until the studio is updated.
+    constexpr int formatVersion = 5;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -345,6 +354,11 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("grooveVelocity", project.groove.velocity);
     root.setAttribute ("grooveRandom", project.groove.random);
 
+    // The automatic de-click fade length. What makes a project written by an
+    // older build open sensibly is the default on the load side rather than
+    // anything here, since an older build cannot write this attribute at all.
+    root.setAttribute ("autoFade", project.autoFadeSeconds);
+
     // ---- modulators ----
     if (! project.modulators.empty())
     {
@@ -523,6 +537,23 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("gain", (double) clip.gainDb);
         e->setAttribute ("muted", clip.muted);
 
+        // The fades somebody drew. Written for every clip type rather than
+        // only for audio, so that the four fields travel together and a later
+        // change that gives another clip type a fade does not have to find
+        // this. Zero is the common case and means the edge takes the
+        // project's automatic fade.
+        //
+        // The shape is saved by its id and read back through
+        // `ClipFade::shapeFromId`, so an id this build does not know lands on
+        // `linear` rather than off the end of the enum. Named ids would be
+        // better still, the way a modulation routing is named, but a fade
+        // shape is not a routing: there are three of them, nothing points at
+        // them, and the fallback loses a curve rather than redirecting one.
+        e->setAttribute ("fadeIn",       clip.fadeIn);
+        e->setAttribute ("fadeOut",      clip.fadeOut);
+        e->setAttribute ("fadeInShape",  ClipFade::idOfShape (clip.fadeInShape));
+        e->setAttribute ("fadeOutShape", ClipFade::idOfShape (clip.fadeOutShape));
+
         if (clip.isAudio())
         {
             e->setAttribute ("sample", clip.sample != nullptr ? sampleIds[clip.sample.get()] : 0);
@@ -633,6 +664,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.groove.amount   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveAmount", 1.0));
     project.groove.velocity = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveVelocity", 0.0));
     project.groove.random   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveRandom", 0.0));
+
+    // A project written before fades existed has no attribute here and gets
+    // the default, so every old project opens de-clicked. The upper bound is
+    // a second, which is far longer than a de-click fade has any business
+    // being and is there so that a corrupt or hand-edited file cannot fade a
+    // whole clip out: `ClipFade::resolve` would honour it.
+    project.autoFadeSeconds = juce::jlimit (0.0, 1.0,
+        root->getDoubleAttribute ("autoFade", ClipFade::defaultAutoSeconds));
 
     project.modulators.clear();
     if (auto* modsXml = root->getChildByName ("MODULATORS"))
@@ -841,6 +880,18 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             clip.length = std::max (0.0, e->getDoubleAttribute ("length"));
             clip.gainDb = (float) e->getDoubleAttribute ("gain");
             clip.muted  = e->getBoolAttribute ("muted");
+
+            // Negative is refused rather than clamped into meaning, because a
+            // negative length is not a short fade: `ClipFade::resolve` reads
+            // anything at or below zero as "this edge has no fade of its own"
+            // and hands it the automatic one, which is the right answer for a
+            // file that has written nonsense here.
+            clip.fadeIn       = std::max (0.0, e->getDoubleAttribute ("fadeIn"));
+            clip.fadeOut      = std::max (0.0, e->getDoubleAttribute ("fadeOut"));
+            clip.fadeInShape  = ClipFade::shapeFromId (e->getIntAttribute ("fadeInShape",
+                                                       ClipFade::idOfShape (ClipFade::defaultShape)));
+            clip.fadeOutShape = ClipFade::shapeFromId (e->getIntAttribute ("fadeOutShape",
+                                                       ClipFade::idOfShape (ClipFade::defaultShape)));
 
             if (clip.isAudio())
             {
