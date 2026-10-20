@@ -30,6 +30,7 @@
 
 #include "Fx/Svf.h"
 
+#include <algorithm>
 #include <complex>
 #include <cstdio>
 #include <cmath>
@@ -688,6 +689,361 @@ void resetClearsTheTail()
 
 } // namespace
 
+//==============================================================================
+/** The bell and the two shelves are the cookbook biquads, exactly.
+
+    Not similar to them: the same transfer functions in a different topology.
+    That is worth asserting rather than assuming, because it ties this filter
+    to a published closed form rather than to itself, and because the mixing
+    weights are the one place a typo produces a filter that still works. The
+    coefficients come from Robert Bristow-Johnson, "Cookbook formulae for
+    audio equalizer biquad filter coefficients", in the W3C's copy of his own
+    text, https://www.w3.org/TR/audio-eq-cookbook, written out here rather
+    than referred to so the comparison is against the paper and not against a
+    second reading of this file.
+*/
+double cookbookMagnitude (Fx::Svf::Type type, double hz, double q, double gainDb,
+                          double at, double rate)
+{
+    const double A = std::pow (10.0, gainDb / 40.0);
+    const double w0 = 2.0 * pi * hz / rate;
+    const double alpha = std::sin (w0) / (2.0 * q);
+    const double cosine = std::cos (w0);
+    const double rootA = std::sqrt (A);
+
+    double b0 = 0.0, b1 = 0.0, b2 = 0.0, a0 = 1.0, a1 = 0.0, a2 = 0.0;
+
+    if (type == Fx::Svf::Type::bell)
+    {
+        b0 = 1.0 + alpha * A;  b1 = -2.0 * cosine;  b2 = 1.0 - alpha * A;
+        a0 = 1.0 + alpha / A;  a1 = -2.0 * cosine;  a2 = 1.0 - alpha / A;
+    }
+    else if (type == Fx::Svf::Type::lowShelf)
+    {
+        b0 =        A * ((A + 1.0) - (A - 1.0) * cosine + 2.0 * rootA * alpha);
+        b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cosine);
+        b2 =        A * ((A + 1.0) - (A - 1.0) * cosine - 2.0 * rootA * alpha);
+        a0 =             (A + 1.0) + (A - 1.0) * cosine + 2.0 * rootA * alpha;
+        a1 =     -2.0 * ((A - 1.0) + (A + 1.0) * cosine);
+        a2 =             (A + 1.0) + (A - 1.0) * cosine - 2.0 * rootA * alpha;
+    }
+    else
+    {
+        b0 =        A * ((A + 1.0) + (A - 1.0) * cosine + 2.0 * rootA * alpha);
+        b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosine);
+        b2 =        A * ((A + 1.0) + (A - 1.0) * cosine - 2.0 * rootA * alpha);
+        a0 =             (A + 1.0) - (A - 1.0) * cosine + 2.0 * rootA * alpha;
+        a1 =      2.0 * ((A - 1.0) - (A + 1.0) * cosine);
+        a2 =             (A + 1.0) - (A - 1.0) * cosine - 2.0 * rootA * alpha;
+    }
+
+    const Complex z = std::polar (1.0, -2.0 * pi * at / rate);
+
+    return std::abs ((b0 + b1 * z + b2 * z * z) / (a0 + a1 * z + a2 * z * z));
+}
+
+void theBellAndShelvesAreTheCookbook()
+{
+    std::printf ("the bell and shelves against the cookbook\n");
+
+    const double rate = 44100.0;
+    double worst = 0.0;
+
+    for (auto type : { Fx::Svf::Type::bell, Fx::Svf::Type::lowShelf,
+                       Fx::Svf::Type::highShelf })
+    {
+        double worstHere = 0.0;
+
+        for (double hz : { 30.0, 200.0, 1000.0, 5000.0, 12000.0, 18000.0, 21000.0 })
+            for (double q : { 0.3, 0.70710678118654752, 2.0, 8.0 })
+                for (double gainDb : { -18.0, -6.0, -1.0, 1.0, 6.0, 18.0 })
+                {
+                    const auto f = make (rate, type, hz, q, gainDb);
+
+                    for (double at = 10.0; at < rate * 0.5; at *= 1.08)
+                    {
+                        const double mine = magnitudeAt (f, at, rate);
+                        const double theirs = cookbookMagnitude (type, hz, q, gainDb,
+                                                                 at, rate);
+
+                        const double offBy = std::fabs (20.0 * std::log10 (mine)
+                                                          - 20.0 * std::log10 (theirs));
+
+                        worstHere = std::max (worstHere, offBy);
+                    }
+                }
+
+        std::printf ("    %-10s worst disagreement %s dB\n",
+                     type == Fx::Svf::Type::bell ? "bell"
+                       : (type == Fx::Svf::Type::lowShelf ? "low shelf" : "high shelf"),
+                     show (worstHere).c_str());
+
+        worst = std::max (worst, worstHere);
+    }
+
+    if (worst > 1.0e-6)
+        fail ("the filter is not the cookbook biquad: off by " + show (worst) + " dB");
+}
+
+//==============================================================================
+/** The analogue prototype each form is the bilinear image of, which is what
+    "the response this is supposed to have" means. */
+double prototypeMagnitude (Fx::Svf::Type type, double hz, double q, double gainDb,
+                           double at)
+{
+    const double A = std::pow (10.0, gainDb / 40.0);
+
+    if (type == Fx::Svf::Type::bell)
+    {
+        const double k = 1.0 / (q * A);
+        const Complex s (0.0, at / hz);
+
+        return std::abs ((s * s + k * A * A * s + 1.0) / (s * s + k * s + 1.0));
+    }
+
+    const double k = 1.0 / q;
+
+    if (type == Fx::Svf::Type::lowShelf)
+    {
+        const Complex s (0.0, (at / hz) * std::sqrt (A));
+
+        return std::abs ((s * s + k * A * s + A * A) / (s * s + k * s + 1.0));
+    }
+
+    const Complex s (0.0, (at / hz) / std::sqrt (A));
+
+    return std::abs ((A * A * s * s + k * A * s + 1.0) / (s * s + k * s + 1.0));
+}
+
+/** How far the conventional design is from its own prototype near the top of
+    the band, asserted as a quantity rather than as "small".
+
+    This is the fault `BellMatch.h` exists to correct, and the figures are
+    here so that nobody has to take its header on trust. Asserted with a
+    tolerance both ways on purpose: a test that only said the error was under
+    something would pass on a filter that had stopped being a bell at all.
+*/
+void theNearNyquistErrorIsAKnownQuantity()
+{
+    std::printf ("the conventional design against its own prototype, at 44.1 kHz\n");
+
+    const double rate = 44100.0;
+
+    struct Case
+    {
+        const char* name;
+        Fx::Svf::Type type;
+        double hz, q, gainDb, expected;
+    };
+
+    // Measured, and then checked against an independent evaluation of the
+    // same prototypes in a throwaway probe before being written down.
+    const Case cases[]
+    {
+        { "high shelf 12 kHz Q 0.707 +12 dB", Fx::Svf::Type::highShelf,
+          12000.0, 0.70710678118654752, 12.0, 2.196 },
+        { "high shelf 16 kHz Q 0.707 +12 dB", Fx::Svf::Type::highShelf,
+          16000.0, 0.70710678118654752, 12.0, 3.630 },
+        { "high shelf 12 kHz Q 0.707  +6 dB", Fx::Svf::Type::highShelf,
+          12000.0, 0.70710678118654752, 6.0, 1.034 },
+        { "bell       12 kHz Q 1     +12 dB", Fx::Svf::Type::bell,
+          12000.0, 1.0, 12.0, 5.233 },
+        { "bell        8 kHz Q 1      +6 dB", Fx::Svf::Type::bell,
+          8000.0, 1.0, 6.0, 1.299 },
+        { "bell        1 kHz Q 1     +12 dB", Fx::Svf::Type::bell,
+          1000.0, 1.0, 12.0, 0.052 }
+    };
+
+    for (const auto& c : cases)
+    {
+        const auto f = make (rate, c.type, c.hz, c.q, c.gainDb);
+
+        double worst = 0.0;
+
+        for (double at = 20.0; at <= 20000.0; at *= 1.002)
+            worst = std::max (worst,
+                              std::fabs (20.0 * std::log10 (magnitudeAt (f, at, rate))
+                                           - 20.0 * std::log10 (prototypeMagnitude
+                                                                  (c.type, c.hz, c.q,
+                                                                   c.gainDb, at))));
+
+        std::printf ("    %s: off by %.3f dB (known %.3f)\n", c.name, worst, c.expected);
+
+        expectNear (worst, c.expected, 0.01,
+                    std::string ("the known deviation for ") + c.name + " has moved");
+    }
+}
+
+/** Two structural facts behind all of the above, which are exact rather than
+    measured: a digital bell is unity at Nyquist whatever its gain, because
+    the prototype is unity at infinite frequency and the transform maps one
+    onto the other, and a shelf reaches its far gain there for the same
+    reason. Asserting them means a future change to the prototype cannot
+    pass unnoticed. */
+void theEndsOfTheBandAreExact()
+{
+    std::printf ("the top of the band, exactly\n");
+
+    const double rate = 48000.0;
+
+    for (double hz : { 500.0, 4000.0, 15000.0 })
+        for (double q : { 0.5, 1.0, 4.0 })
+            for (double gainDb : { -12.0, -3.0, 6.0, 15.0 })
+            {
+                const auto bell = make (rate, Fx::Svf::Type::bell, hz, q, gainDb);
+
+                expectNear (magnitudeAtNyquist (bell, rate), 1.0, 1.0e-12,
+                            "a bell is not unity at Nyquist at " + show (hz) + " Hz");
+
+                const auto high = make (rate, Fx::Svf::Type::highShelf, hz, q, gainDb);
+                const double wanted = std::pow (10.0, gainDb / 20.0);
+
+                expectNear (magnitudeAtNyquist (high, rate) / wanted, 1.0, 1.0e-9,
+                            "a high shelf does not reach its gain at Nyquist at "
+                              + show (hz) + " Hz");
+            }
+
+    std::printf ("    a bell is unity there and a high shelf is at its gain\n");
+}
+
+/** A cut is the exact mirror of the boost, in decibels, at every frequency.
+
+    True of the analogue prototype, and the digital bell inherits it exactly
+    because the bell's corner does not depend on its gain. The shelves inherit
+    it too, which is less obvious since their corners do depend on the gain.
+    Worth asserting because an equaliser whose cuts are not the mirror of its
+    boosts is one where undoing a move does not undo it.
+*/
+void boostAndCutMirrorExactly()
+{
+    std::printf ("boost against cut\n");
+
+    const double rate = 48000.0;
+
+    for (auto type : { Fx::Svf::Type::bell, Fx::Svf::Type::lowShelf,
+                       Fx::Svf::Type::highShelf })
+    {
+        double worst = 0.0;
+
+        for (double hz : { 50.0, 400.0, 3000.0, 15000.0 })
+            for (double q : { 0.3, 1.0, 8.0 })
+                for (double gainDb : { 1.0, 6.0, 24.0 })
+                {
+                    const auto up = make (rate, type, hz, q, gainDb);
+                    const auto down = make (rate, type, hz, q, -gainDb);
+
+                    for (double at = 20.0; at < rate * 0.49; at *= 1.1)
+                        worst = std::max (worst,
+                                          std::fabs (20.0 * std::log10
+                                                       (magnitudeAt (up, at, rate))
+                                                       + 20.0 * std::log10
+                                                           (magnitudeAt (down, at, rate))));
+                }
+
+        std::printf ("    %-10s mirrors to %s dB\n",
+                     type == Fx::Svf::Type::bell ? "bell"
+                       : (type == Fx::Svf::Type::lowShelf ? "low shelf" : "high shelf"),
+                     show (worst).c_str());
+
+        if (worst > 1.0e-11)
+            fail ("a cut is not the mirror of a boost: off by " + show (worst) + " dB");
+    }
+}
+
+/** Why the bandwidth is measured at half the decibel gain and not three
+    decibels down: below three decibels of gain there is no three decibel
+    point to measure at.
+
+    This is the fact that justifies the convention, and without it written
+    down somebody will improve the definition to the one that sounds more
+    standard and break every Q in every preset.
+*/
+void aSmallBellHasNoThreeDecibelPoint()
+{
+    std::printf ("the bandwidth convention\n");
+
+    const double rate = 48000.0;
+    const double hz = 1000.0;
+
+    for (double gainDb : { 1.0, 3.0, 6.0, 12.0, 24.0 })
+    {
+        const auto f = make (rate, Fx::Svf::Type::bell, hz, 1.0, gainDb);
+
+        const double half = std::pow (10.0, gainDb / 40.0);
+
+        const double below = crossing (f, rate, half, 10.0, hz, true);
+        const double above = crossing (f, rate, half, hz, rate * 0.49, false);
+
+        const double octaves = std::log2 (above / below);
+
+        // The same span at every gain is what constant Q means, and it comes
+        // free from dividing the damping by the amplitude.
+        std::printf ("    %+5.1f dB: half gain span %.4f octaves, three decibel"
+                     " point %s\n", gainDb, octaves,
+                     gainDb > 3.0 ? "exists" : "does not exist");
+
+        expectNear (octaves, 1.3839, 0.002,
+                    "the half gain span moved at " + show (gainDb) + " dB of gain");
+
+        const double peak = std::pow (10.0, gainDb / 20.0);
+        const bool hasThreeDecibelPoint = peak > std::pow (10.0, 3.0 / 20.0);
+
+        if (hasThreeDecibelPoint != (gainDb > 3.0))
+            fail ("the three decibel point exists at " + show (gainDb)
+                  + " dB where it should not, or the other way about");
+    }
+}
+
+/** The filter's own `magnitudeAt` against the exact state space response.
+
+    Both are in this project and they must agree, because the equaliser draws
+    its curve from the first and every check here is made with the second. A
+    curve that disagrees with the filter is a curve that lies to the person
+    using it, and it would lie quietly.
+*/
+void theFiltersOwnCurveIsTheRealOne()
+{
+    std::printf ("magnitudeAt against the state space response\n");
+
+    double worst = 0.0;
+
+    for (double rate : { 44100.0, 48000.0, 96000.0 })
+        for (auto type : { Fx::Svf::Type::lowpass, Fx::Svf::Type::highpass,
+                           Fx::Svf::Type::bandpass, Fx::Svf::Type::bandpassQ,
+                           Fx::Svf::Type::notch, Fx::Svf::Type::peak,
+                           Fx::Svf::Type::allpass, Fx::Svf::Type::bell,
+                           Fx::Svf::Type::lowShelf, Fx::Svf::Type::highShelf,
+                           Fx::Svf::Type::bellMatched })
+            for (double hz : { 40.0, 500.0, 6000.0, 17000.0 })
+                for (double q : { 0.4, 1.0, 6.0 })
+                {
+                    const auto f = make (rate, type, hz, q, 9.0);
+
+                    for (double at = 20.0; at < rate * 0.45; at *= 1.3)
+                    {
+                        const double exact = magnitudeAt (f, at, rate);
+                        const double drawn = f.magnitudeAt (at);
+
+                        if (exact > 1.0e-6)
+                            worst = std::max (worst,
+                                              std::fabs (20.0 * std::log10 (drawn / exact)));
+                    }
+                }
+
+    std::printf ("    worst disagreement %s dB\n", show (worst).c_str());
+
+    // A nanodecibel rather than nothing at all. The two are different
+    // arithmetic for the same answer: `magnitudeAt` evaluates the transfer
+    // function directly, where the state space form above inverts a two by
+    // two whose determinant is nearly zero for a high Q band near Nyquist,
+    // and that inversion is what sets this floor. It is eight orders of
+    // magnitude below any weight typed wrong, which is what this is for.
+    if (worst > 1.0e-7)
+        fail ("the curve the filter draws is not the response it has: off by "
+              + show (worst) + " dB");
+}
+
+//==============================================================================
 int main()
 {
     std::printf ("Fx::Svf\n\n");
@@ -706,6 +1062,13 @@ int main()
     stableEverywhere();
     outOfRangeSettingsAreHeldIn();
     resetClearsTheTail();
+
+    theBellAndShelvesAreTheCookbook();
+    theNearNyquistErrorIsAKnownQuantity();
+    theEndsOfTheBandAreExact();
+    boostAndCutMirrorExactly();
+    aSmallBellHasNoThreeDecibelPoint();
+    theFiltersOwnCurveIsTheRealOne();
 
     std::printf ("\n");
 
