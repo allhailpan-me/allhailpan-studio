@@ -6,6 +6,366 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-15: clip fades, and the de-click fade every edge should already have had
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **Clip fade in and fade out, crossfades by overlap, and an automatic de-click fade at every clip edge** | **Chosen.** Deferred on 2026-10-08 and twice on 2026-10-13, each time as "the largest real gap". This is the night that does only that. |
+| Fader law | Deferred again, and still a real gap: `processInsert` turns the fader position into gain with `(v / 0.8)^2`, where every studio tapers in decibels. Not chosen because it changes the meaning of every stored `volume` in every saved project, so it wants a night with the version translation as its main subject rather than as a side effect of something else. |
+| MIDI record alignment | Deferred again, for the reason the last two nights gave rather than a new one: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| A tuner | Deferred. Still wants a published pitch detector and a window. |
+| Punch in and punch out recording | Deferred, and note that it now has a dependency worth having: Pro Tools' punch recording works by auto crossfading at the drop-in and drop-out points, which is exactly the machinery this night builds. Cheaper after tonight than before it. |
+| A separate crossfade object, the way Pro Tools models one | Rejected, on the research. Reaper and Ableton both make a crossfade an overlap of two clips' own fades, and `renderAudioClips` already sums overlapping clips on a track into the same insert, so a fade out meeting a fade in **is** a crossfade with no new object, no new render path and no new file format entity. Ardour makes the same point from the other direction: its manual says "It is important to understand that region fades *are* crossfades." |
+| Ardour's `FadeFast` and `FadeSlow` shapes (decibel-linear) | Rejected for tonight and worth recording. Both are real and Ardour recommends them as general-purpose fades, but each needs a floor convention to exist at all (Ardour's are built by dropping 60 dB and 80 dB over the fade and then jumping to -140 dB at the end), and that floor is an arbitrary constant rather than a specification. Their crossfade partners are built as `sqrt(1 - g^2)` and are therefore non-symmetric, which Ardour's own manual says limits their use. Three shapes with exact closed forms beat five where two carry a made-up number. |
+| Ableton's signal-dependent edge fade length | Rejected as unimplementable from the documentation. Live documents the fade as "signal-dependent" and "ranges from 0-4 milliseconds" but does not publish how the length is chosen from the signal. A guess at it would be precisely the plausible-and-wrong failure this project keeps a record of, so the figure is used as a fixed length and the fact that Live varies it is recorded here instead. |
+| Reaper's v7.81 continuous curvature and S parameters | Rejected: no published mapping to a curve. Reaper's seven numbered shapes have no published formulas and no published names either, beyond `0 = linear`. Anything giving formulas for them is reverse engineering. |
+
+### What was chosen, and why
+
+**Cutting a clip anywhere but at a zero crossing clicks, and there was nothing
+at all to stop it.**
+
+`Clip` carried `gainDb` and `muted` and no fade of any kind. The only per-clip
+gain shape in the engine was `CompFade`, which exists for the joins *inside* a
+take folder, so a comp was crossfaded and the clip's own two edges were a hard
+cut. Every studio researched applies a short fade at a clip boundary for exactly
+this reason, and all four of them give the user handles to make it a long one.
+
+For somebody recording guitar and vocals this is daily, three times over:
+
+- A take trimmed to its first note starts on whatever sample the trim landed on.
+  Full scale on the first sample is a step, and a step's spectrum falls at only
+  6 dB per octave, so it puts energy right across the audible band. That is the
+  click.
+- Splicing the good half of one take onto the good half of another means two
+  edges meeting, and nothing was ramping either of them.
+- Fading out the end of a song had to be drawn as an automation curve on the
+  insert, which is four or five actions where every other studio is one drag.
+
+### Where the behaviour came from
+
+Read from the primary source in every case: Ardour's own git tree at
+`1d826f3`, Cockos' own extension SDK header, Ableton's own manual, Avid's own
+help pages, Apple's own Logic manual, and Harris 1978 for the one piece of
+arithmetic that is actually published.
+
+- **The two crossfade laws, and which material each is for.** Avid states the
+  rule in both directions on its Fades Dialog Link Settings page: **Equal
+  Power** is "Recommended for material that is not phase coherent", and **Equal
+  Gain** is "Recommended for material that is phase-coherent or nearly
+  phase-coherent", each with the other's failure named (equal gain dips on
+  uncorrelated material, equal power clips on correlated material). The
+  criterion Avid uses is **phase coherence**, not "same file", which is the
+  right criterion and is what the header's comment says. Ardour's manual states
+  the same rule with the numbers: linear is "the correct crossfade to use with
+  highly-correlated signals" and its sides are "each -6dB attenuated at the
+  midpoint", while constant power is "the correct crossfade to use when splicing
+  audio in the general (uncorrelated) case" and its sides "each reach -3dB at
+  the midpoint". Apple is the third independent statement, naming **EqP (Equal
+  Power Crossfade)** and giving the reason as minimising "volume dips between
+  audio regions".
+- **The arithmetic of each.** Equal gain is `g_in = x`, `g_out = 1 - x`, which
+  is Ardour's `FadeLinear`: two breakpoints and, for the layer underneath,
+  literally `1 - gain` (`libs/ardour/audioregion.cc`). Equal power is
+  `g_in = sin(x*pi/2)`, `g_out = cos(x*pi/2)`, which is Ardour's
+  `FadeConstantPower`, whose own source comment reads "constant-power fades use
+  a sin/cos relationship". Midpoints are 0.5 and 0.5 summing to unity gain, and
+  0.70710678 and 0.70710678 summing to unity power. Nothing here was fitted.
+- **The default shape is equal power**, following Ardour's
+  `default-fade-shape`, which is `FadeConstantPower` in
+  `rc_configuration_vars.inc.h` and is what both its region fades and its
+  crossfades get. Recorded as a disagreement rather than a consensus: Pro
+  Tools' documented default is Preset Curve 4, which Avid says "fades in with a
+  linear fade curve. This is the default curve", and Avid's user guide calls its
+  Default Fade Out "standard equal gain". Reaper's shipped default is not
+  documented at all.
+- **The de-click length.** Ableton documents 4 ms, twice and in two places: the
+  Clip View section says the automatic edge fade "ranges from 0-4 milliseconds",
+  and the Arrangement View section says a deleted fade handle resets to "a
+  default length of 4 ms" and that with **Create Fades on Clip Edges** enabled
+  "adjacent audio clips will automatically get 4 ms crossfades". Ardour's is 64
+  samples, a bare literal appearing four times in its tree with no named
+  constant, which is 1.45 ms at 44.1 kHz. Avid suggests 10 ms for its punch
+  crossfade. 4 ms is the middle of that range, is the one figure a manufacturer
+  publishes as a number of milliseconds rather than a number of samples, and is
+  the default here.
+- **Ardour's 64 samples is deliberately not copied**, and the reason is the one
+  `CLAUDE.md` already records for the K-weighting filters. A fixed sample count
+  gets shorter in time as the sample rate rises: 1.45 ms at 44.1 kHz and
+  0.33 ms at 192 kHz, which is backwards, because what the fade has to do is
+  set by the audible band and not by the converter. The length here is a time.
+- **The de-click shape is the raised cosine, and this is the one piece of
+  arithmetic in the feature that is derived rather than quoted.** The published
+  part is Harris, "On the Use of Windows for Harmonic Analysis with the Discrete
+  Fourier Transform", Proc. IEEE 66(1), January 1978, whose Table I gives the
+  sidelobe fall off against the order of the boundary discontinuity: -6 dB per
+  octave for the rectangle, -12 for the triangle, "reflecting the discontinuity
+  of the window residing in the first derivative", and -18 for Hann, where "the
+  discontinuity of this window resides in the second derivative". Nuttall, NUSC
+  TR 6239, 1980, states the same as an asymptotic expansion. Applying that to a
+  fade's two joins separately, which is the step that is easy to get wrong
+  because the two joins are not the same: a linear ramp leaves a slope
+  discontinuity at both ends and so decays at 12 dB per octave at both;
+  `sin(x*pi/2)` has zero slope where it meets unity but not where it meets
+  silence, so it is 18 dB per octave at one end and 12 at the other; the raised
+  cosine `(1 - cos(x*pi))/2` has zero slope at both ends and is 18 dB per
+  octave at both. So the shape a de-click fade wants is the raised cosine, and
+  the project default shape is only half as good as it at the end that matters
+  most. **Ardour uses its default shape for its de-click and therefore gets
+  12 dB per octave at the silent end.** The test measures the decay rather than
+  asserting the citation.
+- **The raised cosine is an equal gain law, which is the second reason to use
+  it for the de-click and was not obvious.** `g(x) + g(1-x) = 1` exactly, by
+  the cosine's own symmetry. So when two clips of the same performance abut and
+  their automatic fades overlap, the join is phase coherent material through an
+  equal gain crossfade, which is exactly what Avid's rule asks for. Both
+  arguments point at the same shape, from different directions.
+- **There is no established default for a fade from silence**, and the comment
+  says so rather than implying an authority. Ardour uses constant power and
+  publishes a reason, but the reason is about Ardour's data model rather than
+  about sound: in a layered model every region fade is a crossfade against
+  whatever is beneath, and "If a region doesn't have any region(s) under it,
+  then the region is crossfaded to silence". Pro Tools uses linear and publishes
+  no reason. Logic treats equal power as belonging to crossfades specifically.
+  The theoretical argument does not transfer either: equal power exists to hold
+  the sum of two uncorrelated powers constant, and against silence there is no
+  second term to hold anything constant with. Recorded as a genuine gap.
+- **A fade length is a time, anchored to its edge, and is never rescaled.**
+  Every studio checked stores it in absolute time and not one stores it as a
+  fraction of the clip: Ardour's fade is an `Evoral::ControlList` built with
+  `Temporal::AudioTime` so it does not move with tempo, and Reaper's
+  `D_FADEINLEN` is documented as "item manual fadein length in seconds". A
+  fraction is the plausible-and-wrong choice, and wrong in a way that would be
+  hard to diagnose: trimming a clip would change how its fade sounds, and
+  stretching one would change its de-click length.
+- **Reaper's data model is copied for the one thing it does better than the
+  others.** Its SDK header carries `D_FADEINLEN` and `D_FADEOUTLEN` for the
+  user's fade and **separately** `D_FADEINLEN_AUTO` and `D_FADEOUTLEN_AUTO`,
+  "in seconds, 0 means no auto-fadein". Two quantities per end rather than one,
+  so the studio's de-click fade and the user's fade coexist instead of one
+  overwriting the other. Here that is a stored length per end which is zero
+  until somebody drags it, and a project-wide automatic length that fills in
+  every edge that is still zero. Setting the automatic length to zero disables
+  it, which is Reaper's own convention for the same field.
+- **Overlapping fades are refused, not allowed to double up.** Ableton's manual
+  states it flatly: "A clip's start and end fades cannot overlap each other."
+  Worth copying deliberately, because Ardour's library layer clamps each fade
+  independently and then lets `read_from_sources` apply both to the same samples
+  when they meet, which is an implementation gap rather than a behaviour.
+
+### What was built
+
+`Source/ClipFade.h`, with no JUCE in it: the three shapes as closed forms, the
+resolution of what a clip asks for into what its length can actually carry, and
+the gain at a beat. The falling half of every shape is the rising half read
+backwards rather than a second formula, which is what makes the crossfade
+identities exact instead of approximate: `sin((1-u)*pi/2)` is `cos(u*pi/2)` by
+the identity and not by rounding.
+
+`Clip` gains four fields, `fadeIn`, `fadeOut` and a shape for each. `Project`
+gains `autoFadeSeconds`. The engine's `AudioClipRT` gains the window, built
+once per clip in `pushArrangement` and copied into every entry a clip produces,
+so a take folder's outer edges fade while its internal comp joins keep the
+crossfades they already had, and the two multiply rather than fight. The one
+line in `renderAudioClips` that applies `compFadeGain` now applies both, which
+is the whole of the engine change: `renderOffline` calls `renderAudioClips`
+over the same snapshot, so the export gets fades for free and cannot disagree
+with what was heard.
+
+`Project::split` clears the fade at each new inner edge, so the two halves of a
+cut are de-clicked by the automatic fade while keeping whatever the user had
+drawn at the two outer edges. That is Ardour's behaviour on a split, where a
+newly created inner edge always gets a default fade.
+
+### Deliberately left for later
+
+- **Fade handles require the clip to be selected**, the same rule the warp
+  markers and the automation handles already follow, because the top of an
+  unselected clip is the grab handle for moving it. Reaper and Ardour both show
+  fade handles on hover without a selection. One extra click, and worth
+  revisiting when there is a reason to touch the playlist's hit testing again.
+- **A curve amount, rather than a choice of three shapes.** Reaper from 7.81
+  and Logic both expose a continuous curvature, which is a better control than
+  a menu. Neither publishes how the number maps to a curve, so doing it here
+  means inventing a mapping, which is worth doing deliberately and saying so,
+  not as a side effect of this.
+- **Ardour's second trim mode**, where dragging from the fade area keeps the
+  timeline position at which the fade reaches unity fixed and changes the
+  fade's length to suit, rather than moving the fade with the edge. Ardour
+  ships both and picks between them by where the drag started. The one built
+  here is move-with-the-edge, which is the common case.
+- **Refusing a crossfade that has no source material behind the join.** Avid
+  states the rule, that "a crossfade cannot be performed on clips that do not
+  contain audio material beyond their clip boundaries", and Ardour implements it
+  in `verify_xfade_bounds`. It does not arise here yet, because a crossfade is
+  an overlap of two clips that are each already only as long as their own
+  audio, so there is nothing to fake. It becomes real the moment there is a
+  gesture that creates an overlap by dragging a clip's edge out past its source.
+- **A fade on a MIDI clip.** Not a thing in any studio checked, and the
+  arithmetic would have to act on velocity rather than on gain.
+- **The automatic fade is not in the undo history.** It is saved, loaded and
+  reset by `clearAll`, but a de-click length is a property of how the studio
+  joins audio rather than of the arrangement, and nobody pressing Ctrl+Z after
+  drawing a note expects it to move. Recorded because `CLAUDE.md` asks for four
+  things and this field deliberately takes three.
+- **The automatic de-click length has no home of its own.** It is on the fade
+  handle's own menu, marked as applying to the whole project, because that is
+  the only place a control for it could go without building a page for it.
+  Reaper keeps the same figure in its project defaults and that is where it
+  belongs eventually.
+- **A real crossfade still has to be made by overlapping two clips.** Dragging
+  a fade at an exact join makes a dip rather than a crossfade, because the two
+  ramps are consecutive rather than simultaneous, which is inherent to clips
+  that do not overlap. Overlapping them works, and the renderer sums them
+  correctly, so the gesture exists; what is missing is the one that does it for
+  you. Ableton's "adjacent audio clips will automatically get 4 ms crossfades"
+  is that gesture, and it works by extending the material rather than by
+  shaping it. Doing the same here means a clip's played span reaching past its
+  own edges in the snapshot, which touches the warp and stretch geometry, and
+  is a night of its own.
+
+### What the audit found
+
+Mutation testing of `ClipFade.h` tried 61 deliberate breakages and the test
+caught 54. Eleven survived the first round: six were real gaps and the test was
+strengthened until each was caught, and five were argued as no-ops. Eleven
+further mutations aimed at the parts that round left thin found one more real
+gap and two more no-ops. The seven survivors are all genuine no-ops and the
+arguments are in the mutation report; two are worth having in the header and
+are now there.
+
+Three of the real gaps are worth recording because of their shape rather than
+their fix:
+
+1. **A wrong curve could pass.** `sqrt(x)` is monotone from nothing to one,
+   sits exactly at one over root two at its midpoint, and satisfies
+   `g(x)^2 + g(1-x)^2 = 1` **exactly**, because `x + (1 - x) = 1`. So it
+   answered every property the test asserted about equal power, and was caught
+   only by the comparison against the closed form, which is a restatement of
+   the implementation. That is precisely the fault `CLAUDE.md` records for
+   `PanLaw`'s first test. The test now checks the thing the header's table is
+   actually about: which join of each ramp is flat and which is not, measured
+   as a one sided difference at each end. `sqrt`'s unity end reads 0.5 whatever
+   the step, so it fails on a property now rather than on a formula.
+2. **`numShapes` could be changed from three to two and nothing failed**,
+   because every identifier check was parameterised by it and was therefore
+   checking the count against itself. Meanwhile `ProjectIO` writes the
+   S-curve's id as 2 and reads it back through `shapeFromId`, which would no
+   longer recognise it, so every saved S-curve fade would have loaded as
+   linear: a fade that is quietly the wrong shape, which is the exact failure
+   the named fallback exists to avoid.
+3. **One clamp of a symmetric looking pair is load bearing and the other is
+   provably dead.** `windowFor` raises the fade out's start to the fade in's
+   end, and that line is not defensive: the engine reaches it through a
+   division by the tempo and a multiplication back by it, and the pair lands
+   one unit in the last place past the span on about five per cent of real
+   positions, which is an overlap at ordinary places such as a four beat clip
+   forty minutes into a session. Its sibling, the clamp of the same value to
+   the clip's start, can never bind. Both are documented now, the way `PanLaw.h`
+   documents its own survivor.
+
+A separate agent then audited the whole change on the assumption it was wrong,
+and found three things that would have shipped. The first two are ordinary
+wiring faults; the third is a design error and is the useful one.
+
+1. **A fade edit was invisible to the undo history and to the dirty flag.**
+   `Project::sameClip` compares every field of a clip that counts as an edit,
+   and the four new ones were not in it. `capture` copied them, so they would
+   have ridden in the history, but `commit` never got that far: it saw no
+   change, returned false, and `markDirty` was never called. So drawing a fade
+   and closing the window lost it with no prompt and no asterisk, and a single
+   Ctrl+Z afterwards removed the fade **and** undid the previous unrelated edit
+   as one step, with the fade unrecoverable. This is the "captured for undo"
+   leg of the four things `CLAUDE.md` asks of new state, failed in the one way
+   that leaves everything looking right.
+2. **Choosing a fade shape from the menu never reached the engine.** The menu's
+   callback committed the edit and repainted, and `pushArrangement` is reached
+   only from `project.changed()`. So the painted curve changed shape
+   immediately and the engine carried on with the old one, and because of the
+   fault above nothing marked the project dirty either, so there was no cue at
+   all that the picture and the sound had parted company.
+3. **An automatic fade at an abutting join is a hole, not a crossfade.** This
+   is the one that matters and the research was quoted and then not followed.
+   Clips here do not overlap unless somebody overlaps them, so two abutting
+   clips' automatic fades are **consecutive rather than simultaneous**: the
+   first ramps down to nothing across its last four milliseconds and the
+   second ramps up from nothing across its first four, and the composite gain
+   passes through exactly zero at the join. `Project::split` and
+   `Project::duplicate` both produce exactly that join, and at a join where the
+   waveform was continuous that is strictly worse than the hard cut it
+   replaced. Measured by the audit at 48 kHz: up to 0.99 of full scale of
+   error, 11 dB below the signal at 1 kHz, and three milliseconds of full scale
+   silence removed at every cut. Slicing a drum loop on the grid put a hole on
+   every slice; duplicating a one bar loop put one on every bar line.
+
+   The equal gain identity the header leans on, `g(x) + g(1-x) = 1`, is a
+   statement about two ramps across the **same** span. Abutting ramps are
+   across adjacent spans and the identity says nothing about them. Ableton does
+   get a crossfade at an abutting join, which is what its own "adjacent audio
+   clips will automatically get 4 ms crossfades" describes, but it gets it by
+   overlapping the material: the overlap does the work and the fades only shape
+   it. Reading that line as licence to shape two abutting clips was the error.
+
+   The fix is `ClipFade::Request::autoIn` and `autoOut`, set false by
+   `Project::edgeIsJoined` wherever another clip on the same track meets this
+   one to within a millionth of a beat, which at any sensible tempo is well
+   under one sample. An exact join was made exact by the studio rather than by
+   hand, so it is the only case where the audio either side is continuous; a
+   clip dragged to within a millisecond of another has a real gap and a real
+   step and still wants de-clicking. A **drawn** fade is never declined,
+   because somebody who drags a handle at a join means it. `ClipFadeTest` now
+   asserts the join both ways round: declined, the composite gain is bit for
+   bit unity across it, and granted, it reaches zero. Asserting only the first
+   would have been passed by a studio with no automatic fade at all.
+
+The audit also found four comments that said something other than what the code
+did, which is the fault `CLAUDE.md` records twice for `updateLatency`, and all
+four are fixed: the claim that abutting clips' fades overlap, as above; the
+claim that an overflowing pair is split in the ratio asked for, when it is
+split in the ratio of the two clamped lengths, which is the better rule and now
+has the comment that says so; the save side's reason for writing the automatic
+length unconditionally, which cannot be the reason, because an older build
+cannot write that attribute at all and it is the load side's default that makes
+an old project open sensibly; and the test's reason for zero padding the
+transform, which is about where the bins land rather than about periodicity.
+`"only half as good"` was wrong arithmetic too: 12 against 18 decibels an
+octave is a third worse, not half, and it is the order that halves rather than
+the figure.
+
+Four smaller things in the playlist, all fixed: the fade band had no minimum
+clip width guard, so on a clip narrower than about ten pixels the whole top of
+the body became the fade in handle and the trim gesture was unreachable; the
+drag had no grab offset, so the fade jumped by up to the five pixel hit
+tolerance at the first mouse move; `paintFades` measured its curve from the
+clipped left edge rather than from the ramp's own start, so a clip scrolled
+half off the left drew its fade in restarted at the viewport edge at the wrong
+shape; and double clicking a fade handle dropped a warp marker underneath it.
+
+Checked and found sound, so that nobody re-checks them: the export path (one
+application site, `renderOffline` calls the same `renderAudioClips` over the
+same snapshot, both `AudioClipRT` construction sites set the window, and an
+export starting inside a fade reads the correct partial gain); the "no sample
+is ever in both ramps" invariant, over four million random geometries under
+sanitizers with lengths from 1e-300 to 1e6 beats; the audio thread, where
+`gainAt` allocates nothing, every member of the window has a default
+initialiser so an unfilled one reads unity, and a non-finite beat returns unity
+before any arithmetic; the warped, stretched, mid-render and folder cases, where
+`lengthBeats * 60 / bpm` is the output span in every one; and the de-click
+derivation itself, re-derived independently and confirmed, with the measurement
+shown not to be reading its own construction or a numeric floor (a deliberate
+quantiser collapses the slope to -14.91 and the scatter to 5.56 dB, which is
+why the scatter bound was tightened from 6 dB to 2.5).
+
+One gap in the measurement is worth naming rather than fixing: `decayPerOctave`
+ramps both ends of its block, so it can only see the worse of the two joins.
+Swapping the two columns of the header's table leaves every printed number
+unchanged. The join order is now asserted separately, as a one sided difference
+at each end, which is what closes it.
+
+---
+
 ## 2026-10-13: pan law, and the difference between panning and balancing
 
 ### What was looked at

@@ -973,6 +973,18 @@ void MainComponent::pushArrangement (bool allowRenders)
         if (c.muted || track.muted)
             continue;
 
+        // The clip's own two edges, worked out once here and handed to every
+        // entry the clip produces. It is built from the clip's span on the
+        // arrangement rather than from the audio behind it, because a fade is
+        // a gesture on the timeline: a stretched clip's fade lasts as long as
+        // it was drawn to, and a warped clip's de-click fade does not get
+        // bent by the markers. Only the ramps become beats, the same
+        // conversion and the same reason as the comp's.
+        const ClipFade::Window edgeFade
+            = ClipFade::windowFor (c.start, c.endBeat (project.bpm),
+                                   project.resolvedFadeFor (c),
+                                   project.bpm / 60.0);
+
         if (c.isTakeFolder())
         {
             // One comped stretch becomes one entry, so the renderer plays a
@@ -1012,6 +1024,15 @@ void MainComponent::pushArrangement (bool allowRenders)
                             c.start + f.inTo     / secondsPerBeat,
                             c.start + f.outFrom  / secondsPerBeat,
                             c.start + f.outTo    / secondsPerBeat };
+                // Every comped stretch carries the same window, so the two
+                // outer edges of the folder ramp and the stretches between
+                // them are outside both ramps. One caveat worth knowing: the
+                // comp spans are clamped to each take's own audio, so if the
+                // first span starts after the folder's own start, or its take
+                // has gone missing, the fade in ramps across nothing and the
+                // first audible sample gets none of it. The folder's edges
+                // fade where the comp reaches them, which is almost always.
+                rt.edgeFade = edgeFade;
 
                 snap.audio.push_back (rt);
             }
@@ -1022,9 +1043,10 @@ void MainComponent::pushArrangement (bool allowRenders)
                 continue;   // missing file
 
             AudioEngine::AudioClipRT rt;
-            rt.insert = track.insert;
-            rt.start  = c.start;
-            rt.gain   = juce::Decibels::decibelsToGain (c.gainDb);
+            rt.insert   = track.insert;
+            rt.start    = c.start;
+            rt.gain     = juce::Decibels::decibelsToGain (c.gainDb);
+            rt.edgeFade = edgeFade;
 
             // A warped clip reads along the piecewise line its markers
             // describe. Which audio that line is measured against depends on

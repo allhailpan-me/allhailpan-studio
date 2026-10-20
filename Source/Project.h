@@ -4,6 +4,7 @@
 #include "WarpMap.h"
 #include "AutomationCurve.h"
 #include "CompModel.h"
+#include "ClipFade.h"
 #include "Groove.h"
 #include <set>
 #include <array>
@@ -449,6 +450,43 @@ struct Clip
     float  gainDb  = 0.0f;
     bool   muted   = false;
 
+    // The ramps at the clip's two ends, in seconds of output time: a gesture
+    // on the timeline, so measured where the listener is rather than in the
+    // source audio, and therefore not stretched by `stretch` or bent by the
+    // warp markers. Zero means the edge has no fade of its own and the
+    // project's automatic de-click length fills it in, which is Reaper's pair
+    // of a manual and an automatic length per end. See ClipFade.h.
+    //
+    // Kept in seconds for the same reason the comp is: what a de-click fade
+    // has to be long enough to hide is a click, and a click has never heard
+    // of a tempo.
+    double fadeIn  = 0.0, fadeOut = 0.0;
+    ClipFade::Shape fadeInShape  = ClipFade::defaultShape;
+    ClipFade::Shape fadeOutShape = ClipFade::defaultShape;
+
+    /** The clip's duration on the arrangement, in seconds of output time,
+        which is the unit a fade length is in. */
+    double outputSeconds (double bpm) const noexcept
+    {
+        return lengthBeats (bpm) * 60.0 / std::max (1.0e-9, bpm);
+    }
+
+    /** What the clip's fades come to once its own length has had its say.
+
+        `autoIn` and `autoOut` say whether each edge may take the project's
+        automatic de-click fade. They are false where another clip meets this
+        one exactly, because two abutting automatic fades are consecutive
+        rather than simultaneous and would put a hole in a join that was
+        continuous. `Project::resolvedFadeFor` works them out; call that
+        rather than this unless you already know. */
+    ClipFade::Resolved resolvedFade (double bpm, double autoFadeSeconds,
+                                     bool autoIn = true, bool autoOut = true) const noexcept
+    {
+        return ClipFade::resolve (outputSeconds (bpm),
+                                  { fadeIn, fadeOut, fadeInShape, fadeOutShape, autoIn, autoOut },
+                                  autoFadeSeconds);
+    }
+
     bool   isAudio() const noexcept      { return type == ClipType::audio; }
     bool   isTakeFolder() const noexcept { return type == ClipType::audio && folder != nullptr && ! folder->takes.empty(); }
     bool   isMidi() const noexcept       { return type == ClipType::midi; }
@@ -571,6 +609,20 @@ public:
     std::vector<Modulator>   modulators;
     Groove                   groove;
     double bpm = kDefaultBpm;
+
+    // The automatic de-click fade every clip edge gets that has no fade of its
+    // own, in seconds. Zero turns it off, which is Reaper's own convention for
+    // the same field. Ableton's published figure is the default: see
+    // ClipFade.h for where it comes from and for why it is a time rather than
+    // a number of samples.
+    //
+    // This is the one field that deliberately takes three of the four things
+    // `CLAUDE.md` asks of new state rather than all four: it is saved, loaded
+    // and reset by clearAll, and it is not in the undo history. A de-click
+    // length is a property of how the studio joins audio rather than of the
+    // arrangement, and nobody pressing Ctrl+Z after drawing a note expects it
+    // to move. The same argument the loop range is outside the history for.
+    double autoFadeSeconds = ClipFade::defaultAutoSeconds;
 
     // The tempo File > New starts at, which is a preference rather than part of
     // the project: it is held here only because clearAll is what puts the tempo
@@ -699,6 +751,8 @@ public:
         bpm = startingBpm;
 
         loopStart = loopEnd = 0.0;
+
+        autoFadeSeconds = ClipFade::defaultAutoSeconds;
 
         rackStart       = 0.0;
         rackBars        = 1;
@@ -1499,6 +1553,16 @@ public:
         const double cutBeats = atBeat - c->start;
         right.start = atBeat;
 
+        // The cut makes two new edges, and neither of them is the edge the
+        // fade on that end was drawn for. Clearing them hands both to the
+        // automatic de-click fade, which is what a cut needs and what Ardour
+        // does on a split: a newly created inner edge always gets a default
+        // fade. The two outer edges keep whatever was drawn there.
+        right.fadeIn      = 0.0;
+        right.fadeInShape = ClipFade::defaultShape;
+        c->fadeOut        = 0.0;
+        c->fadeOutShape   = ClipFade::defaultShape;
+
         if (c->isAudio())
         {
             // Cut where the clip is actually reading at that beat, which is the
@@ -1529,6 +1593,55 @@ public:
             c->length    = cutBeats;
         }
         return addClip (right);
+    }
+
+    /** Whether another clip on the same track meets this one exactly at the
+        given edge, which is what `split` and `duplicate` produce.
+
+        Only an exact join counts, to a millionth of a beat, which at any
+        sensible tempo is well under a single sample. That is deliberate: a
+        join that is exact was made exact by the studio rather than by hand,
+        and it is the only case where the audio either side is continuous and
+        an automatic fade would therefore take something away. A clip somebody
+        dragged to within a millisecond of another has a real gap and a real
+        step at its edge, so it still wants de-clicking.
+
+        Muted clips do not count, because a muted clip is not sounding and the
+        join it would have made is not there to preserve.
+
+        This is quadratic in the clips on a track, so the inner test compares
+        two integers before it computes any beat. A thousand clips cost a
+        million integer comparisons per arrangement push, which is a
+        millisecond on the message thread and happens on an edit rather than
+        on a frame.
+    */
+    bool edgeIsJoined (const Clip& c, bool atStart) const
+    {
+        if (! c.isAudio())
+            return false;
+
+        const double edge = atStart ? c.start : c.endBeat (bpm);
+
+        for (const auto& o : clips)
+        {
+            if (o.track != c.track || o.id == c.id || o.muted || ! o.isAudio())
+                continue;
+            const double meets = atStart ? o.endBeat (bpm) : o.start;
+            if (std::abs (meets - edge) <= 1.0e-6)
+                return true;
+        }
+        return false;
+    }
+
+    /** The clip's fades, with the automatic de-click fade declined at any edge
+        that another clip already joins. The one call everything should use:
+        the playlist draws from it and the arrangement push builds from it, so
+        what is on screen and what is heard come from the same answer. */
+    ClipFade::Resolved resolvedFadeFor (const Clip& c) const
+    {
+        return c.resolvedFade (bpm, autoFadeSeconds,
+                               ! edgeIsJoined (c, true),
+                               ! edgeIsJoined (c, false));
     }
 
     // Exact end of the last clip: playback loops here.
@@ -1617,6 +1730,14 @@ private:
             || a.track != b.track || a.start != b.start || a.offset != b.offset || a.length != b.length
             || a.stretch != b.stretch || a.pitch != b.pitch || a.gainDb != b.gainDb || a.muted != b.muted
             || a.sourceBpm != b.sourceBpm || a.followTempo != b.followTempo
+            // A fade is an edit. Without these four the fade would be copied
+            // into every snapshot and noticed by none of them, so commit()
+            // would report nothing changed: drawing a fade would never become
+            // an undo step, would never mark the project dirty, and would be
+            // lost on close with no prompt. Every field above earns its line
+            // here for the same reason.
+            || a.fadeIn != b.fadeIn || a.fadeOut != b.fadeOut
+            || a.fadeInShape != b.fadeInShape || a.fadeOutShape != b.fadeOutShape
             || a.warp != b.warp)
             return false;
         if (a.curve != b.curve

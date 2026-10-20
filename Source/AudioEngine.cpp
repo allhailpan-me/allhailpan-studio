@@ -2057,10 +2057,21 @@ void AudioEngine::renderAudioClips (int numSamples)
             const int   f1   = std::min (f0 + 1, frames - 1);
             const float frac = (float) (frame - f0);
 
-            // A comped stretch is ramped at its joins. Two comparisons for
-            // every clip that is not comped, and a quarter cycle of sine only
-            // inside the few milliseconds of an actual join.
-            const float gain = clip.gain * (float) compFadeGain (clip.fade, beat);
+            // A comped stretch is ramped at its joins, and the clip's own two
+            // edges are ramped by whatever fade they carry. Four comparisons
+            // for every clip with neither, and a quarter cycle of sine only
+            // inside the few milliseconds of an actual join or edge.
+            //
+            // The two multiply rather than one replacing the other: a comp
+            // join is inside the performance and a clip edge is where the
+            // performance meets the arrangement, so a folder faded in at its
+            // start and comped at its first join needs both. This is the only
+            // place either is applied, and `renderOffline` calls this same
+            // function over the same snapshot, so a bounce cannot disagree
+            // with what was heard.
+            const float gain = clip.gain
+                             * (float) compFadeGain (clip.fade, beat)
+                             * (float) ClipFade::gainAt (clip.edgeFade, beat);
 
             left[i]  += (srcL[f0] + (srcL[f1] - srcL[f0]) * frac) * gain;
             right[i] += (srcR[f0] + (srcR[f1] - srcR[f0]) * frac) * gain;
