@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 
 //==============================================================================
@@ -40,10 +41,12 @@
         y = v + s
         s = y + v
 
-    with `y` the low pass and `x - y` the high pass. Verified in
-    `OnePoleTest` against the closed forms `1/(1+s)` and `s/(1+s)` on the
-    prewarped axis, where it agrees to about 1e-13 dB, and the pair sums to
-    exactly one, which is the strict statement that it is complementary.
+    with `y` the low pass and `x - y` the high pass. `OnePoleTest` measures
+    all five responses out of the running section, in phase as well as in
+    magnitude, and holds them against the closed form each one is specified
+    by: the two passes agree to about 3e-14 of their own size and the pair
+    adds back up to the input to the last bit, which is the strict statement
+    that it is complementary.
 
     **Each shelf's corner is prewarped by its own gain, not by the square
     root of it.** A two pole shelf divides `g` by `sqrt(A)` where `A` is the
@@ -71,6 +74,13 @@ public:
         highShelf
     };
 
+    /** The coefficients are built up front so that a section nobody has
+        configured is the filter its own members describe, a one kilohertz low
+        pass at 44.1 kHz, rather than two different wrong answers: `c` left at
+        zero returns silence from `process` while `magnitudeAt` takes its
+        degenerate branch and reports unity. */
+    OnePole() noexcept { update(); }
+
     void setSampleRate (double newRate) noexcept
     {
         sampleRate = newRate > 0.0 ? newRate : 44100.0;
@@ -84,11 +94,13 @@ public:
     {
         type = newType;
 
-        // The same ceiling `Svf` uses and for the same reason: the tangent
-        // runs off to infinity at Nyquist.
-        const double highest = sampleRate * 0.49;
-        frequency = hz < 1.0 ? 1.0 : (hz > highest ? highest : hz);
+        // Kept as it was asked for and clamped in `update()` instead, against
+        // whatever the sample rate is by then. See the ceiling there.
+        frequency = hz;
 
+        // Past this the arithmetic below leaves what a float buffer can carry,
+        // and nothing musical lives out there. The gain does not depend on the
+        // rate, so unlike the corner it can be clamped once and kept.
         gain = gainDb < -120.0 ? -120.0 : (gainDb > 120.0 ? 120.0 : gainDb);
 
         update();
@@ -160,7 +172,27 @@ private:
         // shelf's is set by the fourth root. See the header comment.
         const double linear = std::pow (10.0, gain / 20.0);
 
-        double G = std::tan (pi * frequency / sampleRate);
+        // The same ceiling `Svf` uses and for the same reason: the tangent
+        // runs off to infinity at Nyquist.
+        //
+        // It is applied here, on the way to the coefficient, rather than once
+        // in `set`, because what counts as too high depends on the rate and
+        // the rate outlives the call that set the corner. Clamped in `set`
+        // alone, a section given a corner near the top of a 192 kHz band and
+        // then handed 48 kHz keeps a corner past the new Nyquist, where the
+        // tangent is negative: `c` comes out negative with it, the pole lands
+        // outside the unit circle and the section runs away to infinity in a
+        // few seconds. Nothing reports that. The mixer simply fills with
+        // noise, and the driver change that caused it was several minutes
+        // earlier.
+        //
+        // The ceiling is applied after the floor rather than beside it,
+        // because below about two hertz of sample rate the one hertz floor is
+        // itself above the ceiling.
+        const double wanted = frequency < 1.0 ? 1.0 : frequency;
+        const double highest = sampleRate * 0.49;
+
+        double G = std::tan (pi * std::fmin (wanted, highest) / sampleRate);
 
         switch (type)
         {
