@@ -40,10 +40,12 @@
         y = v + s
         s = y + v
 
-    with `y` the low pass and `x - y` the high pass. Verified in
-    `OnePoleTest` against the closed forms `1/(1+s)` and `s/(1+s)` on the
-    prewarped axis, where it agrees to about 1e-13 dB, and the pair sums to
-    exactly one, which is the strict statement that it is complementary.
+    with `y` the low pass and `x - y` the high pass. `OnePoleTest` measures
+    all five responses out of the running section, in phase as well as in
+    magnitude, and holds them against the closed form each one is specified
+    by: the two passes agree to about 3e-14 of their own size and the pair
+    adds back up to the input to the last bit, which is the strict statement
+    that it is complementary.
 
     **Each shelf's corner is prewarped by its own gain, not by the square
     root of it.** A two pole shelf divides `g` by `sqrt(A)` where `A` is the
@@ -71,6 +73,13 @@ public:
         highShelf
     };
 
+    /** The coefficients are built up front so that a section nobody has
+        configured is the filter its own members describe, a one kilohertz low
+        pass at 44.1 kHz, rather than two different wrong answers: `c` left at
+        zero returns silence from `process` while `magnitudeAt` takes its
+        degenerate branch and reports unity. */
+    OnePole() noexcept { update(); }
+
     void setSampleRate (double newRate) noexcept
     {
         sampleRate = newRate > 0.0 ? newRate : 44100.0;
@@ -84,11 +93,13 @@ public:
     {
         type = newType;
 
-        // The same ceiling `Svf` uses and for the same reason: the tangent
-        // runs off to infinity at Nyquist.
-        const double highest = sampleRate * 0.49;
-        frequency = hz < 1.0 ? 1.0 : (hz > highest ? highest : hz);
+        // Kept as it was asked for and clamped in `update()` instead, against
+        // whatever the sample rate is by then. See the ceiling there.
+        frequency = hz;
 
+        // Past this the arithmetic below leaves what a float buffer can carry,
+        // and nothing musical lives out there. The gain does not depend on the
+        // rate, so unlike the corner it can be clamped once and kept.
         gain = gainDb < -120.0 ? -120.0 : (gainDb > 120.0 ? 120.0 : gainDb);
 
         update();
@@ -112,12 +123,32 @@ public:
         disagree. */
     double magnitudeAt (double hz) const noexcept
     {
+        // A backstop that nothing reaches, kept because it costs a compare
+        // and the alternative is a division by zero on a curve. The corner is
+        // floored at one hertz and then held under 0.49 of the rate, so the
+        // tangent is strictly positive and finite and `c` is strictly between
+        // nought and one at every setting of all three arguments. Removing
+        // this changes no measurement, and `OnePoleTest` says why rather than
+        // leaving it to be rediscovered: it asserts the corner is three
+        // decibels down whatever nonsense it was given, and three decibels
+        // down is not the flat one this branch would return.
+        //
+        // It was reachable until the coefficients were built in the
+        // constructor. An unconfigured section had `c` at zero, so this
+        // returned unity while `process` returned silence.
         if (! (c > 0.0) || ! (c < 1.0))
             return 1.0;
 
         // c = G/(1+G), so G comes back out as c/(1-c).
         const double G = c / (1.0 - c);
 
+        // A negative frequency is not a request either of these two can
+        // answer: a magnitude is even in it and a phase is odd, so folding to
+        // DC and reflecting are both defensible and neither is the thing a
+        // curve is for. So nothing asserts which of them happens here, and
+        // dropping the fold is a no-op that `OnePoleTest` deliberately does
+        // not fail. What it does assert is that the answer stays finite and
+        // the magnitude stays positive.
         const double highest = sampleRate * 0.4999;
         const double at = hz < 0.0 ? 0.0 : (hz > highest ? highest : hz);
 
@@ -160,7 +191,27 @@ private:
         // shelf's is set by the fourth root. See the header comment.
         const double linear = std::pow (10.0, gain / 20.0);
 
-        double G = std::tan (pi * frequency / sampleRate);
+        // The same ceiling `Svf` uses and for the same reason: the tangent
+        // runs off to infinity at Nyquist.
+        //
+        // It is applied here, on the way to the coefficient, rather than once
+        // in `set`, because what counts as too high depends on the rate and
+        // the rate outlives the call that set the corner. Clamped in `set`
+        // alone, a section given a corner near the top of a 192 kHz band and
+        // then handed 48 kHz keeps a corner past the new Nyquist, where the
+        // tangent is negative: `c` comes out negative with it, the pole lands
+        // outside the unit circle and the section runs away to infinity in a
+        // few seconds. Nothing reports that. The mixer simply fills with
+        // noise, and the driver change that caused it was several minutes
+        // earlier.
+        //
+        // The ceiling is applied after the floor rather than beside it,
+        // because below about two hertz of sample rate the one hertz floor is
+        // itself above the ceiling.
+        const double wanted = frequency < 1.0 ? 1.0 : frequency;
+        const double highest = sampleRate * 0.49;
+
+        double G = std::tan (pi * std::fmin (wanted, highest) / sampleRate);
 
         switch (type)
         {

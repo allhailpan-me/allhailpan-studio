@@ -7,6 +7,216 @@ Newest first.
 
 ---
 
+## 2026-10-21: the one pole section
+
+### What was looked at
+
+`Source/Fx/OnePole.h`, 203 lines, no JUCE. It was chosen for the oldest reason
+in this file: the header claimed at line 44 to be "Verified in `OnePoleTest`",
+and no `OnePoleTest.cpp` existed. What covered it was three functions inside
+`Tests/PassFilterTest.cpp`, which is a test of the cascade built on top of it.
+
+What sits on it is the reason it was worth a night. `Fx/PassFilter.h` uses it
+for every odd order, so a six decibel per octave high pass, which its own
+header calls the single most used filter in a mix, is this section and nothing
+else. The header names the phaser's first order allpass and the gentle shelves
+as the other two jobs only it can do.
+
+### One real fault, and it is a blast of noise
+
+**A corner set at one sample rate and then read at a lower one puts the pole
+outside the unit circle, and the section runs away to infinity.**
+
+The corner was clamped against Nyquist once, in `set`, using the sample rate as
+it was at that moment. The rate outlives that call. Handed a corner near the
+top of a 192 kHz band and then told the rate is now 48 kHz, the section kept a
+corner past the new Nyquist, and the tangent of a frequency past Nyquist is
+negative: `c` came out negative with it and the pole landed at 1 - 2c, outside
+the circle.
+
+Measured, every one of the five responses reaches a non-finite output inside
+400000 samples, at every pair of rates tried: from 96 or 192 kHz down to 8,
+22.05, 44.1 or 48. It is not a drift. It is a few seconds of doubling, and
+then the output is whatever infinity sounds like through a converter.
+
+Nothing reports it, which is the shape this file keeps recording. The driver
+change that caused it was minutes earlier, and the symptom is in the mixer.
+
+Not reachable today. The only thing using `OnePole` is `PassFilter`, which
+re-sets its sections from the frequency it was asked for whenever the rate
+moves, so the stale corner never survives. It is reachable by anything that
+holds a section and is told the rate has changed, which is exactly what the
+header says the phaser and the shelves are going to do.
+
+**Fixed** by clamping on the way to the coefficient, in `update()`, rather than
+once in `set`. `frequency` now keeps what was asked for and the ceiling is
+applied against whatever the rate is by then. That also fixed an ordering
+fault that was sitting next to it: the one hertz floor and the ceiling were
+applied as one expression, so below about two hertz of sample rate the floor
+was itself above the ceiling. The floor is applied first now and the ceiling
+last.
+
+**`Svf.h` has the identical shape**: the same clamp, in the same place, with
+the same `setSampleRate` that calls `update()` without re-reading it. It is
+not reachable there either, because `LowPassGate` and `Voice` both re-set the
+cutoff on every block, but it is the same latent fault in a file that far more
+of the studio runs through. It wants its own night rather than being dragged
+into this one.
+
+### One more fault, smaller and of the same family
+
+**An unconfigured section gave two different wrong answers.** `c` started at
+zero, so `process` returned silence for ever while `magnitudeAt` took its
+degenerate branch and reported unity. The members said a one kilohertz low
+pass at 44.1 kHz and neither answer was that, and the two did not agree with
+each other.
+
+**Fixed** by building the coefficients in a constructor. The useful
+consequence is that `c` is now strictly between nought and one at every
+setting of all three arguments, which makes the degenerate branch in
+`magnitudeAt` genuinely unreachable rather than nearly so. See the survivors
+below.
+
+### What the old coverage was missing
+
+It caught more than it looked like it would: every breakage of the recursion
+in `process` is caught, through the order one path in
+`runningItMatchesTheCurve`, and the coefficient algebra is caught by the
+magnitude checks. Three things were not covered at all.
+
+**The direction of the phase.** The existing check said in its own comment
+that "the direction is asserted rather than the amount", and then asserted
+`std::fabs (all.phaseAt (...))` against pi, pi/2 and zero. Taking the modulus
+is precisely the direction being thrown away. Negating the whole of `phaseAt`
+passed, and the header says the other sign "is also an allpass and it puts the
+notches somewhere else".
+
+**`phaseAt` against anything that runs.** `magnitudeAt` carries a comment
+about a curve drawn from a second copy of the algebra being a second copy that
+can disagree, and `magnitudeAt` was checked against the running filter.
+`phaseAt` was a second copy that nothing had ever compared against a sample.
+The sharpest demonstration: building the high pass inverted, `m0 = -1` and
+`m1 = 1`, leaves every magnitude in the file identical to the last bit and
+turns the phase by half a cycle. It passes the old coverage completely. In a
+mix that is a six decibel per octave high pass that flips the polarity of
+whatever goes through it, which cancels against any parallel path.
+
+**Every clamp and guard in the header.** All seven could be removed without a
+single check noticing, because none of them is reachable through `PassFilter`,
+which clamps before it, and nothing else drove the section directly.
+
+**The complementary check was a tautology.** It computed
+`1/(1+s) + s/(1+s)` and compared it against one. That is an identity in `s`
+and is true however either section behaves; neither filter appeared in it.
+
+### What is now checked
+
+`Tests/OnePoleTest.cpp`, 1100 lines. Every check drives the running section
+and reads the complex gain back out of its output, which is the only way to
+say anything about `phaseAt` at all.
+
+- **All five responses against the specification each one is named by**, in
+  phase as well as magnitude, over 240 randomised settings at four sample
+  rates: 2880 readings, worst off by 2.9e-14 of its own size and 2.2e-14
+  radians. The closed forms are written from the specification rather than
+  from `update()`: a one pole shelf is `(A + jw)/(1 + jw)` with its half gain
+  point at the corner, which is what fixes the prewarping, both output
+  coefficients and the recursion together.
+- **Both drawn curves against the same measurement**: 2.5e-14 dB and 1.2e-14
+  radians.
+- **The allpass turns the phase positive and falling**, measured off the
+  output: half a cycle at the bottom, a quarter at the corner, nothing at the
+  top, with the direction asserted rather than its modulus.
+- **The two pole prewarping has a signature.** Dividing by the fourth root of
+  the gain rather than the square root is the obvious thing to write, because
+  it is what every two pole shelf in the project does, and it leaves the
+  shelf a shelf with the right two ends. All that moves is the corner, which
+  is the number on the control: at eighteen decibels of boost it reads
+  12.371 dB where it should read 9.
+- **The pair adds back up to the input on the running sections**, to 1.1e-16.
+- **Sweeping the corner under a steady signal does not move the output**, by
+  1.8e-15 of its own level across the whole band in both directions. That is
+  the whole of the topology preserving claim: the state of a trapezoidal
+  integrator is the integrator's own output and does not depend on the
+  coefficient, so with the input held still the corner can be put anywhere
+  without a click.
+- **Every setting is stable**, read as the envelope of an impulse response
+  shrinking from one window of 20000 samples to the next. A ratio rather than
+  a floor at some sample number, because a corner of one hertz at 192 kHz is
+  perfectly stable and still a thirtieth of its peak after a third of a
+  million samples, while a corner left at Nyquist rings at exactly constant
+  amplitude for ever and only a ratio sees that. Includes the rate change that
+  found the fault above.
+- **The corner is three decibels down where it was asked for**, from one hertz
+  to 0.489 of the rate, within 4.3e-8 dB, and clamped rather than honoured
+  past the ceiling.
+- **An unconfigured section is the filter its own defaults describe**, both
+  drawn and run, to zero.
+- **Nonsense in the rate, the corner and the gain at every type** stays
+  finite and bounded, the corner stays three decibels down, the curve does not
+  turn back on itself, and an allpass stays flat.
+
+It runs in 2.3 seconds with the sanitizers on.
+
+### Mutation testing
+
+Forty eight deliberate breakages of `Source/Fx/OnePole.h`, each compiled with
+`-fsanitize=address,undefined -fno-sanitize-recover=undefined` exactly as
+`Tests/run.sh` has them. **Forty five were caught.** All three survivors are
+genuine no-ops rather than gaps, and all three are now written down in the
+header.
+
+- **The degenerate guard at the top of `magnitudeAt` removed.** It is a
+  backstop that nothing reaches. With the corner floored at one hertz and then
+  held under 0.49 of the rate, the tangent is strictly positive and finite and
+  `c` is strictly between nought and one at every setting, so the branch never
+  fires and removing it changes no measurement. That is an argument, so the
+  test turns it into a reading: it asserts the corner is three decibels down
+  whatever nonsense it was given, at every type and every rate, and three
+  decibels down is not the flat unity this branch returns. The branch was
+  reachable before this night, by an unconfigured section, and the constructor
+  closed that.
+- **A negative frequency no longer folded to DC, in `magnitudeAt`**, and
+  **the same in `phaseAt`**. A negative frequency is not a request either can
+  answer: a magnitude is even in it and a phase is odd, so folding to DC and
+  reflecting are both defensible and neither is what a curve is for. Nothing
+  asserts which happens, deliberately. What the test does assert is that the
+  answer stays finite and the magnitude stays positive.
+
+### Checked and found sound
+
+- **The recursion itself**, which the old coverage already proved and which
+  nine further breakages confirmed: the integrator, the state update, the two
+  output coefficients and the normalisation of `c`.
+- **The shelf prewarping in both directions**, by the square root of the full
+  gain, against the half gain point of `(A + jw)/(1 + jw)` worked out from the
+  specification. The header's arithmetic about it is correct, including the
+  claim that a two pole shelf uses the fourth root.
+- **Smith's AP1 is the sign the header says it is**, and the high pass minus
+  twice the low pass really is it.
+- **`reset` is exact** and nothing else moves the state.
+
+### Also corrected
+
+`Tests/PassFilterTest.cpp` kept the check that lied about asserting the
+direction of the phase, and the tautology. The modulus is gone, so those three
+assertions now say what their comment says, and the tautology is gone with a
+note saying where the question is actually asked. Its header now points at the
+section's own file.
+
+### Left alone deliberately
+
+- **`Svf.h`'s identical clamp**, as above. Its own night.
+- **Both negative frequency folds**, as above.
+- **`Fx/Unit.h`**, 234 lines with no JUCE and no test, which looked like a
+  target until it turned out that nothing in `Source` or `Tests` references it
+  at all: it describes itself as the shape every effect has, alongside an
+  `Fx/Plugin.h` that does not exist yet. It is scaffolding for work in
+  progress rather than code anything runs, so a test over it tonight would
+  have been a test of a decision somebody else is still making.
+
+---
+
 ## 2026-10-14: the oversampler, at every sample rate a device can open at
 
 ### What was looked at
