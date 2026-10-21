@@ -1,6 +1,7 @@
 #include "AudioEngine.h"
 #include "AudioDefaults.h"
 #include "LatencyGraph.h"
+#include "SoloGraph.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -12,6 +13,13 @@ AudioEngine::AudioEngine()
         controls[(size_t) i].name = i == 0 ? juce::String ("Master") : "Insert " + juce::String (i);
     for (int c = 0; c < kNumChannels; ++c)
         channelSlots[(size_t) c].insert.store (c + 1);
+
+    // An atomic<float> default constructs to zero and zero here is silence,
+    // so this is not tidiness: without it the mixer would be mute until the
+    // first graph update, and the first graph update happens when the device
+    // opens, which is after this.
+    for (auto& g : soloGain)
+        g.store (1.0f);
 }
 
 AudioEngine::~AudioEngine()
@@ -519,6 +527,11 @@ void AudioEngine::updateLatency()
         clipDelaySamples[(size_t) i].store (graph.clipDelay[(size_t) i]);
 
     totalLatency.store (graph.totalLatency);
+
+    // Which inserts are audible depends on the same routing this function has
+    // just read, so it is recomputed here rather than at a second list of call
+    // sites that would have to be kept in step with this one. See updateSolo.
+    updateSolo();
 }
 
 void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, float level)
@@ -537,6 +550,169 @@ void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, floa
     const juce::SpinLock::ScopedLockType lock (graphLock);
     updateLatency();
 }
+
+// ---------------------------------------------------------------------------
+/** Works out which inserts are audible, and what each one's output is
+    multiplied by.
+
+    The rule, what it was checked against, and what it costs are all in
+    SoloGraph.h. Everything that needs JUCE is here: reading the routing and
+    the three flags out of the atomics, and publishing the answers.
+
+    This hangs off the end of updateLatency rather than having its own set of
+    call sites, and that is deliberate. The closure reads exactly the routing
+    updateLatency has just read, and every path that changes a signal route in
+    this studio already has to call updateLatency under the graph lock:
+    loading or removing a plugin, bypassing an effect, moving a channel to
+    another insert, changing a send, splitting a channel's buses. A second
+    list of call sites to keep in step with that one is a list that will fall
+    out of step, and the symptom would be an insert audible or silent for a
+    routing that no longer exists.
+
+    Ardour needs two further pieces of code for exactly this, one correcting
+    its counters at both ends when an aux send appears or disappears and one
+    zeroing a route's solo before removing it, and it still ships a repair
+    path for the counters that leak anyway.
+
+    Must be called with graphLock held. It allocates nothing: soloSetup and
+    soloResult are members, and everything below is assign or resize on
+    vectors that are already the right size after the first call.
+*/
+// ---------------------------------------------------------------------------
+void AudioEngine::updateSolo()
+{
+    auto& setup = soloSetup;
+
+    setup.inserts.resize ((size_t) kNumInserts);
+
+    setup.settings.soloMuteGain      = soloMuteGain.load();
+    setup.settings.soloOverridesMute = soloOverridesMute.load();
+
+    for (int i = 0; i < kNumInserts; ++i)
+    {
+        auto& entry = setup.inserts[(size_t) i];
+        auto& ctl   = controls[(size_t) i];
+
+        entry.selfSoloed = ctl.solo.load();
+        entry.muted      = ctl.mute.load();
+        entry.isolated   = ctl.soloIsolate.load();
+
+        // Insert 0 is the master and has no send of its own, so its row is
+        // left empty rather than gathered and ignored, which is what
+        // updateLatency does with the same row.
+        entry.sendTo.resize (i == 0 ? 0 : (size_t) kNumSends);
+
+        for (int sendIndex = 0; sendIndex < (int) entry.sendTo.size(); ++sendIndex)
+            entry.sendTo[(size_t) sendIndex] = ctl.sendTo[(size_t) sendIndex].load();
+    }
+
+    SoloGraph::compute (setup, soloResult);
+
+    anySoloed.store (soloResult.anySoloed);
+
+    for (int i = 0; i < kNumInserts; ++i)
+    {
+        const auto& state = soloResult.inserts[(size_t) i];
+
+        soloGain[(size_t) i].store (state.gain);
+        soloedByOthers[(size_t) i].store (state.soloedByOthers);
+        mutedByOthersSoloing[(size_t) i].store (state.mutedByOthersSoloing);
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+void AudioEngine::setMute (int insert, bool shouldMute)
+{
+    if (! juce::isPositiveAndBelow (insert, kNumInserts))
+        return;
+
+    controls[(size_t) insert].mute.store (shouldMute);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
+void AudioEngine::setSolo (int insert, bool shouldSolo)
+{
+    // Never the master. Soloing the thing every other insert is summed into
+    // would mean soloing the whole mix, and the strip does not offer it;
+    // this is the guard for a project file that says otherwise. Ardour draws
+    // the same line with Route::can_solo.
+    if (insert < 1 || insert >= kNumInserts)
+        return;
+
+    controls[(size_t) insert].solo.store (shouldSolo);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
+void AudioEngine::setSoloIsolate (int insert, bool shouldIsolate)
+{
+    if (insert < 1 || insert >= kNumInserts)
+        return;
+
+    controls[(size_t) insert].soloIsolate.store (shouldIsolate);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
+void AudioEngine::applySoloGesture (int insert, bool modifierHeld)
+{
+    if (insert < 1 || insert >= kNumInserts)
+        return;
+
+    const bool already = controls[(size_t) insert].solo.load();
+
+    switch (SoloGraph::gestureFor (exclusiveSolo.load(), modifierHeld, already))
+    {
+        case SoloGraph::Gesture::clearAll:
+            clearAllSolos();
+            return;
+
+        case SoloGraph::Gesture::exclusive:
+            // Written as one pass over every insert followed by one recompute
+            // rather than as a setSolo per strip: fifteen recomputes would
+            // each take the graph lock, and the intermediate states are mixes
+            // nobody asked for.
+            for (int i = 1; i < kNumInserts; ++i)
+                controls[(size_t) i].solo.store (i == insert);
+            break;
+
+        case SoloGraph::Gesture::toggle:
+            controls[(size_t) insert].solo.store (! already);
+            break;
+    }
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
+void AudioEngine::clearAllSolos()
+{
+    for (int i = 1; i < kNumInserts; ++i)
+        controls[(size_t) i].solo.store (false);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
+void AudioEngine::setSoloSettings (float gain, bool overridesMute, bool exclusive)
+{
+    // Stored as it arrives, bounds and all. SoloGraph refuses a figure it
+    // cannot make sense of rather than clamping it, because a clamp hands a
+    // NaN straight back, and it falls back to full mute, which is both the
+    // documented default and the one reading that cannot damage a mix.
+    soloMuteGain.store (gain);
+    soloOverridesMute.store (overridesMute);
+    exclusiveSolo.store (exclusive);
+
+    const juce::SpinLock::ScopedLockType lock (graphLock);
+    updateSolo();
+}
+
 
 void AudioEngine::setMonitorMode (Monitor m)
 {
@@ -2113,8 +2289,27 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // two gains, and because the export goes through this same function a
     // bounce gets the law without being told about it.
     const float v    = ctl.volume.load();
-    const float gain = ctl.mute.load() ? 0.0f : (v / 0.8f) * (v / 0.8f);
     const float pan  = ctl.pan.load();
+
+    // Mute is no longer read here, and that is the point rather than a
+    // refactor. What an insert's output is multiplied by now depends on every
+    // other insert's solo and on the send matrix, so it is worked out by
+    // SoloGraph on the message thread and read here as one number. Whether a
+    // mute still wins over a solo on the same insert is part of that
+    // arithmetic, which is why reading ctl.mute here as well would be a
+    // second opinion rather than a safety net.
+    //
+    // It is read straight from the atomic rather than latched into a local at
+    // the top of the block, as the pan law is. The difference is that these
+    // are written under the graph lock, and the audio thread holds that lock
+    // for the whole block, so a block cannot see half of an update. The pan
+    // law is a bare atomic that anybody can store into at any moment.
+    //
+    // This one multiply is also what carries solo into the sends, because
+    // routeSends copies out of this same buffer afterwards. Without that, an
+    // insert silenced by somebody else's solo would still feed a bus that
+    // solo is keeping audible, and would be heard through it.
+    const float gain = soloGain[(size_t) index].load() * (v / 0.8f) * (v / 0.8f);
 
     // Worked out per block rather than kept somewhere. In balance mode that is
     // a comparison; in pan mode it is three sines and two divisions, and three

@@ -134,6 +134,16 @@ MainComponent::MainComponent()
         clickButton.setToggleState (engine.isMetronomeOn(), juce::dontSendNotification);
     };
 
+    soloAlertButton.setClickingTogglesState (false);
+    soloAlertButton.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
+    soloAlertButton.setTooltip ("Lights when something in the mixer is soloed. Click to clear every solo.");
+    soloAlertButton.onClick = [this]
+    {
+        engine.clearAllSolos();
+        mixer.refresh();
+        refreshSoloAlert();
+    };
+
     playlistTab.onClick = [this] { setView (View::playlist); };
     pianoTab.onClick    = [this] { setView (View::pianoRoll); };
     rackTab.onClick     = [this] { setView (View::rack); };
@@ -315,7 +325,8 @@ MainComponent::MainComponent()
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
                      static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
-                     static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&playlistTab),
+                     static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&soloAlertButton),
+                     static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
                      static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
                      static_cast<juce::Component*> (&mixerTab),
@@ -1850,6 +1861,12 @@ PreferencesActions MainComponent::preferenceActions()
             safeThis->engine.setRecordTrimMs (ms);
     };
 
+    actions.setSoloSettings = [safeThis] (float muteGain, bool overridesMute, bool exclusive)
+    {
+        if (safeThis != nullptr)
+            safeThis->engine.setSoloSettings (muteGain, overridesMute, exclusive);
+    };
+
     actions.recordOffsetSamples = [safeThis]() -> int
     {
         return safeThis != nullptr ? safeThis->engine.getRecordOffsetSamples() : 0;
@@ -1947,7 +1964,8 @@ void MainComponent::resized()
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
     tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
-    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (14);
+    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (4);
+    soloAlertButton.setBounds (bar.removeFromLeft (48)); bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));
@@ -2052,6 +2070,16 @@ void MainComponent::paintStatus (juce::Graphics& g, juce::Rectangle<int> r)
     g.drawText (showMessage ? statusMessage : info, text, juce::Justification::centredLeft);
 }
 
+void MainComponent::refreshSoloAlert()
+{
+    const bool soloing = engine.isAnySoloed();
+
+    // Sixty times a second, so it does nothing at all unless the answer has
+    // moved. setToggleState would repaint on every tick otherwise.
+    if (soloAlertButton.getToggleState() != soloing)
+        soloAlertButton.setToggleState (soloing, juce::dontSendNotification);
+}
+
 void MainComponent::timerCallback()
 {
     if (! focusGrabbed && isShowing())
@@ -2077,6 +2105,7 @@ void MainComponent::timerCallback()
 
     checkModulationLearn();
     updateFloatingWindows();
+    refreshSoloAlert();
 
     // Zero is off. Counting only while it is on, so turning the autosave off
     // does not leave a counter climbing towards a save that never comes.
@@ -2801,7 +2830,20 @@ void MainComponent::exportAudio (bool stems)
         self.exportJob = std::make_unique<ExportJob> (self.engine, songEnd, self.engine.getSampleRate(),
                                                       masterFile, std::move (stemFiles), stems);
         self.exportJob->startThread();
-        self.setStatus ("Exporting...");
+
+        // A bounce honours solo, exactly as playback does, because this studio
+        // runs two code paths over one graph and anything on one and not the
+        // other makes a bounce sound different from what was heard. Printing a
+        // stem by soloing it is also an ordinary thing to want.
+        //
+        // No reachable documentation from any of the four studios researched
+        // settles whether an export should honour solo, so it is a decision
+        // rather than a citation, and what makes it safe either way is saying
+        // so in words before the file is written. See Research/BACKLOG.md.
+        self.setStatus (self.engine.isAnySoloed()
+                            ? juce::String ("Exporting with a solo still on, so only the soloed strips "
+                                            "are in the file...")
+                            : juce::String ("Exporting..."));
     });
 }
 

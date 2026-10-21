@@ -167,6 +167,13 @@ private:
     void closePluginWindow (juce::AudioProcessor*);
     void updateFloatingWindows();
 
+    /** Lights the solo indicator when anything is soloed. Called from the
+        main timer rather than from every place a solo can change, because a
+        solo can also come from loading a project or from the mixer window,
+        and one poll of a published flag is cheaper than keeping a list of
+        callers in step. */
+    void refreshSoloAlert();
+
     // views and misc
     void undoRedo (bool redo);
     void updateUndoButtons();
@@ -238,6 +245,15 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
+
+    // Lights whenever anything in the mixer is soloed, and clears every solo
+    // when clicked. Ardour has one, internally called "rude solo", and it is
+    // on the transport bar rather than in the mixer for the reason it exists
+    // at all: leaving a solo up and then wondering where the mix went is the
+    // commonest mistake anybody makes with solo, and an indicator that is only
+    // visible in the mixer cannot catch somebody who is looking at the
+    // playlist.
+    juce::TextButton soloAlertButton { "Solo" };
     juce::ComboBox   recordMode, countInBox, monitorBox;
 
     // What the input menu was last built for. Starts at a count no device can

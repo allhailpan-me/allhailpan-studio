@@ -378,11 +378,56 @@ private:
             mute.setClickingTogglesState (false);
             mute.onClick = [this]
             {
-                auto& c = owner.engine.insert (index);
-                c.mute.store (! c.mute.load());
-                refresh();
+                // Through the engine, because what this strip is multiplied by
+                // depends on every other strip's solo and on the send matrix.
+                owner.engine.setMute (index, ! owner.engine.isMuted (index));
+                owner.refresh();
                 owner.edited();
             };
+
+            solo.setClickingTogglesState (false);
+
+            if (index > 0)
+            {
+                solo.setTooltip ("Hear this strip on its own.\n"
+                                 "Anything it sends to stays audible, so soloing a vocal keeps its "
+                                 "reverb, and soloing a reverb keeps what feeds it.\n"
+                                 "Alt click to solo only this one. Alt click a lit solo to clear "
+                                 "every solo.\n"
+                                 "Right click the strip for Solo isolate, which keeps a strip "
+                                 "audible when something else is soloed.");
+                solo.onClick = [this]
+                {
+                    // Logic's modifier for both of its solo gestures, and the
+                    // preference and the modifier go through one function so
+                    // the two cannot drift apart. See SoloGraph::gestureFor.
+                    owner.engine.applySoloGesture (
+                        index, juce::ModifierKeys::getCurrentModifiers().isAltDown());
+
+                    // Every strip, not this one: a solo here changes what is
+                    // audible on all of them, and the whole point of the three
+                    // state button is that the other strips can say so.
+                    owner.refresh();
+                    owner.edited();
+                };
+            }
+            else
+            {
+                // On the master, the same slot is the indicator that says
+                // something is soloed and the button that clears it. Ardour
+                // has one, internally called "rude solo", and its tooltip is
+                // the whole argument for it: "When active, something is
+                // soloed. Click to de-solo everything". Leaving a solo up and
+                // then wondering where the mix went is the commonest mistake
+                // anybody makes with solo.
+                solo.setTooltip ("Lights when something is soloed. Click to clear every solo.");
+                solo.onClick = [this]
+                {
+                    owner.engine.clearAllSolos();
+                    owner.refresh();
+                    owner.edited();
+                };
+            }
 
             // The master has nothing to record: it is where every insert is
             // summed, so a live input there would run through the whole
@@ -439,7 +484,7 @@ private:
             }
 
             for (auto* c : { static_cast<juce::Component*> (&fader), static_cast<juce::Component*> (&pan),
-                             static_cast<juce::Component*> (&mute) })
+                             static_cast<juce::Component*> (&mute), static_cast<juce::Component*> (&solo) })
             {
                 c->setWantsKeyboardFocus (false);
                 c->setMouseClickGrabsKeyboardFocus (false);
@@ -472,6 +517,45 @@ private:
 
             mute.setButtonText (ctl.mute.load() ? "muted" : "on");
             mute.setToggleState (! ctl.mute.load(), juce::dontSendNotification);
+
+            // Three states, not two, which is Ardour's RouteUI::solo_active_state
+            // and is not cosmetic: soloing a vocal lights nothing on the reverb
+            // bus unless the bus can say it is soloed by propagation, and there
+            // is then no way to tell why the reverb is still being heard.
+            //
+            // On the master the same button is the "something is soloed"
+            // indicator, so it lights from the whole mixer rather than from
+            // this strip.
+            if (index > 0)
+            {
+                const bool selfSoloed = owner.engine.isSoloed (index);
+                const bool byOthers   = owner.engine.isSoloedByOthers (index);
+                const bool isolated   = owner.engine.isSoloIsolated (index);
+
+                solo.setButtonText (isolated ? "iso" : "solo");
+                solo.setToggleState (selfSoloed, juce::dontSendNotification);
+                solo.setColour (juce::TextButton::textColourOnId, Ahp::rec);
+                solo.setColour (juce::TextButton::textColourOffId,
+                                byOthers ? Ahp::rec.withAlpha (0.55f)
+                                         : (isolated ? Ahp::bone : Ahp::muted));
+            }
+            else
+            {
+                solo.setButtonText ("solo");
+                solo.setToggleState (owner.engine.isAnySoloed(), juce::dontSendNotification);
+                solo.setColour (juce::TextButton::textColourOnId, Ahp::rec);
+                solo.setColour (juce::TextButton::textColourOffId, Ahp::muted.withAlpha (0.5f));
+            }
+
+            // Ardour draws the mute button outlined on a strip muted because
+            // something else is soloed, with the preference that does it on by
+            // default, and Logic flashes it instead. Same purpose either way:
+            // a strip that has gone quiet has to be able to say why. The
+            // outline itself is in paint(), so it does not fight the button's
+            // own look and feel.
+            mute.setColour (juce::TextButton::textColourOffId,
+                            owner.engine.isMutedByOthersSoloing (index) ? Ahp::rec.withAlpha (0.7f)
+                                                                        : Ahp::bone);
 
             fxCount = 0;
             for (int k = 0; k < kNumFxSlots; ++k)
@@ -607,7 +691,12 @@ private:
 
             pan.setBounds (r.removeFromTop (30).withSizeKeepingCentre (30, 30));
             r.removeFromTop (4);
-            mute.setBounds (r.removeFromBottom (20));
+            // Mute and solo share the bottom row, mute first, which is the
+            // order every studio puts them in.
+            auto buttons = r.removeFromBottom (20);
+            mute.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2 - 1));
+            buttons.removeFromLeft (2);
+            solo.setBounds (buttons);
             r.removeFromBottom (14);                               // dB readout
             meterArea = r.removeFromRight (12).reduced (1, 2);
             r.removeFromRight (2);
@@ -646,6 +735,15 @@ private:
             g.setFont (juce::FontOptions (10.0f));
             g.drawText (db <= -99.0f ? juce::String ("-inf") : juce::String (db, 1),
                         getLocalBounds().withTrimmedBottom (26).removeFromBottom (14), juce::Justification::centred);
+
+            // The outline Ardour draws on a strip that is quiet only because
+            // something else is soloed, round the mute button, which is where
+            // Ardour and Logic both put it.
+            if (owner.engine.isMutedByOthersSoloing (index))
+            {
+                g.setColour (Ahp::rec.withAlpha (0.55f));
+                g.drawRoundedRectangle (mute.getBounds().toFloat().reduced (0.5f), 3.0f, 1.0f);
+            }
 
             g.setColour (Ahp::black);
             g.fillRect (meterArea);
@@ -717,6 +815,15 @@ private:
             if (index > 0)
             {
                 m.addSeparator();
+
+                // Ardour calls it Solo Isolate, Pro Tools calls it Solo Safe
+                // and Logic calls it solo-safe, and all three manuals describe
+                // the same behaviour. Avid's own caution is worth passing on
+                // in the tooltip: "Don't apply Solo Safe to every track, since
+                // that defeats the purpose of soloing."
+                m.addItem (4, "Solo isolate", true, owner.engine.isSoloIsolated (index));
+
+                m.addSeparator();
                 m.addSectionHeader ("Pan control");
                 m.addItem (20, PanLaw::name (PanLaw::Mode::balance), true, mode == PanLaw::Mode::balance);
                 m.addItem (21, PanLaw::name (PanLaw::Mode::pan),     true, mode == PanLaw::Mode::pan);
@@ -764,6 +871,15 @@ private:
 
                 if (result == 1) { safe->rename(); return; }
 
+                if (result == 4 && safe->index > 0)
+                {
+                    safe->owner.engine.setSoloIsolate (safe->index,
+                                                       ! safe->owner.engine.isSoloIsolated (safe->index));
+                    safe->owner.refresh();
+                    safe->owner.edited();
+                    return;
+                }
+
                 if (result == 10 || result == 11 || result == 12)
                 {
                     safe->owner.mapInputsFrom (safe->index, result == 11, result == 12);
@@ -786,7 +902,18 @@ private:
                 {
                     ctl.volume.store (0.8f);
                     ctl.pan.store (0.0f);
-                    ctl.mute.store (false);
+
+                    // Through the engine, and taking the solo state with it: a
+                    // strip reset to its defaults and left solo isolated is a
+                    // strip that behaves differently from every other one with
+                    // nothing on it to say so.
+                    safe->owner.engine.setMute (safe->index, false);
+
+                    if (safe->index > 0)
+                    {
+                        safe->owner.engine.setSolo (safe->index, false);
+                        safe->owner.engine.setSoloIsolate (safe->index, false);
+                    }
                 }
                 else if (result == 3)
                 {
@@ -803,7 +930,7 @@ private:
         const int index;
         int fxCount = 0;
         juce::Slider fader, pan;
-        juce::TextButton mute;
+        juce::TextButton mute, solo;
         juce::ComboBox   inputBox;
         juce::TextButton arm { "arm" };
         juce::Rectangle<int> meterArea;
