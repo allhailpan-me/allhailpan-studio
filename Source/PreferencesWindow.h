@@ -68,6 +68,20 @@ struct PreferencesActions
         milliseconds, positive pulling recorded takes earlier. */
     std::function<void (double)> setRecordTrimMs;
 
+    /** How solo behaves, in the order the engine takes them: the gain a strip
+        silenced by somebody else's solo goes to, then whether a solo beats a
+        mute on the same strip, then whether soloing one strip clears the
+        others. All three are Ardour's, and all three are application settings
+        there too.
+
+        The order is written down because a std::function's parameters have no
+        names, so this comment is the only thing a second caller would have to
+        go on, and the two flags swapped is silent: exclusive solo would stop
+        clearing the other strips and a strip that is both muted and soloed
+        would become audible, with nothing erroring. An audit found this
+        comment listing them the other way round. */
+    std::function<void (float, bool, bool)> setSoloSettings;
+
     /** How far ahead of its arrival a frame of a capture belongs, as the
         engine works it out right now. Shown rather than set, so that a studio
         applying nothing can be told apart from one applying the wrong
@@ -107,6 +121,13 @@ inline void applyPreferences (juce::PropertiesFile& settings, const PreferencesA
 
     if (actions.setRecordTrimMs)
         actions.setRecordTrimMs (storedPreference (settings, Prefs::Key::recordTrimMs, Prefs::recordTrimMs));
+
+    if (actions.setSoloSettings)
+        actions.setSoloSettings (
+            Prefs::soloMuteGain (storedPreference (settings, Prefs::Key::soloMuteCutDb,
+                                                   Prefs::soloMuteCutDb)),
+            Prefs::flag (settings.getDoubleValue (Prefs::Key::soloOverridesMute, 0.0), false),
+            Prefs::flag (settings.getDoubleValue (Prefs::Key::exclusiveSolo, 0.0), false));
 }
 
 //==============================================================================
@@ -126,14 +147,19 @@ public:
         addAndMakeVisible (tempoLabel);
         addAndMakeVisible (tempoValue);
         addAndMakeVisible (tempoNote);
+        addAndMakeVisible (soloLabel);
+        addAndMakeVisible (soloCut);
+        addAndMakeVisible (exclusiveSolo);
+        addAndMakeVisible (soloOverridesMute);
+        addAndMakeVisible (soloNote);
         addAndMakeVisible (folderNote);
         addAndMakeVisible (revealButton);
         addAndMakeVisible (resetButton);
 
-        for (auto* l : { &autosaveLabel, &clickLabel, &tempoLabel })
+        for (auto* l : { &autosaveLabel, &clickLabel, &tempoLabel, &soloLabel })
             l->setJustificationType (juce::Justification::centredLeft);
 
-        for (auto* l : { &autosaveNote, &clickNote, &tempoNote, &folderNote })
+        for (auto* l : { &autosaveNote, &clickNote, &tempoNote, &soloNote, &folderNote })
         {
             l->setColour (juce::Label::textColourId, Ahp::muted);
             l->setFont (juce::FontOptions (12.0f));
@@ -194,6 +220,66 @@ public:
                            "nobody chose from one you meant.",
                            juce::dontSendNotification);
 
+        // ---- solo ----
+        //
+        // Ardour's three, with its own labels where it has one. The cut is a
+        // fader there too, labelled "Solo-in-place mute cut (dB)", and its
+        // bottom end is full mute, which is what it ships.
+        soloCut.setSliderStyle (juce::Slider::LinearHorizontal);
+        soloCut.setRange (Prefs::soloMuteCutDb.minimum, Prefs::soloMuteCutDb.maximum, 0.5);
+        soloCut.setTextBoxStyle (juce::Slider::TextBoxRight, false, 70, 22);
+
+        // The bottom of the range is silence, so the number there would be a
+        // lie, and the top is 0 dB, where solo stops doing anything at all and
+        // saying "0.0 dB" would not warn anybody.
+        soloCut.textFromValueFunction = [] (double db)
+        {
+            if (db <= Prefs::soloMuteCutDb.minimum)
+                return juce::String ("silent");
+
+            return db >= Prefs::soloMuteCutDb.maximum ? juce::String ("no change")
+                                                      : juce::String (db, 1) + " dB";
+        };
+        soloCut.valueFromTextFunction = [] (const juce::String& text)
+        {
+            if (text.containsIgnoreCase ("silent"))
+                return Prefs::soloMuteCutDb.minimum;
+
+            return text.containsIgnoreCase ("no change") ? Prefs::soloMuteCutDb.maximum
+                                                         : text.getDoubleValue();
+        };
+        soloCut.onValueChange = [this]
+        {
+            settings.setValue (Prefs::Key::soloMuteCutDb, soloCut.getValue());
+            applyAndSave();
+        };
+
+        exclusiveSolo.setButtonText ("Only one strip soloed at a time");
+        exclusiveSolo.setTooltip ("Soloing a strip clears the others. Alt click does the opposite of "
+                                  "whichever way this is set.");
+        exclusiveSolo.onClick = [this]
+        {
+            settings.setValue (Prefs::Key::exclusiveSolo, exclusiveSolo.getToggleState() ? 1 : 0);
+            applyAndSave();
+        };
+
+        soloOverridesMute.setButtonText ("Soloing overrides muting");
+        soloOverridesMute.setTooltip ("With this on, a strip you have both muted and soloed is heard. "
+                                      "A strip that is only audible because something feeding it was "
+                                      "soloed stays muted either way.");
+        soloOverridesMute.onClick = [this]
+        {
+            settings.setValue (Prefs::Key::soloOverridesMute, soloOverridesMute.getToggleState() ? 1 : 0);
+            applyAndSave();
+        };
+
+        soloNote.setText ("Soloing a strip keeps whatever it sends to audible, so a soloed vocal still "
+                          "has its reverb, and soloing a reverb keeps what feeds it. Right click a strip "
+                          "in the mixer for Solo isolate, which keeps it audible whatever else is soloed: "
+                          "useful on a shared effects return, and self defeating if you set it on "
+                          "everything.",
+                          juce::dontSendNotification);
+
         // ---- where the file is ----
         folderNote.setText ("Settings, the plugin list and the autosave are kept in\n"
                               + settings.getFile().getParentDirectory().getFullPathName(),
@@ -203,11 +289,11 @@ public:
         revealButton.setTooltip ("Opens the folder these settings are stored in.");
 
         resetButton.onClick = [this] { resetToDefaults(); };
-        resetButton.setTooltip ("Puts the three settings above back to their defaults. "
+        resetButton.setTooltip ("Puts the settings above back to their defaults. "
                                 "Your audio device and plugin list are not touched.");
 
         refreshFromSettings();
-        setSize (560, 460);
+        setSize (560, 640);
     }
 
     void resized() override
@@ -232,6 +318,12 @@ public:
         tempoLabel.setBounds (row (20, 2));
         tempoValue.setBounds (row (26).removeFromLeft (160));
         tempoNote .setBounds (row (48, 18));
+
+        soloLabel        .setBounds (row (20, 2));
+        soloCut          .setBounds (row (26).removeFromLeft (360));
+        exclusiveSolo    .setBounds (row (22, 2));
+        soloOverridesMute.setBounds (row (22));
+        soloNote         .setBounds (row (62, 18));
 
         auto bottom = area.removeFromBottom (28);
         revealButton.setBounds (bottom.removeFromLeft (150));
@@ -269,6 +361,17 @@ private:
 
         tempoValue.setValue (storedPreference (settings, Prefs::Key::defaultTempo, Prefs::defaultTempo),
                              juce::dontSendNotification);
+
+        soloCut.setValue (storedPreference (settings, Prefs::Key::soloMuteCutDb, Prefs::soloMuteCutDb),
+                          juce::dontSendNotification);
+
+        exclusiveSolo.setToggleState (
+            Prefs::flag (settings.getDoubleValue (Prefs::Key::exclusiveSolo, 0.0), false),
+            juce::dontSendNotification);
+
+        soloOverridesMute.setToggleState (
+            Prefs::flag (settings.getDoubleValue (Prefs::Key::soloOverridesMute, 0.0), false),
+            juce::dontSendNotification);
     }
 
     void applyAndSave()
@@ -285,6 +388,9 @@ private:
         settings.setValue (Prefs::Key::autosaveInterval,  Prefs::autosaveChoice.fallback);
         settings.setValue (Prefs::Key::metronomeLevelDb, Prefs::metronomeLevelDb.fallback);
         settings.setValue (Prefs::Key::defaultTempo,     Prefs::defaultTempo.fallback);
+        settings.setValue (Prefs::Key::soloMuteCutDb,    Prefs::soloMuteCutDb.fallback);
+        settings.setValue (Prefs::Key::exclusiveSolo,     0);
+        settings.setValue (Prefs::Key::soloOverridesMute, 0);
 
         refreshFromSettings();
         applyAndSave();
@@ -298,6 +404,10 @@ private:
 
     juce::Label  clickLabel { {}, "Metronome level" }, clickNote;
     juce::Slider clickLevel;
+
+    juce::Label        soloLabel { {}, "Solo" }, soloNote;
+    juce::Slider       soloCut;
+    juce::ToggleButton exclusiveSolo, soloOverridesMute;
 
     juce::Label  tempoLabel { {}, "Tempo of a new project" }, tempoNote;
     juce::Slider tempoValue;

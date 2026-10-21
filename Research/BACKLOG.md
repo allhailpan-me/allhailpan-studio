@@ -6,6 +6,375 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-21: solo, and what has to stay audible when something is soloed
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **Solo** | **Chosen.** There was no solo anywhere in the studio: not in the engine, not in the mixer, not in the project file. `InsertControls` carried a mute and nothing else. |
+| Fader law | Deferred again, third time, and still a real gap: `processInsert` turns the fader position into gain with `(v / 0.8)^2` where every studio tapers in decibels. Still wants a night with the version translation as its subject, and solo was chosen over it because solo is missing entirely rather than merely wrong. |
+| Punch in and punch out recording | Deferred, and the reason is now specific rather than general. The crossfade machinery it needs landed on 2026-10-15, but the thing it actually needs is a published answer to what happens to the audio already on the track: recording currently finds an empty track rather than punching into an occupied one, so a punch take would sum with the performance it was meant to replace. Making it replace instead means either a destructive trim of the clip underneath or turning that clip into a take folder whose comp selects the punch, and the second reaches `Project`, `ProjectIO`, `CompModel`, the playlist and the engine at once. Worth a night of its own, and worth researching how Pro Tools' playlists and Reaper's "trim content behind media items" each model it before choosing. |
+| MIDI record alignment | Deferred again, same reason as the last three nights: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| A tuner | Deferred. Still wants a published pitch detector and a window. |
+| AFL and PFL listening | **Rejected, on the research, and not on taste.** Ardour's own monitor section page defines both as routing the listened signal to a second monitoring output while leaving the master untouched: "Listen disconnects the monitor bus from the master, so it receives only listened signals... the master is unaffected". This engine has exactly one output path. Building AFL or PFL means a second bus, a second set of device output channels to assign it to, and a monitor section to control it, which is a monitor section feature rather than a solo feature. Solo in place is the default in every studio looked at: Ardour ships `solo-control-is-listen-control = false` and `use-monitor-bus = false`, and the option editor forces the first false while the second is. |
+| Solo lock, Ardour's `SoloSafeControl` | Rejected. It freezes an insert's solo state against clicks and against propagation alike, which means a guard at the top of every state transition for a control nobody asked for. Note for whoever meets it: **Ardour's internal "solo safe" is not Pro Tools' Solo Safe.** Pro Tools' Solo Safe is Ardour's Solo Isolate, which is what was built. Reading Ardour's source with Pro Tools habits implements the wrong feature. |
+| Dim, and solo boost | Rejected. Both are monitor section controls in Ardour (`monitor_processor.cc`), applied after the mix rather than inside the solo arithmetic, and a dim that attenuated the master output would be changing the mix rather than the monitoring, which is the opposite of what the word means. Their figures are recorded here so nobody has to look them up again: dim defaults to -12 dB over a -20 to 0 dB range, solo boost to 0 dB over 0 to +10 dB. |
+| Momentary solo | Rejected for tonight, with the mechanism recorded because it is the part that is easy to get wrong. Ardour's `Session::prepare_momentary_solo` partitions every route into those currently soloed and those not, and the release sets each list back to where it was. It restores a **snapshot** rather than toggling, so a momentary solo cannot leave the session in a state it was not in before. If it is ever built, build it that way. |
+| Saving the propagation counters the way Ardour does | Rejected deliberately. `SoloControl::get_state` writes `self-solo`, `soloed-by-upstream` and `soloed-by-downstream`, and restoring a derived quantity means a file can be internally inconsistent with its own routing: the project would load audibly wrong with nothing to say why. Only the user's two instructions are saved, and the closure is recomputed after load. That is the same discipline `WarpMap.h` already encodes by normalising on load. Ardour itself argues for this from the other end: it ships `SoloControl::clear_all_solo_state`, a repair path with user visible logging for leaked counters, which is the clearest possible statement that incremental counters leak in practice. |
+
+### What was chosen, and why
+
+**There was no way to hear one thing on its own.**
+
+To listen to the vocal, the only route was to mute the other fifteen inserts by
+hand and then remember which of them had already been muted before starting.
+That is a daily mixing action everywhere else and it was one click elsewhere
+against fifteen here, plus a state nobody can reliably restore. It is the
+clearest case of the three the standing brief asks for at once: standard
+everywhere, missing entirely, and far more actions here than anywhere else.
+
+The reason it is a night's work rather than a button is the part nobody sees
+until it is wrong. Muting everything that is not soloed also mutes the reverb
+the soloed vocal is sending to, so soloing a vocal gives a dry vocal, and
+soloing the reverb gives a reverb with nothing going into it. Every studio has
+an answer to that and the answers differ.
+
+### Where the behaviour came from
+
+Primary sources throughout: Ardour's own git tree at `d66bd6ce` read directly,
+Ardour's published manual, Avid's own Pro Tools user guide pages, Apple's own
+Logic Pro manual, and Cockos' own wiki. Four of the eight questions asked have
+a complete primary answer from Ardour only, and each gap is named below rather
+than filled in with a plausible guess.
+
+- **Propagation through sends, which is the whole difficulty.** Ardour is the
+  only one of the four that publishes an algorithm, and it is complete.
+  `Session::route_solo_changed` keeps two counters per route,
+  `_soloed_by_others_upstream` and `_soloed_by_others_downstream`, and for every
+  other route asks `i->feeds (route)` and `route->feeds (i)`, incrementing the
+  downstream counter on things that feed the soloed route and the upstream
+  counter on things it feeds. `Route::feeds` delegates to `GraphEdges::feeds`,
+  which is recursive and does **not** filter on its own `via_sends_only` flag,
+  so a send edge propagates exactly like a main output edge and propagation is
+  over the transitive closure rather than immediate neighbours. **Both
+  directions propagate, automatically, with no preference to turn it off.**
+  Read the counter names twice: on route R, `_soloed_by_others_upstream` means
+  something upstream of R is soloed. The counter is named for where the soloed
+  route sits, not where R sits.
+- **What that produces here.** Solo the vocal on insert 3 which sends to the
+  reverb on insert 9, and 9 is soloed-by-upstream and stays audible, so the
+  vocal is heard with its reverb. Solo the reverb instead and the vocal is
+  soloed-by-downstream and stays audible, so the dry vocal is heard as well:
+  Ardour's manual states that one outright, "Soloing a bus will also solo any
+  tracks or busses which feed that bus". It surprises people and it is still
+  the published rule.
+- **The hardest case, which a naive implementation fails.** Vocal on 3 and
+  guitar on 4 both send to the reverb on 9. Solo 9: all of 3, 4 and 9 are
+  audible. Now also solo 3, and the guitar must go silent while the vocal and
+  the reverb stay. Ardour gets there through `push_solo_upstream`, with its own
+  comment: "When we solo 1 track out of N that feed a bus, that track will
+  cause mod_solo_by_upstream (+1) to be called on the bus. The bus then needs
+  to call mod_solo_by_downstream (-1) on all tracks that feed it." Computed as
+  a closure rather than as counters, the same answer falls out of one rule: an
+  insert is audible when it is soloed itself, or it is upstream of something
+  soloed, or it is downstream of something soloed **and nothing soloed sits
+  between them**. The test asserts the case directly.
+- **Where the gain is applied, which is the half that is easy to miss.**
+  Ardour applies it per output point rather than per route, in
+  `Delivery::run`, and with its shipped defaults (`mute-affects-main-outs` and
+  `mute-affects-post-fader` both true) an insert silenced by somebody else's
+  solo has **both its main output and its post-fader sends** cut. Without the
+  second half, a guitar silenced by a vocal solo still feeds the reverb bus,
+  the reverb bus is audible because the vocal soloed it upstream, and the
+  guitar is heard through the reverb. The sends here are post fader and are
+  copied out of the insert's buffer after `processInsert` has applied the
+  fader, so folding the solo gain into that one multiply cuts both at once,
+  which is Ardour's default behaviour and not a shortcut. The test measures it
+  rather than trusting it.
+- **Solo isolate: three studios, one meaning, three names.** Ardour's manual:
+  "When tracks or busses are soloed the isolated ones will not mute." Avid's
+  own Solo Safe page: it "keeps a track audible when other tracks are soloed",
+  and is "especially useful" on "Aux tracks, busses, and effects returns, so
+  shared effects like reverb or delay aren't cut off when you solo a related
+  track". Apple: "The channel strip does not mute when you solo another channel
+  strip." All three mean exempt from being muted by somebody else's solo, and
+  none of them means unsoloable. Avid's own caution is worth repeating in the
+  tooltip: "Don't apply Solo Safe to every track, since that defeats the
+  purpose of soloing." Called Solo Isolate here, following Ardour and Logic's
+  description, with "solo safe" in the tooltip because that is the word two
+  thirds of users will arrive with.
+  That Pro Tools and Logic both need this control at all is the evidence that
+  neither propagates: a studio that propagated upstream would not have to tell
+  people to solo-safe their reverb returns.
+- **The master needs no isolate of its own.** Every insert feeds insert 0, so
+  insert 0 is downstream of everything and is soloed-by-upstream whenever
+  anything is soloed at all. It falls out of the rule, and the test asserts it
+  for every send matrix and every solo set, because the failure if it ever
+  stops being true is that soloing produces silence.
+- **Mute against solo, where Ardour's code and Ardour's manual contradict each
+  other.** `MuteMaster::mute_gain_at` has two branches on
+  `Config->get_solo_mute_override()`, which ships `false`, and in that default
+  branch an explicit mute is tested first and wins: **a track that is both
+  muted and soloed is silent.** Ardour's own mixer strip page says the
+  opposite, "by default, Solo overrides Mute, i.e. if a track is both Soloed
+  and Muted, it will play". The source is primary for behaviour and the config
+  default and the arithmetic agree with each other, so the manual sentence is
+  treated as stale. No primary source was reachable for Pro Tools, Logic or
+  Reaper on this question, so **there is no majority to follow and the default
+  here is a choice**: explicit mute wins, because a mute somebody set by hand
+  is an instruction and a solo elsewhere is a temporary audition. It is a
+  preference, and the arithmetic of both branches is implemented exactly,
+  including the asymmetry that is the first thing a paraphrase loses: in the
+  override branch the test is `_soloed_by_self`, not `soloed()`, so self solo
+  beats an explicit mute and being soloed by propagation does not.
+- **The solo mute gain.** Ardour's `solo-mute-gain` is a linear coefficient
+  defaulting to `0.0`, full mute, presented as a fader labelled "Solo-in-place
+  mute cut (dB)". Its manual: "Setting this level to -inf dB will mean that
+  other tracks will not be heard at all". Full mute is the default here too,
+  and the setting is in decibels with silence at the bottom of the range, the
+  way the metronome level already is.
+- **Additive, not exclusive.** Ardour ships `exclusive-solo = false` and Logic
+  documents additive solo with Option-click for exclusive. Additive is the
+  default here, exclusive is a preference, and a modifier click does the
+  opposite of whatever the preference says, through the same code path so the
+  two cannot drift apart. Following Logic, a modifier click on a solo that is
+  already on clears every solo, which is the cheapest possible way out.
+- **The three state solo button is not cosmetic.** Ardour's
+  `RouteUI::solo_active_state` returns explicit, implicit or off, from
+  `self_soloed()` and `soloed_by_others()`. Without it, soloing a vocal lights
+  nothing on the reverb bus and there is no way to tell why the reverb is
+  still audible. Ardour also draws the mute button outlined on anything muted
+  by somebody else's solo (`show-solo-mutes`, defaulting on) and Logic flashes
+  it; both are the same idea and both are built here.
+- **The indicator that lights when anything is soloed, and clears it.**
+  Ardour's is internally called "rude solo", bound to `Main/cancel-solo`, with
+  the tooltip "When active, something is soloed. Click to de-solo
+  everything". It is the cheapest defence against the commonest error with
+  solo, which is leaving one on and then wondering where the mix went.
+
+### The two decisions taken without a primary source, recorded as decisions
+
+**Whether a bounce honours solo. Nobody's reachable documentation says.** The
+pages that would have answered it were refused or unreachable: Avid's
+"Bouncing a Mix", Ardour's export dialog page, and the bodies of both the
+Reaper and Pro Tools reference guides, whose relevant page numbers are written
+into the research record so a later night can go straight to them. What could
+be established is from Ardour's source rather than its prose: there is not one
+occurrence of "solo" anywhere in its export path, and the solo gain lives in
+`Delivery::run` which is on the graph the export runs, so an Ardour export
+taken while something is soloed exports the soloed material.
+
+Solo is honoured in `renderOffline` here, identically to playback, for the
+reason `CLAUDE.md` gives: two code paths over one graph, and anything added to
+one and not the other makes a bounce sound different from what was heard. The
+precedent for diverging exists and is narrow, `exportingFullyCompensated`, and
+it diverges because the live behaviour is a monitoring convenience with a named
+reason; the difference is that honouring solo in a render cannot produce a
+wrong file, only a short one, and it is audible immediately. Printing a stem by
+soloing it is also an ordinary thing to want. What makes the choice safe either
+way is that the export says so in words before it starts, the way the solo
+indicator does for playback.
+
+**That solo is not undoable.** It follows the mixer state that is already
+there rather than being decided afresh: volume, pan and mute all live in the
+engine and are saved and loaded by `ProjectIO`, and none of them is in
+`Project::capture`. Solo is a listening state, and an undo history with
+fourteen solo clicks in it is an undo history nobody can use. So of
+`CLAUDE.md`'s four things it needs three: saved in `save`, restored in `load`,
+reset in `clearAll`.
+
+### What could not be sourced, named as such
+
+- **Pro Tools' solo latch modes** (Latch, X-OR, Momentary), their default, and
+  what Bounce To Disk respects. Everything reported about Pro Tools comes from
+  two short Avid web pages. The Digidesign 6.4 guide that was reachable is 22
+  years old and truncated before the relevant chapters; the places to look are
+  "Soloing and Muting Tracks" p.100, "Bounce to Disk" p.482 and "Bounce
+  Options" p.483.
+- **Logic's behaviour when a soloed track's send feeds an aux.** No Apple page
+  found says.
+- **Reaper**, on almost everything. Its user guide body was unreachable and the
+  one Cockos wiki page that was readable shows that its vocabulary is inverted
+  relative to everybody else's: in Reaper, "in-place" solo means the track's
+  own fader output with its sends **excluded**, and the Alt variant is the one
+  that keeps the reverb. That is the opposite of what solo in place means in
+  Ardour and Pro Tools. **Reaper's wording was deliberately not borrowed.** The
+  sections to read are 5.2 "Track Control Modifiers" p.92, 5.3 "Mute/Solo In
+  Front" p.93, and 21.3 "Rendering A Project" p.403.
+
+### What the audit changed, and what it did not
+
+A separate agent audited the whole change on the assumption it was wrong. The
+arithmetic survived: it mutation tested `SoloGraph.h` independently, got the
+same six survivors the header documents, and could not break the closure. Every
+fault it found was in the engine, the interface or the comments, which is worth
+recording because that is where the author had stopped looking.
+
+Two were real behaviour:
+
+- **Solo stepped the gain instead of ramping it.** One press moves up to
+  fifteen inserts from unity to zero, and a flat multiply puts the step at
+  whatever the signal happened to be on each of them. A step falls at only
+  6 dB per octave, so a mix at -10 dBFS gives a broadband click at -10 dBFS
+  into the master chain, on every press and every release, and worst of all on
+  an exclusive solo where one gain rises as fourteen fall. **The research
+  recorded where Ardour applies its figure and never asked how it gets
+  there:** `Delivery::run` interpolates towards it across the buffer, and that
+  interpolation is what keeps Ardour's mute and solo quiet. Ramped over five
+  milliseconds now, which is the figure and the argument `mixMonitorInput`
+  already had. Mute is de-clicked by the same change, having been a flat
+  `? 0.0f :` since long before this.
+  The ramps are latched to their target rather than ramped at the start of a
+  render and when a device opens: solo cannot change during a bounce, so the
+  only thing a ramp could do there is put a five millisecond fade on the front
+  of the file.
+- **A send turned all the way down still counted as a route, and the header
+  claimed the opposite rule two screens earlier.** `isLegalSendTarget`'s
+  comment said it had to agree exactly with `routeSends`, which skips a send
+  whose level is at or below zero, and `levelAffectsRouting = false` then
+  declared that it did not. The stated failure was live and the audit measured
+  it: a vocal whose send is pointed at a reverb with the amount knob turned
+  down to nothing, which is the ordinary way to take the reverb off that
+  vocal, made soloing the reverb play the full level dry vocal, with the
+  vocal's own strip lighting its solo button by propagation to explain why.
+  The level is part of the closure now.
+  **This is a departure from Ardour and is recorded as one.** Its
+  `Route::feeds` is about connections and takes no account of a send's gain,
+  so an Ardour send turned down is still a propagation edge. Its mixer is
+  built differently: a send there is a processor that is present or absent,
+  where here a send is a destination and an amount and the amount at nothing
+  is how somebody switches it off. The price is that the closure now depends
+  on a continuous control, which `setSend` already recomputes on.
+  The test could not see it: every generated send had a destination and a
+  level that agreed about whether it existed, so one legal send in eight is
+  now turned all the way down on purpose.
+
+Three were the interface:
+
+- The mute button's new colour **fired on the opposite state.** That button's
+  toggle state is inverted, true meaning not muted, so setting its off colour
+  from `mutedByOthersSoloing` lit a hand muted strip whenever anything
+  anywhere was soloed and never lit the strip the colour was for. The outline
+  in `paint` was doing the job correctly all along, so the colour is gone and
+  the outline now also requires that the strip is not muted by hand, the way
+  Ardour's `update_mute_display` lets an explicit mute win.
+- **Mute and solo side by side left each of them 13 pixels of text.** A strip
+  is 66 pixels wide and 56 after its margins, and JUCE indents button text by
+  half the corner size at each end, so a 27 pixel button at a 12 pixel font is
+  a smear. Stacked now, full width each, with the strip 20 pixels taller so it
+  did not come out of the fader's travel.
+- **"Reset volume and pan" cleared solo isolate without saying so.** That is
+  the one setting here whose loss is silent and deferred: reset a reverb
+  return's fader and the next time somebody solos a vocal the return is cut
+  and the vocal is dry. The item says "Reset this strip" now.
+
+Two were comments that said something other than what the code did, which is
+the fault `CLAUDE.md` records twice for `updateLatency` and which this change
+managed twice more:
+
+- The header's note on its own redundant guards **named the wrong pair and
+  gave the wrong failure.** It claimed `soloedAt`'s guard and the propagation
+  scan's bound were the dangerous pair and that removing both would silence
+  the mixer. The audit removed them and measured the opposite: every solo
+  becomes a no-op. The dangerous pair is `soloedAt`'s guard with the
+  `anySoloed` loop's bound, which does silence the mixer. Both are written out
+  now, with what each actually does.
+- `PreferencesActions::setSoloSettings` **listed its two bools in the wrong
+  order.** A `std::function`'s parameters have no names, so the comment was
+  the only documentation a second caller would have, and following it swaps
+  two flags silently: exclusive solo stops clearing the other strips and a
+  strip that is both muted and soloed becomes audible, with nothing erroring.
+
+And one smaller thing fixed on the way: a right click on the solo button both
+soloed the strip and opened its menu, because `juce::Button` does not filter on
+which mouse button. Pre-existing for the mute and arm buttons, but the solo
+tooltip sends people there to right click for Solo isolate, so it is now on a
+path the feature advertises.
+
+### Found by the audit and deliberately not fixed
+
+Each of these is real, each is recorded so a later night does not have to
+rediscover it, and none of them is this change's to fix.
+
+- **A mute or solo click during a bounce freezes the interface.** All six of
+  the new setters take the graph lock, and `renderOffline` holds it from before
+  the first block to after the last. `juce::SpinLock` spins and then yields, so
+  one click during a ten minute stem export is a ten minute "not responding"
+  window burning a core against the render thread. This is a pre-existing
+  hazard reaching one more control: `setSend`, `setFx` and `setInsertInput`
+  already block the same way, and `renderOffline`'s own comment names it as
+  the reason `setPanLaw` does not take the lock. Mute was lock free before
+  this change, so that one is a regression, and it is the control somebody is
+  most likely to touch.
+  The fix that would cover the whole family is for the render to drop and
+  retake the lock between blocks, and that is not small: the reason it holds
+  the lock throughout is so that one bounce is mixed under one graph and one
+  pan law, which is the guarantee this studio exists to keep. A night of its
+  own, and the answer may be to publish each instruction and recompute on the
+  message thread's next turn rather than to loosen the render.
+- **The top bar was already over subscribed before solo was added.** The
+  audit measured it: at the default window of 1500 pixels the left hand chain
+  needs more room than it has, the tabs are already clipped, and the Mix
+  report tab is the one with no keyboard shortcut to reach it instead. Solo's
+  indicator was moved into the right hand chain, which is laid out first and
+  therefore cannot be the thing that falls off the end, and made narrower, but
+  40 pixels is still 40 pixels off a bar that did not have them. The bar wants
+  a real answer: a smaller set of always visible controls, an overflow menu,
+  or the view tabs moved somewhere else.
+- **Solo silences live input monitoring, and the meters with it.** Four
+  microphones on four inserts with monitoring on, solo a guide part on a fifth,
+  and all four players lose their headphone feed. Nothing is lost from the
+  take, because the recorders tap the input before the mixer, but the players
+  stop hearing themselves. This is what solo in place means and Ardour does the
+  same, so it is modelled rather than overlooked, and the documented escape is
+  solo isolate, which is exactly what Avid describes Solo Safe being for.
+  Recorded rather than fixed because exempting a monitored insert would make
+  solo useless while tracking, which is when a studio is most likely to have
+  several of them: soloing the guide would leave all four microphones in.
+  `LatencyGraph::Insert::monitored` exists for the compensation exemption and
+  is deliberately not reused here. The meters going dead with it is a separate
+  consequence of the same cause: this studio measures peak after the fader and
+  Ardour's meter point sits before the delivery that applies the solo gain.
+- **The partial solo mute cut is applied twice on a path through a send.** At
+  the default the cut is exactly zero and the question does not arise. Set it
+  to something in between and a signal reaching the master through a send is
+  cut at its source and again at the bus, so it arrives at the square of the
+  cut while the dry path arrives at the cut: at -12 dB the reverb returns of
+  the held material are 12 dB below where they sit in the full mix, so they
+  collapse rather than coming down with it. Ardour does the same for the same
+  structural reason, its gain being per output point too. Fixing it means a
+  second figure per insert, one for its own output and one for what passes
+  through it, which is a feature rather than a tidy up. The test measures the
+  number now rather than leaving it to be discovered.
+- **The check against Ardour's algorithm is not independent of this project's
+  reading of it.** The model in `SoloGraphTest.cpp` is a transcription of the
+  quotes in this entry, which came from a sparse clone of Ardour at `d66bd6ce`.
+  If that reading of `route_solo_changed` is wrong then the closure and the
+  model are wrong together, and ten thousand agreeing solo sets prove only that
+  they agree. The audit tried to re-verify it from the web and the fetch was
+  refused. Worth doing from a fresh clone on a night that has one.
+
+### Where the arithmetic lives
+
+`SoloGraph.h`, no JUCE, so the whole closure is tested. It takes the send
+matrix, each insert's mute, self solo and isolate, and the three settings, and
+returns one gain per insert. The engine keeps only what needs JUCE: reading the
+routing out of the atomics and multiplying one number into the fader gain that
+`processInsert` already applies, which is also what carries it into the sends
+and into the export without a second implementation.
+
+Recomputed from scratch on every change rather than kept as counters. Ardour
+maintains counters incrementally because its graph is arbitrary and its routes
+come and go; this one is sixteen fixed inserts with an acyclic send matrix, so
+a whole recompute is trivial and it makes the hardest bug in the feature, a
+leaked counter, structurally impossible. The recompute hangs off the end of
+`updateLatency`, which is the one function every path that changes a signal
+route already has to call under the graph lock. A second list of call sites to
+keep in step is a list that will fall out of step.
+
+---
+
 ## 2026-10-15: clip fades, and the de-click fade every edge should already have had
 
 ### What was looked at

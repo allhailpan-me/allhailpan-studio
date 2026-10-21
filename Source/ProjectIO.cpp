@@ -14,13 +14,26 @@ namespace
     // a balance control, which is what every version up to 3 did to every
     // insert, and a clip without a fade takes the automatic one.
     //
-    // The bump is unconditional, as 2, 3 and 4 were, so the previous release
-    // refuses a project saved by this build rather than opening it. That is
-    // the point: an older loader would ignore the four fade attributes without
-    // complaint, so a two second fade out somebody drew would simply not be
-    // there, and a mix that quietly lost an edit is worse than one that will
-    // not open until the studio is updated.
-    constexpr int formatVersion = 5;
+    // 6 adds solo and solo isolate on each insert. Older files load unchanged:
+    // an insert with neither attribute is not soloed and is not isolated,
+    // which is what every version up to 5 did to every insert, because there
+    // was no solo at all.
+    //
+    // Only those two are saved and not what they add up to. Ardour saves its
+    // propagation counters as well, and that is the one thing in its model
+    // deliberately not copied: restoring a derived quantity means a file can
+    // be inconsistent with its own routing, and the project would then load
+    // audibly wrong with nothing to say why. These two are the user's own
+    // instructions and the rest is recomputed on load, which is the same
+    // discipline WarpMap.h encodes by normalising its markers on load.
+    //
+    // The bump is unconditional, as 2, 3, 4 and 5 were, so the previous
+    // release refuses a project saved by this build rather than opening it.
+    // An older loader would ignore both attributes without complaint, and a
+    // solo isolate somebody set on their reverb returns would be silently
+    // gone, so solo would then behave differently from the way they set it up
+    // with nothing to say that the file had said otherwise.
+    constexpr int formatVersion = 6;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -300,15 +313,23 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         ctl.volume.store (0.8f);
         ctl.pan.store (0.0f);
         ctl.panMode.store (PanLaw::defaultMode);
-        ctl.mute.store (false);
+
+        // Through the engine rather than through the atomic, because what an
+        // insert is multiplied by now depends on every other insert's solo
+        // and on the send matrix. See AudioEngine::setMute.
+        engine.setMute (i, false);
 
         // Reset, which is the one of the four that survives testing and then
         // leaks between projects: a strip still wired to a microphone in a
-        // project that never mentioned one.
+        // project that never mentioned one, or a vocal left soloed in the
+        // last session so that a new project comes up with fifteen inserts
+        // silent.
         if (i > 0)
         {
             engine.setInsertInput (i, {});
             engine.setInsertArmed (i, false);
+            engine.setSolo (i, false);
+            engine.setSoloIsolate (i, false);
         }
 
         for (int k = 0; k < kNumSends; ++k)
@@ -411,6 +432,16 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
         e->setAttribute ("pan", (double) ctl.pan.load());
         e->setAttribute ("panMode", PanLaw::modeToStored (ctl.panMode.load()));
         e->setAttribute ("mute", ctl.mute.load());
+
+        // The two instructions, and not the answer: see the note on the
+        // format version. Insert 0 is never soloed or isolated, so its row
+        // does not carry either, and a file that says otherwise is refused by
+        // the engine rather than by the loader.
+        if (i > 0)
+        {
+            e->setAttribute ("solo", engine.isSoloed (i));
+            e->setAttribute ("soloIsolate", engine.isSoloIsolated (i));
+        }
 
         // Which socket feeds this strip, and whether it records. Saved with
         // the project rather than the application, because which microphone
@@ -741,7 +772,18 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                                       : PanLaw::modeFromStored (
                                             e->getIntAttribute ("panMode",
                                                 PanLaw::modeToStored (PanLaw::defaultMode))));
-            ctl.mute.store (e->getBoolAttribute ("mute"));
+            // All three through the engine so the solo closure is recomputed
+            // afterwards, the way the sends and the inputs below already are.
+            // Stored straight into the atomics instead, a project would load
+            // with its solos set and its mixer still mixing as though none of
+            // them were, until the next time somebody happened to move a send.
+            engine.setMute (i, e->getBoolAttribute ("mute"));
+
+            if (i > 0)
+            {
+                engine.setSolo (i, e->getBoolAttribute ("solo"));
+                engine.setSoloIsolate (i, e->getBoolAttribute ("soloIsolate"));
+            }
 
             // Routed through the engine so the delay compensation is
             // recomputed: an insert carrying a live input is exempt from it.

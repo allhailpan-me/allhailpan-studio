@@ -72,7 +72,7 @@ static std::vector<double> hostileNumbers()
 static std::vector<Prefs::Range> everyRange()
 {
     return { Prefs::autosaveMinutes, Prefs::metronomeLevelDb, Prefs::defaultTempo,
-             Prefs::recordTrimMs };
+             Prefs::recordTrimMs, Prefs::soloMuteCutDb };
 }
 
 //==============================================================================
@@ -427,6 +427,82 @@ static void theRecordTrimDefaultsToDoingNothing()
            "the control's range and the arithmetic's range have drifted apart");
 }
 
+//==============================================================================
+static void soloDefaultsToAFullMute()
+{
+    // Ardour's solo-mute-gain ships at 0.0, a linear coefficient, which is
+    // full mute, and its manual says what that means: "Setting this level to
+    // -inf dB will mean that other tracks will not be heard at all". Exactly
+    // zero rather than merely small, because fifteen strips at the bottom of
+    // this range sum to about -36 dB and that is audible: a solo that left
+    // them there would not be a solo.
+    check (Prefs::soloMuteGain (Prefs::soloMuteCutDb.fallback) == 0.0f,
+           "the default solo mute cut is not a full mute");
+
+    check (Prefs::soloMuteGain (Prefs::soloMuteCutDb.minimum) == 0.0f,
+           "the quietest solo mute cut still lets something through");
+
+    check (Prefs::soloMuteGain (-1000.0) == 0.0f,
+           "a cut far below the range still lets something through");
+}
+
+static void theSoloCutIsDecibels()
+{
+    checkClose (Prefs::soloMuteGain (0.0), 1.0, 1.0e-9,
+                "the top of the range is not unity, so solo would still change the level there");
+    checkClose (Prefs::soloMuteGain (-6.0206), 0.5, 1.0e-4, "-6 dB is not half the amplitude");
+    checkClose (Prefs::soloMuteGain (-20.0), 0.1, 1.0e-6, "-20 dB is not a tenth of the amplitude");
+
+    // And rises with the setting, over the whole range, so a control that
+    // reads louder cannot be quieter.
+    float previous = -1.0f;
+
+    for (double db = Prefs::soloMuteCutDb.minimum; db <= Prefs::soloMuteCutDb.maximum; db += 0.25)
+    {
+        const float g = Prefs::soloMuteGain (db);
+
+        check (g >= 0.0f && g <= 1.0f, "a solo mute gain left the range zero to one");
+        check (g >= previous, "the solo mute gain fell as the setting rose");
+        previous = g;
+    }
+}
+
+static void nothingAFileCanHoldMakesSoloLouder()
+{
+    // The one direction that must be impossible whatever the file says. A gain
+    // above unity here would mean soloing one strip made every other strip
+    // louder, which nobody wants and which can clip a master that was fine.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    for (double stored : { nan, inf, -inf, 1.0e300, -1.0e300, 0.0, 1.0, -1.0,
+                           Prefs::soloMuteCutDb.maximum + 60.0 })
+    {
+        const float g = Prefs::soloMuteGain (stored);
+        check (g >= 0.0f && g <= 1.0f, "a stored cut produced a gain outside zero to one");
+    }
+}
+
+static void aFlagIsOnlyOnOrOff()
+{
+    // Read as "is it exactly the on value" rather than "is it non zero", so
+    // that a garbled line reaches the default rather than being taken as a
+    // yes. Both solo flags default to off, which is what Ardour ships.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    check (! Prefs::flag (0.0, false), "zero did not read as off");
+    check (Prefs::flag (1.0, false), "one did not read as on");
+    check (! Prefs::flag (0.0, true), "zero did not read as off against an on default");
+    check (Prefs::flag (1.0, true), "one did not read as on against an on default");
+
+    for (double stored : { nan, inf, -inf, 2.0, -1.0, 0.5, 1.0e300 })
+    {
+        check (! Prefs::flag (stored, false), "an unusable flag did not reach an off default");
+        check (Prefs::flag (stored, true), "an unusable flag did not reach an on default");
+    }
+}
+
 int main()
 {
     std::printf ("preferences\n");
@@ -454,6 +530,11 @@ int main()
     nothingAFileCanHoldBreaksAnything();
 
     theRecordTrimDefaultsToDoingNothing();
+
+    soloDefaultsToAFullMute();
+    theSoloCutIsDecibels();
+    nothingAFileCanHoldMakesSoloLouder();
+    aFlagIsOnlyOnOrOff();
 
     if (failures > 0)
     {

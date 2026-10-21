@@ -12,6 +12,7 @@
 #include "InputSource.h"
 #include "RecordAlign.h"
 #include "PanLaw.h"
+#include "SoloGraph.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -191,6 +192,21 @@ public:
         std::atomic<PanLaw::Mode> panMode { PanLaw::defaultMode };
 
         std::atomic<bool>  mute   { false };
+
+        // Solo, and the exemption from somebody else's solo that Ardour calls
+        // Solo Isolate, Pro Tools calls Solo Safe and Logic calls solo-safe.
+        //
+        // These two and the mute above are the user's own instructions and
+        // nothing else: what they add up to is worked out by SoloGraph, which
+        // is why none of the three is read directly by the mixing code any
+        // more. They are set through AudioEngine::setMute, setSolo and
+        // setSoloIsolate rather than through these atomics, because changing
+        // one has to recompute the answer, and a store that skipped that
+        // would be a button that did nothing until the next time somebody
+        // happened to move a send.
+        std::atomic<bool>  solo        { false };
+        std::atomic<bool>  soloIsolate { false };
+
         std::atomic<float> peakL  { 0.0f }, peakR { 0.0f };
         std::array<std::atomic<bool>, kNumFxSlots> bypass {};
 
@@ -215,6 +231,77 @@ public:
     */
     void setPanLaw (PanLaw::Law law) noexcept { panLaw.store (law); }
     PanLaw::Law getPanLaw() const noexcept    { return panLaw.load(); }
+
+    // ---- mute, solo and solo isolate ----
+    //
+    // All three go through the engine rather than through the atomics on
+    // InsertControls, because each changes what SoloGraph answers for every
+    // insert and not only for its own. See SoloGraph.h for the rule and for
+    // what it was checked against.
+
+    void setMute (int insert, bool shouldMute);
+    void setSolo (int insert, bool shouldSolo);
+    void setSoloIsolate (int insert, bool shouldIsolate);
+
+    bool isMuted (int insert) const noexcept
+    {
+        return juce::isPositiveAndBelow (insert, kNumInserts)
+            && controls[(size_t) insert].mute.load();
+    }
+
+    bool isSoloed (int insert) const noexcept
+    {
+        return juce::isPositiveAndBelow (insert, kNumInserts)
+            && controls[(size_t) insert].solo.load();
+    }
+
+    bool isSoloIsolated (int insert) const noexcept
+    {
+        return juce::isPositiveAndBelow (insert, kNumInserts)
+            && controls[(size_t) insert].soloIsolate.load();
+    }
+
+    /** Applies a click on a solo button, preference and modifier together.
+
+        One entry point for both, following Ardour, where a plain click under
+        its exclusive-solo preference and a modified click without it reach
+        the same code. The rule itself is in SoloGraph::gestureFor and is
+        tested; this is the part that needs the engine. */
+    void applySoloGesture (int insert, bool modifierHeld);
+
+    /** Clears every solo. What the indicator's click does, and what a
+        modified click on an already soloed strip does. */
+    void clearAllSolos();
+
+    /** Whether anything at all is soloed, which is what lights the indicator.
+        Published rather than derived so the interface can read it sixty times
+        a second without touching the graph lock, which during a bounce is
+        held for the whole render. */
+    bool isAnySoloed() const noexcept { return anySoloed.load(); }
+
+    /** Audible because of somebody else's solo rather than its own, and
+        silent only because something else is soloed. Both are needed by the
+        strip and neither can be worked out from one insert's own flags:
+        Ardour's solo button has three states and draws the mute button
+        outlined on the second of these, and without them soloing a vocal
+        lights nothing on the reverb bus and there is no way to tell why the
+        reverb is still heard. */
+    bool isSoloedByOthers (int insert) const noexcept
+    {
+        return juce::isPositiveAndBelow (insert, kNumInserts)
+            && soloedByOthers[(size_t) insert].load();
+    }
+
+    bool isMutedByOthersSoloing (int insert) const noexcept
+    {
+        return juce::isPositiveAndBelow (insert, kNumInserts)
+            && mutedByOthersSoloing[(size_t) insert].load();
+    }
+
+    /** The three settings that change what the arithmetic answers rather than
+        what the user asked for. Application preferences, as they are in
+        Ardour, so they arrive from Prefs rather than from a project. */
+    void setSoloSettings (float soloMuteGain, bool soloOverridesMute, bool exclusive);
 
     void setFx (int insert, int slot, std::unique_ptr<juce::AudioPluginInstance>);
 
@@ -583,6 +670,15 @@ private:
     static int channelsFor (const juce::AudioPluginInstance&);
     int  bufferCapacity() const noexcept { return std::max (blockSize * 2, 8192); }
     void updateLatency();
+
+    /** Recomputes which inserts are audible. Must be called with graphLock
+        held, which is why it has no lock of its own. */
+    void updateSolo();
+
+    /** Puts every solo ramp where it is going, so nothing fades. For the
+        start of a render and for a device opening, where a ramp would be a
+        fade on the front of a file or of the first block. */
+    void latchSoloRamps();
     void processInsert (int index, int numSamples, PanLaw::Law law);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
@@ -641,6 +737,44 @@ private:
     // somebody clicks a bypass button. See LatencyGraph::compute.
     LatencyGraph::Setup  latencySetup;
     LatencyGraph::Result latencyGraph;
+
+    // Reused for the same reason, and recomputed in the same place: see
+    // updateSolo, which hangs off the end of updateLatency.
+    SoloGraph::Setup  soloSetup;
+    SoloGraph::Result soloResult;
+
+    /** Per insert: what its output is multiplied by once mute and solo have
+        both been taken into account. Unity, the solo mute cut, or zero.
+
+        Written on the message thread under the graph lock, read on the audio
+        thread, which holds that lock for the whole block. So a block cannot
+        see half of an update, and unlike the pan law this does not have to be
+        latched into a local at the top of the block: the lock is already what
+        makes it one state for one block.
+
+        Not default initialised, because the default for an atomic<float> is
+        zero and zero here is silence. Set in the constructor. */
+    std::array<std::atomic<float>, kNumInserts> soloGain;
+
+    /** Audio thread only: where each insert's solo gain has got to on its way
+        to the figure above. One press of solo moves up to fifteen of these at
+        once, and a gain that arrives in one sample is a click on every one of
+        them. Latched to the target rather than ramped at the start of a
+        render and when a device opens. */
+    std::array<float, kNumInserts> soloRamp = [] {
+        std::array<float, kNumInserts> a;
+        a.fill (1.0f);
+        return a;
+    }();
+
+    // Published for the interface, which reads them without the graph lock
+    // because that lock is held for the length of a bounce.
+    std::array<std::atomic<bool>, kNumInserts> soloedByOthers {};
+    std::array<std::atomic<bool>, kNumInserts> mutedByOthersSoloing {};
+    std::atomic<bool>  anySoloed { false };
+    std::atomic<float> soloMuteGain { 0.0f };
+    std::atomic<bool>  soloOverridesMute { false };
+    std::atomic<bool>  exclusiveSolo { false };
 
     // Modulators follow the song while it plays, so a project sounds the
     // same every time and matches its export. While stopped they run off

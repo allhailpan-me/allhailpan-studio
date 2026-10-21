@@ -41,6 +41,13 @@ namespace Key
     inline constexpr const char* defaultTempo     = "defaultTempo";
     inline constexpr const char* recordTrimMs     = "recordTrimMs";
 
+    // Solo. Application settings rather than project ones, which is where
+    // Ardour keeps all three: they are how somebody likes solo to behave
+    // rather than anything about a particular song.
+    inline constexpr const char* soloMuteCutDb    = "soloMuteCutDb";
+    inline constexpr const char* exclusiveSolo    = "exclusiveSolo";
+    inline constexpr const char* soloOverridesMute = "soloOverridesMute";
+
     // Already written by the transport controls before this header existed, so
     // the spellings have to stay as they are to keep existing settings files
     // readable.
@@ -75,6 +82,27 @@ inline constexpr Range autosaveMinutes { 0.0, 30.0, 2.0 };
     and a full scale sine burst is already louder than anyone wants.
 */
 inline constexpr Range metronomeLevelDb { -48.0, 0.0, -9.1 };
+
+/** How far down a strip goes when something else is soloed, in decibels,
+    where the bottom of the range is silence rather than a very quiet strip.
+
+    Ardour's `solo-mute-gain` is the same setting, stored as a linear
+    coefficient and defaulting to `0.0`, which is full mute, and presented as
+    a fader labelled "Solo-in-place mute cut (dB)". Its manual: "Setting this
+    level to -inf dB will mean that other tracks will not be heard at all".
+    Full mute is the default here too.
+
+    The top of the range is 0 dB, which means solo does nothing. That is a
+    useless setting rather than an invalid one and it is the natural end of
+    the range, so it is allowed. Ardour's own fader goes to +6 dB, which would
+    mean soloing one strip made every other strip louder; that is refused here
+    rather than offered, and SoloGraph refuses it a second time for a settings
+    file that contains it anyway.
+
+    Anything between is Ardour's answer to what other studios call solo in
+    front: the rest of the mix stays audible underneath, quieter.
+*/
+inline constexpr Range soloMuteCutDb { -60.0, 0.0, -60.0 };
 
 /** The correction to what the driver claims its latency is, in milliseconds,
     positive pulling recorded takes earlier.
@@ -192,6 +220,46 @@ inline float metronomeGain (double storedDb) noexcept
         return 0.0f;
 
     return (float) std::pow (10.0, db / 20.0);
+}
+
+/** Linear gain for a strip that something else's solo has silenced, from the
+    stored cut in decibels.
+
+    The bottom of the range is exactly zero rather than -60 dB of signal, for
+    a reason worth keeping: fifteen strips at -60 dB each sum to about -36 dB,
+    which is audible, so a solo that left them there would not be a solo. It
+    is the same argument metronomeGain makes for its own bottom end.
+*/
+inline float soloMuteGain (double storedDb) noexcept
+{
+    const double db = number (storedDb, soloMuteCutDb);
+
+    if (db <= soloMuteCutDb.minimum)
+        return 0.0f;
+
+    return (float) std::pow (10.0, db / 20.0);
+}
+
+/** Reads a stored flag back.
+
+    Stored as a number, because the settings file is numbers and text, and
+    read as "is it exactly the on value" rather than "is it non zero": a
+    garbled line, a NaN or somebody's 2 all have to reach the default rather
+    than being taken as a yes. Both of the solo flags default to off, which is
+    what Ardour ships for `exclusive-solo` and `solo-mute-override`.
+*/
+inline bool flag (double stored, bool fallback) noexcept
+{
+    if (! std::isfinite (stored))
+        return fallback;
+
+    if (stored == 0.0)
+        return false;
+
+    if (stored == 1.0)
+        return true;
+
+    return fallback;
 }
 
 //==============================================================================
