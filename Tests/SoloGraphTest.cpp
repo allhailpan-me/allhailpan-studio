@@ -114,7 +114,33 @@ Mixer makeMixer (std::mt19937& rng, int n, double sendDensity)
     {
         for (int s = 0; s < kNumSends; ++s)
         {
-            if (unit (rng) >= sendDensity || i + 1 >= n)
+            if (unit (rng) >= sendDensity)
+                continue;
+
+            // One in twelve is a destination the mixer does not allow: its own
+            // insert, one behind it, one past the last insert, or a negative.
+            //
+            // Generated rather than assumed away, and that is not padding.
+            // SoloGraph resolves the whole graph in one downward pass, and the
+            // only thing that makes one pass enough is that a send goes
+            // forwards. If its filter let a destination through that
+            // AudioEngine::routeSends ignores, an insert would be kept audible
+            // for a route carrying no audio; if it let through an index past
+            // the end, it would read off the end of the reachability matrix.
+            // The second of those is why these are compiled with the
+            // sanitizers.
+            if (unit (rng) < 1.0 / 12.0)
+            {
+                const int kind = (int) (unit (rng) * 4.0) % 4;
+                m.sendTo[(std::size_t) i][(std::size_t) s] = kind == 0 ? i
+                                                           : kind == 1 ? i - 1
+                                                           : kind == 2 ? n
+                                                                       : -3;
+                m.sendLevel[(std::size_t) i][(std::size_t) s] = 0.5f;
+                continue;
+            }
+
+            if (i + 1 >= n)
                 continue;
 
             std::uniform_int_distribution<int> to (i + 1, n - 1);
@@ -984,6 +1010,27 @@ void testIsolate()
              + " cases: isolate exempts its own insert and is not a propagation rule");
     check (madeADifference > 500, "isolate never actually rescued anything, so this proves little");
 
+    // An isolated insert is audible, so its strip must not claim to be
+    // silenced by somebody else's solo. Nothing else in this file looks at
+    // that flag on an isolated insert, and the mute button is drawn outlined
+    // from it: a strip that is perfectly audible and says it has been muted
+    // is worse than one that says nothing.
+    {
+        Mixer quiet = makeMixer (rng, 10, 0.0);
+        quiet.selfSoloed[2] = 1;
+        quiet.isolated[6] = 1;
+
+        SoloGraph::Result r;
+        SoloGraph::compute (quiet.setup(), r);
+
+        check (r.inserts[6].gain == 1.0f, "an isolated insert should be audible");
+        check (! r.inserts[6].mutedByOthersSoloing,
+               "an isolated insert should not report itself as muted by somebody else's solo");
+        check (r.inserts[7].mutedByOthersSoloing,
+               "an ordinary silenced insert should report itself as muted by the solo, or this "
+               "check is passed by an implementation that never sets the flag at all");
+    }
+
     // Isolate is an exemption from somebody else's solo and nothing more. It
     // does not override a mute the user set by hand, and it does not stop the
     // insert being soloed itself.
@@ -1005,6 +1052,66 @@ void testIsolate()
            "an isolated insert is still soloable itself");
     check (plain.inserts[2].gain == 0.0f,
            "an isolated insert's own solo still silences everything else");
+}
+
+void testMuteOnItsOwn()
+{
+    std::printf ("\nMute with nothing soloed\n");
+
+    // The path through compute that runs when nothing is soloed at all, which
+    // is how the mixer spends almost all of its life. It is a separate branch
+    // from the one every other check in this file exercises, and a branch that
+    // returned unity for everything would pass all of them: solo would work
+    // perfectly and the mute buttons would have stopped doing anything.
+    std::mt19937 rng (616u);
+    SoloGraph::Result r;
+    int cases = 0, wrong = 0, muted = 0;
+
+    for (int trial = 0; trial < 3000; ++trial)
+    {
+        std::uniform_int_distribution<int> size (1, 16);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        auto m = makeMixer (rng, size (rng), unit (rng));
+
+        for (int i = 0; i < m.n; ++i)
+        {
+            m.muted[(std::size_t) i]    = unit (rng) < 0.4 ? 1 : 0;
+            m.isolated[(std::size_t) i] = unit (rng) < 0.2 ? 1 : 0;
+        }
+
+        SoloGraph::Settings s;
+        s.soloMuteGain      = unit (rng) < 0.5 ? 0.0f : 0.4f;
+        s.soloOverridesMute = unit (rng) < 0.5;
+
+        SoloGraph::compute (m.setup (s), r);
+        ++cases;
+
+        check (! r.anySoloed, "nothing was soloed and the result says otherwise");
+
+        for (int i = 0; i < m.n; ++i)
+        {
+            const bool isMuted = m.muted[(std::size_t) i] != 0;
+            const float want = isMuted ? 0.0f : 1.0f;
+
+            if (isMuted)
+                ++muted;
+
+            if (r.inserts[(std::size_t) i].gain != want)
+                ++wrong;
+
+            // And nothing claims to have been silenced by a solo, because
+            // there is no solo.
+            if (r.inserts[(std::size_t) i].soloedByOthers
+                || r.inserts[(std::size_t) i].mutedByOthersSoloing)
+                ++wrong;
+        }
+    }
+
+    std::printf ("  %d mixers, %d muted inserts\n", cases, muted);
+    check (muted > 5000, "too few muted inserts for this to have checked anything");
+    check (wrong == 0, "a mute was not honoured with nothing soloed, in "
+                         + std::to_string (wrong) + " places");
 }
 
 void testMutePrecedence()
@@ -1278,6 +1385,7 @@ int main()
     testTheMasterIsNeverSilenced();
     testTheSendOfASilencedInsert();
     testIsolate();
+    testMuteOnItsOwn();
     testMutePrecedence();
     testTheSoloMuteGain();
     testGestures();

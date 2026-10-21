@@ -118,6 +118,33 @@
     in play the counters here do not return to zero when every solo is
     cleared, which is presumably what the repair path is for.
 
+    SIX GUARDS IN HERE ARE DELIBERATELY REDUNDANT
+
+    Written down so nobody goes looking for the test that should have caught
+    them. Of 49 deliberate breakages of this header, 43 were caught and these
+    six produce identical output, each for a reason rather than by luck:
+
+    - **`soloedAt`'s `i >= 1`, and the propagation scan starting at 1.** These
+      two are a pair, and removing either one alone changes nothing because
+      the other still keeps insert 0 out. Removing both would let a solo
+      stored against the master silence the mixer. Both are kept, because one
+      comparison is cheaper than a rule that says "this is safe as long as
+      every loop bound elsewhere stays as it is".
+    - **The `s != i` in the taken over scan, and the `s == i` in the
+      propagation scan.** Both rest on no insert reaching itself, which the
+      forward only send rule guarantees. They are the guards that would matter
+      the day somebody relaxes that rule, which is the same day this header's
+      single downward pass stops working, and `isLegalSendTarget` says so too.
+    - **Rule 3 being reached by an `else if` rather than an `if`.** Both rules
+      set the same flag and the loop stops on it, so the two orderings cannot
+      differ. It is an `else if` because asking the second question after the
+      first has already answered yes is work for no reason.
+    - **The `i >= 1` on isolate.** The master is downstream of everything, so
+      it is at unity whether or not it is isolated, and a muted master is at
+      zero in both branches of `gainFor` regardless. It is kept for the same
+      reason as the first pair: a project file can say anything, and the
+      guard, not an argument about reachability, is what makes that harmless.
+
     WHAT THE GAIN IS APPLIED TO
 
     Ardour applies this per output point rather than per route, in
