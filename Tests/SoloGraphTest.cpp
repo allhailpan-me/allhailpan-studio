@@ -80,6 +80,22 @@ struct Mixer
     std::vector<std::vector<float>> sendLevel;
     std::vector<char> selfSoloed, muted, isolated;
 
+    /** A send with a destination and an amount, set together, because a
+        destination without an amount is not a route and a hand built mixer
+        that set only one of them would quietly have no sends at all. */
+    void route (int from, int to, float level = 0.5f)
+    {
+        for (int s = 0; s < kNumSends; ++s)
+        {
+            if (sendTo[(std::size_t) from][(std::size_t) s] == 0)
+            {
+                sendTo[(std::size_t) from][(std::size_t) s]    = to;
+                sendLevel[(std::size_t) from][(std::size_t) s] = level;
+                return;
+            }
+        }
+    }
+
     SoloGraph::Setup setup (SoloGraph::Settings settings = {}) const
     {
         SoloGraph::Setup s;
@@ -92,6 +108,7 @@ struct Mixer
             s.inserts[(std::size_t) i].muted      = muted[(std::size_t) i] != 0;
             s.inserts[(std::size_t) i].isolated   = isolated[(std::size_t) i] != 0;
             s.inserts[(std::size_t) i].sendTo     = sendTo[(std::size_t) i];
+            s.inserts[(std::size_t) i].sendLevel  = sendLevel[(std::size_t) i];
         }
 
         return s;
@@ -144,8 +161,16 @@ Mixer makeMixer (std::mt19937& rng, int n, double sendDensity)
                 continue;
 
             std::uniform_int_distribution<int> to (i + 1, n - 1);
-            m.sendTo[(std::size_t) i][(std::size_t) s]    = to (rng);
-            m.sendLevel[(std::size_t) i][(std::size_t) s] = 0.2f + 0.6f * (float) unit (rng);
+            m.sendTo[(std::size_t) i][(std::size_t) s] = to (rng);
+
+            // One legal send in eight is turned all the way down, which is how
+            // somebody takes a reverb off one strip without losing the
+            // routing. Until these were generated, every send in every case
+            // had a destination and a level that agreed about whether it
+            // existed, so nothing checked that the closure asks about both.
+            m.sendLevel[(std::size_t) i][(std::size_t) s] = unit (rng) < 0.125
+                                                              ? 0.0f
+                                                              : 0.2f + 0.6f * (float) unit (rng);
         }
     }
 
@@ -180,7 +205,12 @@ std::vector<char> floydReach (const Mixer& m)
         {
             const int to = m.sendTo[(std::size_t) i][(std::size_t) s];
 
-            if (to > i && to < n)
+            // Forwards, in range, and actually carrying something. The third
+            // of those is the one that is easy to leave out, and leaving it
+            // out is how soloing an effects return whose send is turned all
+            // the way down plays the full level dry signal that is not
+            // reaching it.
+            if (to > i && to < n && m.sendLevel[(std::size_t) i][(std::size_t) s] > 0.0f)
                 at (i, to) = 1;
         }
     }
@@ -414,10 +444,11 @@ double masterContribution (const Mixer& m, const std::vector<float>& gain,
         for (int s = 0; s < kNumSends; ++s)
         {
             const int to = m.sendTo[(std::size_t) i][(std::size_t) s];
+            const float level = m.sendLevel[(std::size_t) i][(std::size_t) s];
 
-            if (to > i && to < n)
-                in[(std::size_t) to] += sendSource
-                                      * (double) m.sendLevel[(std::size_t) i][(std::size_t) s];
+            // The same three conditions AudioEngine::routeSends applies.
+            if (to > i && to < n && level > 0.0f)
+                in[(std::size_t) to] += sendSource * (double) level;
         }
     }
 
@@ -634,10 +665,10 @@ void testArdourIsOrderDependent()
         m.muted.assign (5, 0);
         m.isolated.assign (5, 0);
 
-        m.sendTo[1][0] = 2;
-        m.sendTo[2][0] = 3;
-        m.sendTo[2][1] = 4;
-        m.sendTo[3][0] = 4;
+        m.route (1, 2);
+        m.route (2, 3);
+        m.route (2, 4);
+        m.route (3, 4);
 
         const auto reach = floydReach (m);
 
@@ -798,8 +829,8 @@ void testTheNamedCase()
     m.muted.assign (16, 0);
     m.isolated.assign (16, 0);
 
-    m.sendTo[3][0] = 9;   m.sendLevel[3][0] = 0.5f;
-    m.sendTo[4][0] = 9;   m.sendLevel[4][0] = 0.5f;
+    m.route (3, 9);
+    m.route (4, 9);
 
     SoloGraph::Result r;
 
@@ -962,6 +993,103 @@ void testTheSendOfASilencedInsert()
                  wrongModelLeaked);
     check (wrongModelLeaked > 500,
            "the wrong wiring leaks in too few cases for this check to be meaningful");
+}
+
+void testASendTurnedDownIsNotARoute()
+{
+    std::printf ("\nA send turned all the way down\n");
+
+    // The ordinary way to take a reverb off one strip: leave the destination
+    // where it is and bring the amount to nothing. Counted as a route, soloing
+    // that reverb plays the full level dry signal that is not reaching it.
+    Mixer m;
+    m.n = 12;
+    m.sendTo.assign (12, std::vector<int> (kNumSends, 0));
+    m.sendLevel.assign (12, std::vector<float> (kNumSends, 0.0f));
+    m.selfSoloed.assign (12, 0);
+    m.muted.assign (12, 0);
+    m.isolated.assign (12, 0);
+
+    m.route (3, 9, 0.0f);   // vocal, reverb amount turned down to nothing
+    m.route (4, 9, 0.5f);   // guitar, reverb on
+
+    SoloGraph::Result r;
+
+    m.selfSoloed[9] = 1;
+    SoloGraph::compute (m.setup(), r);
+
+    check (r.inserts[3].gain == 0.0f,
+           "soloing a reverb should not play a strip whose send to it is turned down to nothing");
+    check (! r.inserts[3].soloedByOthers,
+           "and that strip's solo button should not light to explain a route that carries nothing");
+    check (r.inserts[4].gain == 1.0f,
+           "soloing a reverb should still play the strip that is actually feeding it");
+
+    // And the other way round: soloing the vocal should not keep a reverb
+    // audible that the vocal is not sending anything to.
+    m.selfSoloed[9] = 0;
+    m.selfSoloed[3] = 1;
+    SoloGraph::compute (m.setup(), r);
+
+    check (r.inserts[3].gain == 1.0f, "the soloed vocal should be audible");
+    check (r.inserts[9].gain == 0.0f,
+           "soloing a strip whose send is turned down should not keep its old destination audible");
+
+    // Turn the amount up and the route is back, with no other change.
+    m.sendLevel[3][0] = 0.4f;
+    SoloGraph::compute (m.setup(), r);
+    check (r.inserts[9].gain == 1.0f && r.inserts[9].soloedByOthers,
+           "turning the send amount up should put the reverb back");
+
+    std::printf ("  a destination with the amount at nothing is not a route, in either direction\n");
+}
+
+void testAPartialCutOnAWetPath()
+{
+    std::printf ("\nWhat a partial solo mute cut does to a send path\n");
+
+    // Not a check that the number is right: a check that the number is known.
+    // One gain per insert means a signal reaching the master through a send
+    // meets the cut twice, at its source and again at the bus, so it arrives
+    // at the square of the cut while the dry path arrives at the cut. Ardour
+    // does the same thing for the same structural reason, so this measures
+    // what the design produces rather than asserting a target.
+    Mixer m;
+    m.n = 12;
+    m.sendTo.assign (12, std::vector<int> (kNumSends, 0));
+    m.sendLevel.assign (12, std::vector<float> (kNumSends, 0.0f));
+    m.selfSoloed.assign (12, 0);
+    m.muted.assign (12, 0);
+    m.isolated.assign (12, 0);
+
+    m.route (4, 9, 1.0f);   // guitar into a reverb, at unity
+    m.selfSoloed[2] = 1;                              // something else entirely is soloed
+
+    SoloGraph::Settings s;
+    s.soloMuteGain = 0.25f;                           // about -12 dB
+
+    SoloGraph::Result r;
+    SoloGraph::compute (m.setup (s), r);
+
+    const auto gain = gainsOf (r);
+    const double throughTheMixer = masterContribution (m, gain, 4, true);
+
+    // Dry path at the cut, wet path at the cut squared, so 1.25 rather than
+    // the 2.0 an undiminished send would give.
+    check (std::abs (throughTheMixer - (0.25 + 0.25 * 0.25)) < 1.0e-9,
+           "a partial cut on a send path is not what the header says it is: measured "
+             + std::to_string (throughTheMixer));
+
+    std::printf ("  cut 0.25: dry 0.250, wet 0.0625, together %.4f at the master\n",
+                 throughTheMixer);
+    std::printf ("  so the wet path sits %.1f dB below where it would in the full mix\n",
+                 20.0 * std::log10 (0.25));
+
+    // At the default the question does not arise, which is why this is a note
+    // about a setting rather than a fault.
+    SoloGraph::compute (m.setup(), r);
+    check (masterContribution (m, gainsOf (r), 4, true) == 0.0,
+           "at the default cut a silenced insert should contribute nothing at all");
 }
 
 void testIsolate()
@@ -1181,7 +1309,7 @@ void testMutePrecedence()
     // the helper.
     std::mt19937 rng (5u);
     Mixer m = makeMixer (rng, 12, 0.0);
-    m.sendTo[2][0] = 7; m.sendLevel[2][0] = 0.5f;
+    m.route (2, 7);
     m.selfSoloed[2] = 1;
     m.muted[7] = 1;
 
@@ -1358,6 +1486,34 @@ void testReuseAndEdges()
         check (r.inserts[(std::size_t) i].gain == 1.0f,
                "a solo stored against the master should not silence the mixer");
 
+    // A send row with no level beside it. The engine fills both from one loop
+    // so this cannot come out of a project file, but the fallback exists and
+    // an untested fallback is the one that is wrong when it fires. The quieter
+    // reading is the right one: a route this header cannot price cannot be
+    // allowed to keep an insert audible.
+    {
+        SoloGraph::Setup bare;
+        bare.inserts.resize (6);
+        bare.inserts[2].sendTo = { 4, 5 };          // no sendLevel row at all
+        bare.inserts[3].sendTo = { 4, 5 };
+        bare.inserts[3].sendLevel = { 0.5f };       // a level for the first send only
+        bare.inserts[4].selfSoloed = true;
+
+        SoloGraph::compute (bare, r);
+
+        check (r.inserts[2].gain == 0.0f,
+               "a send with no level beside it should not be a route");
+        check (r.inserts[3].gain == 1.0f,
+               "the send that does have a level should still be a route");
+
+        bare.inserts[4].selfSoloed = false;
+        bare.inserts[5].selfSoloed = true;
+        SoloGraph::compute (bare, r);
+
+        check (r.inserts[3].gain == 0.0f,
+               "insert 3's second send has no level, so soloing its destination should not play it");
+    }
+
     // The master on its own, and nothing at all.
     SoloGraph::Setup one;
     one.inserts.resize (1);
@@ -1384,6 +1540,8 @@ int main()
     testTheNamedCase();
     testTheMasterIsNeverSilenced();
     testTheSendOfASilencedInsert();
+    testASendTurnedDownIsNotARoute();
+    testAPartialCutOnAWetPath();
     testIsolate();
     testMuteOnItsOwn();
     testMutePrecedence();

@@ -398,11 +398,21 @@ private:
                                  "audible when something else is soloed.");
                 solo.onClick = [this]
                 {
+                    // juce::Button does not filter on which mouse button, and
+                    // the strip is a mouse listener on this one, so a right
+                    // click would otherwise solo the strip and open the menu at
+                    // the same time. The tooltip above sends people here to
+                    // right click for Solo isolate, so this is on a path the
+                    // feature advertises.
+                    const auto mods = juce::ModifierKeys::getCurrentModifiers();
+
+                    if (mods.isPopupMenu())
+                        return;
+
                     // Logic's modifier for both of its solo gestures, and the
                     // preference and the modifier go through one function so
                     // the two cannot drift apart. See SoloGraph::gestureFor.
-                    owner.engine.applySoloGesture (
-                        index, juce::ModifierKeys::getCurrentModifiers().isAltDown());
+                    owner.engine.applySoloGesture (index, mods.isAltDown());
 
                     // Every strip, not this one: a solo here changes what is
                     // audible on all of them, and the whole point of the three
@@ -551,11 +561,10 @@ private:
             // something else is soloed, with the preference that does it on by
             // default, and Logic flashes it instead. Same purpose either way:
             // a strip that has gone quiet has to be able to say why. The
-            // outline itself is in paint(), so it does not fight the button's
-            // own look and feel.
-            mute.setColour (juce::TextButton::textColourOffId,
-                            owner.engine.isMutedByOthersSoloing (index) ? Ahp::rec.withAlpha (0.7f)
-                                                                        : Ahp::bone);
+            // outline is in paint(), which is the only place it can be: this
+            // button's toggle state is inverted, true meaning not muted, so
+            // setting its off colour from that state lights the wrong one of
+            // the two. An audit found exactly that here.
 
             fxCount = 0;
             for (int k = 0; k < kNumFxSlots; ++k)
@@ -691,12 +700,16 @@ private:
 
             pan.setBounds (r.removeFromTop (30).withSizeKeepingCentre (30, 30));
             r.removeFromTop (4);
-            // Mute and solo share the bottom row, mute first, which is the
-            // order every studio puts them in.
-            auto buttons = r.removeFromBottom (20);
-            mute.setBounds (buttons.removeFromLeft (buttons.getWidth() / 2 - 1));
-            buttons.removeFromLeft (2);
-            solo.setBounds (buttons);
+            // Stacked rather than side by side, and the strip is taller by
+            // the difference. A strip is 66 pixels wide and 56 after its
+            // margins, so splitting that row in two leaves 27 pixels a button,
+            // and JUCE's own button text indent is half the corner size at
+            // each end: 13 pixels of text for a 12 pixel font, which is a
+            // smear. An audit measured it. Full width each, one above the
+            // other, keeps both words legible.
+            solo.setBounds (r.removeFromBottom (18));
+            r.removeFromBottom (2);
+            mute.setBounds (r.removeFromBottom (18));
             r.removeFromBottom (14);                               // dB readout
             meterArea = r.removeFromRight (12).reduced (1, 2);
             r.removeFromRight (2);
@@ -739,7 +752,13 @@ private:
             // The outline Ardour draws on a strip that is quiet only because
             // something else is soloed, round the mute button, which is where
             // Ardour and Logic both put it.
-            if (owner.engine.isMutedByOthersSoloing (index))
+            // An explicit mute wins the display, the way Ardour's
+            // update_mute_display lets it: mutedByOthersSoloing is true on a
+            // hand muted strip too, because it is about what the solo system
+            // is doing and takes no account of mute, so without this a strip
+            // the user muted would also be outlined and the outline would stop
+            // meaning anything.
+            if (owner.engine.isMutedByOthersSoloing (index) && ! owner.engine.isMuted (index))
             {
                 g.setColour (Ahp::rec.withAlpha (0.55f));
                 g.drawRoundedRectangle (mute.getBounds().toFloat().reduced (0.5f), 3.0f, 1.0f);
@@ -785,7 +804,13 @@ private:
             juce::PopupMenu m;
             m.addSectionHeader (owner.engine.insert (index).name);
             m.addItem (1, "Rename...");
-            m.addItem (2, "Reset volume and pan");
+            // Named for everything it does. It used to say "Reset volume and
+            // pan" while also clearing mute, and it now clears solo and solo
+            // isolate as well. Solo isolate is the one setting here whose loss
+            // is silent and deferred: reset a reverb return's fader, and the
+            // next time somebody solos a vocal the return is cut and the vocal
+            // is dry, with nothing anywhere to say the solo isolate went.
+            m.addItem (2, "Reset this strip");
             m.addItem (3, "Remove all effects", fxCount > 0);
 
             // Ardour, Cubase and Reaper all let the panner be chosen rather
@@ -947,7 +972,9 @@ private:
     bool offeredADefaultInput = false;
 
     // Taller than it was by the input menu and the arm button together.
-    static constexpr int stripW = 66, stripH = 230, gap = 6;
+    // Taller than it was by the height of the solo button and its gap, so
+    // that adding solo did not come out of the fader's travel.
+    static constexpr int stripW = 66, stripH = 250, gap = 6;
 
     AudioEngine& engine;
     Project&     project;

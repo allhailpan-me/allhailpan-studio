@@ -121,15 +121,30 @@
     SIX GUARDS IN HERE ARE DELIBERATELY REDUNDANT
 
     Written down so nobody goes looking for the test that should have caught
-    them. Of 49 deliberate breakages of this header, 43 were caught and these
-    six produce identical output, each for a reason rather than by luck:
+    them. Of the deliberate breakages this header has been put through, twice,
+    by its author and then by an audit that did not believe the first count,
+    these six are the ones that produce identical output, each for a reason
+    rather than by luck. The counts are in the pull request that added solo:
 
-    - **`soloedAt`'s `i >= 1`, and the propagation scan starting at 1.** These
-      two are a pair, and removing either one alone changes nothing because
-      the other still keeps insert 0 out. Removing both would let a solo
-      stored against the master silence the mixer. Both are kept, because one
-      comparison is cheaper than a rule that says "this is safe as long as
-      every loop bound elsewhere stays as it is".
+    - **`soloedAt`'s `i >= 1`, and the two loop bounds that start at 1.** Each
+      one alone can be removed without changing the output, because the others
+      still keep insert 0 out of the arithmetic. An audit measured what the
+      pairs actually do, because the first version of this paragraph named the
+      wrong one and gave the wrong failure, which is the fault `CLAUDE.md`
+      records twice for `updateLatency`:
+
+        - `soloedAt`'s guard together with the **`anySoloed` loop's** bound is
+          the dangerous pair. Remove both and a solo stored against the master
+          in a project file reports `anySoloed`, so every other insert is
+          silenced: the mixer plays nothing at all.
+        - `soloedAt`'s guard together with the **propagation scan's** bound is
+          the harmless one. Remove both and every solo becomes a no-op
+          instead, because the master then counts as soloed-by-propagation for
+          everything.
+
+      All three are kept, because one comparison is cheaper than a rule that
+      says "this is safe as long as every loop bound elsewhere stays as it
+      is".
     - **The `s != i` in the taken over scan, and the `s == i` in the
       propagation scan.** Both rest on no insert reaching itself, which the
       forward only send rule guarantees. They are the guards that would matter
@@ -144,6 +159,25 @@
       zero in both branches of `gainFor` regardless. It is kept for the same
       reason as the first pair: a project file can say anything, and the
       guard, not an argument about reachability, is what makes that harmless.
+
+    WHAT A PARTIAL CUT DOES TO A WET PATH
+
+    At the default the solo mute gain is exactly zero and this does not arise.
+    Set it to something in between, which is Ardour's answer to what other
+    studios call solo in front, and one gain per insert has a consequence
+    worth stating because nothing announces it: a signal that reaches the
+    master through a send is cut once at its source and again at the bus, so
+    it arrives at the square of the cut while the dry path arrives at the cut.
+    At -12 dB that is a wet path 12 dB below where it would sit in the full
+    mix, so the reverb returns of the material being held under the solo
+    collapse rather than coming down with it.
+
+    Ardour does the same thing, and for the same structural reason: its gain
+    is applied per output point, so a signal through a send meets
+    `mute_gain_at` twice as well. So this is modelled rather than chosen, and
+    the test measures it rather than leaving it to be discovered. Fixing it
+    would mean a second figure per insert, one for its own output and one for
+    what passes through it, which is a real feature and not a tidy up.
 
     WHAT THE GAIN IS APPLIED TO
 
@@ -183,6 +217,10 @@ namespace SoloGraph
         /** Per send: the destination insert, or anything that is not a legal
             forward target, meaning no send. */
         std::vector<int> sendTo;
+
+        /** Per send: how much of this insert goes there. A send at nothing is
+            not a route, for the reason given at `sendCarriesAudio`. */
+        std::vector<float> sendLevel;
     };
 
     //==========================================================================
@@ -295,18 +333,37 @@ namespace SoloGraph
         return to > from && to < numInserts;
     }
 
-    /** A send turned down to nothing is still a send, and still propagates.
+    /** True when this send actually carries audio, which is what makes it a
+        route for the purposes of solo.
 
-        Deliberate, and the reason is worth keeping because the other choice
-        looks tidier. Ardour's `Route::feeds` is about connections and takes no
-        account of a send's gain, and `LatencyGraph` already compensates a send
-        whose level is zero for the same reason: the level is a knob the user
-        is in the middle of moving, and a routing that appeared and disappeared
-        as it crossed zero would make the mixer's behaviour depend on a
-        continuous control. "Off" for a send here is its destination, not its
-        level.
+        A send at nothing is not a route, and this is the second half of
+        agreeing with `routeSends`, which skips a send whose level is at or
+        below zero. Getting it wrong the other way is not a rounding error: a
+        vocal on insert 3 whose send is pointed at a reverb on insert 9 with
+        the amount knob turned down to nothing is the ordinary way to take the
+        reverb off that vocal without losing the routing. Counted as a route,
+        soloing insert 9 would play the full level dry vocal, and the vocal's
+        own strip would light its solo button by propagation to explain why.
+
+        This is a departure from Ardour, recorded as one. Ardour's
+        `Route::feeds` is about connections and takes no account of a send's
+        gain, so an Ardour send turned down is still a propagation edge. Its
+        mixer is built differently: a send there is a processor that is present
+        or absent, where here a send is a destination and an amount, and the
+        amount at nothing is how somebody switches it off. `LatencyGraph` does
+        ignore the level, and that is not an inconsistency: a delay line on a
+        copy that carries nothing is inaudible either way, whereas audibility
+        is the only thing this header decides.
+
+        The price is that the solo closure now depends on a continuous
+        control, so dragging a send amount through zero changes which inserts
+        are audible. That is already a graph change: `AudioEngine::setSend`
+        recomputes on every move of either the destination or the amount.
     */
-    inline constexpr bool levelAffectsRouting = false;
+    inline bool sendCarriesAudio (int from, int to, float level, int numInserts) noexcept
+    {
+        return isLegalSendTarget (from, to, numInserts) && level > 0.0f;
+    }
 
     //==========================================================================
     /** The solo mute gain, as a number this header is willing to act on.
@@ -448,9 +505,22 @@ namespace SoloGraph
 
             follow (0);
 
-            for (int to : setup.inserts[(std::size_t) i].sendTo)
-                if (isLegalSendTarget (i, to, n))
-                    follow (to);
+            const auto& sendTo    = setup.inserts[(std::size_t) i].sendTo;
+            const auto& sendLevel = setup.inserts[(std::size_t) i].sendLevel;
+
+            for (std::size_t sendIndex = 0; sendIndex < sendTo.size(); ++sendIndex)
+            {
+                // A level this header was not given reads as nothing. The
+                // engine fills both of these from the same loop, so a short
+                // row is a mistake in here rather than something a file can
+                // contain, and of the two readings of a mistake the quieter
+                // one cannot leave an insert audible for a route carrying no
+                // audio.
+                const float level = sendIndex < sendLevel.size() ? sendLevel[sendIndex] : 0.0f;
+
+                if (sendCarriesAudio (i, sendTo[sendIndex], level, n))
+                    follow (sendTo[sendIndex]);
+            }
         }
 
         if (! result.anySoloed)

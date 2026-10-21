@@ -203,6 +203,158 @@ reset in `clearAll`.
   sections to read are 5.2 "Track Control Modifiers" p.92, 5.3 "Mute/Solo In
   Front" p.93, and 21.3 "Rendering A Project" p.403.
 
+### What the audit changed, and what it did not
+
+A separate agent audited the whole change on the assumption it was wrong. The
+arithmetic survived: it mutation tested `SoloGraph.h` independently, got the
+same six survivors the header documents, and could not break the closure. Every
+fault it found was in the engine, the interface or the comments, which is worth
+recording because that is where the author had stopped looking.
+
+Two were real behaviour:
+
+- **Solo stepped the gain instead of ramping it.** One press moves up to
+  fifteen inserts from unity to zero, and a flat multiply puts the step at
+  whatever the signal happened to be on each of them. A step falls at only
+  6 dB per octave, so a mix at -10 dBFS gives a broadband click at -10 dBFS
+  into the master chain, on every press and every release, and worst of all on
+  an exclusive solo where one gain rises as fourteen fall. **The research
+  recorded where Ardour applies its figure and never asked how it gets
+  there:** `Delivery::run` interpolates towards it across the buffer, and that
+  interpolation is what keeps Ardour's mute and solo quiet. Ramped over five
+  milliseconds now, which is the figure and the argument `mixMonitorInput`
+  already had. Mute is de-clicked by the same change, having been a flat
+  `? 0.0f :` since long before this.
+  The ramps are latched to their target rather than ramped at the start of a
+  render and when a device opens: solo cannot change during a bounce, so the
+  only thing a ramp could do there is put a five millisecond fade on the front
+  of the file.
+- **A send turned all the way down still counted as a route, and the header
+  claimed the opposite rule two screens earlier.** `isLegalSendTarget`'s
+  comment said it had to agree exactly with `routeSends`, which skips a send
+  whose level is at or below zero, and `levelAffectsRouting = false` then
+  declared that it did not. The stated failure was live and the audit measured
+  it: a vocal whose send is pointed at a reverb with the amount knob turned
+  down to nothing, which is the ordinary way to take the reverb off that
+  vocal, made soloing the reverb play the full level dry vocal, with the
+  vocal's own strip lighting its solo button by propagation to explain why.
+  The level is part of the closure now.
+  **This is a departure from Ardour and is recorded as one.** Its
+  `Route::feeds` is about connections and takes no account of a send's gain,
+  so an Ardour send turned down is still a propagation edge. Its mixer is
+  built differently: a send there is a processor that is present or absent,
+  where here a send is a destination and an amount and the amount at nothing
+  is how somebody switches it off. The price is that the closure now depends
+  on a continuous control, which `setSend` already recomputes on.
+  The test could not see it: every generated send had a destination and a
+  level that agreed about whether it existed, so one legal send in eight is
+  now turned all the way down on purpose.
+
+Three were the interface:
+
+- The mute button's new colour **fired on the opposite state.** That button's
+  toggle state is inverted, true meaning not muted, so setting its off colour
+  from `mutedByOthersSoloing` lit a hand muted strip whenever anything
+  anywhere was soloed and never lit the strip the colour was for. The outline
+  in `paint` was doing the job correctly all along, so the colour is gone and
+  the outline now also requires that the strip is not muted by hand, the way
+  Ardour's `update_mute_display` lets an explicit mute win.
+- **Mute and solo side by side left each of them 13 pixels of text.** A strip
+  is 66 pixels wide and 56 after its margins, and JUCE indents button text by
+  half the corner size at each end, so a 27 pixel button at a 12 pixel font is
+  a smear. Stacked now, full width each, with the strip 20 pixels taller so it
+  did not come out of the fader's travel.
+- **"Reset volume and pan" cleared solo isolate without saying so.** That is
+  the one setting here whose loss is silent and deferred: reset a reverb
+  return's fader and the next time somebody solos a vocal the return is cut
+  and the vocal is dry. The item says "Reset this strip" now.
+
+Two were comments that said something other than what the code did, which is
+the fault `CLAUDE.md` records twice for `updateLatency` and which this change
+managed twice more:
+
+- The header's note on its own redundant guards **named the wrong pair and
+  gave the wrong failure.** It claimed `soloedAt`'s guard and the propagation
+  scan's bound were the dangerous pair and that removing both would silence
+  the mixer. The audit removed them and measured the opposite: every solo
+  becomes a no-op. The dangerous pair is `soloedAt`'s guard with the
+  `anySoloed` loop's bound, which does silence the mixer. Both are written out
+  now, with what each actually does.
+- `PreferencesActions::setSoloSettings` **listed its two bools in the wrong
+  order.** A `std::function`'s parameters have no names, so the comment was
+  the only documentation a second caller would have, and following it swaps
+  two flags silently: exclusive solo stops clearing the other strips and a
+  strip that is both muted and soloed becomes audible, with nothing erroring.
+
+And one smaller thing fixed on the way: a right click on the solo button both
+soloed the strip and opened its menu, because `juce::Button` does not filter on
+which mouse button. Pre-existing for the mute and arm buttons, but the solo
+tooltip sends people there to right click for Solo isolate, so it is now on a
+path the feature advertises.
+
+### Found by the audit and deliberately not fixed
+
+Each of these is real, each is recorded so a later night does not have to
+rediscover it, and none of them is this change's to fix.
+
+- **A mute or solo click during a bounce freezes the interface.** All six of
+  the new setters take the graph lock, and `renderOffline` holds it from before
+  the first block to after the last. `juce::SpinLock` spins and then yields, so
+  one click during a ten minute stem export is a ten minute "not responding"
+  window burning a core against the render thread. This is a pre-existing
+  hazard reaching one more control: `setSend`, `setFx` and `setInsertInput`
+  already block the same way, and `renderOffline`'s own comment names it as
+  the reason `setPanLaw` does not take the lock. Mute was lock free before
+  this change, so that one is a regression, and it is the control somebody is
+  most likely to touch.
+  The fix that would cover the whole family is for the render to drop and
+  retake the lock between blocks, and that is not small: the reason it holds
+  the lock throughout is so that one bounce is mixed under one graph and one
+  pan law, which is the guarantee this studio exists to keep. A night of its
+  own, and the answer may be to publish each instruction and recompute on the
+  message thread's next turn rather than to loosen the render.
+- **The top bar was already over subscribed before solo was added.** The
+  audit measured it: at the default window of 1500 pixels the left hand chain
+  needs more room than it has, the tabs are already clipped, and the Mix
+  report tab is the one with no keyboard shortcut to reach it instead. Solo's
+  indicator was moved into the right hand chain, which is laid out first and
+  therefore cannot be the thing that falls off the end, and made narrower, but
+  40 pixels is still 40 pixels off a bar that did not have them. The bar wants
+  a real answer: a smaller set of always visible controls, an overflow menu,
+  or the view tabs moved somewhere else.
+- **Solo silences live input monitoring, and the meters with it.** Four
+  microphones on four inserts with monitoring on, solo a guide part on a fifth,
+  and all four players lose their headphone feed. Nothing is lost from the
+  take, because the recorders tap the input before the mixer, but the players
+  stop hearing themselves. This is what solo in place means and Ardour does the
+  same, so it is modelled rather than overlooked, and the documented escape is
+  solo isolate, which is exactly what Avid describes Solo Safe being for.
+  Recorded rather than fixed because exempting a monitored insert would make
+  solo useless while tracking, which is when a studio is most likely to have
+  several of them: soloing the guide would leave all four microphones in.
+  `LatencyGraph::Insert::monitored` exists for the compensation exemption and
+  is deliberately not reused here. The meters going dead with it is a separate
+  consequence of the same cause: this studio measures peak after the fader and
+  Ardour's meter point sits before the delivery that applies the solo gain.
+- **The partial solo mute cut is applied twice on a path through a send.** At
+  the default the cut is exactly zero and the question does not arise. Set it
+  to something in between and a signal reaching the master through a send is
+  cut at its source and again at the bus, so it arrives at the square of the
+  cut while the dry path arrives at the cut: at -12 dB the reverb returns of
+  the held material are 12 dB below where they sit in the full mix, so they
+  collapse rather than coming down with it. Ardour does the same for the same
+  structural reason, its gain being per output point too. Fixing it means a
+  second figure per insert, one for its own output and one for what passes
+  through it, which is a feature rather than a tidy up. The test measures the
+  number now rather than leaving it to be discovered.
+- **The check against Ardour's algorithm is not independent of this project's
+  reading of it.** The model in `SoloGraphTest.cpp` is a transcription of the
+  quotes in this entry, which came from a sparse clone of Ardour at `d66bd6ce`.
+  If that reading of `route_solo_changed` is wrong then the closure and the
+  model are wrong together, and ten thousand agreeing solo sets prove only that
+  they agree. The audit tried to re-verify it from the web and the fetch was
+  refused. Worth doing from a fresh clone on a night that has one.
+
 ### Where the arithmetic lives
 
 `SoloGraph.h`, no JUCE, so the whole closure is tested. It takes the send

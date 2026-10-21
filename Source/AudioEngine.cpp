@@ -579,6 +579,12 @@ void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, floa
     vectors that are already the right size after the first call.
 */
 // ---------------------------------------------------------------------------
+void AudioEngine::latchSoloRamps()
+{
+    for (int i = 0; i < kNumInserts; ++i)
+        soloRamp[(size_t) i] = soloGain[(size_t) i].load();
+}
+
 void AudioEngine::updateSolo()
 {
     auto& setup = soloSetup;
@@ -602,8 +608,18 @@ void AudioEngine::updateSolo()
         // updateLatency does with the same row.
         entry.sendTo.resize (i == 0 ? 0 : (size_t) kNumSends);
 
+        entry.sendLevel.resize (entry.sendTo.size());
+
         for (int sendIndex = 0; sendIndex < (int) entry.sendTo.size(); ++sendIndex)
-            entry.sendTo[(size_t) sendIndex] = ctl.sendTo[(size_t) sendIndex].load();
+        {
+            entry.sendTo[(size_t) sendIndex]    = ctl.sendTo[(size_t) sendIndex].load();
+
+            // The level as well as the destination, because a send turned all
+            // the way down carries no audio and routeSends skips it. See
+            // SoloGraph::sendCarriesAudio for what counting it anyway would
+            // do to soloing an effects return.
+            entry.sendLevel[(size_t) sendIndex] = ctl.sendLevel[(size_t) sendIndex].load();
+        }
     }
 
     SoloGraph::compute (setup, soloResult);
@@ -1255,6 +1271,12 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // Plugins report their latency only once prepared, and the block size just
     // changed, so the delay lines are sized and set here.
     updateLatency();
+
+    // Where the ramps are going, not where they were. A device opening or
+    // changing its rate is not a moment to fade anything: the step size is
+    // worked out from the sample rate, and a ramp left half way across a
+    // restart would be a fade over whatever the new rate makes of it.
+    latchSoloRamps();
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -2309,7 +2331,28 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // routeSends copies out of this same buffer afterwards. Without that, an
     // insert silenced by somebody else's solo would still feed a bus that
     // solo is keeping audible, and would be heard through it.
-    const float gain = soloGain[(size_t) index].load() * (v / 0.8f) * (v / 0.8f);
+    //
+    // Ramped rather than stepped, and that is not a polish. One press of solo
+    // moves up to fifteen of these from unity to zero, and a gain that steps
+    // between two blocks puts a discontinuity on each of them at whatever the
+    // signal happened to be: a step's spectrum falls at only 6 dB per octave,
+    // so a mix sitting at -10 dBFS gives a broadband click at -10 dBFS into
+    // the master chain, on every press and every release. Ardour does not
+    // apply its own figure flat either: `Delivery::run` interpolates towards
+    // it across the buffer, and that interpolation is what keeps its mute and
+    // solo quiet. The studio already has the argument and the figure, in
+    // mixMonitorInput: about five milliseconds, short enough to feel
+    // immediate and long enough not to click.
+    const float wanted = soloGain[(size_t) index].load();
+    const float from   = soloRamp[(size_t) index];
+    const float step   = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
+    const float to     = from < wanted ? std::min (wanted, from + step * (float) numSamples)
+                                       : std::max (wanted, from - step * (float) numSamples);
+
+    soloRamp[(size_t) index] = to;
+
+    const float fader = (v / 0.8f) * (v / 0.8f);
+    const float gain  = from * fader;
 
     // Worked out per block rather than kept somewhere. In balance mode that is
     // a comparison; in pan mode it is three sines and two divisions, and three
@@ -2322,8 +2365,20 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // block, and one whole bounce, uses one law. See the call sites.
     const auto panGain = PanLaw::gains (ctl.panMode.load(), law, (double) pan);
 
-    slot.buffer.applyGain (0, 0, numSamples, gain * (float) panGain.left);
-    slot.buffer.applyGain (1, 0, numSamples, gain * (float) panGain.right);
+    if (to == from)
+    {
+        slot.buffer.applyGain (0, 0, numSamples, gain * (float) panGain.left);
+        slot.buffer.applyGain (1, 0, numSamples, gain * (float) panGain.right);
+    }
+    else
+    {
+        const float end = to * fader;
+
+        slot.buffer.applyGainRamp (0, 0, numSamples, gain * (float) panGain.left,
+                                   end * (float) panGain.left);
+        slot.buffer.applyGainRamp (1, 0, numSamples, gain * (float) panGain.right,
+                                   end * (float) panGain.right);
+    }
 
     ctl.peakL.store (std::max (slot.buffer.getMagnitude (0, 0, numSamples), ctl.peakL.load() * 0.9f));
     ctl.peakR.store (std::max (slot.buffer.getMagnitude (1, 0, numSamples), ctl.peakR.load() * 0.9f));
@@ -2695,6 +2750,15 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     // would spin the message thread for the length of the export.
     const auto renderLaw = panLaw.load();
     updateLatency();
+
+    // The ramps start where they are going rather than where live playback
+    // left them. Solo cannot change during a render, because this function
+    // holds the graph lock for all of it, so the only thing a ramp could do
+    // here is put a five millisecond fade on the front of the bounce: engage
+    // a solo and export at once and the material being held under it would
+    // fade out across the first few hundred samples of the file. A bounce has
+    // to be the same from its first sample to its last.
+    latchSoloRamps();
 
     struct RestoreCompensation
     {

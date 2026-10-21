@@ -674,6 +674,11 @@ private:
     /** Recomputes which inserts are audible. Must be called with graphLock
         held, which is why it has no lock of its own. */
     void updateSolo();
+
+    /** Puts every solo ramp where it is going, so nothing fades. For the
+        start of a render and for a device opening, where a ramp would be a
+        fade on the front of a file or of the first block. */
+    void latchSoloRamps();
     void processInsert (int index, int numSamples, PanLaw::Law law);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
@@ -750,6 +755,17 @@ private:
         Not default initialised, because the default for an atomic<float> is
         zero and zero here is silence. Set in the constructor. */
     std::array<std::atomic<float>, kNumInserts> soloGain;
+
+    /** Audio thread only: where each insert's solo gain has got to on its way
+        to the figure above. One press of solo moves up to fifteen of these at
+        once, and a gain that arrives in one sample is a click on every one of
+        them. Latched to the target rather than ramped at the start of a
+        render and when a device opens. */
+    std::array<float, kNumInserts> soloRamp = [] {
+        std::array<float, kNumInserts> a;
+        a.fill (1.0f);
+        return a;
+    }();
 
     // Published for the interface, which reads them without the graph lock
     // because that lock is held for the length of a bounce.

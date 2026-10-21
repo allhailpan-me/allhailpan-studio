@@ -68,10 +68,18 @@ struct PreferencesActions
         milliseconds, positive pulling recorded takes earlier. */
     std::function<void (double)> setRecordTrimMs;
 
-    /** How solo behaves: the gain a strip silenced by somebody else's solo
-        goes to, whether soloing one strip clears the others, and whether a
-        solo beats a mute on the same strip. All three are Ardour's, and all
-        three are application settings there too. */
+    /** How solo behaves, in the order the engine takes them: the gain a strip
+        silenced by somebody else's solo goes to, then whether a solo beats a
+        mute on the same strip, then whether soloing one strip clears the
+        others. All three are Ardour's, and all three are application settings
+        there too.
+
+        The order is written down because a std::function's parameters have no
+        names, so this comment is the only thing a second caller would have to
+        go on, and the two flags swapped is silent: exclusive solo would stop
+        clearing the other strips and a strip that is both muted and soloed
+        would become audible, with nothing erroring. An audit found this
+        comment listing them the other way round. */
     std::function<void (float, bool, bool)> setSoloSettings;
 
     /** How far ahead of its arrival a frame of a capture belongs, as the

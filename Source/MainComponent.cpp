@@ -1949,6 +1949,13 @@ void MainComponent::resized()
     // way the overflow clips the middle of the bar, which is recoverable by
     // widening the window, rather than destroying the buttons at the end.
     pluginsButton.setBounds (bar.removeFromRight (68)); bar.removeFromRight (6);
+    // In the right hand chain, which is laid out before the left one, so this
+    // cannot be the button that falls off the end of a bar too narrow for
+    // everything on it. An audit measured the bar as already over subscribed
+    // at the default window size before solo was added, which is in the
+    // backlog; what matters here is that the one control whose whole job is to
+    // be noticed is not the one that disappears.
+    soloAlertButton.setBounds (bar.removeFromRight (40)); bar.removeFromRight (10);
     audioButton  .setBounds (bar.removeFromRight (66)); bar.removeFromRight (14);
     redoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (4);
     undoButton   .setBounds (bar.removeFromRight (54)); bar.removeFromRight (10);
@@ -1964,8 +1971,7 @@ void MainComponent::resized()
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
     tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
-    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (4);
-    soloAlertButton.setBounds (bar.removeFromLeft (48)); bar.removeFromLeft (14);
+    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));
@@ -2841,8 +2847,8 @@ void MainComponent::exportAudio (bool stems)
         // rather than a citation, and what makes it safe either way is saying
         // so in words before the file is written. See Research/BACKLOG.md.
         self.setStatus (self.engine.isAnySoloed()
-                            ? juce::String ("Exporting with a solo still on, so only the soloed strips "
-                                            "are in the file...")
+                            ? juce::String ("Exporting with a solo still on, so the file has only what "
+                                            "the solo is letting through...")
                             : juce::String ("Exporting..."));
     });
 }
