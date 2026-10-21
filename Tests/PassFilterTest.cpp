@@ -1,5 +1,10 @@
-// Checks Fx/PassFilter.h and Fx/OnePole.h: the steep high pass and low pass
-// an equaliser needs, and the one pole section they are built on.
+// Checks Fx/PassFilter.h: the steep high pass and low pass an equaliser needs.
+//
+// The one pole section the odd orders are built on has its own file now,
+// OnePoleTest.cpp, which measures all five of its responses out of the
+// running section rather than off its two analytic curves. What is left here
+// about the section is kept because the cascade leans on it: the two passes
+// against their closed forms, the allpass, and the shelves.
 //
 // There is one claim and it is a closed form: a Butterworth filter of order N
 // has magnitude 1/sqrt(1 + r^2N) and is 3.0103 decibels down at its cutoff
@@ -96,7 +101,7 @@ void theOnePoleIsExact()
     low.set (Fx::OnePole::Type::lowpass, fc);
     high.set (Fx::OnePole::Type::highpass, fc);
 
-    double worstLow = 0.0, worstHigh = 0.0, worstSum = 0.0;
+    double worstLow = 0.0, worstHigh = 0.0;
 
     const double g = std::tan (pi * fc / rate);
 
@@ -113,24 +118,17 @@ void theOnePoleIsExact()
                               std::fabs (db (high.magnitudeAt (at))
                                            - db (std::abs (s / (1.0 + s)))));
 
-        // Complementary as complex numbers, which is the strict version: the
-        // two magnitudes adding to one would also be true of filters that are
-        // not a pair.
-        const std::complex<double> sum = 1.0 / (1.0 + s) + s / (1.0 + s);
-
-        worstSum = std::max (worstSum, std::abs (sum - 1.0));
+        // Whether the pair adds back up to the input is asked of the two
+        // running sections in OnePoleTest. It cannot be asked here: the two
+        // closed forms are 1/(1+s) and s/(1+s), and that they add to one is
+        // an identity in s which is true however either section behaves.
     }
 
-    std::printf ("    low pass off by %s dB, high pass off by %s dB,"
-                 " the pair sums to one within %s\n",
-                 show (worstLow).c_str(), show (worstHigh).c_str(),
-                 show (worstSum).c_str());
+    std::printf ("    low pass off by %s dB, high pass off by %s dB\n",
+                 show (worstLow).c_str(), show (worstHigh).c_str());
 
     if (worstLow > 1.0e-9 || worstHigh > 1.0e-9)
         fail ("the one pole is not its closed form");
-
-    if (worstSum > 1.0e-12)
-        fail ("the one pole pair is not complementary: off by " + show (worstSum));
 
     expectNear (db (low.magnitudeAt (fc)), -3.0103, 0.002,
                 "the one pole low pass is not three decibels down at its cutoff");
@@ -166,12 +164,14 @@ void theAllpassIsFlatAndTurnsHalfACycle()
 
     // Smith's AP1 is pi at DC, pi/2 at the corner and nothing at Nyquist. The
     // other sign convention is also an allpass and puts a phaser's notches
-    // somewhere else, so the direction is asserted rather than the amount.
-    expectNear (std::fabs (all.phaseAt (0.0)), pi, 1.0e-9,
+    // somewhere else, so these are signed. They used to take the modulus,
+    // which is exactly the direction being thrown away: negating the whole of
+    // phaseAt passed. OnePoleTest measures the same thing off the output.
+    expectNear (all.phaseAt (0.0), pi, 1.0e-9,
                 "the allpass does not invert at DC");
-    expectNear (std::fabs (all.phaseAt (fc)), pi * 0.5, 1.0e-6,
-                "the allpass is not a quarter cycle at its corner");
-    expectNear (std::fabs (all.phaseAt (rate * 0.4999)), 0.0, 1.0e-3,
+    expectNear (all.phaseAt (fc), pi * 0.5, 1.0e-6,
+                "the allpass is not a positive quarter cycle at its corner");
+    expectNear (all.phaseAt (rate * 0.4999), 0.0, 1.0e-3,
                 "the allpass does not come back to nothing at Nyquist");
 }
 

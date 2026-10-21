@@ -1039,6 +1039,68 @@ void nonsenseStaysFinite()
 
                         return;
                     }
+
+                    // The corner of a pass is three decibels down, whatever
+                    // was asked for, and this is what says the degenerate
+                    // branch at the top of `magnitudeAt` is never taken: that
+                    // branch returns exactly one, and one is not three
+                    // decibels down. So the branch is a backstop against a
+                    // coefficient outside nought to one, and no setting of
+                    // any of these three arguments produces one.
+                    //
+                    // Worked out here rather than read back, because the
+                    // whole question is whether the clamping inside arrives
+                    // at a corner that is usable: the floor first, then the
+                    // ceiling, against the rate the filter settled on.
+                    const double on = filter.getSampleRate();
+                    const double corner = std::fmin (std::fmax (hz, 1.0),
+                                                     0.49 * on);
+
+                    if (type == Fx::OnePole::Type::lowpass
+                         || type == Fx::OnePole::Type::highpass)
+                    {
+                        expectNear (db (filter.magnitudeAt (corner)), -3.0103,
+                                    0.002, what + ": the corner is not three"
+                                                  " decibels down");
+
+                        // And it goes the right way from there. Not strictly:
+                        // a corner at the one hertz floor against a rate of
+                        // a gigahertz puts the far end of the band within
+                        // 5e-13 of unity, which is the same double.
+                        const bool rising = type == Fx::OnePole::Type::highpass;
+                        double previous = rising ? -1.0 : 2.0;
+
+                        for (double part : { 0.001, 0.01, 0.1, 0.3, 0.49 })
+                        {
+                            const double now = filter.magnitudeAt (part * on);
+
+                            if (rising ? now < previous : now > previous)
+                            {
+                                fail (what + ": the curve turns back on itself,"
+                                             " " + show (now) + " at "
+                                           + show (part) + " of the rate"
+                                             " against " + show (previous)
+                                           + " below it");
+
+                                return;
+                            }
+
+                            previous = now;
+                        }
+                    }
+
+                    // And an allpass is flat at every setting, which is the
+                    // one thing it must never stop being.
+                    if (type == Fx::OnePole::Type::allpass)
+                        for (double part : { 0.001, 0.05, 0.25, 0.49 })
+                            if (std::fabs (filter.magnitudeAt (part * on) - 1.0)
+                                  > 1.0e-15)
+                            {
+                                fail (what + ": the allpass is not flat at "
+                                           + show (part) + " of the rate");
+
+                                return;
+                            }
                 }
             }
         }

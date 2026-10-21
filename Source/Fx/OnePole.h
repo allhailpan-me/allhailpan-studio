@@ -1,5 +1,4 @@
 #pragma once
-#include <algorithm>
 #include <cmath>
 
 //==============================================================================
@@ -124,12 +123,32 @@ public:
         disagree. */
     double magnitudeAt (double hz) const noexcept
     {
+        // A backstop that nothing reaches, kept because it costs a compare
+        // and the alternative is a division by zero on a curve. The corner is
+        // floored at one hertz and then held under 0.49 of the rate, so the
+        // tangent is strictly positive and finite and `c` is strictly between
+        // nought and one at every setting of all three arguments. Removing
+        // this changes no measurement, and `OnePoleTest` says why rather than
+        // leaving it to be rediscovered: it asserts the corner is three
+        // decibels down whatever nonsense it was given, and three decibels
+        // down is not the flat one this branch would return.
+        //
+        // It was reachable until the coefficients were built in the
+        // constructor. An unconfigured section had `c` at zero, so this
+        // returned unity while `process` returned silence.
         if (! (c > 0.0) || ! (c < 1.0))
             return 1.0;
 
         // c = G/(1+G), so G comes back out as c/(1-c).
         const double G = c / (1.0 - c);
 
+        // A negative frequency is not a request either of these two can
+        // answer: a magnitude is even in it and a phase is odd, so folding to
+        // DC and reflecting are both defensible and neither is the thing a
+        // curve is for. So nothing asserts which of them happens here, and
+        // dropping the fold is a no-op that `OnePoleTest` deliberately does
+        // not fail. What it does assert is that the answer stays finite and
+        // the magnitude stays positive.
         const double highest = sampleRate * 0.4999;
         const double at = hz < 0.0 ? 0.0 : (hz > highest ? highest : hz);
 
