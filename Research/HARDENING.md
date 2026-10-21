@@ -7,6 +7,59 @@ Newest first.
 
 ---
 
+## 2026-10-21: the one pole section (in progress)
+
+### What is being looked at
+
+`Source/Fx/OnePole.h`, 203 lines, no JUCE. It has no test file of its own:
+its header claims at line 44 to be "Verified in `OnePoleTest`", and no
+`OnePoleTest.cpp` exists. What coverage it has is three functions inside
+`Tests/PassFilterTest.cpp`, which is a test of the cascade that is built on
+it.
+
+It is worth a night because of what sits on it. `Fx/PassFilter.h` uses it for
+every odd order, so a six decibel per octave high pass, which the header calls
+the single most used filter in a mix, is this header and nothing else. The
+header also names the phaser and the gentle shelves as the other two jobs only
+it can do.
+
+### First result: the gap is phase, and the clamps
+
+Eighteen deliberate breakages run against the existing suite so far. The
+recursion in `process` is covered: all eight breakages of the state update and
+the output mixing are caught, through the order one path in
+`runningItMatchesTheCurve`. The coefficient algebra is covered too, by the
+magnitude checks.
+
+What is not covered:
+
+- **The direction of the phase.** The existing check says in its own comment
+  that "the direction is asserted rather than the amount", and then asserts
+  `std::fabs (all.phaseAt (...))` against pi, pi/2 and zero. Taking the
+  modulus is exactly what throws the direction away. Negating the whole of
+  `phaseAt` survives, and the header says the other sign "is also an allpass
+  and it puts the notches somewhere else", which is the thing a phaser is
+  built out of.
+- **`phaseAt` against anything running.** `magnitudeAt` carries a comment
+  saying a curve drawn from a second copy of the algebra is a second copy that
+  can disagree, and `magnitudeAt` is checked against the running filter.
+  `phaseAt` is a second copy that nothing has ever compared against a sample.
+- **Every clamp and guard in the header.** Seven breakages, all survivors: the
+  frequency ceiling at 0.49 of the rate moved to Nyquist and to 0.40, the one
+  hertz floor dropped to zero, the gain clamp removed, the sample rate
+  fallback removed, the degenerate guard in `magnitudeAt` removed, and
+  negative frequencies no longer folded to zero. None is reachable through
+  `PassFilter`, which clamps before it, and nothing drives `OnePole` directly.
+- **The allpass and the two shelves never go through `process` at all.** Only
+  the low pass and the high pass do, and only at one sample rate.
+
+### Still to do
+
+Write `Tests/OnePoleTest.cpp`, which makes the header's claim true as well as
+covering the above. Then mutation test it properly.
+
+---
+
 ## 2026-10-14: the oversampler, at every sample rate a device can open at
 
 ### What was looked at
