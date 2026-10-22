@@ -22,6 +22,16 @@
 //     uniform, so the moments still flatten, and half an LSB of DC goes into
 //     the file underneath them. This is not hypothetical: it is what JUCE's
 //     own float writer does, and it is why the quantiser is in Dither.h.
+//   * lrint in place of floor(x + 1/2), which reads as a simplification and
+//     ties to even rather than up, following a floating point rounding mode
+//     nothing here sets. The same mix then exports differently on different
+//     platforms, and at 24 bit, which is never dithered, there is no draw to
+//     carry the decision off the tie.
+//   * The clamp applied after the conversion to int rather than before it.
+//     Every code stays in range and every enormous positive sample comes out
+//     at the bottom rail, because the conversion itself is undefined that far
+//     out. GCC's -fsanitize=undefined does not include float-cast-overflow,
+//     so nothing raises: only asserting which rail can see it.
 //
 // So the properties below are the theory's, measured, and not the header's
 // formulas restated. The figures come from Lipshitz, Wannamaker and
@@ -120,6 +130,24 @@ int main()
     // The depth and mode tables, and the policy over them
     // =====================================================================
 
+    // The two defaults, pinned, because they are decisions with consequences
+    // rather than arbitrary starting points and because every other check in
+    // this section is blind to them: the out of range checks below compare
+    // what an unrecognised id gives against the default, which is satisfied
+    // whatever the default is.
+    //
+    // 24 bit is what every export before this feature existed was written at,
+    // and `Prefs::exportBitDepth` derives its own stored default from this
+    // one, so moving it would quietly change what a project that has never
+    // touched the setting writes. Triangular, because the policy below turns
+    // dither off everywhere it would be wrong anyway, so the only thing a
+    // default of none could do is leave a 16 bit master undithered with
+    // nothing to say so.
+    checkExact ((double) (int) defaultDepth, (double) (int) Depth::int24,
+                "the default export depth should be 24 bit");
+    checkExact ((double) (int) defaultMode, (double) (int) Mode::triangular,
+                "the default dither should be triangular");
+
     // A stored id nobody recognises has to land on the default rather than
     // past the end of the list. It is the same discipline Prefs::choiceId
     // exists for, and the reason is the same: these come out of a settings
@@ -146,7 +174,15 @@ int main()
 
     for (auto d : depths)
     {
+        // The name is what the preferences menu shows and what the export's
+        // own report says it wrote, so a swapped pair is a studio telling
+        // somebody it wrote a 24 bit file when it wrote a 16 bit one.
+        // Asserted as a property rather than against the strings: a name has
+        // to carry its own word length, which no other entry's does.
         check (name (d) != nullptr && name (d)[0] != '\0', "a depth with no name");
+
+        check (std::string (name (d)).find (std::to_string (bitsFor (d))) != std::string::npos,
+               std::string ("a depth's name should say its word length: ") + name (d));
 
         // The policy, asserted as a property rather than as the expression
         // that implements it: only a reduction to 16 bit is dithered. A
@@ -160,6 +196,47 @@ int main()
         // somebody would notice least.
         checkExact ((double) (int) modeFor (d, Mode::none), (double) (int) Mode::none,
                     std::string ("asking for no dither should give none at ") + name (d));
+    }
+
+    // The dither mode's name has to identify the mode for the same reason,
+    // and distinctness is not enough on its own: a swapped pair is still two
+    // different strings. So the dithered one names the density it is and the
+    // undithered one does not.
+    check (std::string (name (Mode::triangular)).find ("triangular") != std::string::npos,
+           std::string ("the dithered mode should name its density: ") + name (Mode::triangular));
+    check (std::string (name (Mode::none)).find ("triangular") == std::string::npos,
+           std::string ("the undithered mode should not name a density: ") + name (Mode::none));
+
+    // Every entry the enum has must be reachable from some stored id, which
+    // is a different claim from the round trips above and from the out of
+    // range checks, because both of those are bounded by the counts
+    // themselves and so cannot see a count that is one short.
+    //
+    // The counts are also what builds the menu: PreferencesWindow fills its
+    // two boxes with depthAt (i) and modeFromStored (i) for i below them. A
+    // count one short therefore drops an entry from the menu and turns the
+    // setting it had saved into the default on the next launch, with nothing
+    // anywhere to say that the choice has gone.
+    for (auto d : depths)
+    {
+        bool reachable = false;
+
+        for (int i = 0; i < numDepths; ++i)
+            if (depthAt (i) == d)
+                reachable = true;
+
+        check (reachable, std::string ("no stored id reaches ") + name (d));
+    }
+
+    for (auto m : { Mode::none, Mode::triangular })
+    {
+        bool reachable = false;
+
+        for (int i = 0; i < numModes; ++i)
+            if (modeFromStored (i) == m)
+                reachable = true;
+
+        check (reachable, std::string ("no stored id reaches ") + name (m));
     }
 
     checkExact ((double) bitsFor (Depth::int16),   16.0, "16 bit should be 16 bits");
@@ -355,6 +432,47 @@ int main()
         check (worstAbsError <= 0.5 + 1.0e-9,
                "an undithered error should never exceed half a step: worst was "
                    + std::to_string (worstAbsError));
+    }
+
+    // =====================================================================
+    // An exact tie rounds up
+    // =====================================================================
+    //
+    // Mid tread round to nearest leaves exactly one case to decide, and
+    // Dither.h decides it: floor(x + 1/2) sends a sample sitting exactly half
+    // a step between two codes to the upper one. The two alternatives that
+    // read as simplifications, lrint and nearbyint, follow the current
+    // floating point rounding mode, which ties to even by default, so the
+    // same mix would export differently on a platform or inside a host that
+    // had set that mode to anything else. Nothing in this studio sets it,
+    // which is exactly why nothing would notice.
+    //
+    // Not a curiosity of measure zero either. A tie needs the scaled sample
+    // to land on a half, which is any float that is an odd multiple of half a
+    // step: 2^-16 at 16 bit and 2^-24 at 24 bit, both exactly representable
+    // and both ordinary numbers for a quiet tail to pass through. And 24 bit
+    // is never dithered, so there is no draw to carry the decision off the
+    // tie and the whole file is written this way.
+    //
+    // Both signs and both parities of the code, because ties to even agrees
+    // with ties up on half of them, and which half depends on the sign.
+    {
+        for (auto d : { Depth::int16, Depth::int24 })
+        {
+            Quantiser q (d, Mode::none, 0ull);
+            const double scale = scaleFor (d);
+
+            for (int code : { -4, -3, -2, -1, 0, 1, 2, 3 })
+            {
+                // An odd numerator over twice the scale, so the float is
+                // exact and the scaled double is exactly a half.
+                const float sample = (float) (((double) code + 0.5) / scale);
+
+                checkExact ((double) q.code (sample), (double) (code + 1),
+                            std::string ("a sample exactly half a step above code ")
+                                + std::to_string (code) + " should round up at " + name (d));
+            }
+        }
     }
 
     // =====================================================================
@@ -895,15 +1013,33 @@ int main()
         // lands exactly on the rail rather than somewhere near it or wrapped
         // round to the other one. A wrapped code is not a loud sample, it is
         // full scale noise of the opposite sign.
+        //
+        // Carried out to the largest float there is, and at both depths,
+        // because the thing that is not enough here is checking that the code
+        // stayed in range. Clamping after the conversion to int rather than
+        // before it reads as the tidier line and is the mistake the comment
+        // in Dither.h is about: every code stays in range, and every large
+        // positive sample lands on the bottom rail, because the conversion
+        // itself is undefined past about 2^31 and gives the most negative
+        // integer in practice, which the clamp then passes through as being
+        // perfectly in bounds. Nothing raises, either: GCC's
+        // -fsanitize=undefined does not include float-cast-overflow. The only
+        // check that can see it is one that says which rail.
         {
-            Quantiser q (Depth::int16, Mode::none, 0ull);
-
-            for (float over : { 1.0001f, 1.5f, 2.0f, 1000.0f })
+            for (auto d : { Depth::int16, Depth::int24 })
             {
-                checkExact ((double) q.code (over), (double) highestCode (Depth::int16),
-                            "a sample above full scale should clamp to the highest code");
-                checkExact ((double) q.code (-over), (double) lowestCode (Depth::int16),
-                            "a sample below full scale should clamp to the lowest code");
+                Quantiser q (d, Mode::none, 0ull);
+
+                for (float over : { 1.0001f, 1.5f, 2.0f, 1000.0f, 1.0e20f, 1.0e30f,
+                                    std::numeric_limits<float>::max() })
+                {
+                    checkExact ((double) q.code (over), (double) highestCode (d),
+                                std::string ("a sample above full scale should clamp to the highest "
+                                             "code at ") + name (d) + ": " + std::to_string (over));
+                    checkExact ((double) q.code (-over), (double) lowestCode (d),
+                                std::string ("a sample below full scale should clamp to the lowest "
+                                             "code at ") + name (d) + ": " + std::to_string (over));
+                }
             }
         }
 
