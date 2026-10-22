@@ -7,6 +7,20 @@ Newest first.
 
 ---
 
+## 2026-10-22: the state variable filter (in progress)
+
+Auditing `Source/Fx/Svf.h`, the two pole state variable filter every effect in
+the studio is built on, picked up from where the night of 2026-10-21 left it:
+that night fixed two faults in `Fx/OnePole.h` and recorded that `Svf.h` "has
+the identical shape" and "wants its own night rather than being dragged into
+this one".
+
+Both faults are confirmed present. Still to do: establish reachability through
+each of the five things that hold an `Svf`, fix, strengthen
+`Tests/SvfTest.cpp`, and mutation test.
+
+---
+
 ## 2026-10-21: the one pole section
 
 ### What was looked at
