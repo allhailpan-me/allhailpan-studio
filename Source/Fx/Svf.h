@@ -64,6 +64,39 @@
     the one asked for, which is the kind of wrong nobody hears until they
     compare against another studio.
 
+    Five things in here are deliberately unfailable, and they are written down
+    so nobody goes looking for the test that should have caught them. Each
+    one was broken on purpose and the suite could not see it, and in each
+    case that is the right answer rather than a gap:
+
+    - **The degenerate guard at the top of `magnitudeAt`.** It is a backstop
+      nothing reaches. With the corner floored at one hertz and then held
+      under 0.49 of a finite rate, `g` is strictly positive and finite, so
+      `a1` and `a2` are too, at every setting of all four arguments. That is
+      an argument, so `SvfTest` turns it into a reading: it asserts all three
+      `a` coefficients are strictly positive over eleven and a half thousand
+      settings, the nonsense ones included. The branch was reachable before
+      the constructor existed, by a filter nobody had configured.
+    - **Recovering `g` from `a2 / a1` rather than `a3 / a2`.** Both are `g`:
+      `a2` is `g` times `a1` and `a3` is `g` times `a2`, so either ratio
+      gives it back, and the two agree to rounding.
+    - **The curve's own ceiling taken at Nyquist rather than at 0.4999 of
+      the rate.** Every response tends to `m0` as the prewarped frequency
+      runs away, and both ceilings land on that asymptote to within absolute
+      rounding, so the answer does not move by anything a tolerance can
+      read. It stays because the square of the tangent is what the
+      denominator carries, and that overflows once the corner's own tangent
+      falls below about 1e-138, which needs a sample rate of the same order.
+    - **The first clamp on the frequency `magnitudeAt` is asked about.** The
+      `fmin` below it already holds the top end, and a magnitude is even in
+      the prewarped frequency, so folding a negative one to DC and
+      reflecting it give the same number. Dead either way.
+    - **The upper bound on Q.** It is a musical bound and says so: a
+      positive `g` and a positive `k` are stable at any Q, so a Q of a
+      billion is narrower than any ear or any room can use and perfectly
+      well behaved. The lower bound is not like this and is load bearing: a
+      Q of nothing makes `k` infinite, which takes `a1` to zero.
+
     No JUCE, so the tests can reach it.
 */
 namespace Fx

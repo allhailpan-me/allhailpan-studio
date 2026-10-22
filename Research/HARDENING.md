@@ -7,227 +7,260 @@ Newest first.
 
 ---
 
-## 2026-10-22: the state variable filter (in progress)
-
-Auditing `Source/Fx/Svf.h`, the two pole state variable filter every effect in
-the studio is built on, picked up from where the night of 2026-10-21 left it:
-that night fixed two faults in `Fx/OnePole.h` and recorded that `Svf.h` "has
-the identical shape" and "wants its own night rather than being dragged into
-this one".
-
-Both faults are confirmed present. Still to do: establish reachability through
-each of the five things that hold an `Svf`, fix, strengthen
-`Tests/SvfTest.cpp`, and mutation test.
-
----
-
-## 2026-10-21: the one pole section
+## 2026-10-22: the state variable filter
 
 ### What was looked at
 
-`Source/Fx/OnePole.h`, 203 lines, no JUCE. It was chosen for the oldest reason
-in this file: the header claimed at line 44 to be "Verified in `OnePoleTest`",
-and no `OnePoleTest.cpp` existed. What covered it was three functions inside
-`Tests/PassFilterTest.cpp`, which is a test of the cascade built on top of it.
+`Source/Fx/Svf.h`, 342 lines, no JUCE: the two pole state variable filter
+every effect in the studio is built on, and the thing `PassFilter`,
+`BellMatch`, `LowPassGate` and the instrument's voice all run through. It was
+not chosen for having no test. It had `Tests/SvfTest.cpp`, 1083 lines, and a
+good one. It was chosen because the night of 2026-10-21 fixed two faults in
+`Fx/OnePole.h` and recorded that this file "has the identical shape", in the
+same two places, and "wants its own night rather than being dragged into this
+one". Both were still there.
 
-What sits on it is the reason it was worth a night. `Fx/PassFilter.h` uses it
-for every odd order, so a six decibel per octave high pass, which its own
-header calls the single most used filter in a mix, is this section and nothing
-else. The header names the phaser's first order allpass and the gentle shelves
-as the other two jobs only it can do.
+### Two faults, the same two, and the bigger one is a blast of noise
 
-### One real fault, and it is a blast of noise
+**1. A corner set at one sample rate and then read at a lower one puts the
+poles outside the unit circle.**
 
-**A corner set at one sample rate and then read at a lower one puts the pole
-outside the unit circle, and the section runs away to infinity.**
+`set` clamped the cutoff against `sampleRate * 0.49` using the rate as it
+stood at that moment, and stored the clamped value. `setSampleRate` then
+changed the rate and called `update()`, which read that stored frequency
+against the new one. Past the new Nyquist the prewarping tangent is negative,
+`g` comes out negative with it, and the section doubles its own output.
 
-The corner was clamped against Nyquist once, in `set`, using the sample rate as
-it was at that moment. The rate outlives that call. Handed a corner near the
-top of a 192 kHz band and then told the rate is now 48 kHz, the section kept a
-corner past the new Nyquist, and the tangent of a frequency past Nyquist is
-negative: `c` came out negative with it and the pole landed at 1 - 2c, outside
-the circle.
+Measured across every one of the eleven response types and eight pairs of
+rates: a non-finite output in 2001 samples going from 192 kHz to 48 kHz, 807
+samples from 96 kHz to 8 kHz, 3370 at the slowest. Forty milliseconds at the
+fast end. Not a drift, and nothing reports it: the driver change that caused
+it was minutes earlier and the symptom is in the mixer.
 
-Measured, every one of the five responses reaches a non-finite output inside
-400000 samples, at every pair of rates tried: from 96 or 192 kHz down to 8,
-22.05, 44.1 or 48. It is not a drift. It is a few seconds of doubling, and
-then the output is whatever infinity sounds like through a converter.
+Worth recording that the quiet cases are wrong too. 96 kHz down to 44.1 kHz
+stays stable, because the stale corner lands on a part of the tangent that
+happens to be positive, and what it gives is a 46 kHz corner read as about a
+kilohertz. A stable filter at entirely the wrong frequency, which is the
+version of this somebody would file as "the EQ sounds different today".
 
-Nothing reports it, which is the shape this file keeps recording. The driver
-change that caused it was minutes earlier, and the symptom is in the mixer.
+**Fixed** by clamping in `update()`, on the way to the coefficient, so the
+ceiling is measured against whatever the rate is by then and `frequency`
+keeps what was asked for. The floor is applied first and the ceiling last,
+which also fixed the ordering fault sitting next to it, exactly as in
+`OnePole`: as one expression, a sample rate below about two hertz left the
+one hertz floor above its own ceiling.
 
-Not reachable today. The only thing using `OnePole` is `PassFilter`, which
-re-sets its sections from the frequency it was asked for whenever the rate
-moves, so the stale corner never survives. It is reachable by anything that
-holds a section and is told the rate has changed, which is exactly what the
-header says the phaser and the shelves are going to do.
+**2. An unconfigured section gave two different wrong answers, and neither
+was the filter its own members describe.** Every `a` started at zero, so
+`process` returned silence for ever, while `magnitudeAt` saw a zero `a2`,
+took its degenerate branch and reported unity at every frequency. The members
+said a one kilohertz lowpass at 44.1 kHz.
 
-**Fixed** by clamping on the way to the coefficient, in `update()`, rather than
-once in `set`. `frequency` now keeps what was asked for and the ceiling is
-applied against whatever the rate is by then. That also fixed an ordering
-fault that was sitting next to it: the one hertz floor and the ceiling were
-applied as one expression, so below about two hertz of sample rate the floor
-was itself above the ceiling. The floor is applied first now and the ceiling
-last.
-
-**`Svf.h` has the identical shape**: the same clamp, in the same place, with
-the same `setSampleRate` that calls `update()` without re-reading it. It is
-not reachable there either, because `LowPassGate` and `Voice` both re-set the
-cutoff on every block, but it is the same latent fault in a file that far more
-of the studio runs through. It wants its own night rather than being dragged
-into this one.
-
-### One more fault, smaller and of the same family
-
-**An unconfigured section gave two different wrong answers.** `c` started at
-zero, so `process` returned silence for ever while `magnitudeAt` took its
-degenerate branch and reported unity. The members said a one kilohertz low
-pass at 44.1 kHz and neither answer was that, and the two did not agree with
-each other.
+The pairing is the worst possible one. An equaliser drawing its curve before
+anybody had touched a band would have drawn a flat line through unity, which
+is exactly what a bypassed band should look like, while the same band in the
+signal path deleted everything through it. Correct on screen and silent in
+the audio.
 
 **Fixed** by building the coefficients in a constructor. The useful
-consequence is that `c` is now strictly between nought and one at every
-setting of all three arguments, which makes the degenerate branch in
-`magnitudeAt` genuinely unreachable rather than nearly so. See the survivors
-below.
+consequence is the same one that night found: `a1` and `a2` are now non-zero
+at every reachable setting, which makes the degenerate branch a backstop
+rather than a state the studio can be in. `setSampleRate` also now requires
+a finite rate as well as a positive one, because infinity passes a bare
+`> 0.0` and is the one value that makes the prewarping tangent exactly zero.
 
-### What the old coverage was missing
+### Reachability: neither one, today, and the third is an accident
 
-It caught more than it looked like it would: every breakage of the recursion
-in `process` is caught, through the order one path in
-`runningItMatchesTheCurve`, and the coefficient algebra is caught by the
-magnitude checks. Three things were not covered at all.
+Both are latent. Said plainly because the honest answer matters more than a
+dramatic one.
 
-**The direction of the phase.** The existing check said in its own comment
-that "the direction is asserted rather than the amount", and then asserted
-`std::fabs (all.phaseAt (...))` against pi, pi/2 and zero. Taking the modulus
-is precisely the direction being thrown away. Negating the whole of `phaseAt`
-passed, and the header says the other sign "is also an allpass and it puts the
-notches somewhere else".
+- **`LowPassGate`** calls `filter.set` every sample inside `process`, so it
+  cannot hold a stale corner.
+- **`PassFilter::setSampleRate`** passes the rate down and then calls its own
+  `update()`, which re-sets every section from the frequency it was asked
+  for. It keeps the raw frequency, so this is correct.
+- **`Voice`** escapes by an accident of ordering in a different file, and
+  this is the one worth writing down. It guards `filter.set` on the modulated
+  cutoff or Q having actually moved, which is a performance guard
+  `CLAUDE.md` describes and defends. `Voice::setSampleRate` does not forget
+  that guard. So after a rate change the stale coefficients would stay for
+  the life of a held note, and the only reason they do not is that
+  `PanOne::prepareToPlay` happens to follow `setSampleRate` with `setPatch`,
+  which ends in `retune()`, which forgets it. Nothing anywhere says that
+  `Voice::setSampleRate` leaves the filter needing repair, and the clamp
+  does bind there in ordinary use: the voice's filter runs at four times the
+  rate and its cutoff is `patch.cutoff * 2^octaves`, so a 20 kHz cutoff with
+  the default half keytracking on a high note asks for 138 kHz, which the
+  ceiling catches at 48 kHz base.
+- **`BellMatch`** and **`PanOneParams`** hold no `Svf` at all. The second
+  only converts the type enum, and `toEnum (v, 10)` against a ten entry
+  choice list is correct and deliberate: the matched bell is an equaliser
+  band and is not offered as a voice filter.
 
-**`phaseAt` against anything that runs.** `magnitudeAt` carries a comment
-about a curve drawn from a second copy of the algebra being a second copy that
-can disagree, and `magnitudeAt` was checked against the running filter.
-`phaseAt` was a second copy that nothing had ever compared against a sample.
-The sharpest demonstration: building the high pass inverted, `m0 = -1` and
-`m1 = 1`, leaves every magnitude in the file identical to the last bit and
-turns the phase by half a cycle. It passes the old coverage completely. In a
-mix that is a six decibel per octave high pass that flips the polarity of
-whatever goes through it, which cancels against any parallel path.
+### What the old test was missing, and why
 
-**Every clamp and guard in the header.** All seven could be removed without a
-single check noticing, because none of them is reachable through `PassFilter`,
-which clamps before it, and nothing else drove the section directly.
+It was a good test and the gap was structural rather than careless.
 
-**The complementary check was a tautology.** It computed
-`1/(1+s) + s/(1+s)` and compared it against one. That is an identity in `s`
-and is true however either section behaves; neither filter appeared in it.
+**Every check set the sample rate first and the frequency second.** That is
+the order a test naturally writes, and the order the file's own `make()`
+helper hard codes. Nothing in 1083 lines ever moved the rate afterwards, so
+fault 1 was not merely unchecked, it was unreachable by the shape of the
+harness.
+
+**Nothing ever looked at a filter that had not been handed a rate and a
+setting first**, so fault 2 was invisible for the same kind of reason.
+
+**`isMatched` was never called, and `bellMatched` appeared once** in the
+whole file, inside the curve check. The one response with a second design
+behind it was also the one whose neutral setting nothing checked.
+
+**The curve check stopped at 0.45 of the rate.** The top twentieth of the
+band was never compared against the real response, which is precisely where
+a bell's skirt is crushed and where the matched design exists to do something
+about it.
+
+**Every clamp in the file could be removed without a single check
+noticing**, and two of them are load bearing rather than decorative. See the
+mutation results.
 
 ### What is now checked
 
-`Tests/OnePoleTest.cpp`, 1100 lines. Every check drives the running section
-and reads the complex gain back out of its output, which is the only way to
-say anything about `phaseAt` at all.
+`Tests/SvfTest.cpp`, 1083 lines to 1338, with the pole modulus factored out
+and shared rather than written twice.
 
-- **All five responses against the specification each one is named by**, in
-  phase as well as magnitude, over 240 randomised settings at four sample
-  rates: 2880 readings, worst off by 2.9e-14 of its own size and 2.2e-14
-  radians. The closed forms are written from the specification rather than
-  from `update()`: a one pole shelf is `(A + jw)/(1 + jw)` with its half gain
-  point at the corner, which is what fixes the prewarping, both output
-  coefficients and the recursion together.
-- **Both drawn curves against the same measurement**: 2.5e-14 dB and 1.2e-14
-  radians.
-- **The allpass turns the phase positive and falling**, measured off the
-  output: half a cycle at the bottom, a quarter at the corner, nothing at the
-  top, with the direction asserted rather than its modulus.
-- **The two pole prewarping has a signature.** Dividing by the fourth root of
-  the gain rather than the square root is the obvious thing to write, because
-  it is what every two pole shelf in the project does, and it leaves the
-  shelf a shelf with the right two ends. All that moves is the corner, which
-  is the number on the control: at eighteen decibels of boost it reads
-  12.371 dB where it should read 9.
-- **The pair adds back up to the input on the running sections**, to 1.1e-16.
-- **Sweeping the corner under a steady signal does not move the output**, by
-  1.8e-15 of its own level across the whole band in both directions. That is
-  the whole of the topology preserving claim: the state of a trapezoidal
-  integrator is the integrator's own output and does not depend on the
-  coefficient, so with the input held still the corner can be put anywhere
-  without a click.
-- **Every setting is stable**, read as the envelope of an impulse response
-  shrinking from one window of 20000 samples to the next. A ratio rather than
-  a floor at some sample number, because a corner of one hertz at 192 kHz is
-  perfectly stable and still a thirtieth of its peak after a third of a
-  million samples, while a corner left at Nyquist rings at exactly constant
-  amplitude for ever and only a ratio sees that. Includes the rate change that
-  found the fault above.
-- **The corner is three decibels down where it was asked for**, from one hertz
-  to 0.489 of the rate, within 4.3e-8 dB, and clamped rather than honoured
-  past the ceiling.
-- **An unconfigured section is the filter its own defaults describe**, both
-  drawn and run, to zero.
-- **Nonsense in the rate, the corner and the gain at every type** stays
-  finite and bounded, the corner stays three decibels down, the curve does not
-  turn back on itself, and an allpass stays flat.
-
-It runs in 2.3 seconds with the sanitizers on.
+- **A filter told the rate has changed is indistinguishable from one built at
+  that rate in the first place.** Bit for bit, over 2772 settings: all eleven
+  responses, 36 pairs of rates from 8 to 192 kHz, and seven fractions of the
+  first rate's band including past its own ceiling. No reference arithmetic
+  and no setting at which it may be approximately true. The pole modulus is
+  read off the state transition matrix beside it, because an equality between
+  two filters would hold just as well if both were unstable, and the output
+  is run for 250000 samples at the rate pairs that used to run away, which is
+  more than twenty times the slowest old failure.
+- **A corner above the ceiling is the corner at the ceiling, exactly**, at
+  four rates and five Q values. This is the one that catches the clamp being
+  applied to the coefficients but not to the matched bell's design, which has
+  a seam in it: `bellIsMatchable`'s boundary rises with Q and crosses the
+  ceiling around a Q of ninety, so above that a band asked for a cutoff past
+  the ceiling is feasible at the ceiling and infeasible at the frequency
+  asked for, and designed from the wrong one it drops silently to the
+  conventional bell. Only visible at a high Q.
+- **An unconfigured filter is the lowpass its members describe**, in both
+  answers. The agreement is asserted against the running filter rather than
+  between the two formulas, because silence from `process` and unity from
+  `magnitudeAt` are each perfectly self consistent. A step settles at unity,
+  it is three decibels down at a kilohertz, it passes nothing at Nyquist and
+  it falls like two poles.
+- **`isMatched` tells the truth**: never true where `BellMatch`'s own
+  feasibility predicate says there is no design, always true where there is
+  one and a gain to correct, false for every other type even after a matched
+  bell was set on the same object, and where it falls back the coefficients
+  are the plain bell's to the last bit. 1868 settings matched and 607 fell
+  back.
+- **A matched bell of no gain is a wire**, bit for bit on 2000 random samples
+  and unity on the drawn curve. `neutralAtZeroGain` never reached this type.
+- **Nonsense in the rate, the corner, the Q and the gain still leaves a
+  filter that runs**, over 11550 settings, and the invariant the header rests
+  its stability argument on is asserted directly: `a1`, `a2` and `a3` all
+  strictly positive, which is `g` strictly positive and finite said in terms
+  of what the filter holds. That is a far sharper instrument than waiting for
+  an output to stop being finite, because a corner that has come out a hair
+  negative gives a pole modulus of 1.0000000000000002, which runs away in
+  seconds and passes any tolerance anybody would write around one. Finite
+  nonsense plus infinity, no NaN: the line is where a value is still well
+  defined, and neither this header nor `OnePole.h` claims to repair a
+  not-a-number from outside.
+- **The curve now runs to 0.4998 of the rate** rather than 0.45.
 
 ### Mutation testing
 
-Forty eight deliberate breakages of `Source/Fx/OnePole.h`, each compiled with
+Fifty seven deliberate breakages of `Source/Fx/Svf.h`, each compiled with
 `-fsanitize=address,undefined -fno-sanitize-recover=undefined` exactly as
-`Tests/run.sh` has them. **Forty five were caught.** All three survivors are
-genuine no-ops rather than gaps, and all three are now written down in the
+`Tests/run.sh` has them. Against the test as it was found, 45 were caught.
+Against the test as it now stands, **52 were caught**. All five survivors are
+genuine no-ops rather than gaps, and all five are now written down in the
 header.
 
-- **The degenerate guard at the top of `magnitudeAt` removed.** It is a
-  backstop that nothing reaches. With the corner floored at one hertz and then
-  held under 0.49 of the rate, the tangent is strictly positive and finite and
-  `c` is strictly between nought and one at every setting, so the branch never
-  fires and removing it changes no measurement. That is an argument, so the
-  test turns it into a reading: it asserts the corner is three decibels down
-  whatever nonsense it was given, at every type and every rate, and three
-  decibels down is not the flat unity this branch returns. The branch was
-  reachable before this night, by an unconfigured section, and the constructor
-  closed that.
-- **A negative frequency no longer folded to DC, in `magnitudeAt`**, and
-  **the same in `phaseAt`**. A negative frequency is not a request either can
-  answer: a magnitude is even in it and a phase is odd, so folding to DC and
-  reflecting are both defensible and neither is what a curve is for. Nothing
-  asserts which happens, deliberately. What the test does assert is that the
-  answer stays finite and the magnitude stays positive.
+The seven the old test missed, all of which now fail:
+
+- the two faults above, put back (`set` clamping against the rate of the
+  moment; the constructor removed);
+- the floor and the ceiling on the corner, each removed;
+- the floor and the ceiling applied in the wrong order;
+- the lower bound on Q removed;
+- the bound on the gain removed;
+- the matched bell designed from the unclamped frequency;
+- `setSampleRate` accepting a non-finite rate.
+
+Two of those clamps turned out to be load bearing rather than decorative,
+which is worth knowing because they read as defensive boilerplate:
+
+- **The one hertz floor on the corner.** A cutoff of nothing gives a `g` of
+  nothing and arrives at exactly the unconfigured filter's pair of
+  contradictory answers. Reachable, and not obscurely: the instrument
+  modulates its cutoff in octaves, twelve of them downward, so a patch
+  resting at the bottom of its range sweeps to 20 hertz over 4096, which is
+  a fifth of a hundredth of a hertz.
+- **The bound on the gain.** Past about 170 decibels of cut the amplitude
+  underflows to zero, and a shelf divides its `g` by the square root of it,
+  so `g` becomes infinite, `a1` becomes zero and `a2` is infinity times zero.
+  The filter then outputs silence from the first sample, permanently.
+
+The five survivors, all genuine no-ops:
+
+- **The degenerate guard at the top of `magnitudeAt` removed.** Unreachable
+  now that the constructor exists and the clamps hold, which the strictly
+  positive check turns from an argument into a reading over 11550 settings.
+- **`g` recovered as `a2 / a1` rather than `a3 / a2`.** Both are `g`.
+- **The curve's own ceiling taken at Nyquist rather than 0.4999 of the
+  rate.** Every response tends to `m0` as the prewarped frequency runs away
+  and both ceilings land on that asymptote to within absolute rounding, so
+  the answer does not move by anything a tolerance can read. Measured as 508
+  dB apart in a ratio, which is two ways of writing a number that is
+  effectively zero: the types where it differs are the ones whose asymptote
+  is zero. It stays because the denominator carries the square of the
+  tangent, which overflows once the corner's own tangent falls below about
+  1e-138, needing a sample rate of that order.
+- **The first clamp on the frequency `magnitudeAt` is asked about.** The
+  `fmin` below it already holds the top end, and a magnitude is even in the
+  prewarped frequency, so folding a negative one to DC and reflecting it give
+  the same number. Dead either way.
+- **The upper bound on Q.** A musical bound, and the header says so: a
+  positive `g` and a positive `k` are stable at any Q.
 
 ### Checked and found sound
 
-- **The recursion itself**, which the old coverage already proved and which
-  nine further breakages confirmed: the integrator, the state update, the two
-  output coefficients and the normalisation of `c`.
-- **The shelf prewarping in both directions**, by the square root of the full
-  gain, against the half gain point of `(A + jw)/(1 + jw)` worked out from the
-  specification. The header's arithmetic about it is correct, including the
-  claim that a two pole shelf uses the fourth root.
-- **Smith's AP1 is the sign the header says it is**, and the high pass minus
-  twice the low pass really is it.
-- **`reset` is exact** and nothing else moves the state.
-
-### Also corrected
-
-`Tests/PassFilterTest.cpp` kept the check that lied about asserting the
-direction of the phase, and the tautology. The modulus is gone, so those three
-assertions now say what their comment says, and the tautology is gone with a
-note saying where the question is actually asked. Its header now points at the
-section's own file.
+- **Every mixing weight, one response at a time.** Twenty two breakages
+  across the ten plain responses, the bell and both shelves, including the
+  whole highpass polarity flipped, which leaves every magnitude in the file
+  identical. All caught, most of them by the structural identities rather
+  than by the magnitude checks.
+- **The recursion and the coefficient algebra.** Thirteen breakages: both
+  integrators turned to Euler, the state updates reordered so one reads the
+  other, every sign in `v1`, `v2` and `v3`, the output weights swapped, and
+  `a1`, `a2`, `a3` and `k` each built wrong. All caught.
+- **The drawn curve against the running filter**, which caught five of six
+  breakages of `magnitudeAt`'s algebra.
+- **`PassFilter` and `LowPassGate`'s handling of a rate change**, by reading
+  them, as above.
+- **`PanOneParams`' filter type conversion** against its choice list.
 
 ### Left alone deliberately
 
-- **`Svf.h`'s identical clamp**, as above. Its own night.
-- **Both negative frequency folds**, as above.
-- **`Fx/Unit.h`**, 234 lines with no JUCE and no test, which looked like a
-  target until it turned out that nothing in `Source` or `Tests` references it
-  at all: it describes itself as the shape every effect has, alongside an
-  `Fx/Plugin.h` that does not exist yet. It is scaffolding for work in
-  progress rather than code anything runs, so a test over it tonight would
-  have been a test of a decision somebody else is still making.
+- **A not-a-number handed in from outside.** Neither this file nor
+  `OnePole.h` guards it, and a test asserting it did would be asserting a
+  guard nobody has decided to write. If it is wanted it belongs in both
+  files on the same night.
+- **`PassFilter`'s own default state.** A `PassFilter` that is processed
+  without `set` or `setSampleRate` ever being called used to output silence,
+  because its first section was an unconfigured `Svf`. Tonight's constructor
+  fixes that as a side effect: it is now the 20 hertz second order highpass
+  its members describe. Nothing in `Source` constructs one yet, so there is
+  no fault to report, and its own test is somebody else's night.
+- **The curve's behaviour above Nyquist.** The drawn curve holds the top of
+  its own range while the state space form walks `z` round the circle and
+  comes back to DC. Both are honest answers to a question nobody should ask,
+  and nothing asserts which happens.
 
 ---
 

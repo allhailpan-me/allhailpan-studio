@@ -34,6 +34,7 @@
 #include <complex>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <string>
 
@@ -1059,7 +1060,14 @@ void theFiltersOwnCurveIsTheRealOne()
                 {
                     const auto f = make (rate, type, hz, q, 9.0);
 
-                    for (double at = 20.0; at < rate * 0.45; at *= 1.3)
+                    // Up to the filter's own ceiling rather than stopping at
+                    // 0.45 of the rate. The top twentieth of the band was
+                    // never compared, and it is where a bell's skirt is
+                    // crushed and where the matched design exists to do
+                    // something about it: the one stretch of the axis the two
+                    // arithmetics are most likely to disagree on was the one
+                    // stretch nothing looked at.
+                    for (double at = 20.0; at < rate * 0.4998; at *= 1.3)
                     {
                         const double exact = magnitudeAt (f, at, rate);
                         const double drawn = f.magnitudeAt (at);
@@ -1492,6 +1500,250 @@ void theMatchedBellSaysWhichDesignItIsRunning()
 }
 
 //==============================================================================
+/** A corner above the ceiling is the corner at the ceiling, exactly.
+
+    The clamp is not only a number that stops the tangent running away: what
+    it produces has to be a filter, and the only sensible filter to give back
+    for a cutoff nobody can have is the highest one somebody can. Said as an
+    equality rather than as a bound, so there is nothing to interpret.
+
+    This is the check that catches the clamp being applied to the coefficients
+    and not to the matched bell's design, which is a mistake with a seam in it:
+    `bellIsMatchable`'s boundary rises with Q and passes the ceiling somewhere
+    around a Q of ninety, so above that a band asked for a cutoff past the
+    ceiling is feasible at the ceiling and infeasible at the frequency asked
+    for. Designed from the wrong one of those, the band silently drops to the
+    conventional bell, which at the top of the band is the five decibel error
+    the matched design exists to remove. Only visible at a high Q, which is
+    why the grid goes there. */
+void aCornerAboveTheCeilingIsTheCeiling()
+{
+    std::printf ("a corner above the ceiling\n");
+
+    for (double rate : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        const double ceiling = rate * 0.49;
+
+        for (double q : { 0.5, 4.0, 40.0, 95.0, 100.0 })
+            for (double gainDb : { -12.0, 0.0, 12.0 })
+                for (double above : { 1.0, 1.0000001, 1.5, 4.0, 1.0e6 })
+                    for (auto type : allTypes)
+                    {
+                        Fx::Svf asked;
+                        asked.setSampleRate (rate);
+                        asked.set (type, ceiling * above, q, gainDb);
+
+                        Fx::Svf atCeiling;
+                        atCeiling.setSampleRate (rate);
+                        atCeiling.set (type, ceiling, q, gainDb);
+
+                        const auto a = asked.coefficients();
+                        const auto b = atCeiling.coefficients();
+
+                        if (a.a1 != b.a1 || a.a2 != b.a2 || a.a3 != b.a3
+                            || a.m0 != b.m0 || a.m1 != b.m1 || a.m2 != b.m2
+                            || asked.isMatched() != atCeiling.isMatched())
+                        {
+                            fail (std::string ("a ") + nameOf (type) + " asked for "
+                                  + show (above) + " times its ceiling is not the one"
+                                  " at its ceiling, at rate " + show (rate) + ", Q "
+                                  + show (q) + ", " + show (gainDb) + " dB"
+                                  + (asked.isMatched() != atCeiling.isMatched()
+                                        ? " (and the two disagree about the matched design)"
+                                        : ""));
+                            return;
+                        }
+                    }
+    }
+
+    std::printf ("    identical at four rates, five Q values and five overshoots\n");
+}
+
+//==============================================================================
+/** Nonsense in the rate, the corner, the Q and the gain still leaves a filter
+    that runs, and the invariant the header rests its stability on holds at
+    every one of them.
+
+    That invariant is the point of this check rather than finiteness. With the
+    corner floored at one hertz and held under 0.49 of a finite rate, `g` is
+    strictly positive and finite, and a trapezoidally integrated state
+    variable filter with a positive `g` and a positive `k` is unconditionally
+    stable. `a2` is `g` times `a1` and `a3` is `g` times `a2`, so asserting
+    all three are strictly positive asserts exactly that, and it is a far
+    sharper instrument than waiting for an output to stop being finite: a
+    corner that has come out a hair negative gives poles whose modulus is
+    1.0000000000000002, which runs away in a few seconds of real time and
+    passes any tolerance anybody would write around one.
+  
+    It is also what makes the clamps load bearing rather than decorative.
+    Every one of them was removable without a single check noticing before
+    tonight:
+
+    - the one hertz floor. A cutoff of nothing gives a `g` of nothing, and
+      then `process` returns silence for ever while `magnitudeAt` takes its
+      degenerate branch and draws unity: the same pair of contradictory
+      answers an unconfigured filter used to give. Reachable, and not
+      obscurely: the instrument modulates its cutoff in octaves, twelve of
+      them downward, so a patch resting at the bottom of its range sweeps to
+      twenty hertz over four thousand and ninety six, which is a fifth of a
+      hundredth of a hertz.
+    - the lower bound on Q. A Q of nothing makes `k` infinite, which takes
+      `a1` to zero and arrives at the same contradiction by another road.
+    - the bound on the gain. Past about 170 decibels of cut the amplitude
+      underflows to nothing, and a shelf divides its `g` by the square root
+      of it, so `g` becomes infinite, `a1` becomes nothing, and `a2` is
+      infinity times nothing, which is not a number. The filter then outputs
+      silence, permanently, from the first sample.
+    - the order of the floor and the ceiling, which a sample rate of one
+      hertz reaches.
+
+    The values are finite nonsense rather than NaN, which is the same
+    boundary `OnePoleTest` draws: neither header claims to repair a
+    not-a-number handed in from outside, and a test that asserted it did
+    would be asserting a guard nobody has decided to write. */
+void nonsenseStillLeavesAFilterThatRuns()
+{
+    std::printf ("out of range use\n");
+
+    double worstCurve = 0.0;
+    double worstPole = 0.0;
+    int settings = 0;
+
+    // Infinity is in the list and a not-a-number is not, and the line
+    // between them is where a value is still well defined. An infinite rate
+    // has an answer the arithmetic walks straight into: the prewarping
+    // tangent of anything over infinity is exactly zero, which is the one
+    // value that takes `a2` to nothing, makes `g` unrecoverable from the
+    // coefficients and puts the drawn curve down its degenerate branch. A
+    // not-a-number has no answer, and neither this header nor `OnePole.h`
+    // claims to repair one handed in from outside.
+    for (double rate : { 0.0, -1.0, 1.0, 8000.0, 192000.0, 1.0e9,
+                         std::numeric_limits<double>::infinity() })
+        for (double hz : { -1.0e9, -1.0, 0.0, 1.0e-12, 1.0, 1.0e9 })
+            for (double q : { -5.0, 0.0, 1.0e-12, 0.70710678118654752, 1.0e9 })
+                for (double gainDb : { -1.0e6, -120.0, 0.0, 120.0, 1.0e6 })
+                    for (auto type : allTypes)
+                    {
+                        Fx::Svf f;
+                        f.setSampleRate (rate);
+                        f.set (type, hz, q, gainDb);
+
+                        // Whatever it fell back to, it has to say so, because
+                        // every tolerance below is a fraction of it.
+                        const double actualRate = f.getSampleRate();
+
+                        const std::string what = std::string (nameOf (type))
+                            + " at " + show (hz) + " hz, rate " + show (rate)
+                            + ", Q " + show (q) + ", " + show (gainDb) + " dB";
+
+                        if (! (actualRate > 0.0) || ! std::isfinite (actualRate))
+                        {
+                            fail (what + ": the rate it kept is not usable");
+                            return;
+                        }
+
+                        const auto c = f.coefficients();
+
+                        if (! (std::isfinite (c.a1) && std::isfinite (c.a2)
+                               && std::isfinite (c.a3) && std::isfinite (c.m0)
+                               && std::isfinite (c.m1) && std::isfinite (c.m2)))
+                        {
+                            fail (what + ": coefficients stopped being finite");
+                            return;
+                        }
+
+                        // The invariant. a1 > 0 and a2 > 0 and a3 > 0 is g
+                        // strictly positive and finite, said in terms of what
+                        // the filter actually holds.
+                        if (! (c.a1 > 0.0 && c.a2 > 0.0 && c.a3 > 0.0))
+                        {
+                            fail (what + ": the prewarped corner is not strictly"
+                                  " positive, a1 " + show (c.a1) + ", a2 "
+                                  + show (c.a2) + ", a3 " + show (c.a3));
+                            return;
+                        }
+
+                        // A cross-check rather than the guarantee, and held to
+                        // a nanometre of the circle rather than to the circle,
+                        // because at these settings the measurement is the
+                        // ill-conditioned part. A corner sitting on the one
+                        // hertz floor at a rate of a gigahertz gives a `g` of
+                        // three nanounits, and the discriminant that decides
+                        // whether the poles are a real pair or a complex one is
+                        // then two nearly equal numbers subtracted: it reads a
+                        // modulus of exactly one for a filter whose poles are
+                        // comfortably inside. The sharp instrument here is the
+                        // strictly positive test above, which is exact.
+                        const double pole = largestPoleModulus (f);
+
+                        if (! (pole < 1.0 + 1.0e-9))
+                        {
+                            fail (what + ": pole outside the unit circle, modulus "
+                                  + show (pole));
+                            return;
+                        }
+
+                        worstPole = std::max (worstPole, pole);
+
+                        // The two answers still agree. Compared absolutely
+                        // rather than in decibels on purpose: the failure
+                        // these clamps prevent is a drawn unity against a
+                        // real nothing, and a ratio of those is a number no
+                        // tolerance can read.
+                        // Fractions of the rate it kept, never a frequency in
+                        // hertz. Above Nyquist the two are not comparing the
+                        // same thing and are not meant to: the drawn curve
+                        // holds the top of its own range, while the state
+                        // space form walks `z` round the circle and comes
+                        // back to DC, which is an honest answer to a question
+                        // nobody should ask.
+                        for (double at : { 0.0, actualRate * 0.001, actualRate * 0.01,
+                                           actualRate * 0.2, actualRate * 0.4998 })
+                        {
+                            const double drawn = f.magnitudeAt (at);
+                            const double real = magnitudeAt (f, at, actualRate);
+
+                            if (! (std::isfinite (drawn) && drawn >= 0.0))
+                            {
+                                fail (what + ": the drawn curve at " + show (at)
+                                      + " hz is " + show (drawn));
+                                return;
+                            }
+
+                            const double off = std::fabs (drawn - real);
+
+                            if (! (off <= 1.0e-4 * (1.0 + std::fabs (real))))
+                            {
+                                fail (what + ": drawn " + show (drawn)
+                                      + " against real " + show (real) + " at "
+                                      + show (at) + " hz");
+                                return;
+                            }
+
+                            worstCurve = std::max (worstCurve,
+                                                   off / (1.0 + std::fabs (real)));
+                        }
+
+                        for (int n = 0; n < 400; ++n)
+                        {
+                            const double y = f.process ((double) (n % 7) * 0.3 - 1.0);
+
+                            if (! std::isfinite (y))
+                            {
+                                fail (what + ": the output stopped being finite at "
+                                      + std::to_string (n));
+                                return;
+                            }
+                        }
+
+                        ++settings;
+                    }
+
+    std::printf ("    %d settings, worst pole modulus %s, worst curve disagreement %s\n",
+                 settings, show (worstPole).c_str(), show (worstCurve).c_str());
+}
+
+//==============================================================================
 int main()
 {
     std::printf ("Fx::Svf\n\n");
@@ -1521,6 +1773,8 @@ int main()
     theRateCanChangeUnderAFilterThatIsAlreadySet();
     anUnconfiguredFilterIsWhatItsDefaultsDescribe();
     theMatchedBellSaysWhichDesignItIsRunning();
+    aCornerAboveTheCeilingIsTheCeiling();
+    nonsenseStillLeavesAFilterThatRuns();
 
     std::printf ("\n");
 
