@@ -97,6 +97,15 @@ down to about 32. At 16 pixels it is a bright mark rather than a readable
 one, which is as far as line art of this kind goes without drawing a simpler
 version of the logo.
 
+**A short sound in the playlist plays once a bar, not over and over.** Drop
+a one shot into an empty playlist and press play, and it used to repeat back
+to back, because playback looped at the exact end of the last clip. It now
+plays to the end of the bar the last clip finishes in, with silence for the
+rest of that bar, so what you hear is a bar of music rather than a stutter.
+A loop you have cut to exactly one bar, or four, stays exactly that long. A
+loop range you set yourself works as it always did, and an export still ends
+where your last sound does.
+
 ## Since v0.6.1
 
 **Every mixer strip can take its own input, and they all record at once.**
