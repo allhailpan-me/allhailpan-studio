@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Dither.h"
 #include "RecordAlign.h"
 #include <algorithm>
 #include <cmath>
@@ -54,6 +55,13 @@ namespace Key
     inline constexpr const char* monitorMode      = "monitorMode";
     inline constexpr const char* recordMode       = "recordMode";
     inline constexpr const char* countIn          = "countIn";
+
+    // What an export is written as. Application settings rather than project
+    // ones because they describe where a file is going rather than anything
+    // about the song: the same arrangement gets a 16 bit file for a delivery
+    // and a 32 bit float one for somebody who is going to work on it.
+    inline constexpr const char* exportBitDepth   = "exportBitDepth";
+    inline constexpr const char* exportDither     = "exportDither";
 }
 
 //==============================================================================
@@ -322,6 +330,39 @@ inline constexpr Choice autosaveChoice { autosaveChoiceCount, 4 };
 inline double autosaveMinutesFor (int storedId) noexcept
 {
     return autosaveChoices[(size_t) (choiceId (storedId, autosaveChoice) - 1)];
+}
+
+//==============================================================================
+/** The depth an export is written at.
+
+    The count comes from `Dither.h` rather than being written again here, so a
+    depth added there cannot leave a list behind that does not offer it. The
+    fallback is 24 bit, which is what every export was written at before there
+    was a choice, so somebody who never opens this gets what they already had.
+*/
+inline constexpr Choice exportBitDepth { Dither::numDepths,
+                                         Dither::depthToStored (Dither::defaultDepth) + 1 };
+
+/** Whether a word length reduction is dithered. */
+inline constexpr Choice exportDither { Dither::numModes,
+                                       Dither::modeToStored (Dither::defaultMode) + 1 };
+
+/** The depth and the dither a stored id means.
+
+    These exist so the one place that turns a one based combo box id into a
+    zero based enum is a function with a test on it. Done at each call site
+    instead, the off by one is invisible in the reading and lands as an export
+    written at the wrong depth, which is a file somebody sends somewhere before
+    anybody notices. It is the same discipline autosaveMinutesFor is here for.
+*/
+inline Dither::Depth exportDepthFor (int storedId) noexcept
+{
+    return Dither::depthFromStored (choiceId (storedId, exportBitDepth) - 1);
+}
+
+inline Dither::Mode exportDitherFor (int storedId) noexcept
+{
+    return Dither::modeFromStored (choiceId (storedId, exportDither) - 1);
 }
 
 } // namespace Prefs

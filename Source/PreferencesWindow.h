@@ -420,11 +420,173 @@ private:
 };
 
 //==============================================================================
+/** What an export is written as.
+
+    Its own tab rather than another block on the General one, which is where
+    the studios put it too: the bit depth is in the render dialog in Reaper,
+    Pro Tools, Logic and Cubase alike. It is a stored setting here rather than
+    a dialog in front of the file chooser because the export flow is a chooser
+    launched asynchronously and threading a modal choice in front of it is a
+    second thing to get right. What makes that safe rather than merely cheaper
+    is that the export says in the status bar what it is about to write, in
+    words, before the file appears, so a setting left somewhere unexpected is
+    visible at the moment it matters.
+*/
+class ExportPreferencesPanel : public juce::Component
+{
+public:
+    explicit ExportPreferencesPanel (juce::PropertiesFile& s)
+        : settings (s)
+    {
+        addAndMakeVisible (depthLabel);
+        addAndMakeVisible (depthBox);
+        addAndMakeVisible (depthNote);
+        addAndMakeVisible (ditherLabel);
+        addAndMakeVisible (ditherBox);
+        addAndMakeVisible (ditherNote);
+
+        for (auto* l : { &depthLabel, &ditherLabel })
+        {
+            l->setFont (juce::FontOptions (15.0f, juce::Font::bold));
+            l->setJustificationType (juce::Justification::centredLeft);
+        }
+
+        for (auto* l : { &depthNote, &ditherNote })
+        {
+            l->setColour (juce::Label::textColourId, Ahp::muted);
+            l->setFont (juce::FontOptions (12.0f));
+            l->setJustificationType (juce::Justification::topLeft);
+        }
+
+        // Built from Dither.h's own list rather than typed again here, so a
+        // depth added there appears in the box and cannot be offered under a
+        // name that does not match what the engine writes.
+        for (int i = 0; i < Dither::numDepths; ++i)
+            depthBox.addItem (Dither::name (Dither::depthAt (i)), i + 1);
+
+        depthBox.onChange = [this]
+        {
+            settings.setValue (Prefs::Key::exportBitDepth, depthBox.getSelectedId());
+            save();
+            refreshDitherEnablement();
+        };
+
+        depthNote.setText ("16 bit is what a CD is and what a delivery usually asks for. 24 bit is a "
+                           "working master, and is what every export was written at before there was a "
+                           "choice. 32 bit float is the mix exactly as the engine computed it, for "
+                           "handing on to somebody who is going to work on it further.",
+                           juce::dontSendNotification);
+
+        for (int i = 0; i < Dither::numModes; ++i)
+            ditherBox.addItem (Dither::name (Dither::modeFromStored (i)), i + 1);
+
+        ditherBox.onChange = [this]
+        {
+            settings.setValue (Prefs::Key::exportDither, ditherBox.getSelectedId());
+            save();
+        };
+
+        refreshFromSettings();
+        setSize (560, 420);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (16, 14);
+
+        auto row = [&area] (int height, int gap = 6)
+        {
+            auto r = area.removeFromTop (height);
+            area.removeFromTop (gap);
+            return r;
+        };
+
+        depthLabel.setBounds (row (20, 2));
+        depthBox  .setBounds (row (26).removeFromLeft (220));
+        depthNote .setBounds (row (62, 18));
+
+        ditherLabel.setBounds (row (20, 2));
+        ditherBox  .setBounds (row (26).removeFromLeft (220));
+        ditherNote .setBounds (row (104, 18));
+    }
+
+private:
+    void refreshFromSettings()
+    {
+        depthBox.setSelectedId (Prefs::choiceId (settings.getIntValue (Prefs::Key::exportBitDepth,
+                                                                      Prefs::exportBitDepth.fallback),
+                                                 Prefs::exportBitDepth),
+                                juce::dontSendNotification);
+
+        ditherBox.setSelectedId (Prefs::choiceId (settings.getIntValue (Prefs::Key::exportDither,
+                                                                        Prefs::exportDither.fallback),
+                                                  Prefs::exportDither),
+                                 juce::dontSendNotification);
+
+        refreshDitherEnablement();
+    }
+
+    /** The dither control says what it will actually do rather than offering a
+        choice that has no effect.
+
+        Only a reduction to 16 bit is dithered, which is the policy in
+        Dither.h, and the engine applies that policy itself rather than
+        trusting this box: a greyed control and an engine free to disagree with
+        it is two answers to one question. So this is the box agreeing with the
+        engine, not the other way round, and the note says why rather than
+        leaving somebody to wonder why their setting did nothing.
+    */
+    void refreshDitherEnablement()
+    {
+        const auto depth = Prefs::exportDepthFor (depthBox.getSelectedId());
+        const bool dithered = depth == Dither::Depth::int16;
+
+        ditherBox.setEnabled (dithered);
+
+        ditherNote.setText (dithered
+            ? juce::String ("Reducing a 32 bit mix to 16 bit quantises it, and without dither the error "
+                            "is not noise: it follows the signal, so it arrives as distortion rather "
+                            "than hiss and it gets proportionally worse the quieter the music is. Fade "
+                            "outs and reverb tails are where it is heard. Triangular dither costs 4.8 dB "
+                            "of noise floor, which at 16 bit puts it at -96 dBFS, and in exchange the "
+                            "noise stops moving with the music. Turn it off only if this mix is going "
+                            "to be mastered somewhere else, since dithering the same audio twice is "
+                            "worse than doing it once.")
+            : juce::String ("Nothing to dither at ") + Dither::name (depth) + ". At 24 bit the "
+                            "quantisation floor is around -144 dBFS, below the noise of any microphone "
+                            "or preamp, and a 32 bit float file is the mix itself with no word length "
+                            "reduction at all. Dither is applied only when a file is written at 16 bit, "
+                            "which is the same rule Ardour, Cubase and Logic follow.",
+            juce::dontSendNotification);
+    }
+
+    void save()
+    {
+        // Written out now rather than at shutdown, for the reason the rest of
+        // this window does it: a preference somebody set and then lost to a
+        // crash is worse than one they never found.
+        settings.saveIfNeeded();
+    }
+
+    juce::PropertiesFile& settings;
+
+    juce::Label    depthLabel { {}, "Bit depth" }, depthNote;
+    juce::ComboBox depthBox;
+
+    juce::Label    ditherLabel { {}, "Dither" }, ditherNote;
+    juce::ComboBox ditherBox;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ExportPreferencesPanel)
+};
+
+//==============================================================================
 /** The window: the device chooser, the plugin list and the rest, in one place. */
 class PreferencesComponent : public juce::Component
 {
 public:
-    enum Tab { general = 0, audio, plugins };
+    // Export is appended rather than inserted, so the ids the rest of the
+    // application already passes in keep pointing at the tabs they always did.
+    enum Tab { general = 0, audio, plugins, exportSettings };
 
     PreferencesComponent (PluginManager& pluginManager, juce::AudioDeviceManager& devices,
                           PreferencesActions actions)
@@ -470,6 +632,9 @@ public:
                                                     pluginManager.crashedPluginsFile(),
                                                     &pluginManager.settings(), true),
                      true);
+
+        tabs.addTab ("Export", Ahp::panel,
+                     new ExportPreferencesPanel (settings), true);
 
         // Taller than it was: the audio tab gained a line of readout and a
         // correction, and the device chooser is the thing that must not be

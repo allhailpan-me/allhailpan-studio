@@ -2833,8 +2833,23 @@ void MainComponent::exportAudio (bool stems)
             masterFile = chosen.hasFileExtension ("wav") ? chosen : chosen.withFileExtension ("wav");
         }
 
+        // The depth and the dither come from the stored settings, through the
+        // two functions in Preferences.h that turn a combo box id into the
+        // enum, so the off by one between the two lives in one tested place
+        // rather than here. What the engine actually applies is reported back
+        // by the job rather than worked out again below: the policy that only
+        // 16 bit is dithered belongs to Dither.h, and a second copy of it here
+        // could disagree with the file.
+        const auto depth  = Prefs::exportDepthFor (self.plugins.settings()
+                                                       .getIntValue (Prefs::Key::exportBitDepth,
+                                                                     Prefs::exportBitDepth.fallback));
+        const auto dither = Prefs::exportDitherFor (self.plugins.settings()
+                                                        .getIntValue (Prefs::Key::exportDither,
+                                                                      Prefs::exportDither.fallback));
+
         self.exportJob = std::make_unique<ExportJob> (self.engine, songEnd, self.engine.getSampleRate(),
-                                                      masterFile, std::move (stemFiles), stems);
+                                                      masterFile, std::move (stemFiles), stems,
+                                                      depth, dither);
         self.exportJob->startThread();
 
         // A bounce honours solo, exactly as playback does, because this studio
@@ -2846,10 +2861,19 @@ void MainComponent::exportAudio (bool stems)
         // settles whether an export should honour solo, so it is a decision
         // rather than a citation, and what makes it safe either way is saying
         // so in words before the file is written. See Research/BACKLOG.md.
+        // What is about to be written, in words, before the file appears. The
+        // depth lives in Preferences rather than in a dialog in front of the
+        // chooser, so this line is what stops that being a setting somebody
+        // forgets they changed: a 16 bit delivery printed as a 32 bit float
+        // file, or the other way round, is otherwise only discovered by
+        // whoever receives it.
+        const auto written = juce::String (Dither::name (self.exportJob->getDepth()))
+                                 + ", " + Dither::name (self.exportJob->getDither());
+
         self.setStatus (self.engine.isAnySoloed()
-                            ? juce::String ("Exporting with a solo still on, so the file has only what "
-                                            "the solo is letting through...")
-                            : juce::String ("Exporting..."));
+                            ? "Exporting " + written + " with a solo still on, so the file has only what "
+                              "the solo is letting through..."
+                            : "Exporting " + written + "...");
     });
 }
 
@@ -2885,9 +2909,13 @@ void MainComponent::checkExportProgress()
         return;
     }
 
-    const auto file = job->getMasterFile();
+    const auto file    = job->getMasterFile();
+    const auto written = juce::String (Dither::name (job->getDepth()))
+                             + ", " + Dither::name (job->getDither());
+
     setStatus (job->exportedStems()
-                   ? "Exported the mix and " + juce::String (job->numStems()) + " stems to " + file.getParentDirectory().getFullPathName()
-                   : "Exported to " + file.getFullPathName());
+                   ? "Exported the mix and " + juce::String (job->numStems()) + " stems, " + written
+                         + ", to " + file.getParentDirectory().getFullPathName()
+                   : "Exported " + written + " to " + file.getFullPathName());
     file.revealToUser();
 }
