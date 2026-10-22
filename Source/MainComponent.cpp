@@ -1172,7 +1172,7 @@ void MainComponent::pushArrangement (bool allowRenders)
         }
     }
 
-    snap.songEnd    = project.songEndBeats();
+    snap.songEnd    = project.songLoopEndBeats();
     snap.modulators = project.modulators;      // small, so copied whole
     engine.setSnapshot (std::move (snap));
 

@@ -1386,8 +1386,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
     // A loop range set on the playlist repeats over itself, and it does so
     // while recording as well, because recording round a loop is the only
-    // reason to set one. With no range, playback still loops at the end of the
-    // last clip the way it always has, which is a different thing: it is for
+    // reason to set one. With no range, playback loops at the end of the bar
+    // the last clip finishes in (`songEnd` arrives already rounded up to a
+    // whole bar, see SongLength.h), which is a different thing: it is for
     // auditioning an arrangement, and looping it while recording would record
     // over the take just played.
     const double rangeStart = loopRangeStart.load();
