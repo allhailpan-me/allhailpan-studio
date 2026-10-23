@@ -34,6 +34,7 @@
 #include <complex>
 #include <cstdio>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <string>
 
@@ -134,6 +135,62 @@ double magnitudeAt (const Fx::Svf& filter, double hz, double sampleRate)
 double magnitudeAtNyquist (const Fx::Svf& filter, double sampleRate)
 {
     return magnitudeAt (filter, sampleRate * 0.5, sampleRate);
+}
+
+/** The modulus of the larger of the two poles, from the state transition
+    matrix. Anything at or above one is a filter that grows without bound.
+
+    Shared rather than written out at each use, for the reason `Svf.h` gives
+    for keeping `magnitudeAt` in the filter: a second copy of this algebra is
+    a second copy that can disagree, and the two places that want it are the
+    random sweep over settings and the rate change checks, which is exactly
+    the pair that has to agree. */
+double largestPoleModulus (const Fx::Svf& filter)
+{
+    const auto s = stateSpace (filter.coefficients());
+
+    const double trace = s.a11 + s.a22;
+    const double det = s.a11 * s.a22 - s.a12 * s.a21;
+    const double disc = trace * trace - 4.0 * det;
+
+    if (disc >= 0.0)
+    {
+        const double root = std::sqrt (disc);
+        return std::max (std::fabs ((trace + root) * 0.5),
+                         std::fabs ((trace - root) * 0.5));
+    }
+
+    return std::sqrt (det);   // complex pair, modulus is sqrt(det)
+}
+
+/** Every response the filter has, including the matched bell, which nothing
+    in this file reached before. */
+const Fx::Svf::Type allTypes[] = {
+    Fx::Svf::Type::lowpass, Fx::Svf::Type::highpass, Fx::Svf::Type::bandpass,
+    Fx::Svf::Type::bandpassQ, Fx::Svf::Type::notch, Fx::Svf::Type::peak,
+    Fx::Svf::Type::allpass, Fx::Svf::Type::bell,
+    Fx::Svf::Type::lowShelf, Fx::Svf::Type::highShelf,
+    Fx::Svf::Type::bellMatched
+};
+
+const char* nameOf (Fx::Svf::Type t)
+{
+    switch (t)
+    {
+        case Fx::Svf::Type::lowpass:     return "lowpass";
+        case Fx::Svf::Type::highpass:    return "highpass";
+        case Fx::Svf::Type::bandpass:    return "bandpass";
+        case Fx::Svf::Type::bandpassQ:   return "bandpassQ";
+        case Fx::Svf::Type::notch:       return "notch";
+        case Fx::Svf::Type::peak:        return "peak";
+        case Fx::Svf::Type::allpass:     return "allpass";
+        case Fx::Svf::Type::bell:        return "bell";
+        case Fx::Svf::Type::lowShelf:    return "lowShelf";
+        case Fx::Svf::Type::highShelf:   return "highShelf";
+        case Fx::Svf::Type::bellMatched: return "bellMatched";
+    }
+
+    return "?";
 }
 
 Fx::Svf make (double rate, Fx::Svf::Type type, double hz, double q, double gainDb = 0.0)
@@ -606,23 +663,7 @@ void stableEverywhere()
         // rather than waiting for the output to blow up catches a filter that
         // is only just unstable, which is the one that survives a short test
         // and rings for a minute in a real session.
-        const auto s = stateSpace (f.coefficients());
-        const double trace = s.a11 + s.a22;
-        const double det = s.a11 * s.a22 - s.a12 * s.a21;
-        const double disc = trace * trace - 4.0 * det;
-
-        double largest = 0.0;
-
-        if (disc >= 0.0)
-        {
-            const double root = std::sqrt (disc);
-            largest = std::max (std::fabs ((trace + root) * 0.5),
-                                std::fabs ((trace - root) * 0.5));
-        }
-        else
-        {
-            largest = std::sqrt (det);   // complex pair, modulus is sqrt(det)
-        }
+        const double largest = largestPoleModulus (f);
 
         if (! (largest < 1.0 + 1e-12))
             fail ("pole outside the unit circle, modulus " + std::to_string (largest));
@@ -1019,7 +1060,14 @@ void theFiltersOwnCurveIsTheRealOne()
                 {
                     const auto f = make (rate, type, hz, q, 9.0);
 
-                    for (double at = 20.0; at < rate * 0.45; at *= 1.3)
+                    // Up to the filter's own ceiling rather than stopping at
+                    // 0.45 of the rate. The top twentieth of the band was
+                    // never compared, and it is where a bell's skirt is
+                    // crushed and where the matched design exists to do
+                    // something about it: the one stretch of the axis the two
+                    // arithmetics are most likely to disagree on was the one
+                    // stretch nothing looked at.
+                    for (double at = 20.0; at < rate * 0.4998; at *= 1.3)
                     {
                         const double exact = magnitudeAt (f, at, rate);
                         const double drawn = f.magnitudeAt (at);
@@ -1041,6 +1089,658 @@ void theFiltersOwnCurveIsTheRealOne()
     if (worst > 1.0e-7)
         fail ("the curve the filter draws is not the response it has: off by "
               + show (worst) + " dB");
+}
+
+//==============================================================================
+/** The sample rate can change under a filter that is already set up, and the
+    filter has to come out the other side as the filter it was asked for.
+
+    This is the check that was missing, and the shape of the gap is worth
+    recording. Every other check in this file sets the sample rate first and
+    the frequency second, which is the order a test naturally writes and the
+    order `make()` above hard codes. Nothing here had ever moved the rate
+    afterwards. So a cutoff clamped against one rate and then read against
+    another was invisible, and what it produced was not a small error: past
+    the new Nyquist the prewarping tangent is negative, a negative `g` puts
+    the poles outside the unit circle, and the section doubles its own output
+    until it is not a number any more. Measured before the fix, every one of
+    the eleven responses reached a non-finite output within 2001 samples
+    going from 192 kHz to 48 kHz.
+
+    The property asserted is the strongest one available and it is not about
+    the clamp at all: **a filter told the rate has changed must be
+    indistinguishable from one built at that rate in the first place.** It
+    holds whatever the clamp does, it needs no reference arithmetic, and
+    there is no setting at which it is allowed to be approximately true.
+
+    Reachable through nothing today, which is why it needs a test rather than
+    a bug report. `LowPassGate` re-sets its corner every sample and
+    `PassFilter` re-sets every section whenever the rate moves. `Voice`
+    escapes by an accident of ordering in a different file: it guards
+    `filter.set` on the modulated cutoff having actually moved, so after a
+    rate change the stale coefficients would stay for the life of a note, and
+    the only reason they do not is that `PanOne::prepareToPlay` happens to
+    follow `setSampleRate` with `setPatch`, which ends in `retune`, which
+    forgets the guard. */
+void theRateCanChangeUnderAFilterThatIsAlreadySet()
+{
+    std::printf ("the rate changing under a filter already set up\n");
+
+    const double rates[] = { 8000.0, 22050.0, 44100.0, 48000.0, 96000.0, 192000.0 };
+
+    int worstCase = 0;
+    double worstPole = 0.0;
+
+    for (double first : rates)
+        for (double second : rates)
+        {
+            // Across the whole band of the rate it was set at, including the
+            // top of it, which is where the clamp binds and therefore the
+            // only place the stale corner can differ from the asked for one.
+            const double fractions[] = { 0.0001, 0.01, 0.2, 0.45, 0.4899, 0.6, 2.0 };
+
+            for (double fraction : fractions)
+                for (auto type : allTypes)
+                {
+                    const double hz = first * fraction;
+                    const double q = 4.0;
+                    const double gainDb = 9.0;
+
+                    Fx::Svf moved;
+                    moved.setSampleRate (first);
+                    moved.set (type, hz, q, gainDb);
+                    moved.setSampleRate (second);       // the device changed
+
+                    Fx::Svf fresh;
+                    fresh.setSampleRate (second);
+                    fresh.set (type, hz, q, gainDb);
+
+                    const auto a = moved.coefficients();
+                    const auto b = fresh.coefficients();
+
+                    const std::string where = std::string (nameOf (type)) + " "
+                        + show (hz) + " hz, " + show (first) + " -> " + show (second);
+
+                    if (a.a1 != b.a1 || a.a2 != b.a2 || a.a3 != b.a3
+                        || a.m0 != b.m0 || a.m1 != b.m1 || a.m2 != b.m2)
+                    {
+                        fail ("a filter told the rate changed is not the filter"
+                              " built at that rate: " + where
+                              + ": a1 " + show (a.a1) + " against " + show (b.a1)
+                              + ", a2 " + show (a.a2) + " against " + show (b.a2)
+                              + ", a3 " + show (a.a3) + " against " + show (b.a3));
+                        return;
+                    }
+
+                    if (moved.isMatched() != fresh.isMatched())
+                    {
+                        fail ("the matched bell decided differently after a rate"
+                              " change: " + where);
+                        return;
+                    }
+
+                    // Said twice on purpose. The equality above is exact and
+                    // would hold just as well if both filters were unstable,
+                    // because it compares one against the other and nothing
+                    // against the world. This says what the arrangement is
+                    // for: whatever the rate did, the thing that comes out
+                    // runs.
+                    const double pole = largestPoleModulus (moved);
+
+                    if (! (pole < 1.0))
+                    {
+                        fail ("pole outside the unit circle after a rate change: "
+                              + where + ", modulus " + show (pole));
+                        return;
+                    }
+
+                    worstPole = std::max (worstPole, pole);
+                    ++worstCase;
+                }
+        }
+
+    constexpr std::size_t numRates = sizeof (rates) / sizeof (rates[0]);
+
+    std::printf ("    %d settings across %zu pairs of rates, worst pole modulus %s\n",
+                 worstCase, numRates * numRates, show (worstPole).c_str());
+
+    // And the output really does stay finite, over long enough to have run
+    // away. Before the fix the fastest case took 807 samples and the slowest
+    // 11283, so a quarter of a million is a wide margin on both.
+    std::mt19937 rng (20261022);
+    std::uniform_real_distribution<double> audio (-1.0, 1.0);
+
+    for (double first : { 96000.0, 192000.0 })
+        for (double second : { 8000.0, 44100.0, 48000.0 })
+            for (auto type : allTypes)
+            {
+                Fx::Svf f;
+                f.setSampleRate (first);
+                f.set (type, first * 0.48, 0.707, 6.0);
+                f.setSampleRate (second);
+
+                for (int n = 0; n < 250000; ++n)
+                {
+                    const double y = f.process (n == 0 ? 1.0 : audio (rng) * 1e-6);
+
+                    if (! std::isfinite (y))
+                    {
+                        fail (std::string ("a ") + nameOf (type) + " ran away "
+                              + show (first) + " -> " + show (second)
+                              + " after " + std::to_string (n) + " samples");
+                        break;
+                    }
+                }
+            }
+}
+
+//==============================================================================
+/** A filter nobody has configured yet is the filter its own members describe,
+    and its two answers agree with each other.
+
+    It gave three different answers before. The coefficients all started at
+    zero, so `process` returned silence for ever; `magnitudeAt` saw a zero
+    `a2`, took its degenerate branch and reported unity at every frequency;
+    and the members said a one kilohertz lowpass at 44.1 kHz, which is
+    neither of those. Nothing in this file had ever looked at a filter that
+    had not been handed a rate and a setting first.
+
+    Which of the two answers is wrong depends on who is asking, and that is
+    why both are checked. An equaliser drawing its curve before anybody has
+    touched a band would have drawn a flat line through unity, which looks
+    exactly like a band doing nothing and is the one thing a bypassed band
+    should look like. The same band in the signal path would have deleted
+    everything through it. A fault that looks correct on screen and silences
+    the audio is the worst possible pairing of the two.
+
+    The agreement is asserted against the running filter rather than between
+    the two formulas, because `process` returning silence and `magnitudeAt`
+    returning unity are each individually self consistent. */
+void anUnconfiguredFilterIsWhatItsDefaultsDescribe()
+{
+    std::printf ("an unconfigured filter\n");
+
+    const double rate = 44100.0;
+
+    Fx::Svf fresh;                       // nothing called on it at all
+
+    if (! (fresh.getSampleRate() == rate))
+        fail ("an unconfigured filter does not report the rate its members say");
+
+    // 1. The curve it draws is the response it has. This is the one that
+    //    fails whichever of the two answers is the wrong one.
+    for (double hz = 10.0; hz < rate * 0.5; hz *= 1.3)
+    {
+        const double drawn = fresh.magnitudeAt (hz);
+        const double real = magnitudeAt (fresh, hz, rate);
+
+        expectNear (drawn, real, 1e-9 * (1.0 + real),
+                    "unconfigured: drawn curve against the real response at "
+                        + show (hz) + " hz");
+    }
+
+    // 2. It is a second order lowpass at a kilohertz with a Butterworth Q,
+    //    which is what the members below it say. Spelled out rather than
+    //    compared against a reference filter, because a reference built the
+    //    same way would agree with it however wrong both were.
+    expectNear (fresh.magnitudeAt (0.0), 1.0, 1e-12,
+                "unconfigured: unity at DC");
+    expectNear (fresh.magnitudeAt (1000.0), 1.0 / std::sqrt (2.0), 1e-9,
+                "unconfigured: three decibels down at its corner");
+
+    if (! (fresh.magnitudeAt (rate * 0.5) < 1e-6))
+        fail ("unconfigured: should pass nothing at Nyquist, passes "
+              + show (fresh.magnitudeAt (rate * 0.5)));
+
+    // Twelve decibels an octave above the corner, which is what makes it two
+    // poles rather than one.
+    const double decadeUp = fresh.magnitudeAt (10000.0);
+    const double twoDecadesUp = fresh.magnitudeAt (100000.0 > rate * 0.49 ? rate * 0.49 : 100000.0);
+
+    if (! (decadeUp < 0.02 && twoDecadesUp < decadeUp))
+        fail ("unconfigured: does not fall like two poles, "
+              + show (decadeUp) + " then " + show (twoDecadesUp));
+
+    // 3. It passes audio, and it passes it as that lowpass. A step into a
+    //    lowpass settles at the DC gain, which is one. Silence for ever was
+    //    the old answer and it is the one a musician would have met.
+    double last = 0.0;
+
+    for (int n = 0; n < 20000; ++n)
+        last = fresh.process (1.0);
+
+    expectNear (last, 1.0, 1e-9, "unconfigured: a step settles at unity");
+
+    // 4. And it is the same filter as one set up by hand to its own defaults,
+    //    to the last bit, which is what says the defaults and the
+    //    coefficients have not drifted apart.
+    Fx::Svf byHand;
+    byHand.setSampleRate (rate);
+    byHand.set (Fx::Svf::Type::lowpass, 1000.0, 0.70710678118654752);
+
+    const auto a = fresh.coefficients();
+    const auto b = byHand.coefficients();
+
+    if (a.a1 != b.a1 || a.a2 != b.a2 || a.a3 != b.a3
+        || a.m0 != b.m0 || a.m1 != b.m1 || a.m2 != b.m2)
+        fail ("an unconfigured filter is not the one its members describe");
+
+    std::printf ("    a step settles at %s, corner %s of unity\n",
+                 show (last).c_str(), show (fresh.magnitudeAt (1000.0)).c_str());
+}
+
+//==============================================================================
+/** `isMatched` says which of the two bell designs is running, and it has to
+    be telling the truth.
+
+    Nothing called it before tonight. `bellMatched` appeared once in this
+    whole file, inside the curve check, and the flag the header says is
+    "worth exposing rather than hiding" was never read. It is the difference
+    between a twelve kilohertz bell being a tenth of a decibel out and five
+    decibels out, and an equaliser that draws its own curve draws the wrong
+    one if the flag lies.
+
+    Four claims, none of which had a check:
+
+    - every other type reports false, which is what makes the flag readable
+      at all rather than stale from the last band that was a matched bell;
+    - it never claims a match where `BellMatch.h`'s own feasibility predicate
+      says there is none, so the flag and the predicate cannot drift apart;
+    - wherever the match is feasible and the gain is a real one, it is taken,
+      so the correction cannot quietly stop being applied;
+    - where the match is out of reach the coefficients are the plain bell's
+      exactly. The header says those are "the same three lines as above
+      deliberately", and a typo in either copy is otherwise two bells that
+      differ by a frequency nobody looks at.
+
+    One thing checking this turned up, which is a property of the design
+    rather than a fault. `bellIsMatchable` is a necessary condition and not a
+    sufficient one: it deliberately leaves gain out, because at a bandwidth
+    taken at half the decibel gain the feasibility condition cancels it, but
+    `matchedBellBoost` additionally needs the three gains strictly ordered,
+    `g^2 > gb^2 > g0^2`, and a bell of no gain has not got that. So a
+    `bellMatched` band at exactly zero decibels reports false and runs the
+    plain bell, which at zero gain is a wire to the last bit. That is the
+    right answer rather than a missing one, and it is asserted below as a
+    wire rather than left as an argument. */
+void theMatchedBellSaysWhichDesignItIsRunning()
+{
+    std::printf ("the matched bell reports which design it is running\n");
+
+    const double rates[] = { 44100.0, 48000.0, 96000.0 };
+
+    int fellBack = 0, matched = 0;
+
+    for (double rate : rates)
+    {
+        // Nothing but a matched bell may ever report true, whatever was set
+        // before it.
+        for (auto type : allTypes)
+        {
+            Fx::Svf f;
+            f.setSampleRate (rate);
+            f.set (Fx::Svf::Type::bellMatched, 500.0, 1.0, 6.0);   // true first
+            f.set (type, 500.0, 1.0, 6.0);
+
+            if (type != Fx::Svf::Type::bellMatched && f.isMatched())
+                fail (std::string ("a ") + nameOf (type)
+                      + " reports a matched bell design");
+        }
+
+        for (double hz = 20.0; hz < rate * 0.49; hz *= 1.25)
+            for (double q : { 0.3, 0.707, 2.0, 8.0, 30.0 })
+                for (double gainDb : { -18.0, -6.0, 0.0, 6.0, 18.0 })
+                {
+                    Fx::Svf f;
+                    f.setSampleRate (rate);
+                    f.set (Fx::Svf::Type::bellMatched, hz, q, gainDb);
+
+                    const bool feasible = Fx::bellIsMatchable (hz, q, rate);
+
+                    // Never a match where the geometry forbids one. This
+                    // direction holds at every gain, zero included.
+                    if (f.isMatched() && ! feasible)
+                    {
+                        fail ("isMatched claims a design bellIsMatchable says"
+                              " is out of reach, at " + show (hz) + " hz, Q "
+                              + show (q) + ", " + show (gainDb) + " dB, rate "
+                              + show (rate));
+                        return;
+                    }
+
+                    // And always a match where the geometry allows one and
+                    // there is a gain to correct. Without this the flag could
+                    // be false everywhere and the first direction alone would
+                    // be satisfied.
+                    if (feasible && std::fabs (gainDb) >= 0.01 && ! f.isMatched())
+                    {
+                        fail ("a feasible matched bell was not taken, at "
+                              + show (hz) + " hz, Q " + show (q) + ", "
+                              + show (gainDb) + " dB, rate " + show (rate));
+                        return;
+                    }
+
+                    Fx::Svf plain;
+                    plain.setSampleRate (rate);
+                    plain.set (Fx::Svf::Type::bell, hz, q, gainDb);
+
+                    const auto a = f.coefficients();
+                    const auto b = plain.coefficients();
+
+                    const bool identical = a.a1 == b.a1 && a.a2 == b.a2 && a.a3 == b.a3
+                                        && a.m0 == b.m0 && a.m1 == b.m1 && a.m2 == b.m2;
+
+                    if (f.isMatched())
+                    {
+                        ++matched;
+
+                        // A matched design that came out identical to the
+                        // plain one is a correction that is not correcting.
+                        // Only worth asserting where the two really should
+                        // differ, which at zero gain they do not: a bell of
+                        // no gain is a wire either way.
+                        if (identical && hz > rate * 0.02)
+                            fail ("a matched bell is bit for bit the plain one at "
+                                  + show (hz) + " hz, Q " + show (q) + ", "
+                                  + show (gainDb) + " dB");
+                    }
+                    else
+                    {
+                        ++fellBack;
+
+                        if (! identical)
+                            fail ("a fallen back bell is not the plain bell at "
+                                  + show (hz) + " hz, Q " + show (q) + ", "
+                                  + show (gainDb) + " dB, rate " + show (rate));
+                    }
+                }
+    }
+
+    // A matched bell of no gain is a wire, and bit for bit rather than
+    // nearly. `neutralAtZeroGain` above never reached this type, so the one
+    // response in the file with a second design behind it was also the one
+    // whose neutral setting nothing checked. The weights make this exact:
+    // the fallback plain bell at A of one has m1 and m2 of zero and an m0 of
+    // one, so the output is the input and not a rounded copy of it.
+    for (double rate : rates)
+        for (double hz : { 50.0, 1000.0, 9000.0 })
+            for (double q : { 0.3, 1.0, 12.0 })
+            {
+                Fx::Svf f;
+                f.setSampleRate (rate);
+                f.set (Fx::Svf::Type::bellMatched, hz, q, 0.0);
+
+                if (f.isMatched())
+                    fail ("a bell of no gain reports a matched design, which"
+                          " needs its three gains strictly ordered");
+
+                std::mt19937 rng (7);
+                std::uniform_real_distribution<double> audio (-1.0, 1.0);
+
+                for (int n = 0; n < 2000; ++n)
+                {
+                    const double x = audio (rng);
+
+                    if (f.process (x) != x)
+                    {
+                        fail ("a matched bell at zero gain is not a wire at "
+                              + show (hz) + " hz, Q " + show (q));
+                        break;
+                    }
+                }
+
+                for (double at = 20.0; at < rate * 0.49; at *= 1.7)
+                    expectNear (f.magnitudeAt (at), 1.0, 1e-12,
+                                "a matched bell at zero gain draws unity at "
+                                    + show (at) + " hz");
+            }
+
+    std::printf ("    %d settings matched, %d fell back to the plain bell\n",
+                 matched, fellBack);
+}
+
+//==============================================================================
+/** A corner above the ceiling is the corner at the ceiling, exactly.
+
+    The clamp is not only a number that stops the tangent running away: what
+    it produces has to be a filter, and the only sensible filter to give back
+    for a cutoff nobody can have is the highest one somebody can. Said as an
+    equality rather than as a bound, so there is nothing to interpret.
+
+    This is the check that catches the clamp being applied to the coefficients
+    and not to the matched bell's design, which is a mistake with a seam in it:
+    `bellIsMatchable`'s boundary rises with Q and passes the ceiling somewhere
+    around a Q of ninety, so above that a band asked for a cutoff past the
+    ceiling is feasible at the ceiling and infeasible at the frequency asked
+    for. Designed from the wrong one of those, the band silently drops to the
+    conventional bell, which at the top of the band is the five decibel error
+    the matched design exists to remove. Only visible at a high Q, which is
+    why the grid goes there. */
+void aCornerAboveTheCeilingIsTheCeiling()
+{
+    std::printf ("a corner above the ceiling\n");
+
+    for (double rate : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        const double ceiling = rate * 0.49;
+
+        for (double q : { 0.5, 4.0, 40.0, 95.0, 100.0 })
+            for (double gainDb : { -12.0, 0.0, 12.0 })
+                for (double above : { 1.0, 1.0000001, 1.5, 4.0, 1.0e6 })
+                    for (auto type : allTypes)
+                    {
+                        Fx::Svf asked;
+                        asked.setSampleRate (rate);
+                        asked.set (type, ceiling * above, q, gainDb);
+
+                        Fx::Svf atCeiling;
+                        atCeiling.setSampleRate (rate);
+                        atCeiling.set (type, ceiling, q, gainDb);
+
+                        const auto a = asked.coefficients();
+                        const auto b = atCeiling.coefficients();
+
+                        if (a.a1 != b.a1 || a.a2 != b.a2 || a.a3 != b.a3
+                            || a.m0 != b.m0 || a.m1 != b.m1 || a.m2 != b.m2
+                            || asked.isMatched() != atCeiling.isMatched())
+                        {
+                            fail (std::string ("a ") + nameOf (type) + " asked for "
+                                  + show (above) + " times its ceiling is not the one"
+                                  " at its ceiling, at rate " + show (rate) + ", Q "
+                                  + show (q) + ", " + show (gainDb) + " dB"
+                                  + (asked.isMatched() != atCeiling.isMatched()
+                                        ? " (and the two disagree about the matched design)"
+                                        : ""));
+                            return;
+                        }
+                    }
+    }
+
+    std::printf ("    identical at four rates, five Q values and five overshoots\n");
+}
+
+//==============================================================================
+/** Nonsense in the rate, the corner, the Q and the gain still leaves a filter
+    that runs, and the invariant the header rests its stability on holds at
+    every one of them.
+
+    That invariant is the point of this check rather than finiteness. With the
+    corner floored at one hertz and held under 0.49 of a finite rate, `g` is
+    strictly positive and finite, and a trapezoidally integrated state
+    variable filter with a positive `g` and a positive `k` is unconditionally
+    stable. `a2` is `g` times `a1` and `a3` is `g` times `a2`, so asserting
+    all three are strictly positive asserts exactly that, and it is a far
+    sharper instrument than waiting for an output to stop being finite: a
+    corner that has come out a hair negative gives poles whose modulus is
+    1.0000000000000002, which runs away in a few seconds of real time and
+    passes any tolerance anybody would write around one.
+  
+    It is also what makes the clamps load bearing rather than decorative.
+    Every one of them was removable without a single check noticing before
+    tonight:
+
+    - the one hertz floor. A cutoff of nothing gives a `g` of nothing, and
+      then `process` returns silence for ever while `magnitudeAt` takes its
+      degenerate branch and draws unity: the same pair of contradictory
+      answers an unconfigured filter used to give. Reachable, and not
+      obscurely: the instrument modulates its cutoff in octaves, twelve of
+      them downward, so a patch resting at the bottom of its range sweeps to
+      twenty hertz over four thousand and ninety six, which is a fifth of a
+      hundredth of a hertz.
+    - the lower bound on Q. A Q of nothing makes `k` infinite, which takes
+      `a1` to zero and arrives at the same contradiction by another road.
+    - the bound on the gain. Past about 170 decibels of cut the amplitude
+      underflows to nothing, and a shelf divides its `g` by the square root
+      of it, so `g` becomes infinite, `a1` becomes nothing, and `a2` is
+      infinity times nothing, which is not a number. The filter then outputs
+      silence, permanently, from the first sample.
+    - the order of the floor and the ceiling, which a sample rate of one
+      hertz reaches.
+
+    The values are finite nonsense rather than NaN, which is the same
+    boundary `OnePoleTest` draws: neither header claims to repair a
+    not-a-number handed in from outside, and a test that asserted it did
+    would be asserting a guard nobody has decided to write. */
+void nonsenseStillLeavesAFilterThatRuns()
+{
+    std::printf ("out of range use\n");
+
+    double worstCurve = 0.0;
+    double worstPole = 0.0;
+    int settings = 0;
+
+    // Infinity is in the list and a not-a-number is not, and the line
+    // between them is where a value is still well defined. An infinite rate
+    // has an answer the arithmetic walks straight into: the prewarping
+    // tangent of anything over infinity is exactly zero, which is the one
+    // value that takes `a2` to nothing, makes `g` unrecoverable from the
+    // coefficients and puts the drawn curve down its degenerate branch. A
+    // not-a-number has no answer, and neither this header nor `OnePole.h`
+    // claims to repair one handed in from outside.
+    for (double rate : { 0.0, -1.0, 1.0, 8000.0, 192000.0, 1.0e9,
+                         std::numeric_limits<double>::infinity() })
+        for (double hz : { -1.0e9, -1.0, 0.0, 1.0e-12, 1.0, 1.0e9 })
+            for (double q : { -5.0, 0.0, 1.0e-12, 0.70710678118654752, 1.0e9 })
+                for (double gainDb : { -1.0e6, -120.0, 0.0, 120.0, 1.0e6 })
+                    for (auto type : allTypes)
+                    {
+                        Fx::Svf f;
+                        f.setSampleRate (rate);
+                        f.set (type, hz, q, gainDb);
+
+                        // Whatever it fell back to, it has to say so, because
+                        // every tolerance below is a fraction of it.
+                        const double actualRate = f.getSampleRate();
+
+                        const std::string what = std::string (nameOf (type))
+                            + " at " + show (hz) + " hz, rate " + show (rate)
+                            + ", Q " + show (q) + ", " + show (gainDb) + " dB";
+
+                        if (! (actualRate > 0.0) || ! std::isfinite (actualRate))
+                        {
+                            fail (what + ": the rate it kept is not usable");
+                            return;
+                        }
+
+                        const auto c = f.coefficients();
+
+                        if (! (std::isfinite (c.a1) && std::isfinite (c.a2)
+                               && std::isfinite (c.a3) && std::isfinite (c.m0)
+                               && std::isfinite (c.m1) && std::isfinite (c.m2)))
+                        {
+                            fail (what + ": coefficients stopped being finite");
+                            return;
+                        }
+
+                        // The invariant. a1 > 0 and a2 > 0 and a3 > 0 is g
+                        // strictly positive and finite, said in terms of what
+                        // the filter actually holds.
+                        if (! (c.a1 > 0.0 && c.a2 > 0.0 && c.a3 > 0.0))
+                        {
+                            fail (what + ": the prewarped corner is not strictly"
+                                  " positive, a1 " + show (c.a1) + ", a2 "
+                                  + show (c.a2) + ", a3 " + show (c.a3));
+                            return;
+                        }
+
+                        // A cross-check rather than the guarantee, and held to
+                        // a nanometre of the circle rather than to the circle,
+                        // because at these settings the measurement is the
+                        // ill-conditioned part. A corner sitting on the one
+                        // hertz floor at a rate of a gigahertz gives a `g` of
+                        // three nanounits, and the discriminant that decides
+                        // whether the poles are a real pair or a complex one is
+                        // then two nearly equal numbers subtracted: it reads a
+                        // modulus of exactly one for a filter whose poles are
+                        // comfortably inside. The sharp instrument here is the
+                        // strictly positive test above, which is exact.
+                        const double pole = largestPoleModulus (f);
+
+                        if (! (pole < 1.0 + 1.0e-9))
+                        {
+                            fail (what + ": pole outside the unit circle, modulus "
+                                  + show (pole));
+                            return;
+                        }
+
+                        worstPole = std::max (worstPole, pole);
+
+                        // The two answers still agree. Compared absolutely
+                        // rather than in decibels on purpose: the failure
+                        // these clamps prevent is a drawn unity against a
+                        // real nothing, and a ratio of those is a number no
+                        // tolerance can read.
+                        // Fractions of the rate it kept, never a frequency in
+                        // hertz. Above Nyquist the two are not comparing the
+                        // same thing and are not meant to: the drawn curve
+                        // holds the top of its own range, while the state
+                        // space form walks `z` round the circle and comes
+                        // back to DC, which is an honest answer to a question
+                        // nobody should ask.
+                        for (double at : { 0.0, actualRate * 0.001, actualRate * 0.01,
+                                           actualRate * 0.2, actualRate * 0.4998 })
+                        {
+                            const double drawn = f.magnitudeAt (at);
+                            const double real = magnitudeAt (f, at, actualRate);
+
+                            if (! (std::isfinite (drawn) && drawn >= 0.0))
+                            {
+                                fail (what + ": the drawn curve at " + show (at)
+                                      + " hz is " + show (drawn));
+                                return;
+                            }
+
+                            const double off = std::fabs (drawn - real);
+
+                            if (! (off <= 1.0e-4 * (1.0 + std::fabs (real))))
+                            {
+                                fail (what + ": drawn " + show (drawn)
+                                      + " against real " + show (real) + " at "
+                                      + show (at) + " hz");
+                                return;
+                            }
+
+                            worstCurve = std::max (worstCurve,
+                                                   off / (1.0 + std::fabs (real)));
+                        }
+
+                        for (int n = 0; n < 400; ++n)
+                        {
+                            const double y = f.process ((double) (n % 7) * 0.3 - 1.0);
+
+                            if (! std::isfinite (y))
+                            {
+                                fail (what + ": the output stopped being finite at "
+                                      + std::to_string (n));
+                                return;
+                            }
+                        }
+
+                        ++settings;
+                    }
+
+    std::printf ("    %d settings, worst pole modulus %s, worst curve disagreement %s\n",
+                 settings, show (worstPole).c_str(), show (worstCurve).c_str());
 }
 
 //==============================================================================
@@ -1069,6 +1769,12 @@ int main()
     boostAndCutMirrorExactly();
     aSmallBellHasNoThreeDecibelPoint();
     theFiltersOwnCurveIsTheRealOne();
+
+    theRateCanChangeUnderAFilterThatIsAlreadySet();
+    anUnconfiguredFilterIsWhatItsDefaultsDescribe();
+    theMatchedBellSaysWhichDesignItIsRunning();
+    aCornerAboveTheCeilingIsTheCeiling();
+    nonsenseStillLeavesAFilterThatRuns();
 
     std::printf ("\n");
 

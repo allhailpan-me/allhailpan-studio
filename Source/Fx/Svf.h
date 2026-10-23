@@ -64,6 +64,39 @@
     the one asked for, which is the kind of wrong nobody hears until they
     compare against another studio.
 
+    Five things in here are deliberately unfailable, and they are written down
+    so nobody goes looking for the test that should have caught them. Each
+    one was broken on purpose and the suite could not see it, and in each
+    case that is the right answer rather than a gap:
+
+    - **The degenerate guard at the top of `magnitudeAt`.** It is a backstop
+      nothing reaches. With the corner floored at one hertz and then held
+      under 0.49 of a finite rate, `g` is strictly positive and finite, so
+      `a1` and `a2` are too, at every setting of all four arguments. That is
+      an argument, so `SvfTest` turns it into a reading: it asserts all three
+      `a` coefficients are strictly positive over eleven and a half thousand
+      settings, the nonsense ones included. The branch was reachable before
+      the constructor existed, by a filter nobody had configured.
+    - **Recovering `g` from `a2 / a1` rather than `a3 / a2`.** Both are `g`:
+      `a2` is `g` times `a1` and `a3` is `g` times `a2`, so either ratio
+      gives it back, and the two agree to rounding.
+    - **The curve's own ceiling taken at Nyquist rather than at 0.4999 of
+      the rate.** Every response tends to `m0` as the prewarped frequency
+      runs away, and both ceilings land on that asymptote to within absolute
+      rounding, so the answer does not move by anything a tolerance can
+      read. It stays because the square of the tangent is what the
+      denominator carries, and that overflows once the corner's own tangent
+      falls below about 1e-138, which needs a sample rate of the same order.
+    - **The first clamp on the frequency `magnitudeAt` is asked about.** The
+      `fmin` below it already holds the top end, and a magnitude is even in
+      the prewarped frequency, so folding a negative one to DC and
+      reflecting it give the same number. Dead either way.
+    - **The upper bound on Q.** It is a musical bound and says so: a
+      positive `g` and a positive `k` are stable at any Q, so a Q of a
+      billion is narrower than any ear or any room can use and perfectly
+      well behaved. The lower bound is not like this and is load bearing: a
+      Q of nothing makes `k` infinite, which takes `a1` to zero.
+
     No JUCE, so the tests can reach it.
 */
 namespace Fx
@@ -94,9 +127,31 @@ public:
         bellMatched
     };
 
+    /** The coefficients are built here rather than left at zero.
+
+        Left at zero the filter gave two different wrong answers and neither
+        was the one its own members describe: `process` returned silence for
+        ever, because every `a` was zero, while `magnitudeAt` took its
+        degenerate branch and reported unity at every frequency, where the
+        members below say a one kilohertz lowpass at 44.1 kHz. A filter that
+        nobody has configured yet is now that lowpass, in both answers.
+
+        The useful consequence is that `a1` and `a2` are non-zero at every
+        reachable setting, which is what makes the degenerate branch in
+        `magnitudeAt` a backstop rather than a state the studio can be in.
+    */
+    Svf() noexcept { update(); }
+
     void setSampleRate (double newRate) noexcept
     {
-        sampleRate = newRate > 0.0 ? newRate : 44100.0;
+        // Finite as well as positive. Infinity passes a bare `> 0.0`, and a
+        // rate of infinity makes the prewarping tangent exactly zero, which
+        // is the one value that puts `magnitudeAt` down its degenerate
+        // branch and makes `g` unrecoverable from the coefficients. No
+        // driver reports it; the guard is here so the invariant the rest of
+        // this file relies on, that `g` is strictly positive and finite at
+        // every setting, has no exception.
+        sampleRate = (newRate > 0.0 && std::isfinite (newRate)) ? newRate : 44100.0;
         update();
     }
 
@@ -115,11 +170,16 @@ public:
     {
         type = newType;
 
-        // The tangent runs off to infinity at Nyquist, so the cutoff has to
-        // stop short of it. 0.49 rather than 0.5 keeps g finite and leaves
-        // the top of a shelf's range usable, since a shelf multiplies g.
-        const double highest = sampleRate * 0.49;
-        frequency = hz < 1.0 ? 1.0 : (hz > highest ? highest : hz);
+        // Kept as it was asked for, and clamped against Nyquist in `update`
+        // instead. The ceiling is a fraction of the sample rate and the rate
+        // outlives this call, so a corner clamped here and read back later
+        // is a corner measured against a rate that has gone: set near the
+        // top of a 192 kHz band and then told the device is now at 48, this
+        // held a cutoff past the new Nyquist, where the tangent is negative.
+        // A negative `g` puts the poles outside the unit circle and the
+        // section doubles its own output until it is not a number any more,
+        // in about forty milliseconds, with nothing to say why.
+        frequency = hz;
 
         // Below about 0.025 the two pole denominator stops being a resonant
         // section at all, and above 100 a band is narrower than any ear or
@@ -237,7 +297,30 @@ private:
     void update() noexcept
     {
         const double A = std::pow (10.0, gain / 40.0);   // amplitude, half the dB
-        const double w = pi * frequency / sampleRate;
+
+        // The tangent runs off to infinity at Nyquist, so the cutoff has to
+        // stop short of it. 0.49 rather than 0.5 keeps g finite and leaves
+        // the top of a shelf's range usable, since a shelf multiplies g.
+        //
+        // Here rather than in `set` so that it is measured against whatever
+        // the sample rate is now. The floor goes on first and the ceiling
+        // last, rather than both in one expression: written the other way
+        // round, a sample rate below about two hertz leaves the one hertz
+        // floor above its own ceiling, so the clamp hands back a frequency
+        // past Nyquist, which is the one thing it exists to prevent.
+        const double highest = sampleRate * 0.49;
+
+        double corner = frequency < 1.0 ? 1.0 : frequency;
+
+        if (corner > highest)
+            corner = highest;
+
+        // Everything below depends on this: with the corner floored at one
+        // hertz and held under 0.49 of a finite rate, `g` is strictly
+        // positive and finite, and a trapezoidally integrated state variable
+        // filter with a positive `g` and a positive `k` is unconditionally
+        // stable. The clamp is not tidiness, it is the stability argument.
+        const double w = pi * corner / sampleRate;
 
         double g = std::tan (w);
         double k = 1.0 / resonance;
@@ -289,7 +372,7 @@ private:
 
             case Type::bellMatched:
             {
-                const auto design = matchedBell (frequency, resonance, gain, sampleRate);
+                const auto design = matchedBell (corner, resonance, gain, sampleRate);
 
                 matched = design.matched;
 
