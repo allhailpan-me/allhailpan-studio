@@ -47,6 +47,16 @@ public:
         file got. */
     Dither::Mode  getDither() const noexcept { return ditherMode; }
 
+    /** What is being written, in words, for the status bar.
+
+        Built here rather than at each of the places that shows it, because
+        three copies of the same concatenation is three chances for one of
+        them to name a depth the file does not have. */
+    juce::String describeFormat() const
+    {
+        return juce::String (Dither::name (bitDepth)) + ", " + Dither::name (ditherMode);
+    }
+
     void run() override
     {
         // One writer per file, and one quantiser per channel of it. Per
@@ -185,12 +195,13 @@ public:
                         dest[i] = Dither::leftJustified (quant.code (src[i]), bitDepth);
                 }
 
-                // Three entries and a null, because write's own documentation
-                // says the outer array is zero terminated and JUCE's internal
-                // caller does terminate it. The WAV writer happens to take a
-                // channel count as well and so would not read past the second,
-                // but relying on that would be relying on an implementation
-                // detail of a library this project cannot compile to check.
+                // Two channels and a null terminator, because write's own
+                // documentation says the outer array is zero terminated and
+                // JUCE's internal caller does terminate it. The WAV writer
+                // happens to take a channel count as well and so would not
+                // read past the second, but relying on that would be relying
+                // on an implementation detail of a library this project
+                // cannot compile to check.
                 const int* channels[3] = { codes.data(),
                                            codes.data() + (size_t) codeCapacity,
                                            nullptr };

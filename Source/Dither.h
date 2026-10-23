@@ -16,12 +16,22 @@
     Dither is the half of that nobody sees until it is wrong. Turning a float
     mix into a fixed point file quantises it, and an undithered quantiser's
     error is not noise: it is a deterministic function of the signal, so it
-    arrives as distortion rather than hiss and it follows the music. Measured,
-    a 1 kHz sine at 4 LSB has its fifth and seventh harmonics at -26 and -31 dB
-    below the fundamental undithered, and below the measurement floor dithered.
-    The error's variance also wanders by 3.6 dB as a sine fades, which is what
-    makes an undithered fade out or reverb tail grainy in a way that gets worse
-    the quieter it gets.
+    arrives as distortion rather than hiss and it follows the music. Measured
+    at 16 bit, swept across amplitude from one and a half steps to sixteen,
+    the worst harmonic of a low level sine stands at least 36.6 dB clear of
+    the record's own noise floor undithered, and at most 4.1 dB clear of it
+    dithered, which is to say nothing stands out of the noise at all. The
+    error's variance also wanders by 3.5 dB as a sine fades, which is what
+    makes an undithered fade out or reverb tail grainy in a way that gets
+    worse the quieter it gets.
+
+    Swept rather than quoted at one amplitude, because the distortion depends
+    on where the sine's peaks fall relative to the codes and swings more than
+    twenty decibels between neighbouring half steps: -25.4 dB at three and a
+    half steps, -39.5 at four, -28.6 at four and a half. The figures are from
+    `Tests/DitherProbe.cpp`, which exists because the draft of this header
+    quoted three numbers that nothing in the repository produced and all
+    three were wrong.
 
     That is the shape of fault this project keeps meeting. Nothing errors, the
     meters read right, and the tails are wrong.
@@ -417,8 +427,6 @@ namespace Dither
             // is.
             return (int) std::clamp (rounded, (double) lowest, (double) highest);
         }
-
-        Mode dither() const noexcept { return mode; }
 
     private:
         double scale;

@@ -2867,8 +2867,14 @@ void MainComponent::exportAudio (bool stems)
         // forgets they changed: a 16 bit delivery printed as a 32 bit float
         // file, or the other way round, is otherwise only discovered by
         // whoever receives it.
-        const auto written = juce::String (Dither::name (self.exportJob->getDepth()))
-                                 + ", " + Dither::name (self.exportJob->getDither());
+        //
+        // It is in the progress line below as well, and that is the half
+        // that makes the argument true rather than merely stated. This
+        // message is on screen for one frame: checkExportProgress runs off
+        // the 60 Hz timer and replaces the status outright on its first
+        // tick, so an announcement made only here is an announcement nobody
+        // can read. It has to stay up for the whole export.
+        const auto written = self.exportJob->describeFormat();
 
         self.setStatus (self.engine.isAnySoloed()
                             ? "Exporting " + written + " with a solo still on, so the file has only what "
@@ -2884,7 +2890,13 @@ void MainComponent::checkExportProgress()
 
     if (! exportJob->done.load())
     {
-        setStatus ("Exporting... " + juce::String (juce::roundToInt (exportJob->progress.load() * 100.0)) + "%");
+        // Naming the depth on every tick rather than only once before the
+        // first one. This line replaces whatever exportAudio put up, so
+        // without the depth in here the studio would announce what it was
+        // about to write and then hide it again a sixtieth of a second
+        // later, which is the same as not saying it.
+        setStatus ("Exporting " + exportJob->describeFormat() + "... "
+                       + juce::String (juce::roundToInt (exportJob->progress.load() * 100.0)) + "%");
         return;
     }
 
@@ -2910,8 +2922,7 @@ void MainComponent::checkExportProgress()
     }
 
     const auto file    = job->getMasterFile();
-    const auto written = juce::String (Dither::name (job->getDepth()))
-                             + ", " + Dither::name (job->getDither());
+    const auto written = job->describeFormat();
 
     setStatus (job->exportedStems()
                    ? "Exported the mix and " + juce::String (job->numStems()) + " stems, " + written

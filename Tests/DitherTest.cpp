@@ -8,8 +8,10 @@
 //
 //   * No dither at all. The error is then a deterministic function of the
 //     signal, so it is distortion rather than noise, and its level follows the
-//     music. Measured here: harmonics at -26 dB on a low level sine, and a
-//     noise floor that wanders by 3.6 dB as that sine fades.
+//     music. Measured here, swept across amplitude: the worst harmonic of a
+//     low level sine stands at least 36.6 dB clear of the record's own noise
+//     floor undithered and at most 4.1 dB clear of it dithered, and the
+//     noise floor wanders by 3.5 dB as that sine fades.
 //   * One uniform draw instead of two summed. The mean goes flat and the
 //     variance does not, which the 1992 survey names noise modulation.
 //   * Two draws differenced instead of summed. Identical density, identical
@@ -426,9 +428,16 @@ int main()
         // In decibels, because that is the unit the claim means anything in
         // and because it does not have to be rescaled when the sample count
         // changes. Measured at 0.07 dB over 32 positions of a quarter of a
-        // million samples each, against 3.6 dB undithered.
+        // million samples each.
+        //
+        // Deliberately not given a decibel figure to beat for the undithered
+        // case, because it does not have one: across this same sweep the
+        // undithered error power runs from exactly 0 to exactly q^2 / 4, a
+        // ratio with a zero in the bottom of it. A direct current input
+        // sitting on a code has no error at all and one sitting half a step
+        // off has the most there is. The undithered comparison that does
+        // have a figure is the fading sine below, at 3.5 dB.
         const double movedDb = 10.0 * std::log10 (highestVar / lowestVar);
-
         check (movedDb < 0.25,
                "the dithered error's power should not move across the sweep: it moved by "
                    + std::to_string (movedDb) + " dB");
@@ -553,8 +562,8 @@ int main()
         checkClose (0.5 * (lowestVar + highestVar), 3.0, 0.05,
                     "the dithered noise floor should sit at q^2 / 4 at every level");
 
-        // Measured at better than 3 dB of wander undithered, so a threshold
-        // of 1 dB separates them with room to spare.
+        // Measured at 3.5 dB of wander undithered against 0.03 dB dithered,
+        // so a threshold of 1 dB separates them with room to spare.
         const double undWanderDb = 10.0 * std::log10 (undHighestVar / undLowestVar);
         check (undWanderDb > 1.0,
                "an undithered noise floor should move as a sine fades: it moved by "
@@ -635,60 +644,68 @@ int main()
     // =====================================================================
     //
     // The other half of what the undithered error being a function of the
-    // signal means: its energy lands on harmonics of the note. Asserted on
-    // the largest harmonic rather than on a chosen one, because which
-    // harmonic is biggest depends on the amplitude and the frequency and is
-    // not a property worth pinning.
+    // signal means: its energy lands on harmonics of the note, so it arrives
+    // as distortion rather than hiss and it follows the music.
+    //
+    // Swept across amplitude rather than measured at one, and that is a
+    // correction rather than a flourish. The draft of this test took a sine
+    // four steps high, called four steps "where it is worst", and asserted
+    // the worst harmonic stood above -40 dB. Every part of that was wrong.
+    // Undithered distortion depends on where the sine's peaks fall relative
+    // to the codes, so it swings more than twenty decibels between
+    // neighbouring half steps: measured, -25.4 dB at three and a half steps,
+    // -39.5 at four, -28.6 at four and a half. Four steps is a local best
+    // case, and the threshold sat 0.55 dB from red, so moving the amplitude
+    // to the more representative five would have turned the suite red with
+    // nothing wrong in Dither.h at all. Tests/DitherProbe.cpp has the sweep
+    // the figures come from.
+    //
+    // So what is asserted is the property rather than a figure: at every
+    // amplitude, the undithered worst harmonic stands clear of the record's
+    // own noise floor and the dithered one does not. Measured over this
+    // sweep the two do not come close to meeting, undithered clearing by at
+    // least 36.6 dB and dithered by at most 4.1 dB.
+    //
+    // Against the record's own floor rather than a fixed number of decibels,
+    // because a fixed number is really a statement about the record length:
+    // this floor falls as the square root of the number of samples, so a
+    // threshold that passes today quietly becomes either unreachable or
+    // meaningless the moment somebody changes n.
     {
         const double scale = scaleFor (Depth::int16);
-        const double amp   = 4.0;              // four steps, where it is worst
         const int    n     = 1 << 17;
         const int    bin   = 97;               // an odd bin, so harmonics are distinct
         const double w     = 2.0 * 3.14159265358979323846 * (double) bin / (double) n;
 
-        std::vector<float> dOut ((size_t) n), uOut ((size_t) n);
-
-        Quantiser dithered   (Depth::int16, Mode::triangular, 0xbeef'0003ull);
-        Quantiser undithered (Depth::int16, Mode::none,       0xbeef'0003ull);
-
-        for (int i = 0; i < n; ++i)
-        {
-            const double x = amp * std::sin (w * (double) i);
-            dOut[(size_t) i] = (float) dithered.code   ((float) (x / scale));
-            uOut[(size_t) i] = (float) undithered.code ((float) (x / scale));
-        }
-
         RealFFT fft (n);
-        std::vector<std::complex<double>> dBins ((size_t) fft.getNumBins()),
-                                         uBins ((size_t) fft.getNumBins());
-        fft.forward (dOut.data(), dBins.data());
-        fft.forward (uOut.data(), uBins.data());
+        const int bins = fft.getNumBins();
 
-        // The worst harmonic, and the level of everything that is not a
-        // harmonic, both relative to the fundamental.
-        //
-        // Measured against the record's own noise floor rather than against a
-        // fixed number of decibels, because a fixed number is really a
-        // statement about the record length: the floor of this measurement
-        // falls as the square root of the number of samples, so a threshold
-        // that passes today quietly becomes either unreachable or meaningless
-        // the moment somebody changes n. What the dither claims is that there
-        // is no distortion product standing above the noise, and that is what
-        // is asserted.
-        auto measure = [&] (const std::vector<std::complex<double>>& bins)
+        std::vector<float> out ((size_t) n);
+        std::vector<std::complex<double>> spectrum ((size_t) bins);
+
+        // The worst harmonic and the level of everything that is not one,
+        // both relative to the fundamental.
+        auto measure = [&] (double amp, Mode mode)
         {
-            const double fundamental = std::abs (bins[(size_t) bin]);
+            Quantiser q (Depth::int16, mode, 0xbeef'0003ull);
 
-            double worstHarmonic = 0.0;
-            double floorSum = 0.0;
+            for (int i = 0; i < n; ++i)
+                out[(size_t) i] = (float) q.code ((float) (amp * std::sin (w * (double) i) / scale));
+
+            fft.forward (out.data(), spectrum.data());
+
+            const double fundamental = std::abs (spectrum[(size_t) bin]);
+
+            double worstHarmonic = 0.0, floorSum = 0.0;
             int    floorCount = 0;
 
-            for (int k = 2; k < fft.getNumBins(); ++k)
+            for (int k = 2; k < bins; ++k)
             {
-                const double mag = std::abs (bins[(size_t) k]) / fundamental;
+                const double mag = std::abs (spectrum[(size_t) k]) / fundamental;
 
                 // A harmonic of the fundamental, including the fundamental's
-                // own bin and its immediate neighbours, which carry leakage.
+                // own bin and its immediate neighbours, which carry leakage
+                // and are not distortion.
                 const bool isHarmonic = (k % bin) == 0 || std::abs (k - bin) <= 2;
 
                 if (isHarmonic)
@@ -705,32 +722,36 @@ int main()
 
             struct Result { double worstDb, floorDb; };
             return Result { 20.0 * std::log10 (worstHarmonic),
-                            20.0 * std::log10 (std::sqrt (floorSum / (double) std::max (1, floorCount))) };
+                            20.0 * std::log10 (std::sqrt (floorSum / (double) floorCount)) };
         };
 
-        const auto und = measure (uBins);
-        const auto dit = measure (dBins);
+        // From one and a half steps, which is about the quietest a sine can
+        // be and still cross more than two codes, up to sixteen, by which
+        // point the distortion is falling away on its own.
+        for (double amp : { 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 8.0, 12.0, 16.0 })
+        {
+            const auto und = measure (amp, Mode::none);
+            const auto dit = measure (amp, Mode::triangular);
 
-        // Measured around -26 dB undithered against a floor near -60, so a
-        // harmonic standing 20 dB clear of the noise is a wide margin.
-        check (und.worstDb > und.floorDb + 20.0,
-               "an undithered low level sine should show harmonic distortion: worst harmonic "
-                   + std::to_string (und.worstDb) + " dB against a floor of "
-                   + std::to_string (und.floorDb) + " dB");
+            const std::string at = " at " + std::to_string (amp) + " steps";
 
-        // And in absolute terms too, because "above the noise" would also be
-        // satisfied by a very quiet harmonic over a very quiet floor.
-        check (und.worstDb > -40.0,
-               "an undithered low level sine's distortion should be plainly audible: "
-                   + std::to_string (und.worstDb) + " dB");
+            // Twenty decibels of clearance, against a measured worst case of
+            // 36.6, so this has sixteen decibels in hand at the tightest
+            // amplitude in the sweep.
+            check (und.worstDb > und.floorDb + 20.0,
+                   "an undithered low level sine should show harmonic distortion" + at
+                       + ": worst harmonic " + std::to_string (und.worstDb)
+                       + " dB against a floor of " + std::to_string (und.floorDb) + " dB");
 
-        // Dithered, the largest harmonic is one more sample of the same noise
-        // the rest of the spectrum is made of. A few decibels of headroom
-        // because the largest of several hundred bins is above their mean.
-        check (dit.worstDb < dit.floorDb + 10.0,
-               "a dithered low level sine should show no harmonic above the noise: worst harmonic "
-                   + std::to_string (dit.worstDb) + " dB against a floor of "
-                   + std::to_string (dit.floorDb) + " dB");
+            // Dithered, the largest harmonic is one more sample of the same
+            // noise the rest of the spectrum is made of. Ten decibels of
+            // headroom because the largest of several hundred bins sits
+            // above their mean; measured, the worst case is 4.1.
+            check (dit.worstDb < dit.floorDb + 10.0,
+                   "a dithered low level sine should show no harmonic above the noise" + at
+                       + ": worst harmonic " + std::to_string (dit.worstDb)
+                       + " dB against a floor of " + std::to_string (dit.floorDb) + " dB");
+        }
     }
 
     // =====================================================================
@@ -1006,7 +1027,7 @@ int main()
 
         // Half of the argument: within full scale, and at it, the file is
         // never further from the mix than the rounding plus the dither, which
-        // is half a step plus one step. At 16 bit that bound is -90 dBFS, so
+        // is half a step plus one step. At 16 bit that bound is -86.8 dBFS, so
         // no headroom is worth reserving against it.
         for (double peakSteps : { 1.0, 100.0, scale / 2.0, scale - 2.0, scale })
         {

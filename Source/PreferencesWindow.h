@@ -428,9 +428,12 @@ private:
     a dialog in front of the file chooser because the export flow is a chooser
     launched asynchronously and threading a modal choice in front of it is a
     second thing to get right. What makes that safe rather than merely cheaper
-    is that the export says in the status bar what it is about to write, in
-    words, before the file appears, so a setting left somewhere unexpected is
-    visible at the moment it matters.
+    is that the status bar names the depth and the dither, in words, from
+    before the file appears until after it has, so a setting left somewhere
+    unexpected is visible at the moment it matters. It has to be on the
+    progress line and not only on the message before it: that one is replaced
+    by the first tick of the 60 Hz timer, so on its own it would be an
+    announcement nobody could read.
 */
 class ExportPreferencesPanel : public juce::Component
 {
@@ -552,11 +555,16 @@ private:
                             "noise stops moving with the music. Turn it off only if this mix is going "
                             "to be mastered somewhere else, since dithering the same audio twice is "
                             "worse than doing it once.")
-            : juce::String ("Nothing to dither at ") + Dither::name (depth) + ". At 24 bit the "
-                            "quantisation floor is around -144 dBFS, below the noise of any microphone "
-                            "or preamp, and a 32 bit float file is the mix itself with no word length "
-                            "reduction at all. Dither is applied only when a file is written at 16 bit, "
-                            "which is the same rule Ardour, Cubase and Logic follow.",
+            : juce::String ("Nothing to dither at ") + Dither::name (depth) + ". "
+                + (depth == Dither::Depth::int24
+                       ? juce::String ("The quantisation floor of a 24 bit file is around -144 dBFS, "
+                                       "below the noise of any microphone or preamp, so there is "
+                                       "nothing there to linearise and dither would only add noise. ")
+                       : juce::String ("A 32 bit float file is the mix exactly as the engine computed "
+                                       "it, with no word length reduction at all, so there is no "
+                                       "quantisation to dither. "))
+                + "Dither is applied only when a file is written at 16 bit, which is the same rule "
+                  "Ardour, Cubase and Logic follow.",
             juce::dontSendNotification);
     }
 

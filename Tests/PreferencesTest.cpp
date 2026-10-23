@@ -215,6 +215,83 @@ static void everyAutosaveIntervalIsOneOfTheOfferedOnes()
 }
 
 //==============================================================================
+// The one translation on the path from a stored setting to the word length a
+// delivered file is written at.
+//
+// Preferences.h claims these two functions exist "so the one place that
+// turns a one based combo box id into a zero based enum is a function with a
+// test on it". Until this section they were the only part of the export
+// depth change with no test at all, which an audit found and a mutation
+// proved: dropping the `- 1` from either one passes both DitherTest and
+// everything else in this file.
+//
+// What that mutation does is the reason this matters more than an off by one
+// usually would. Nothing errors and nothing looks wrong. Somebody who chose
+// 16 bit for a CD delivery gets 24 bit, somebody who never opened the tab
+// gets 32 bit float where they used to get 24, and the status bar honestly
+// reports the depth the export really used, so it names the wrong one with
+// complete confidence. The file is on its way to whoever asked for it before
+// anybody can notice.
+static void theExportDepthIsTheOneThatWasChosen()
+{
+    // Every id a combo box can really produce maps to the entry sitting at
+    // that position in the list, which is what the window builds its items
+    // from. An off by one in either direction fails here.
+    for (int id = 1; id <= Dither::numDepths; ++id)
+        check (Prefs::exportDepthFor (id) == Dither::depthAt (id - 1),
+               "export depth id " + std::to_string (id) + " chose the wrong word length");
+
+    for (int id = 1; id <= Dither::numModes; ++id)
+        check (Prefs::exportDitherFor (id) == Dither::modeFromStored (id - 1),
+               "export dither id " + std::to_string (id) + " chose the wrong dither");
+
+    // Pinned by name as well as by position, because the mapping above would
+    // still hold if the whole list were reordered, and reordering it would
+    // silently change what every saved setting means.
+    check (Prefs::exportDepthFor (1) == Dither::Depth::int16,   "the first export depth is not 16 bit");
+    check (Prefs::exportDepthFor (2) == Dither::Depth::int24,   "the second export depth is not 24 bit");
+    check (Prefs::exportDepthFor (3) == Dither::Depth::float32, "the third export depth is not 32 bit float");
+
+    check (Prefs::exportDitherFor (1) == Dither::Mode::none,       "the first dither entry is not off");
+    check (Prefs::exportDitherFor (2) == Dither::Mode::triangular, "the second dither entry is not triangular");
+
+    // The fallback is what somebody who has never opened the Export tab
+    // gets, and it has to be the 24 bit the studio wrote before there was a
+    // choice, or an upgrade quietly changes everybody's exports.
+    check (Prefs::exportDepthFor (Prefs::exportBitDepth.fallback) == Dither::Depth::int24,
+           "the default export depth is no longer the 24 bit every export used to be");
+
+    check (Prefs::exportDitherFor (Prefs::exportDither.fallback) == Dither::Mode::triangular,
+           "the default is no longer to dither");
+
+    // And anything a hand edited settings file can hold lands on the default
+    // rather than off the end of the list. Same discipline as the autosave
+    // interval above, and the same reason: these come out of a text file.
+    //
+    // The two extremes are in the list for a specific reason rather than for
+    // completeness. Both functions clamp with choiceId and only then take
+    // one off, and reversing those two steps looks like a tidy up: the
+    // result is the same for every id in range, and out of range the bounds
+    // check inside depthFromStored catches it anyway. It is the same for
+    // every input but one. The most negative int minus one is signed
+    // overflow, which is undefined behaviour rather than a wrong answer, and
+    // a settings file is plain text that can hold exactly that. The
+    // sanitizers make it a failure here instead of whatever the optimiser
+    // decides it is in a release build, but only if something passes the
+    // value, so these two entries are what makes the clamp testable at all.
+    const int lowest  = std::numeric_limits<int>::min();
+    const int highest = std::numeric_limits<int>::max();
+
+    for (const int stored : { lowest, -1000, -1, 0, Dither::numDepths + 1, 99999, highest })
+        check (Prefs::exportDepthFor (stored) == Dither::defaultDepth,
+               "an export depth id off the list did not fall back to the default");
+
+    for (const int stored : { lowest, -1000, -1, 0, Dither::numModes + 1, 99999, highest })
+        check (Prefs::exportDitherFor (stored) == Dither::defaultMode,
+               "an export dither id off the list did not fall back to the default");
+}
+
+//==============================================================================
 static void theAutosaveIntervalKeepsTheIntervalItAlwaysHad()
 {
     // Pinned on purpose. The autosave used to be a literal 60 * 120 counted
@@ -517,6 +594,7 @@ int main()
 
     onlySomethingThatLooksLikeANumberIsTrusted();
     everyAutosaveIntervalIsOneOfTheOfferedOnes();
+    theExportDepthIsTheOneThatWasChosen();
 
     theAutosaveIntervalKeepsTheIntervalItAlwaysHad();
     autosavingOffIsTheOnlyWayToGetZero();
