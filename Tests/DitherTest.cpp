@@ -652,13 +652,13 @@ int main()
     // four steps high, called four steps "where it is worst", and asserted
     // the worst harmonic stood above -40 dB. Every part of that was wrong.
     // Undithered distortion depends on where the sine's peaks fall relative
-    // to the codes, so it swings more than twenty decibels between
-    // neighbouring half steps: measured, -25.4 dB at three and a half steps,
-    // -39.5 at four, -28.6 at four and a half. Four steps is a local best
-    // case, and the threshold sat 0.55 dB from red, so moving the amplitude
-    // to the more representative five would have turned the suite red with
-    // nothing wrong in Dither.h at all. Tests/DitherProbe.cpp has the sweep
-    // the figures come from.
+    // to the codes, so it swings by up to 14.1 dB between neighbouring half
+    // steps: measured, -25.4 dB at three and a half steps, -39.5 at four,
+    // -28.6 at four and a half. Four steps is a local best case, and the
+    // threshold sat 0.55 dB from red, so moving the amplitude to the more
+    // representative five would have turned the suite red with nothing
+    // wrong in Dither.h at all. Tests/DitherProbe.cpp has the sweep the
+    // figures come from.
     //
     // So what is asserted is the property rather than a figure: at every
     // amplitude, the undithered worst harmonic stands clear of the record's
@@ -667,10 +667,23 @@ int main()
     // least 36.6 dB and dithered by at most 4.1 dB.
     //
     // Against the record's own floor rather than a fixed number of decibels,
-    // because a fixed number is really a statement about the record length:
-    // this floor falls as the square root of the number of samples, so a
-    // threshold that passes today quietly becomes either unreachable or
-    // meaningless the moment somebody changes n.
+    // because a fixed number is a statement about this record length and
+    // nothing else: the floor falls as the square root of the number of
+    // samples, so a fixed threshold becomes unreachable or meaningless the
+    // moment somebody changes n.
+    //
+    // Honestly, that makes this form less sensitive to n rather than
+    // independent of it. The distortion sits at a fixed level and the floor
+    // moves, so the clearance moves with n just as hard, in the other
+    // direction. Measured, the worst clearance over this sweep is 13.3 dB at
+    // n = 2^13, 24.4 at 2^15, 36.6 at 2^17 and 42.6 at 2^18, so halving n
+    // twice to make this section faster, which is the obvious thing to try,
+    // turns it red with nothing wrong. The same goes for the top of the
+    // sweep: clearance falls with amplitude and crosses 20 dB between 96 and
+    // 128 steps, so extending the sweep upward needs the threshold looked at
+    // rather than assumed. What is asserted is a property of this quantiser
+    // at these amplitudes and this record length, which is what a
+    // measurement can carry.
     {
         const double scale = scaleFor (Depth::int16);
         const int    n     = 1 << 17;
@@ -710,7 +723,18 @@ int main()
 
                 if (isHarmonic)
                 {
-                    if (k != bin && k / bin <= 7)
+                    // A true harmonic, and only those. The condition above
+                    // also keeps the fundamental's neighbours out of the
+                    // floor, where they would be leakage rather than noise,
+                    // but they are not distortion either and they must not
+                    // reach this maximum: k / bin is 0 or 1 for all of them,
+                    // so a test on k / bin alone lets every one of them
+                    // through. With the sine on an exact bin they hold
+                    // ordinary noise and nothing shows, and the first person
+                    // to move it off the grid, which is the obvious way to
+                    // make this more realistic, would see the dithered check
+                    // fail at -0.04 dB and go looking at the dither.
+                    if (k % bin == 0 && k / bin >= 2 && k / bin <= 7)
                         worstHarmonic = std::max (worstHarmonic, mag);
                 }
                 else
@@ -722,7 +746,7 @@ int main()
 
             struct Result { double worstDb, floorDb; };
             return Result { 20.0 * std::log10 (worstHarmonic),
-                            20.0 * std::log10 (std::sqrt (floorSum / (double) floorCount)) };
+                            20.0 * std::log10 (std::sqrt (floorSum / (double) std::max (1, floorCount))) };
         };
 
         // From one and a half steps, which is about the quietest a sine can
@@ -744,9 +768,19 @@ int main()
                        + " dB against a floor of " + std::to_string (und.floorDb) + " dB");
 
             // Dithered, the largest harmonic is one more sample of the same
-            // noise the rest of the spectrum is made of. Ten decibels of
-            // headroom because the largest of several hundred bins sits
-            // above their mean; measured, the worst case is 4.1.
+            // noise the rest of the spectrum is made of. Measured, the worst
+            // case over this sweep is 4.1 dB, against a threshold of 10.
+            //
+            // What sets that margin is the exponential tail of one noise
+            // bin's power rather than how many bins are looked at, which is
+            // six. Swept over 700 seeds against all twelve amplitudes, four
+            // of the 8400 draws cleared more than 10 dB and the largest was
+            // 10.9, so a different seed would redden this check roughly once
+            // in 175 tries. The seed is fixed, so the test is deterministic
+            // and cannot flake in CI, but changing it is not the free edit
+            // it looks like: anybody who does should re-run that sweep
+            // rather than just the one new seed. Rare event counts are
+            // themselves noisy, so read it as an order of magnitude.
             check (dit.worstDb < dit.floorDb + 10.0,
                    "a dithered low level sine should show no harmonic above the noise" + at
                        + ": worst harmonic " + std::to_string (dit.worstDb)

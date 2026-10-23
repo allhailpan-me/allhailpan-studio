@@ -242,7 +242,7 @@ present, plausible and wrong.
 
 The sweep is the other half of the lesson. Undithered distortion is not
 monotonic in amplitude and is nowhere near it: it depends on where the sine's
-peaks fall relative to the codes and swings more than twenty decibels between
+peaks fall relative to the codes and swings by up to 14.1 dB between
 neighbouring half steps, -25.4 dB at three and a half, -39.5 at four, -28.6 at
 four and a half. The draft called four steps "where it is worst" and it is a
 local best case, which left its fixed threshold 0.55 dB from failing. Moving

@@ -21,10 +21,11 @@
 // What the sweep shows, which is the part worth not relearning. Undithered
 // distortion is not monotonic in amplitude and is not even close to it. It
 // depends on where the sine's peaks happen to fall relative to the codes,
-// so it swings by more than twenty decibels between neighbouring tenths of a
-// step: at 3.5 steps the worst harmonic is -25 dB, at 4.0 it is -39, at 4.5
-// it is -29. Four steps is a local best case rather than a worst case, which
-// is what the draft's comment claimed it was.
+// so it swings by up to 14.1 dB between neighbouring half steps and 7.2 dB
+// between neighbouring tenths: at 3.5 steps the worst harmonic is -25.4 dB,
+// at 4.0 it is -39.5, at 4.5 it is -28.6. Four steps is a local best case
+// rather than a worst case, which is what the draft's comment claimed it
+// was.
 //
 // That is why the test sweeps rather than picking an amplitude. A single
 // chosen amplitude with a fixed threshold is a measurement of where the
@@ -38,6 +39,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 using namespace Dither;
@@ -88,12 +90,14 @@ namespace
 
             if (isHarmonic)
             {
-                if (k != bin && k / bin <= 7)
+                // True harmonics only. The fundamental's neighbours are
+                // excluded from the floor as leakage, and they are not
+                // distortion either: k / bin is 0 or 1 for all of them, so
+                // a test on k / bin alone would let every one of them in.
+                if (k % bin == 0 && k / bin >= 2 && k / bin <= 7)
                 {
                     if (mag > worst) { worst = mag; worstIndex = k / bin; }
-
-                    if (k % bin == 0)
-                        harmonic[k / bin] = mag;
+                    harmonic[k / bin] = mag;
                 }
             }
             else

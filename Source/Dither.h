@@ -26,9 +26,9 @@
     worse the quieter it gets.
 
     Swept rather than quoted at one amplitude, because the distortion depends
-    on where the sine's peaks fall relative to the codes and swings more than
-    twenty decibels between neighbouring half steps: -25.4 dB at three and a
-    half steps, -39.5 at four, -28.6 at four and a half. The figures are from
+    on where the sine's peaks fall relative to the codes and swings by up to
+    14.1 dB between neighbouring half steps: -25.4 dB at three and a half
+    steps, -39.5 at four, -28.6 at four and a half. The figures are from
     `Tests/DitherProbe.cpp`, which exists because the draft of this header
     quoted three numbers that nothing in the repository produced and all
     three were wrong.
