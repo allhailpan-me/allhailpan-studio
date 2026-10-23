@@ -146,9 +146,21 @@ inline void normaliseCompSegments (std::vector<CompSegment>& segments,
 
     const int lastTake = std::min (numTakes, (int) kMaxCompTakes) - 1;
 
-    // Anything that is not a number goes first. Sorting with one still in the
-    // list breaks the comparator's strict weak ordering, which is undefined
-    // behaviour, and a project file is not to be trusted that far.
+    // Anything that is not a number goes first, and the reason is not the one
+    // it looks like. Sorting with a NaN still in the list would break the
+    // comparator's strict weak ordering, but the floor two lines below gets
+    // there before the sort does, and `std::max (0.0, x)` returns its first
+    // argument when the comparison is false, so a NaN would arrive at the
+    // comparator as nought rather than as a NaN.
+    //
+    // What that leaves is worse than undefined behaviour because it runs: a
+    // boundary with no position lands exactly on the folder's start, carrying
+    // whatever take it named, and takes over the opening of the performance.
+    // An infinity below zero does the same. Dropped is the only honest answer,
+    // since a position that is not a number is not a position, and a project
+    // file is not to be trusted that far. Removing this line passes every
+    // invariant a normalised list has, which is why `CompModelTest` checks the
+    // list that comes back and not only its invariants.
     segments.erase (std::remove_if (segments.begin(), segments.end(),
                                     [] (const CompSegment& s) { return ! std::isfinite (s.at); }),
                     segments.end());

@@ -27,6 +27,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <utility>
 
 static int failures = 0;
 
@@ -758,6 +759,96 @@ int main()
                    "at spot " + std::to_string (i) + " the first write of the boundary won: "
                      + "take " + std::to_string (compTakeAt (segs, at)) + " rather than "
                      + std::to_string (second (i)));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A drag that does nothing, on a folder nobody has comped yet.
+    //
+    // This is the one state where "nothing happened" is hard to spell. An
+    // untouched comp is an empty list, which means "the first take, all the
+    // way through", and normalising an empty list spells that out as a single
+    // segment at zero. The two are the same performance, so no check on which
+    // take is heard can tell them apart, and every structural invariant holds
+    // for both.
+    //
+    // What tells them apart is `TakeFolder::operator==`, which is what decides
+    // whether the project is dirty and whether an edit goes on the undo stack.
+    // So a click that misses, or a drag entirely off the end of the folder,
+    // would mark the project changed and push an undo step for an edit that
+    // did not happen, against the rule that undo is one step per finished edit
+    // rather than one per mouse movement.
+    //
+    // Both guards that prevent it, the clamp of the drag into the folder and
+    // the floor on its width, looked like no-ops until they were diffed on
+    // this case: every other test here drags on a comp that has already been
+    // normalised, where both spellings have collapsed to the same one.
+    {
+        const double len = 16.0;
+
+        const std::vector<std::pair<double, double>> doNothing {
+            { len + 1.0, len + 5.0 },          // entirely past the end
+            { -9.0, -3.0 },                    // entirely before the start
+            { 4.0, 4.0 },                      // a click, not a drag
+            { 4.0, 4.0 + kMinCompSpan * 0.5 }, // a drag that went nowhere
+            { len, len + 2.0 },                // starting exactly at the end
+        };
+
+        for (const auto& [from, to] : doNothing)
+        {
+            std::vector<CompSegment> fresh;
+            setCompRegion (fresh, from, to, 1, 2, len);
+
+            const std::string label = "a drag of [" + std::to_string (from) + ", "
+                                        + std::to_string (to) + "] on a fresh folder";
+            check (fresh.empty(), label + " edited the comp anyway");
+        }
+
+        // And the same drags on a comp that is already spelled out leave it
+        // exactly as it was, which is the other half of the same promise.
+        for (const auto& [from, to] : doNothing)
+        {
+            std::vector<CompSegment> segs;
+            setCompRegion (segs, 4.0, 12.0, 1, 2, len);
+            const auto was = segs;
+            setCompRegion (segs, from, to, 0, 2, len);
+
+            check (segs == was, "a drag of [" + std::to_string (from) + ", "
+                                  + std::to_string (to) + "] on a comp edited it anyway");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A boundary whose position is not a number.
+    //
+    // It is dropped, and the thing to check is that it is dropped rather than
+    // moved. Every position in the list is floored at zero a few lines further
+    // down, and `std::max (0.0, x)` returns its first argument when the
+    // comparison is false, so a boundary that is not a number does not stay
+    // where it is: it lands exactly on the folder's start and takes over the
+    // opening of the performance with whatever take it was carrying. An
+    // infinity below zero does the same.
+    //
+    // There was already a case here feeding this function a list full of
+    // rubbish, and it checked the invariants of what came back. That cannot
+    // see this: a boundary at zero naming a take that exists satisfies every
+    // one of them. What it needs is the list itself.
+    {
+        const double len = 16.0;
+
+        for (const double bad : { std::numeric_limits<double>::quiet_NaN(),
+                                  -std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::infinity() })
+        {
+            std::vector<CompSegment> segs { { 0.0, 0 }, { 8.0, 1 }, { bad, 2 } };
+            normaliseCompSegments (segs, 3, len);
+
+            const std::string label = "a boundary at " + std::to_string (bad);
+            checkSegmentInvariants (segs, 3, len, label);
+            check (segs == std::vector<CompSegment> { { 0.0, 0 }, { 8.0, 1 } },
+                   label + " was moved rather than dropped");
+            check (compTakeAt (segs, 1.0) == 0,
+                   label + " took over the start of the performance");
         }
     }
 
