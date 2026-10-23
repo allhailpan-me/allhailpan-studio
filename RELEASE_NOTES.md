@@ -18,10 +18,12 @@ The dither is the part that is not obvious, and it is why this took a night
 rather than an afternoon. Squeezing a mix down to 16 bit has to round every
 sample, and the rounding error is not hiss: it is a direct consequence of the
 waveform, so it comes out as distortion rather than noise, and it follows the
-music. On a sine four steps above silence the rounding alone puts harmonics
-only 26 dB down, which is a lot. Worse, the noise rises and falls with the
-signal, so it is loudest in the quiet bits, which is where you would hear it:
-fade outs and reverb tails go grainy as they disappear. Dither is a very
+music. On a sine a step and a half above silence the rounding alone throws
+harmonics only 15 dB below the note itself, and how bad it is swings wildly
+with level for no reason you could predict: 25 dB down at three and a half
+steps, 39 at four, 29 at four and a half. Worse, the noise rises and falls
+with the signal, so it is loudest in the quiet bits, which is where you would
+hear it: fade outs and reverb tails go grainy as they disappear. Dither is a very
 quiet, very specific noise added before the rounding, and what it buys is a
 noise floor that stays still. Measured here, the floor moves by 0.03 dB as a
 note fades where it used to move by 3.5 dB, and a tone a quarter of a step
