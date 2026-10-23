@@ -160,6 +160,22 @@ int main()
         checkExact (modeToStored (modeFromStored (stored)), modeToStored (defaultMode),
                     "an out of range stored mode should read as the default");
 
+    // A known gap, written down so it cannot quietly become a lie, the way
+    // VoiceTest writes down the destinations nothing reaches yet.
+    //
+    // The bound in modeFromStored is unobservable from outside while there
+    // are exactly two modes and the default is the second of them: an out of
+    // range id that fell through the guard would land on the ternary's else
+    // branch, which is the default anyway. Removing the guard, or taking it
+    // off by one, is a genuine no-op today and the mutation pass found it so.
+    // It stops being one the moment a third mode is added or the default
+    // moves to Mode::none, and this assertion is what fails on that day and
+    // sends whoever did it back to this comment.
+    static_assert (numModes == 2,
+                   "a third mode makes modeFromStored's bound observable: give it a case");
+    static_assert (modeToStored (defaultMode) == numModes - 1,
+                   "a default that is not the ternary's else branch makes the bound observable");
+
     // Every id the list really has has to survive a round trip, or a setting
     // somebody chose turns into a different one on the next launch.
     for (int i = 0; i < numDepths; ++i)
