@@ -6,6 +6,422 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-22: a bit depth to export at, and the dither that makes it honest
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **A bit depth choice on export, and dither on the fixed point conversion** | **Chosen.** Export was hard coded to 24 bit (`ExportJob.h`, `.withBitsPerSample (24)`) with no choice anywhere, and the word "dither" appeared nowhere in the repository. Rejected on 2026-10-08 with an explicit precondition: "there is nothing for it to fix until a 16 bit export option exists". This is the night that builds the option and the dither together, because either alone is half a feature. |
+| Fader law | Deferred a fourth time, and the research changed what the next night should actually fix. The premise written down on the last three nights, that the taper is wrong, does not survive measurement: `(v / 0.8)^2` over a travel of 0..1.25 gives the -20 dB to -6 dB region 25.1 per cent of the fader, against 28.2 for Ardour's law and 22.5 for the X32's, and it is slightly finer than Ardour at unity (0.271 against 0.308 dB per one per cent of travel). What is genuinely wrong is narrower and should be written down as such: **unity sits at 0.640 of the travel** where every reference puts it at 0.75 (Behringer X32, exactly) to 0.782 (Ardour, `(32/33)^8`), and **the ceiling is +3.88 dB**, which is an artefact of 1.25 divided by 0.8 rather than a number anybody chose. Nothing in the audio world specifies a fader law: IEC 60268-17 is the VU meter and 60268-18 is the digital peak meter, and the widely copied `iec_scale` piecewise function is a **meter deflection** function that lives in Ardour's `logmeter.h` next to `meter_deflect_vu`, puts unity at 0.87 of travel and has a hard floor at -70 dB. Anybody reaching for it as a fader law would be implementing the wrong thing, which is why it is recorded here. |
+| Punch in and punch out recording | Deferred, same reason as 2026-10-21 and no new one. |
+| MIDI record alignment | Deferred again, same reason as the last four nights. |
+| A tuner | Deferred. Still wants a published pitch detector and a window. |
+| Noise shaping | **Rejected, and the reason is this project's own history rather than taste.** The citation is real: Lipshitz, Vanderkooy and Wannamaker, "Minimally Audible Noise Shaping", JAES vol 39, pp 836 to 852 (1991), whose abstract claims a second order shaper is worth 10.9 dB of perceived noise against Fielder's modified E-weighting, within 0.6 dB of the information theory limit. The five tap set in circulation, `{ 2.033, -2.165, 1.959, -1.590, 0.6149 }`, could **not** be verified against the paper: it reaches us through SoX into FFmpeg's `noise_shaping_data.c` and separately through Steve Harris into Ardour's gdither, both secondary, and **the two disagree about which sample rate it is for**, gdither's own comment saying "only really works for 46kHz-ish signals" against FFmpeg filing it under 44100. Shipping five coefficients of unverifiable provenance, specified at one rate, in a studio that runs at five, is exactly the failure `Fx/Tilt.h` exists to avoid. It is also the wrong trade to make first: shaping buys perceived quiet by making the file measurably noisier. Worth a night of its own, from the paper itself, with the filter designed at the running rate. |
+| High pass (first order shaped) TPDF | **Rejected for tonight, with its figures recorded because they are worth having.** Differencing successive uniform draws rather than summing two fresh ones leaves the marginal density triangular, so Theorem 8 still holds and the moments are still flat, but the error spectrum follows `q^2/12 + 4 sin^2(pi f / fs) q^2/12`: measured 4.8 dB quieter below 1 kHz and 2.2 dB louder near Nyquist, for **identical total power**. That is a real win at no cost in level, and it is what Ardour ships under the name "Triangular". It was not chosen because the primary source, Lipshitz and Vanderkooy, "High-Pass Dither", AES 4th Regional Convention, Tokyo (1989 June), pp 72 to 75, **could not be obtained**, so the construction here would rest on derivation and measurement rather than on the paper. Flat TPDF is the one the definitive survey recommends by name. |
+| Rectangular dither | **Rejected on the research.** It is in every implementation's menu and it is a worse answer, not a cheaper one. The 1992 survey, section 5.3: 1 LSB rectangular dither makes the first error moment zero for every input, and then "The error variance, on the other hand, is clearly signal dependent. This is sometimes referred to as noise modulation and is audibly undesirable." Measured over a DC sweep across one step, its error variance swings from **0 to q^2/4 and back, following the signal**: the whole noise floor rises and falls with the waveform. Offering it would be offering a mode whose only distinguishing property is a fault. |
+| Dither on the recorder | Rejected as a non-problem, which is worth saying so nobody adds it. A take is captured from the interface and written at the device's own word length, so there is no word length reduction on that path and nothing to linearise. Dither belongs where a float mix becomes a fixed point file, which is the export and only the export. |
+
+### What was chosen, and why
+
+**There was no way to produce a 16 bit file, and no dither to produce one honestly with.**
+
+Every export was 24 bit whether it was a working master or something to be sent
+somewhere that wanted 16 bit, so getting a 16 bit file meant converting it in
+another program, which is both an extra step and a conversion this studio then
+knows nothing about.
+
+The dither is the half that is not obvious, and it is the reason this is a
+night's work rather than a combo box. Reducing a 32 bit float mix to 16 bit
+quantises it, and an undithered quantiser's error is a deterministic function
+of the signal rather than noise: it is correlated with the waveform and it
+arrives as distortion rather than hiss. Measured at 16 bit and swept across
+amplitude, the worst harmonic of a low level sine stands at least **36.6 dB**
+clear of the record's own noise floor undithered and at most **4.1 dB** clear
+of it dithered, which is to say nothing stands out of the noise at all.
+It is also where the noise floor goes when the music gets quiet: the error
+variance of an undithered 16 bit quantiser wanders over 3.5 dB as a sine fades,
+so reverb tails and fade outs get grainy in a way that follows the music. That
+is the shape of fault this file keeps meeting. The file plays, the meters look
+right, and the tails are wrong.
+
+Both halves had to land together. A 16 bit option without dither would be a
+new way to produce a worse file, and dither without a 16 bit option fixes
+nothing, which is precisely why it was rejected in October.
+
+### Where the behaviour came from
+
+Primary sources, with what each is actually load bearing for.
+
+**The dither itself.** S. P. Lipshitz, R. A. Wannamaker and J. Vanderkooy,
+"Quantization and Dither: A Theoretical Survey", JAES vol 40, no 5, pp 355 to
+375 (1992 May), read as full text. Its section 5 covers nonsubtractive dither,
+which is what this is: the dither is added before the quantiser and nothing is
+subtracted afterwards. What was taken from it:
+
+- **Theorem 8.** Dither formed by summing `n` independent zero mean rectangular
+  processes each 1 LSB peak to peak "renders the first n moments of the total
+  error independent of the system input", with "a total error power of
+  (n + 1)D^2/12" for n at least 2. So two summed draws, which is triangular on
+  plus or minus 1 LSB, flattens both the mean and the variance, and the total
+  error power is `q^2/4`.
+- **Why two and not one, and not three.** After equation (108) the survey calls
+  2 LSB peak to peak triangular dither "unique and optimal in the sense that it
+  renders the first and second moments of the total error input independent,
+  while minimizing the second moment", and section 5.4 item (5) adds that it
+  "incurs the least increase in the rms total error level". Note the proof of
+  that uniqueness is **not** in this paper: it is deferred to reference [3],
+  which was then unpublished and is now Wannamaker, Lipshitz, Vanderkooy and
+  Wright, "A Theory of Non-Subtractive Dither", IEEE Trans. Signal Process.,
+  vol 48, no 2, pp 499 to 516 (2000). That paper was not read (paywalled), so
+  the uniqueness claim here rests on the survey asserting it.
+- **The quantiser the theory requires**, which is the part that would have
+  silently defeated the whole thing. Section 2: "Quantizers of the midtread
+  variety will be assumed", built on the floor operator, with the quantisation
+  error having "a maximum magnitude of 0.5 LSB" and a period of 1 LSB. That is
+  `floor(w/q + 1/2)`, which is round to nearest, and the paper never discusses
+  truncation at all.
+- **The recommendation, in the authors' own words**, section 6: "We recommend
+  the use of nonsubtractive, triangular-pdf dither of 2-LSB peak-to-peak
+  amplitude for most audio applications requiring multibit quantization or
+  requantization operations."
+- **What it does not do**, which matters for how the comments are worded.
+  Section 5.4 item (1): nonsubtractive dither **cannot** make the total error
+  independent of the input, only chosen conditional moments of it. So the
+  claim in the header is that the first and second moments are independent of
+  the signal, not that the error is independent of it, and not that the error
+  is noise uncorrelated with the signal. Item (4) names the price: a total
+  error variance greater than `q^2/12`, which here is the 4.77 dB the survey
+  itself quotes as 4.8 dB when comparing its figures 10(d) and 6(d).
+
+Also cited for existence and for the general argument that audio should be
+redithered whenever it is requantised: J. Vanderkooy and S. P. Lipshitz,
+"Dither in Digital Audio", JAES vol 35, no 12, pp 966 to 975 (1987 Dec). Only
+its abstract was reachable, so no number in this studio comes from it.
+
+**Which depths get dithered.** Ardour is the clearest and it is in the source
+rather than the manual: `HasSampleFormat::update_sample_format_selection` in
+`libs/ardour/export_formats.cc` force selects `D_None` and marks every other
+dither type incompatible for 24 bit, 32 bit, float and double, so dither is
+selectable only at 8 and 16 bit, and `SampleFormatConverter<float>::init` hard
+codes `GDitherNone` so a float export cannot be dithered at all. Ardour's
+tracker 0007428, asking for dither on 24 bit exports, is closed won't fix with
+the reasoning that 24 bit covers about 144 dB and thermal and analogue noise
+sit above that floor. Steinberg says the same from the other end: the Cubase
+Export Audio Mixdown page recommends dither for the 16 bit case specifically,
+and its Dither Effects page puts the audible range of the problem at "16 bit
+or below". Apple's Logic bounce page: "Dithering is recommended when bouncing
+24-bit recordings into 16-bit files."
+
+So: dither at 16 bit, none at 24 bit, and structurally none at 32 bit float,
+where no word length reduction happens.
+
+Avid is the one source that contradicts itself and it is recorded rather than
+reconciled. Its "When to Use a Dither Plug-In" page says to use one "when
+exporting to a 16-bit or 24-bit audio file", while its own DigiRack Dither page
+says to use it whenever "your destination bit depth is lower than 24-bit".
+Avid also applies no dither on export at all: it is a plug-in the user inserts.
+
+**Nothing was sourced for Reaper or Studio One.** Reaper's user guide is a PDF
+on hosts the sandbox cannot reach, and the current Studio One manual, now
+Fender Studio Pro 8.2, does not mention dither anywhere. No claim here rests
+on either.
+
+### The hazard found while reading JUCE, which was a live fault
+
+This is the part worth reading before touching the export path again.
+
+**JUCE's `writeFromFloatArrays` does not round to nearest when it narrows to 16
+or 24 bit. It floor truncates with an arithmetic shift.** Read from the real
+9.0.3 headers rather than from memory, as this project's build section
+requires, because JUCE cannot be compiled here:
+
+- `AudioFormatWriter::writeFromFloatArrays` (`juce_AudioFormatWriter.cpp`) hands
+  the floats to the file static `convertFloatsToInts`, which is round to
+  nearest **to int32**, clamped, and then calls `write (const int**, n)`.
+- `juce_WavAudioFormat.cpp` dispatches that to
+  `WriteHelper<AudioData::Int16, AudioData::Int32, ...>` at 16 bit and
+  `AudioData::Int24` at 24.
+- Those take the integer path in `juce_AudioDataConverters.h`, whose
+  `Int16::setAsInt32LE` is `(uint16) (newValue >> 16)` and whose
+  `Int24::setAsInt32LE` is `littleEndian24BitToChars (newValue >> 8, data)`.
+
+An arithmetic right shift on a signed integer is floor division, not rounding.
+So the effective quantiser behind every export this studio has ever written is
+a floor, with a **mean error of -0.4997 LSB** and an error range of (-1, 0]:
+measured, `-0.5/32768` comes back as code -1 and `+0.5/32768` as code 0. At 24
+bit that offset is at -144 dBFS and inaudible, which is why nothing ever said
+so, but it is a half LSB of DC in every file, and at 16 bit it would have been
+at -96 dBFS.
+
+It also would have quietly defeated the dither. Floor is still a uniform
+quantiser, so Theorem 8 survives it and the noise modulation would still have
+been fixed, but the constant first moment becomes -0.5 LSB instead of zero, so
+the dither would have bought a flat noise floor and a DC offset with it.
+
+The fix is not to add half an LSB and hope. The quantiser is now computed in
+`Dither.h`, which is tested, and the integer code is handed to
+`write (const int**, n)` shifted up by 16 or 8 so that JUCE's own shift puts
+it back exactly: `(code << 16) >> 16` is `code` for every code in range, with
+no float arithmetic anywhere in between. The float path is used only for the
+32 bit float export, where `isFloatingPoint()` makes `writeFromFloatArrays`
+pass the floats straight through without converting at all.
+
+Worth knowing for the shape of it: three different float to integer
+conversions live in that one JUCE header, and they disagree.
+`Int16::setAsFloatLE` **does** round to nearest, but clamps to -32767 and can
+never emit -32768, so switching paths would move the negative rail by one LSB.
+Which one runs is decided by the destination type's `copyFrom`, not by
+anything at the call site.
+
+### The decisions taken without a primary source, recorded as decisions
+
+**Clipping.** The theory excludes it by assumption. The survey's footnote 1:
+"For practical purposes, this simply means that the signal is never clipped by
+saturation of the quantizer", and the main text assumes "infinite quantizers".
+Every theorem in it is about a quantiser with infinitely many levels, and no
+manufacturer documentation read addresses overload either. The decision here is
+to **clamp to the extreme code**, which is what both reference implementations
+do (Ardour's gdither clamps after `lrintf` to 32767 and -32768; JUCE clamps the
+float to plus or minus one before scaling, so an export clamps twice over
+whatever this code does). No headroom is reserved: the dither can push a sample
+past full scale by at most 1 LSB, which at 16 bit is 0.00027 dB, and reserving
+room for it would make a bounce quieter than what was heard, which is the class
+of fault `renderOffline` exists to prevent. The honest qualifier, which is in
+the header rather than implied away: a clamped sample is not a uniform
+quantiser, so the moment independence does not hold at the rails. That is
+unavoidable in any finite word length and is exactly why the paper assumes an
+infinite one.
+
+**Rounding at ties.** `floor(x + 0.5)` in double, which sends ties upward,
+rather than `lrint`, which follows the current FPU rounding mode and so ties to
+even by default. The paper's mid tread quantiser is the floor form, and a
+quantiser whose behaviour depends on a floating point mode would make an export
+differ between the three platforms this studio is built for. With dither
+present a tie has measure zero, so this only decides the undithered case.
+
+**The random number generator.** The paper specifies the dither's distribution
+and says nothing about how to generate it. This uses a 64 bit SplitMix64 step
+per draw, which is fast, has no state to warm up and passes the distribution
+tests that matter here, and the test checks the generated density rather than
+trusting the generator. Each channel of each file gets its own stream from its
+own seed, because two channels sharing a dither stream would put correlated
+noise on both and image it in the centre of the stereo field rather than
+spreading it. Ardour keeps per channel state for the same reason but draws all
+channels from one global generator, which is adequate and is not the same
+thing.
+
+**Where the choice lives.** In Preferences rather than in a dialog on every
+export, which is not where the studios put it: the bit depth is in the render
+dialog in every one of them. It is in Preferences here because the export flow
+is a file chooser launched asynchronously and threading a modal choice in front
+of it is a second thing to get right, and because `Preferences.h` already has
+the validation discipline and the tests for a stored choice. What makes that
+safe rather than merely cheaper is that the status bar names the depth and the
+dither, in words, from before the file appears until after it has, so a wrong
+setting is visible at the moment it matters rather than discoverable
+afterwards. It has to be on the progress line and not only on the message
+before it: the audit found that message is replaced by the first tick of the
+60 Hz timer, so on its own it was on screen for a sixtieth of a second.
+
+### What the test asserts
+
+Properties, measured, against the published constants rather than against the
+implementation's own formulas. `Tests/DitherTest.cpp`.
+
+`Tests/DitherProbe.cpp` is the sweep the quoted figures come from. It exists
+because of what the audit found, which is worth keeping as a warning rather
+than just fixing: the draft of this entry, of `Dither.h` and of the test all
+quoted three numbers for the undithered distortion, **-26 dB**, **-31 dB** and
+a **-74 dB** measurement floor, and nothing in the repository produced any of
+them. All three were wrong. The real worst harmonic at that amplitude is the
+third at -39.5 dB and the dithered floor of that measurement is -63 dB. The
+figures look like a measurement taken at a different amplitude than the one
+written down, in the one feature whose own header is about numbers that are
+present, plausible and wrong.
+
+The sweep is the other half of the lesson. Undithered distortion is not
+monotonic in amplitude and is nowhere near it: it depends on where the sine's
+peaks fall relative to the codes and swings by up to 14.1 dB between
+neighbouring half steps, -25.4 dB at three and a half, -39.5 at four, -28.6 at
+four and a half. The draft called four steps "where it is worst" and it is a
+local best case, which left its fixed threshold 0.55 dB from failing. Moving
+the amplitude to the more representative five would have turned the suite red
+with every line of `Dither.h` correct. Sweeping twelve amplitudes and asserting
+clearance over the record's own noise floor has 16 dB in hand at the tightest
+point and does not depend on the record length.
+
+### Mutation testing
+
+**40 deliberate breakages, each compiled with address and undefined behaviour
+sanitizers exactly as `Tests/run.sh` has them, 38 caught.** A plain `-O2`
+harness would have reported the wrong answer for at least three of them, which
+is why CLAUDE.md insists on the sanitizers.
+
+30 over `Dither.h`, 28 caught: one draw, three draws, the same draw twice,
+an uncentred draw, half and double amplitude, a generator that never advances,
+real high pass dither with persistent state, floor instead of round, truncation
+toward zero, ties rounding down, dither added after the rounding, no clamp, a
+least significant bit of reserved headroom, no guard on a non finite sample,
+the scale off by a factor of two, both extreme codes off by one, two wrong
+shifts in `leftJustified`, 24 bit declared as 23, four breakages of the dither
+policy, two of the stored id bounds, a broken round trip, and collapsing the
+two channel seeds into one.
+
+The two survivors were each established as genuine no-ops rather than gaps:
+
+- **Differencing two fresh uniform draws instead of summing them.** They have
+  the same distribution, because the draws are independent and the density is
+  symmetric, and successive results are still independent, so it is white. The
+  mutation that is not a no-op is *high pass* dither, which keeps the previous
+  draw and differences against it, and that one is caught: the spectrum check
+  and only the spectrum check fires, reading 1.10 in the bottom band rising to
+  4.96 at the top against an expected flat 3.00. That is the header's central
+  claim about why the spectrum check exists, and it is true.
+- **The bound in `modeFromStored`.** With exactly two modes whose default is
+  the ternary's else branch, an out of range id that fell through the guard
+  lands on the default anyway, so removing the guard changes no answer for any
+  input. It stops being a no-op the moment a third mode is added or the default
+  moves to `Mode::none`, so two static assertions in the test now fail on that
+  day and point at the comment explaining why.
+
+10 over `Preferences.h`, all 10 caught, and this file had **no coverage at all**
+until the audit found it. Dropping the `- 1` from `exportDepthFor` passed the
+entire suite while giving somebody who chose 16 bit for a delivery a 24 bit
+file, somebody who never opened the tab a 32 bit float file where they used to
+get 24, and a status line that honestly reported the wrong depth. The same
+mutation on `exportDitherFor` turned the default dither off on every 16 bit
+export, which is the whole feature silently doing nothing.
+
+Worth recording for whoever meets it next: clamping with `choiceId` **before**
+taking one off is not interchangeable with doing it after. It gives the same
+answer for every input but the most negative int, where the subtraction is
+signed overflow rather than a wrong answer, and a settings file is plain text
+that can hold exactly that. The test passes the two integer extremes for that
+reason, and without them both orderings pass.
+
+### What the second audit found
+
+The fixes were audited again rather than taken on trust, and that pass found
+six more, one of which is worth recording because it is the same fault the
+first pass had just removed.
+
+**The replacement text introduced its own wrong number.** The corrected
+comment said the distortion "swings more than twenty decibels between
+neighbouring half steps" and then cited three figures of its own that show
+14.1 dB. The probe said twenty decibels between neighbouring *tenths*, where
+the real figure is 7.2. Correcting a wrong number by writing a different
+wrong number is easier to do than it sounds, and the only thing that caught
+it was somebody re-measuring a sentence that already looked fixed.
+
+**A loaded trap in the harmonic measurement.** `worstHarmonic` maximised over
+every bin that passed `k != bin && k / bin <= 7`, which includes the
+fundamental's four neighbour bins, because `k / bin` is 0 or 1 for all of
+them. The comment directly above said those bins were leakage and not
+distortion. With the sine on an exact bin they hold ordinary noise and the
+measured margins do not move at all, which is why it survived. Move the sine
+half a bin off the grid, which is the obvious way to make the test more
+realistic, and the dithered check fails at -0.04 dB while the dither is
+working perfectly and the real harmonics sit 5 dB below the noise. Whoever
+did that would go looking at `Dither.h`.
+
+**Two comments claiming more generality than the measurement carries.**
+Asserting clearance over the record's own noise floor is less sensitive to
+the record length than a fixed threshold, not independent of it: the
+distortion sits still and the floor moves, so the worst clearance is 13.3 dB
+at n = 2^13 and 36.6 at 2^17. Halving n twice to speed the section up turns
+it red. The same holds at the top of the amplitude sweep, where clearance
+crosses the threshold between 96 and 128 steps. Both are written down now
+rather than left for somebody to discover.
+
+**The dithered check has a seed tail nothing mentioned.** Its margin is set
+by the exponential tail of one noise bin's power, not by the bin count the
+comment blamed. Measured over 700 seeds against all twelve amplitudes, four
+of 8400 draws cleared more than 10 dB, so about one seed in 175 would redden
+it. The seed is fixed so it cannot flake in CI, but changing the seed is not
+the free edit it looks like, and the comment now says so.
+
+Also: `DitherProbe.cpp` used `std::numeric_limits` without including
+`<limits>`, which compiles on libstdc++ by transitive include and nothing in
+CI compiles a probe at all, so it would have been found by whoever next tried
+to recheck the decision on another compiler. And a divide by zero guard had
+been dropped from the floor average.
+
+
+### What the first audit found
+
+Five findings, all fixed, plus the figures above. The one worth keeping in mind
+is the shape of the other two: a comment claiming the opposite of what the code
+does (`// four steps, where it is worst`) and a comment claiming a test that
+does not exist (`a function with a test on it`). Both read as reassurance and
+both were load bearing in the reader's head and nowhere else. The fourth was
+the status line being overwritten within one frame, which did not break the
+feature but made the stated argument for the design untrue. The audit also
+verified every JUCE 9.0.3 signature the change uses against a real sparse
+checkout, which is the only compile check available here.
+
+### Noticed while merging main, and deliberately not fixed here
+
+**A bounce is now shorter than a loop pass, and it is a length rather than a
+mixing difference.** The playlist loop change that merged while this branch was
+open moved the engine snapshot to `Project::songLoopEndBeats()`, which rounds
+up to the end of the bar, while `MainComponent::exportAudio` still takes
+`project.songEndBeats()`, which is the end of the last clip. So a song whose
+last clip ends mid bar plays to the end of that bar and exports to the clip.
+
+Not fixed on this branch, for two reasons rather than one. It is not this
+change's divergence, so fixing it here would widen a pull request about word
+length into one about song length. And the right answer is not obvious: every
+studio exposes a choice of render bounds, the whole project against a time
+selection, so it wants the treatment the pan law and the solo questions got,
+which is finding out what the convention actually is before picking one.
+
+The mild reading is that it is harmless, because `renderOffline` is given a
+four second tail so nothing decaying is cut off. The reason it is still worth a
+night is that two numbers that used to be one now disagree with nothing to say
+why, which is how three separate faults in the old record alignment code
+survived for releases.
+
+### A second line of work on this branch, and what came of it
+
+This night ran twice, because the first run was cut off partway through the
+audit fixes and the second picked the draft up, which is what the standing
+instructions say to do with an unfinished draft. Both runs then did the audit
+fixes independently and arrived at most of the same ones from the same
+findings, which is worth recording for two reasons.
+
+The duplicated work was not wasted in one specific way: the second run's audit
+caught a trap in the harmonic measurement that the first run's fix would have
+**introduced**. Lifting the cap on the harmonic search to "every harmonic
+rather than the first seven" also lifts it onto the fundamental's own
+neighbouring bins, which the comment directly above calls leakage rather than
+distortion. With the sine on an exact bin those bins hold ordinary noise and
+nothing moves, so it survives; move the sine half a bin off the grid, which is
+the obvious way to make the check more realistic, and the dithered check fails
+while the dither is working perfectly. The second run's version is the one
+kept.
+
+What the first run had that the second did not, and which is now merged in: the
+32 bit float path having no non finite guard and that being deliberate, the
+export being bit identical across the three platforms, `emplace` not
+overwriting a duplicate target, why dither being export only is not the
+divergence CLAUDE.md warns about, and two figures in the note shown to the
+user. The quantisation noise of a 24 bit file is -149 dBFS; -144 dBFS is the
+peak error, half a least significant bit, which is the figure `Dither.h` uses
+correctly elsewhere for the DC offset this change removes. And only Ardour
+enforces the 16 bit only rule in code: Cubase and Logic recommend it, which is
+a weaker claim and the one their documentation actually makes.
+
+
+### Where the arithmetic lives
+
+`Source/Dither.h`. No JUCE, so the quantiser, the density and the policy are
+all compiled and run under sanitizers on their own. `ExportJob.h` keeps only
+what needs JUCE: opening the writer at the chosen depth and handing over
+integers or floats.
+
+---
+
 ## 2026-10-21: solo, and what has to stay audible when something is soloed
 
 ### What was looked at
