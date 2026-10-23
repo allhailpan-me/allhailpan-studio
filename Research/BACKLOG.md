@@ -1,5 +1,26 @@
 # Research backlog
 
+## Standing question: nineteen commits of user visible work are unreleased
+
+The last tag is **v0.7.1**, cut on 2026-10-13, and `main` is nineteen commits
+past it. Everything since has gone into the `## Since v0.7.0` section of
+`RELEASE_NOTES.md`, which is the section v0.7.1 itself was cut from, so the
+notes are written and staged rather than missing.
+
+What is sitting there unreleased: the pan law and the mono panner, clip fades
+and the de-click fade at every edge, the oversampler's filters at every rate,
+the delay line, the equaliser's bell, solo with its send and isolate
+behaviour, the playlist looping at the end of the bar, PAN One's forty five
+new presets and its Grow breeding, and now the export bit depth and dither.
+
+Nobody has been deciding not to release; each night has just not been the
+night to decide it. Recorded here so it is a decision rather than a drift. A
+release spans several nights' work by several sessions, so whoever cuts it
+should run the `release-manager` agent over the whole span rather than over
+one change, which is what that agent is for.
+
+---
+
 A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
