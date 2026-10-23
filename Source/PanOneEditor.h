@@ -66,13 +66,33 @@ public:
 
         addAndMakeVisible (presetBox);
 
-        for (int i = 0; i < synth.getNumPrograms(); ++i)
-            presetBox.addItem (synth.getProgramName (i), i + 1);
+        // Grouped by category under headings, in the order each category
+        // first appears. The bank is not stored in that order: a preset's
+        // index is what a project saves, so new presets are appended rather
+        // than slotted in beside their relatives. Items are addressed by id,
+        // which is the preset's index plus one, and never by their position
+        // in the menu, which the headings would throw off.
+        {
+            const auto& bank = PanOneParams::presets();
+            juce::StringArray categories;
 
-        presetBox.setSelectedItemIndex (synth.getCurrentProgram(), juce::dontSendNotification);
+            for (const auto& preset : bank)
+                categories.addIfNotAlreadyThere (preset.category);
+
+            for (const auto& category : categories)
+            {
+                presetBox.addSectionHeading (category);
+
+                for (std::size_t i = 0; i < bank.size(); ++i)
+                    if (category == bank[i].category)
+                        presetBox.addItem (bank[i].name, (int) i + 1);
+            }
+        }
+
+        presetBox.setSelectedId (synth.getCurrentProgram() + 1, juce::dontSendNotification);
         presetBox.onChange = [this]
         {
-            const int index = presetBox.getSelectedItemIndex();
+            const int index = presetBox.getSelectedId() - 1;
 
             if (index >= 0 && index != synth.getCurrentProgram())
                 synth.setCurrentProgram (index);
@@ -390,8 +410,8 @@ private:
     {
         const int program = synth.getCurrentProgram();
 
-        if (presetBox.getSelectedItemIndex() != program)
-            presetBox.setSelectedItemIndex (program, juce::dontSendNotification);
+        if (presetBox.getSelectedId() != program + 1)
+            presetBox.setSelectedId (program + 1, juce::dontSendNotification);
 
         // Saying so matters more than it looks. Somebody who turns a knob and
         // then wonders why the preset no longer sounds like the preset is one

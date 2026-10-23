@@ -1173,3 +1173,15 @@ points. And the random numbers are the file's own splitmix64 and Box Muller
 rather than `<random>`'s distributions, which are not specified exactly and
 give a different sequence on MSVC, so one seed would grow two patches
 depending on who opened the project.
+
+**The preset bank only grows at the end.** A project stores the index of the
+preset it was on, and one saved before the controls existed stores nothing
+else, so a preset inserted among the others opens every such project on its
+neighbour. The panel groups the menu by category under headings and
+addresses items by id, so the stored order never shows. `PanOneParamsTest`
+pins the first twenty two by name, and checks that every preset after them
+wires the macro convention: 1 Tone, 2 Movement, 3 Grit, 4 Shape, each resting
+at a half and routed bipolar, and the mod wheel as vibrato. Most new presets
+that clipped on first render did so through drive or resonance rather than
+oscillator level, because the saturator's makeup holds the level wherever the
+input sits; turn down the drive, not the oscillators.

@@ -1,6 +1,22 @@
-PAN One can now grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**PAN One has forty five new presets, sixty seven in all.** The holes in the
+bank are filled: kicks, snares, rims, hats, a shaker and a zap; an acid line,
+a reese, a tempo wobble and a sub boom; an electric piano, a drawbar organ, a
+clavinet style funk key, brass and a string machine; bells, a music box and a
+gong; tempo locked gates that turn a held chord into a part; and pads, plucks,
+leads, drones and effects that use the LFOs, which the first bank never
+touched. The preset menu on the panel is now grouped under headings by
+category.
+
+**The four macros now mean the same thing on every new preset**: 1 is Tone,
+2 is Movement, 3 is Grit and 4 is Shape. Each rests in the middle, so the
+preset sounds as designed until you move one, and either direction is a
+musical move. The mod wheel is vibrato on all of them. Your old presets are
+all still there, in the same places, so every project opens on the sound it
+was saved with.
 
 **PAN One can grow a new sound out of the one you are playing.** Press
 **Grow** on its panel and it breeds a variation of the current patch. The
