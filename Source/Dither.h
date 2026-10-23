@@ -148,13 +148,35 @@ namespace Dither
     inline constexpr Depth defaultDepth = Depth::int24;
     inline constexpr Mode  defaultMode  = Mode::triangular;
 
+    /** The depth a stored index means.
+
+        **These indices are what a settings file holds, so entries may only be
+        appended.** Inserting one in the middle silently redirects every stored
+        value: add 8 bit at the front and every settings file saying 1 switches
+        from 16 bit to 8, and every one saying 2 from 24 to 16. The project has
+        this rule written down already for modulation routings, where
+        `Synth/ModMatrix.h` keeps string ids precisely so inserting a
+        destination cannot repoint every patch anybody ever saved. The failure
+        here is one wrong export depth rather than a wrong patch, which is why
+        this stays an index like every other stored choice, but it is the same
+        failure and worth a sentence rather than nothing. The note matters more
+        than usual because 8 bit is recorded above as a candidate deliberately
+        left out, so the insertion is one somebody may well come to make.
+
+        An index nobody recognises reads as the default rather than as the last
+        entry. `depthFromStored` guards the range before it gets here and both
+        callers in the window loop over the real count, so it is unreachable
+        today, but an unguarded answer of "32 bit float" would be the depth
+        furthest from what was asked for.
+    */
     inline constexpr Depth depthAt (int index) noexcept
     {
         switch (index)
         {
             case 0:  return Depth::int16;
             case 1:  return Depth::int24;
-            default: return Depth::float32;
+            case 2:  return Depth::float32;
+            default: return defaultDepth;
         }
     }
 
@@ -407,6 +429,12 @@ namespace Dither
             // the least harmful thing available: carrying it into the file
             // would put the extreme code there and the loudest possible click
             // with it.
+            // Only the fixed point depths come through here, so a 32 bit
+            // float export has no such guard and writes whatever the engine
+            // produced, a NaN included. That is the right asymmetry rather
+            // than an oversight: that file is defined as the mix exactly as it
+            // was computed, and a studio that quietly repaired it would be
+            // hiding the plugin that produced it.
             const double x = std::isfinite (sample) ? (double) sample * scale : 0.0;
 
             // Mid tread, the floor form the paper assumes, which is round to
@@ -427,6 +455,15 @@ namespace Dither
             // is.
             return (int) std::clamp (rounded, (double) lowest, (double) highest);
         }
+
+        // Worth claiming rather than leaving to be discovered: all of this is
+        // bit identical on every platform. The generator is pure unsigned
+        // arithmetic, multiplying a float by a power of two is exact in
+        // double, and the rounding is a floor rather than anything that reads
+        // a floating point mode. So the same project exports the same file on
+        // Windows, macOS and Linux, and two exports of an unchanged mix are
+        // the same file, which is the only way to tell a change in the mix
+        // from a change in the noise.
 
     private:
         double scale;

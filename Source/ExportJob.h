@@ -7,6 +7,16 @@
 // Renders the song on a background thread. Progress appears in the status bar,
 // so the window stays usable while it works.
 //
+// Dither lives here, in the export, and nowhere else. That is not the playback
+// against export divergence CLAUDE.md warns about, and the reason belongs here
+// because this is where somebody will come looking for it: that rule is about
+// the mixing loop, where anything on one path and not the other makes a bounce
+// sound different from what was heard. Dither is not in the mixing loop. It is
+// the final reduction of a float mix to a fixed point word length, which only
+// happens when a file is written, and playback hands floats to the driver and
+// reduces nothing. There is no counterpart on the playback path to leave it
+// out of.
+//
 // The depth it writes at and whether the reduction to that depth is dithered
 // are both chosen, in Preferences. What those choices mean, why only 16 bit is
 // dithered, and why the quantiser is in Dither.h rather than left to JUCE are
@@ -124,6 +134,12 @@ public:
                 for (int ch = 0; ch < 2; ++ch)
                     t.quantisers.emplace_back (bitDepth, ditherMode, nextSeed++);
 
+                // Every index is distinct: the master is -1 and the stem
+                // list was sorted, uniqued and had 0 removed before it got
+                // here. Worth knowing that emplace does not overwrite, so a
+                // duplicate would destroy the writer just opened, finish a
+                // file with no samples in it, and return true as though it
+                // had worked.
                 targets.emplace (index, std::move (t));
                 return true;
             }

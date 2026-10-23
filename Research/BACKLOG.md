@@ -360,6 +360,59 @@ feature but made the stated argument for the design untrue. The audit also
 verified every JUCE 9.0.3 signature the change uses against a real sparse
 checkout, which is the only compile check available here.
 
+### Noticed while merging main, and deliberately not fixed here
+
+**A bounce is now shorter than a loop pass, and it is a length rather than a
+mixing difference.** The playlist loop change that merged while this branch was
+open moved the engine snapshot to `Project::songLoopEndBeats()`, which rounds
+up to the end of the bar, while `MainComponent::exportAudio` still takes
+`project.songEndBeats()`, which is the end of the last clip. So a song whose
+last clip ends mid bar plays to the end of that bar and exports to the clip.
+
+Not fixed on this branch, for two reasons rather than one. It is not this
+change's divergence, so fixing it here would widen a pull request about word
+length into one about song length. And the right answer is not obvious: every
+studio exposes a choice of render bounds, the whole project against a time
+selection, so it wants the treatment the pan law and the solo questions got,
+which is finding out what the convention actually is before picking one.
+
+The mild reading is that it is harmless, because `renderOffline` is given a
+four second tail so nothing decaying is cut off. The reason it is still worth a
+night is that two numbers that used to be one now disagree with nothing to say
+why, which is how three separate faults in the old record alignment code
+survived for releases.
+
+### A second line of work on this branch, and what came of it
+
+This night ran twice, because the first run was cut off partway through the
+audit fixes and the second picked the draft up, which is what the standing
+instructions say to do with an unfinished draft. Both runs then did the audit
+fixes independently and arrived at most of the same ones from the same
+findings, which is worth recording for two reasons.
+
+The duplicated work was not wasted in one specific way: the second run's audit
+caught a trap in the harmonic measurement that the first run's fix would have
+**introduced**. Lifting the cap on the harmonic search to "every harmonic
+rather than the first seven" also lifts it onto the fundamental's own
+neighbouring bins, which the comment directly above calls leakage rather than
+distortion. With the sine on an exact bin those bins hold ordinary noise and
+nothing moves, so it survives; move the sine half a bin off the grid, which is
+the obvious way to make the check more realistic, and the dithered check fails
+while the dither is working perfectly. The second run's version is the one
+kept.
+
+What the first run had that the second did not, and which is now merged in: the
+32 bit float path having no non finite guard and that being deliberate, the
+export being bit identical across the three platforms, `emplace` not
+overwriting a duplicate target, why dither being export only is not the
+divergence CLAUDE.md warns about, and two figures in the note shown to the
+user. The quantisation noise of a 24 bit file is -149 dBFS; -144 dBFS is the
+peak error, half a least significant bit, which is the figure `Dither.h` uses
+correctly elsewhere for the DC offset this change removes. And only Ardour
+enforces the 16 bit only rule in code: Cubase and Logic recommend it, which is
+a weaker claim and the one their documentation actually makes.
+
+
 ### Where the arithmetic lives
 
 `Source/Dither.h`. No JUCE, so the quantiser, the density and the policy are

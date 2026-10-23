@@ -557,14 +557,16 @@ private:
                             "worse than doing it once.")
             : juce::String ("Nothing to dither at ") + Dither::name (depth) + ". "
                 + (depth == Dither::Depth::int24
-                       ? juce::String ("The quantisation floor of a 24 bit file is around -144 dBFS, "
-                                       "below the noise of any microphone or preamp, so there is "
-                                       "nothing there to linearise and dither would only add noise. ")
+                       ? juce::String ("The quantisation noise of a 24 bit file sits around "
+                                       "-149 dBFS, below the noise of any microphone or preamp, so "
+                                       "there is nothing there to linearise and dither would only "
+                                       "add noise. ")
                        : juce::String ("A 32 bit float file is the mix exactly as the engine computed "
                                        "it, with no word length reduction at all, so there is no "
                                        "quantisation to dither. "))
-                + "Dither is applied only when a file is written at 16 bit, which is the same rule "
-                  "Ardour, Cubase and Logic follow.",
+                + "Dither is applied only when a file is written at 16 bit. Ardour enforces the "
+                  "same line in its own code, and Cubase and Logic both recommend dither for the "
+                  "16 bit case and not above it.",
             juce::dontSendNotification);
     }
 
