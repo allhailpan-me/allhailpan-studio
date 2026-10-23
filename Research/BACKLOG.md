@@ -35,11 +35,12 @@ The dither is the half that is not obvious, and it is the reason this is a
 night's work rather than a combo box. Reducing a 32 bit float mix to 16 bit
 quantises it, and an undithered quantiser's error is a deterministic function
 of the signal rather than noise: it is correlated with the waveform and it
-arrives as distortion rather than hiss. Measured, a 1 kHz sine at 4 LSB has its
-fifth and seventh harmonics at **-26 and -31 dB** below the fundamental
-undithered, and at -74 dB or lower, which is the measurement floor, dithered.
+arrives as distortion rather than hiss. Measured at 16 bit and swept across
+amplitude, the worst harmonic of a low level sine stands at least **36.6 dB**
+clear of the record's own noise floor undithered and at most **4.1 dB** clear
+of it dithered, which is to say nothing stands out of the noise at all.
 It is also where the noise floor goes when the music gets quiet: the error
-variance of an undithered 16 bit quantiser wanders over 3.6 dB as a sine fades,
+variance of an undithered 16 bit quantiser wanders over 3.5 dB as a sine fades,
 so reverb tails and fade outs get grainy in a way that follows the music. That
 is the shape of fault this file keeps meeting. The file plays, the meters look
 right, and the tails are wrong.
@@ -216,14 +217,100 @@ dialog in every one of them. It is in Preferences here because the export flow
 is a file chooser launched asynchronously and threading a modal choice in front
 of it is a second thing to get right, and because `Preferences.h` already has
 the validation discipline and the tests for a stored choice. What makes that
-safe rather than merely cheaper is that the export says in the status bar what
-it is about to write, in words, before the file appears, so a wrong setting is
-visible at the moment it matters rather than discoverable afterwards.
+safe rather than merely cheaper is that the status bar names the depth and the
+dither, in words, from before the file appears until after it has, so a wrong
+setting is visible at the moment it matters rather than discoverable
+afterwards. It has to be on the progress line and not only on the message
+before it: the audit found that message is replaced by the first tick of the
+60 Hz timer, so on its own it was on screen for a sixtieth of a second.
 
 ### What the test asserts
 
 Properties, measured, against the published constants rather than against the
 implementation's own formulas. `Tests/DitherTest.cpp`.
+
+`Tests/DitherProbe.cpp` is the sweep the quoted figures come from. It exists
+because of what the audit found, which is worth keeping as a warning rather
+than just fixing: the draft of this entry, of `Dither.h` and of the test all
+quoted three numbers for the undithered distortion, **-26 dB**, **-31 dB** and
+a **-74 dB** measurement floor, and nothing in the repository produced any of
+them. All three were wrong. The real worst harmonic at that amplitude is the
+third at -39.5 dB and the dithered floor of that measurement is -63 dB. The
+figures look like a measurement taken at a different amplitude than the one
+written down, in the one feature whose own header is about numbers that are
+present, plausible and wrong.
+
+The sweep is the other half of the lesson. Undithered distortion is not
+monotonic in amplitude and is nowhere near it: it depends on where the sine's
+peaks fall relative to the codes and swings more than twenty decibels between
+neighbouring half steps, -25.4 dB at three and a half, -39.5 at four, -28.6 at
+four and a half. The draft called four steps "where it is worst" and it is a
+local best case, which left its fixed threshold 0.55 dB from failing. Moving
+the amplitude to the more representative five would have turned the suite red
+with every line of `Dither.h` correct. Sweeping twelve amplitudes and asserting
+clearance over the record's own noise floor has 16 dB in hand at the tightest
+point and does not depend on the record length.
+
+### Mutation testing
+
+**40 deliberate breakages, each compiled with address and undefined behaviour
+sanitizers exactly as `Tests/run.sh` has them, 38 caught.** A plain `-O2`
+harness would have reported the wrong answer for at least three of them, which
+is why CLAUDE.md insists on the sanitizers.
+
+30 over `Dither.h`, 28 caught: one draw, three draws, the same draw twice,
+an uncentred draw, half and double amplitude, a generator that never advances,
+real high pass dither with persistent state, floor instead of round, truncation
+toward zero, ties rounding down, dither added after the rounding, no clamp, a
+least significant bit of reserved headroom, no guard on a non finite sample,
+the scale off by a factor of two, both extreme codes off by one, two wrong
+shifts in `leftJustified`, 24 bit declared as 23, four breakages of the dither
+policy, two of the stored id bounds, a broken round trip, and collapsing the
+two channel seeds into one.
+
+The two survivors were each established as genuine no-ops rather than gaps:
+
+- **Differencing two fresh uniform draws instead of summing them.** They have
+  the same distribution, because the draws are independent and the density is
+  symmetric, and successive results are still independent, so it is white. The
+  mutation that is not a no-op is *high pass* dither, which keeps the previous
+  draw and differences against it, and that one is caught: the spectrum check
+  and only the spectrum check fires, reading 1.10 in the bottom band rising to
+  4.96 at the top against an expected flat 3.00. That is the header's central
+  claim about why the spectrum check exists, and it is true.
+- **The bound in `modeFromStored`.** With exactly two modes whose default is
+  the ternary's else branch, an out of range id that fell through the guard
+  lands on the default anyway, so removing the guard changes no answer for any
+  input. It stops being a no-op the moment a third mode is added or the default
+  moves to `Mode::none`, so two static assertions in the test now fail on that
+  day and point at the comment explaining why.
+
+10 over `Preferences.h`, all 10 caught, and this file had **no coverage at all**
+until the audit found it. Dropping the `- 1` from `exportDepthFor` passed the
+entire suite while giving somebody who chose 16 bit for a delivery a 24 bit
+file, somebody who never opened the tab a 32 bit float file where they used to
+get 24, and a status line that honestly reported the wrong depth. The same
+mutation on `exportDitherFor` turned the default dither off on every 16 bit
+export, which is the whole feature silently doing nothing.
+
+Worth recording for whoever meets it next: clamping with `choiceId` **before**
+taking one off is not interchangeable with doing it after. It gives the same
+answer for every input but the most negative int, where the subtraction is
+signed overflow rather than a wrong answer, and a settings file is plain text
+that can hold exactly that. The test passes the two integer extremes for that
+reason, and without them both orderings pass.
+
+### What the audit found
+
+Five findings, all fixed, plus the figures above. The one worth keeping in mind
+is the shape of the other two: a comment claiming the opposite of what the code
+does (`// four steps, where it is worst`) and a comment claiming a test that
+does not exist (`a function with a test on it`). Both read as reassurance and
+both were load bearing in the reader's head and nowhere else. The fourth was
+the status line being overwritten within one frame, which did not break the
+feature but made the stated argument for the design untrue. The audit also
+verified every JUCE 9.0.3 signature the change uses against a real sparse
+checkout, which is the only compile check available here.
 
 ### Where the arithmetic lives
 
