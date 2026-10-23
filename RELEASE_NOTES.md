@@ -1,6 +1,45 @@
-Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**PAN One has forty five new presets, sixty seven in all.** The holes in the
+bank are filled: kicks, snares, rims, hats, a shaker and a zap; an acid line,
+a reese, a tempo wobble and a sub boom; an electric piano, a drawbar organ, a
+clavinet style funk key, brass and a string machine; bells, a music box and a
+gong; tempo locked gates that turn a held chord into a part; and pads, plucks,
+leads, drones and effects that use the LFOs, which the first bank never
+touched. The preset menu on the panel is now grouped under headings by
+category.
+
+**The four macros now mean the same thing on every new preset**: 1 is Tone,
+2 is Movement, 3 is Grit and 4 is Shape. Each rests in the middle, so the
+preset sounds as designed until you move one, and either direction is a
+musical move. The mod wheel is vibrato on all of them. Your old presets are
+all still there, in the same places, so every project opens on the sound it
+was saved with.
+
+**PAN One can grow a new sound out of the one you are playing.** Press
+**Grow** on its panel and it breeds a variation of the current patch. The
+**Amount** slider is how far it may wander, from a nudge to something you
+would not recognise, and **Atonal** is how far from musical pitch: at nothing,
+the second oscillator only ever lands on a fourth, a fifth, an octave or the
+twelfth, keeping whatever fine detune it already had. **Tween** then stands
+anywhere between the sound you started from and the one you grew, and
+**Back** returns to where you were. Grow again from wherever you are standing
+and you are breeding over generations, keeping what you like.
+
+It only breeds the sound: oscillators, fold, drive, filter, envelopes, slopes
+and LFOs. Your pan, glide, macros, gate mode and the modulation matrix's
+wiring are left exactly as they were, so a branch is a new sound on the same
+instrument setup rather than a different instrument. A wavetable is swapped
+for one of its own family on small amounts, and a low pass filter only ever
+becomes a band pass or a high pass, never a notch or an all pass.
+
+**Every branch is played before you hear it.** Each candidate is rendered on
+a voice of its own and thrown away if it is silent, would clip a chord, or is
+more than twelve decibels louder or quieter than what you started from, which
+are the same rules the factory presets are tested against. So Grow cannot land
+on a dud, and a click costs about a tenth of a second while it listens.
 
 **Panning a guitar or a vocal no longer makes it quieter.** Move a mono track
 off centre and it lost 3 dB. Not because anything was broken: the pan knob was
@@ -96,6 +135,15 @@ using the mark's silhouette rather than its outline, so the shape survives
 down to about 32. At 16 pixels it is a bright mark rather than a readable
 one, which is as far as line art of this kind goes without drawing a simpler
 version of the logo.
+
+**A short sound in the playlist plays once a bar, not over and over.** Drop
+a one shot into an empty playlist and press play, and it used to repeat back
+to back, because playback looped at the exact end of the last clip. It now
+plays to the end of the bar the last clip finishes in, with silence for the
+rest of that bar, so what you hear is a bar of music rather than a stutter.
+A loop you have cut to exactly one bar, or four, stays exactly that long. A
+loop range you set yourself works as it always did, and an export still ends
+where your last sound does.
 
 ## Since v0.6.1
 

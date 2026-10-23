@@ -39,6 +39,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <iterator>
 #include <set>
 #include <string>
 #include <vector>
@@ -818,6 +819,95 @@ void aVersionOneProjectTranslates()
     }
 }
 
+/** A project stores the index of the preset it was on, and one saved before
+    the controls existed stores nothing else. So the bank only ever grows at
+    the end, and the first twenty two keep their places for good: a preset
+    inserted among them would open every such project on its neighbour. */
+void theFirstBankKeepsItsPlaces()
+{
+    std::printf ("preset places\n");
+
+    const char* const first[]
+    {
+        "Deep Sub", "Wide Growl", "Squelch", "Reed Lead", "Hard Sync", "Soft Keys",
+        "Bell Tine", "Slow Pad", "Glass Shelf", "Struck", "Tine Pluck", "Folded Drone",
+        "Long Vigil", "Bowed Metal", "Static Field", "Shimmer Rattle", "Tom Strike",
+        "Metal Hat", "Long Riser", "Siren Fold", "Audio Rate Slope", "Broken Machine"
+    };
+
+    const auto& bank = PanOneParams::presets();
+
+    for (std::size_t i = 0; i < std::size (first); ++i)
+        check (i < bank.size() && std::string (bank[i].name) == first[i],
+               "preset " + std::to_string (i) + " should be " + first[i]
+                   + ": the bank has to grow at the end");
+
+    std::set<std::string> names;
+
+    for (const auto& preset : bank)
+        check (names.insert (preset.name).second,
+               std::string ("two presets are called ") + preset.name);
+
+    std::printf ("    %zu presets, the first %zu where they always were\n",
+                 bank.size(), std::size (first));
+}
+
+/** From the second bank on, the macros mean the same on every patch: Tone,
+    Movement, Grit and Shape, each resting at a half, and the mod wheel is
+    vibrato. A convention nothing checks is a convention the next preset
+    forgets, and a macro that does something different on one patch out of
+    sixty is worse than no convention at all. */
+void theSecondBankKeepsTheConventions()
+{
+    std::printf ("macro conventions\n");
+
+    const auto& bank = PanOneParams::presets();
+    const int macro[] { Synth::ModMatrix::sourceFromId ("macro1"),
+                        Synth::ModMatrix::sourceFromId ("macro2"),
+                        Synth::ModMatrix::sourceFromId ("macro3"),
+                        Synth::ModMatrix::sourceFromId ("macro4") };
+    const int wheel = Synth::ModMatrix::sourceFromId ("modwheel");
+    const int cutoff = Synth::ModMatrix::destinationFromId ("cutoff");
+    const int gateRange = Synth::ModMatrix::destinationFromId ("gaterange");
+    const int drive = Synth::ModMatrix::destinationFromId ("drive");
+    const int osc1Pos = Synth::ModMatrix::destinationFromId ("osc1pos");
+
+    int checked = 0;
+
+    for (std::size_t i = 22; i < bank.size(); ++i)
+    {
+        const auto& p = bank[i].patch;
+        const std::string name = bank[i].name;
+
+        bool tone = false, grit = false, shape = false, vibrato = false, movement = false;
+
+        for (int r = 0; r < p.matrix.count; ++r)
+        {
+            const auto& route = p.matrix.routes[r];
+
+            tone = tone || (route.source == macro[0]
+                            && (route.destination == cutoff || route.destination == gateRange));
+            grit = grit || (route.source == macro[2] && route.destination == drive);
+            shape = shape || (route.source == macro[3] && route.destination == osc1Pos);
+            vibrato = vibrato || route.via == wheel;
+            movement = movement || route.via == macro[1] || route.source == macro[1];
+        }
+
+        for (int m = 0; m < 4; ++m)
+            check (p.macros[m] == 0.5, name + "'s macro " + std::to_string (m + 1)
+                                           + " does not rest at a half");
+
+        check (tone, name + " has no Tone on macro 1");
+        check (movement, name + " has no Movement on macro 2");
+        check (grit, name + " has no Grit on macro 3");
+        check (shape, name + " has no Shape on macro 4");
+        check (vibrato, name + " has no vibrato on the mod wheel");
+        ++checked;
+    }
+
+    std::printf ("    %d presets wire all four macros and the wheel\n", checked);
+}
+
 } // namespace
 
 int main()
@@ -834,6 +924,8 @@ int main()
     everyPresetFitsItsControls();
     everyPresetSurvivesTheControls();
     everyPresetMakesASound();
+    theFirstBankKeepsItsPlaces();
+    theSecondBankKeepsTheConventions();
     aVersionOneProjectTranslates();
 
     std::printf ("\n");

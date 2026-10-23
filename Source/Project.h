@@ -6,6 +6,7 @@
 #include "CompModel.h"
 #include "ClipFade.h"
 #include "Groove.h"
+#include "SongLength.h"
 #include <set>
 #include <array>
 #include <map>
@@ -1644,7 +1645,8 @@ public:
                                ! edgeIsJoined (c, false));
     }
 
-    // Exact end of the last clip: playback loops here.
+    // Exact end of the last clip. The export renders to here plus its tail,
+    // so a bounce does not carry a bar of silence it was never asked for.
     double songEndBeats() const
     {
         double end = 0.0;
@@ -1652,6 +1654,11 @@ public:
             end = std::max (end, c.endBeat (bpm));
         return end;
     }
+
+    // Where playback loops with no loop range set: the end of the bar the
+    // last clip finishes in, so a short sound plays once a bar rather than
+    // back to back. See SongLength.h.
+    double songLoopEndBeats() const { return SongLength::loopEndBeats (songEndBeats()); }
 
     int firstArmedTrack() const
     {

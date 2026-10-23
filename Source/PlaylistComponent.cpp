@@ -600,7 +600,7 @@ void PlaylistComponent::paint (juce::Graphics& g)
             g.fillRect (juce::Rectangle<float> ((float) grid.getX(), trackToY (t) - 1.0f, (float) grid.getWidth(), 1.0f));
 
         // loop end
-        const double end = project.songEndBeats();
+        const double end = project.songLoopEndBeats();
         if (end > 0.0)
         {
             g.setColour (Ahp::bone.withAlpha (0.25f));
@@ -654,7 +654,7 @@ void PlaylistComponent::paint (juce::Graphics& g)
             g.fillRect (juce::Rectangle<float> (x, (float) ruler.getY() + 14.0f, 1.0f, 12.0f));
         }
 
-        const double end = project.songEndBeats();
+        const double end = project.songLoopEndBeats();
         if (end > 0.0)
         {
             g.setColour (Ahp::muted);
