@@ -366,6 +366,7 @@ braces on their own line.
 | `PanOne.{h,cpp}` | The built in instrument: the parameters built from the table, the state saved by id, the shared wavetables and the MIDI plumbing |
 | `PanOneParams.h` | Every control PAN One has and every preset, as data: the ranges, the choice lists, the groups, and the translation of what version one saved. No JUCE |
 | `PanOneEditor.h` | The front panel, laid out from the table |
+| `PanOneBreed.h` | Growing a variation of a patch and standing between two: steps along each knob, only the sound bred, pitch kept consonant, and every candidate played before it is offered. No JUCE |
 | `Synth/Lfo.h` | The four modulators that are oscillators when driven hard enough: the shapes, the antialiased edges, and the two random ones. No JUCE |
 | `Synth/WaveBank.h` | The wavetables the instrument ships with, as definitions rather than recordings, plus the shape to spectrum method they are built by. No JUCE |
 | `Tests/` | Standalone checks on the arithmetic, run by `./Tests/run.sh` and by CI on every push |
@@ -1154,3 +1155,21 @@ the routing and got the same centroid to four decimal places, which is what
 sent somebody to look at the matrix rather than at the one line that was
 wrong. Every call in the voice now passes the range its parameter actually
 has.
+
+**A bred patch is listened to before it is offered, and over the same length
+as its seed.** `PanOneBreed.h` grows a variation of the current patch the way
+Synplant grows a branch, and nothing about any single control can promise the
+result makes a sound, so every candidate is played on a voice of its own and
+held to the preset bank's rules: louder than a fiftieth of full scale, a peak
+under one and a half, and within twelve decibels of the seed. The first
+version listened for a fixed 1.2 seconds and then could never grow anything
+from Bowed Metal, because its attack is longer than that and the seed itself
+was under the floor. A seed that quiet is now heard for three seconds and so
+is everything grown from it.
+
+Steps are taken along each knob's travel, using JUCE's own skew formula
+written out without JUCE, and the test compares the two at four thousand
+points. And the random numbers are the file's own splitmix64 and Box Muller
+rather than `<random>`'s distributions, which are not specified exactly and
+give a different sequence on MSVC, so one seed would grow two patches
+depending on who opened the project.

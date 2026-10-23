@@ -3,9 +3,11 @@
 
 #include "AhpLookAndFeel.h"
 #include "PanOne.h"
+#include "PanOneBreed.h"
 #include "PanOneParams.h"
 
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -30,6 +32,19 @@
     and JUCE already has programs for exactly this. It is polled rather than
     listened to because a preset can also change from a project being loaded,
     and four times a second is both cheap and faster than anyone notices.
+
+    The Grow button breeds a variation of whatever is playing, the way
+    Synplant grows a branch from a seed: Amount is how far it may wander and
+    Atonal is how far from musical pitch. Tween then stands anywhere between
+    the seed and the branch, and Back returns to the seed. The arithmetic,
+    and the reasons it stays musical, are in PanOneBreed.h. None of these are
+    parameters, for the reason the preset box is not: each one moves every
+    knob at once.
+
+    Growing plays each candidate on a voice of its own before anybody hears
+    it, on the message thread, so a click costs a tenth of a second or so.
+    That is a pause somebody asked for by pressing a button, and far better
+    than handing them a branch that turns out to be silent.
 */
 class PanOneEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
@@ -67,6 +82,8 @@ public:
         edited.setFont (juce::FontOptions (11.0f));
         edited.setColour (juce::Label::textColourId, Ahp::muted);
         edited.setJustificationType (juce::Justification::centredLeft);
+
+        setUpBreeding();
 
         const auto& specs = PanOneParams::all();
         controls.reserve (specs.size());
@@ -179,7 +196,19 @@ public:
         title.setBounds (header.removeFromLeft (110));
         presetLabel.setBounds (header.removeFromLeft (52));
         presetBox.setBounds (header.removeFromLeft (180).reduced (6, 6));
-        edited.setBounds (header.reduced (8, 0));
+        edited.setBounds (header.removeFromLeft (56).reduced (8, 0));
+
+        // The breeding controls, right to left from the edge.
+        backButton.setBounds (header.removeFromRight (56).reduced (3, 6));
+
+        for (auto* row : { &tweenRow, &atonalRow, &amountRow })
+        {
+            row->slider.setBounds (header.removeFromRight (82).reduced (2, 8));
+            row->label.setBounds (header.removeFromRight (50));
+        }
+
+        growButton.setBounds (header.removeFromRight (60).reduced (3, 6));
+        growNote.setBounds (header.reduced (4, 0));
 
         for (const auto& group : PanOneParams::groups())
         {
@@ -223,6 +252,116 @@ public:
     }
 
 private:
+    /** A small horizontal slider with its name beside it. */
+    struct Labelled
+    {
+        juce::Label  label;
+        juce::Slider slider;
+    };
+
+    void setUpRow (Labelled& row, const char* name, double initial, const char* tip)
+    {
+        addAndMakeVisible (row.label);
+        row.label.setText (name, juce::dontSendNotification);
+        row.label.setFont (juce::FontOptions (11.0f));
+        row.label.setColour (juce::Label::textColourId, Ahp::muted);
+        row.label.setJustificationType (juce::Justification::centredRight);
+
+        addAndMakeVisible (row.slider);
+        row.slider.setSliderStyle (juce::Slider::LinearHorizontal);
+        row.slider.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
+        row.slider.setRange (0.0, 1.0);
+        row.slider.setValue (initial, juce::dontSendNotification);
+        row.slider.setColour (juce::Slider::trackColourId, Ahp::rec);
+        row.slider.setTooltip (tip);
+    }
+
+    void setUpBreeding()
+    {
+        addAndMakeVisible (growButton);
+        growButton.setButtonText ("Grow");
+        growButton.setTooltip ("Breed a variation of the sound that is playing");
+        growButton.onClick = [this] { grow(); };
+
+        addAndMakeVisible (backButton);
+        backButton.setButtonText ("Back");
+        backButton.setTooltip ("Return to the sound before the last Grow");
+        backButton.onClick = [this] { goBack(); };
+        backButton.setEnabled (false);
+
+        setUpRow (amountRow, "Amount", 0.3, "How far a branch may wander from the seed");
+        setUpRow (atonalRow, "Atonal", 0.0, "How far a branch may wander from musical pitch");
+        setUpRow (tweenRow, "Tween", 1.0, "Anywhere between the seed and the branch");
+        tweenRow.slider.setEnabled (false);
+        tweenRow.slider.onValueChange = [this]
+        {
+            if (! tweenFrom.empty() && ! tweenTo.empty())
+                synth.applyValues (PanOneBreed::tween (tweenFrom, tweenTo,
+                                                       tweenRow.slider.getValue()));
+        };
+
+        addAndMakeVisible (growNote);
+        growNote.setFont (juce::FontOptions (11.0f));
+        growNote.setColour (juce::Label::textColourId, Ahp::muted);
+        growNote.setJustificationType (juce::Justification::centredRight);
+    }
+
+    /** Grows from what is heard now, which includes wherever Tween stands.
+        That is Synplant's planting a branch as the new seed, and it is what
+        lets a sound be bred over several generations. */
+    void grow()
+    {
+        const auto seed = synth.currentValues();
+
+        PanOneBreed::Settings settings;
+        settings.amount = amountRow.slider.getValue();
+        settings.atonality = atonalRow.slider.getValue();
+
+        const auto result = PanOneBreed::grow (seed, settings, nextSeed++, PanOne::bank());
+
+        if (! result.grown)
+        {
+            growNote.setText ("try again", juce::dontSendNotification);
+            return;
+        }
+
+        history.push_back (seed);
+
+        // A long session of growing should not hold every patch it ever
+        // passed through.
+        if (history.size() > 64)
+            history.erase (history.begin());
+
+        tweenFrom = seed;
+        tweenTo = result.values;
+
+        synth.applyValues (result.values);
+
+        tweenRow.slider.setValue (1.0, juce::dontSendNotification);
+        tweenRow.slider.setEnabled (true);
+        backButton.setEnabled (true);
+        growNote.setText ("generation " + juce::String ((int) history.size()),
+                          juce::dontSendNotification);
+    }
+
+    void goBack()
+    {
+        if (history.empty())
+            return;
+
+        synth.applyValues (history.back());
+        history.pop_back();
+
+        tweenFrom.clear();
+        tweenTo.clear();
+        tweenRow.slider.setValue (1.0, juce::dontSendNotification);
+        tweenRow.slider.setEnabled (false);
+        backButton.setEnabled (! history.empty());
+        growNote.setText (history.empty() ? juce::String()
+                                          : "generation " + juce::String ((int) history.size()),
+                          juce::dontSendNotification);
+    }
+
     struct Control
     {
         juce::Label    name;
@@ -309,6 +448,17 @@ private:
     bool           showingEdited = false;
 
     std::vector<std::unique_ptr<Control>> controls;
+
+    juce::TextButton growButton, backButton;
+    juce::Label      growNote;
+    Labelled         amountRow, atonalRow, tweenRow;
+
+    std::vector<std::vector<float>> history;
+    std::vector<float> tweenFrom, tweenTo;
+
+    // Different every time the panel opens, so two sessions do not grow the
+    // same branches in the same order.
+    std::uint64_t nextSeed = (std::uint64_t) juce::Random::getSystemRandom().nextInt64();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PanOneEditor)
 };

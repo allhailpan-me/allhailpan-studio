@@ -1,6 +1,29 @@
-Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+PAN One can now grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**PAN One can grow a new sound out of the one you are playing.** Press
+**Grow** on its panel and it breeds a variation of the current patch. The
+**Amount** slider is how far it may wander, from a nudge to something you
+would not recognise, and **Atonal** is how far from musical pitch: at nothing,
+the second oscillator only ever lands on a fourth, a fifth, an octave or the
+twelfth, keeping whatever fine detune it already had. **Tween** then stands
+anywhere between the sound you started from and the one you grew, and
+**Back** returns to where you were. Grow again from wherever you are standing
+and you are breeding over generations, keeping what you like.
+
+It only breeds the sound: oscillators, fold, drive, filter, envelopes, slopes
+and LFOs. Your pan, glide, macros, gate mode and the modulation matrix's
+wiring are left exactly as they were, so a branch is a new sound on the same
+instrument setup rather than a different instrument. A wavetable is swapped
+for one of its own family on small amounts, and a low pass filter only ever
+becomes a band pass or a high pass, never a notch or an all pass.
+
+**Every branch is played before you hear it.** Each candidate is rendered on
+a voice of its own and thrown away if it is silent, would clip a chord, or is
+more than twelve decibels louder or quieter than what you started from, which
+are the same rules the factory presets are tested against. So Grow cannot land
+on a dud, and a click costs about a tenth of a second while it listens.
 
 **Panning a guitar or a vocal no longer makes it quieter.** Move a mono track
 off centre and it lost 3 dB. Not because anything was broken: the pan knob was
