@@ -389,6 +389,19 @@ public:
         return index < parameters.size() ? parameters[index] : nullptr;
     }
 
+    /** Every control's value in table order, the way PanOneParams writes a
+        patch, for the editor's breeding to grow a branch from. */
+    std::vector<float> currentValues() const { return readParameters(); }
+
+    /** Moves every control at once, the way choosing a preset does and for
+        the same reason: through setValueNotifyingHost, so an open editor
+        follows and the host records it. Message thread only. */
+    void applyValues (const std::vector<float>& values)
+    {
+        for (std::size_t i = 0; i < values.size() && i < parameters.size(); ++i)
+            setParameterValue (i, values[i]);
+    }
+
 private:
     /** Translates the four controls version one had that this version does
         not, if the state came from version one at all.

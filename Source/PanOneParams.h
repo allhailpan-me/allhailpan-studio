@@ -1607,6 +1607,914 @@ namespace PanOneParams
                 add ("Broken Machine", "Experimental", p);
             }
 
+
+            //==================================================================
+            // The second bank.
+            //
+            // Appended rather than interleaved with the first, and that is
+            // not tidiness. A project stores the index of the preset it was
+            // on, and one saved before any controls existed carries nothing
+            // else, so inserting a preset in the middle would open those on
+            // the next one along. The panel groups the menu by category, so
+            // nobody reading it sees the order this list is in.
+            //
+            // Two things the first bank does not do, and every preset from
+            // here on does.
+            //
+            // The four macros mean the same on every patch: one is Tone,
+            // two is Movement, three is Grit and four is Shape. That is
+            // Omnisphere 3's lesson, whose six global controls are praised
+            // because they mean something on whatever is loaded; it gets
+            // there by analysing the patch, and a convention gets most of
+            // the way at no cost. Each macro sits at a half, routed
+            // bipolar, so a preset sounds exactly as designed until a macro
+            // is moved, and moving one either way is a musical move rather
+            // than a slide into silence.
+            //
+            // And the mod wheel is vibrato, through the fourth LFO, so that
+            // a player reaching for the wheel gets what every other
+            // instrument has taught them to expect.
+
+            const int lfo1 = Synth::ModMatrix::sourceFromId ("lfo1");
+            const int lfo2 = Synth::ModMatrix::sourceFromId ("lfo2");
+            const int lfo3 = Synth::ModMatrix::sourceFromId ("lfo3");
+            const int lfo4 = Synth::ModMatrix::sourceFromId ("lfo4");
+            const int modWheel = Synth::ModMatrix::sourceFromId ("modwheel");
+            const int pressure = Synth::ModMatrix::sourceFromId ("pressure");
+            const int macro1 = Synth::ModMatrix::sourceFromId ("macro1");
+            const int macro2 = Synth::ModMatrix::sourceFromId ("macro2");
+            const int macro3 = Synth::ModMatrix::sourceFromId ("macro3");
+            const int macro4 = Synth::ModMatrix::sourceFromId ("macro4");
+
+            const int toGateRange = Synth::ModMatrix::destinationFromId ("gaterange");
+            const int toOsc2Level = Synth::ModMatrix::destinationFromId ("osc2level");
+            const int toPan = Synth::ModMatrix::destinationFromId ("pan");
+
+            using LfoShape = Synth::Lfo::Shape;
+            using FilterType = Fx::Svf::Type;
+
+            // The wheel's vibrato: about a third of a semitone either way at
+            // five and a half cycles a second, faded in over a fifth of a
+            // second so a note struck with the wheel already up does not
+            // start with a wobble.
+            const auto wheelVibrato = [&] (Patch& p)
+            {
+                p.lfos[3].shape = LfoShape::sine;
+                p.lfos[3].rateHz = 5.5;
+                p.lfos[3].fadeSeconds = 0.2;
+                p.matrix.add (lfo4, toOsc1Pitch, 0.007f, Shape::asIs, modWheel);
+                p.matrix.add (lfo4, toOsc2Pitch, 0.007f, Shape::asIs, modWheel);
+            };
+
+            // Tone, Grit and Shape. Tone is the cutoff on a patch with a
+            // filter and the gate's range on one without, because a west
+            // coast patch leaves the filter open and does its brightness in
+            // the gate. Movement is per patch, as the via on whatever moves,
+            // so it is wired where the movement is.
+            const auto macros = [&] (Patch& p, bool west)
+            {
+                for (auto& m : p.macros)
+                    m = 0.5;
+
+                if (west)
+                    p.matrix.add (macro1, toGateRange, 0.40f, Shape::bipolar);
+                else
+                    p.matrix.add (macro1, toCutoff, 0.25f, Shape::bipolar);
+
+                p.matrix.add (macro3, toDrive, 0.30f, Shape::bipolar);
+                p.matrix.add (macro4, toOsc1Pos, 0.25f, Shape::bipolar);
+                wheelVibrato (p);
+            };
+
+            // A movement routing: the depth is doubled and scaled by macro
+            // two, which rests at a half, so it sounds as designed there,
+            // vanishes at nothing and doubles at full.
+            const auto moving = [&] (Patch& p, int source, int destination, float depth,
+                                     Shape shape = Shape::asIs)
+            {
+                p.matrix.add (source, destination, 2.0f * depth, shape, macro2);
+            };
+
+            //------------------------------------------------------------------
+            // Bass.
+
+            {
+                // A sine whose pitch falls two octaves in sixty milliseconds
+                // and a long tail: the electronic kick drum's tuned cousin,
+                // played as a bass line.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.85;
+                p.subLevel = 0.0;
+                p.driveAmount = 2.5; p.driveCurve = Curve::soft;
+                p.envelopes[0] = { 0.001, 1.400, 0.00, 0.300 };
+                p.envelopes[1] = { 0.0005, 0.060, 0.00, 0.050 };
+                p.matrix.add (env2, toOsc1Pitch, 0.25f);
+                macros (p, false);
+                moving (p, env2, toDrive, 0.15f);
+                add ("Sub Boom", "Bass", p);
+            }
+
+            {
+                // Two saws a few cents apart beating against each other, and
+                // a slow LFO moving the second so the beating never settles.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.333; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.18;
+                p.subLevel = 0.30;
+                p.cutoff = 700.0; p.resonance = 1.1; p.filterKeyTrack = 0.3;
+                p.driveAmount = 3.0; p.driveCurve = Curve::soft;
+                p.envelopes[0] = { 0.003, 0.500, 0.85, 0.180 };
+                p.lfos[0].shape = LfoShape::triangle; p.lfos[0].rateHz = 0.35;
+                p.lfos[0].retrigger = false;
+                macros (p, false);
+                moving (p, lfo1, toOsc2Pitch, 0.003f);
+                moving (p, lfo1, toCutoff, 0.06f);
+                add ("Reese Pressure", "Bass", p);
+            }
+
+            {
+                // A resonant low pass snapping shut on every note, with a
+                // short glide between overlapping ones: the squelch line.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.36; p.osc1Level = 0.50;
+                p.cutoff = 260.0; p.resonance = 4.5; p.filterKeyTrack = 0.5;
+                p.driveAmount = 1.2; p.driveCurve = Curve::cubic;
+                p.glideSeconds = 0.06;
+                p.envelopes[0] = { 0.002, 0.300, 0.70, 0.080 };
+                p.envelopes[1] = { 0.001, 0.180, 0.00, 0.100 };
+                p.matrix.add (env2, toCutoff, 0.42f);
+                p.matrix.add (velocity, toCutoff, 0.20f);
+                macros (p, false);
+                moving (p, env2, toResonance, 0.10f);
+                add ("Acid Line", "Bass", p);
+            }
+
+            {
+                // The cutoff swept by an LFO locked to the tempo, a quarter
+                // note each way.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.38; p.osc1Level = 0.30;
+                p.osc2Table = pulse; p.osc2Position = 0.0; p.osc2Level = 0.20;
+                p.osc2Semitones = -12.0;
+                p.subLevel = 0.18;
+                p.cutoff = 220.0; p.resonance = 2.4; p.filterKeyTrack = 0.3;
+                p.driveAmount = 2.0; p.driveCurve = Curve::soft;
+                p.envelopes[0] = { 0.003, 0.500, 0.90, 0.150 };
+                p.lfos[0].shape = LfoShape::sine; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 0.5; p.lfos[0].phaseOffset = 0.75;
+                macros (p, false);
+                moving (p, lfo1, toCutoff, 0.22f, Shape::unipolar);
+                add ("Tempo Wobble", "Bass", p);
+            }
+
+            {
+                // A sine folded by its own envelope, so each note starts as a
+                // buzz and settles to a round tone.
+                auto p = westCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.85;
+                p.subLevel = 0.25;
+                p.gateRange = 5.0; p.gateResting = 80.0; p.gateLag = 0.5;
+                p.foldDrive = 2.0; p.foldMix = 0.9;
+                p.envelopes[0] = { 0.003, 0.600, 0.55, 0.250 };
+                p.envelopes[1] = { 0.001, 0.250, 0.10, 0.200 };
+                p.matrix.add (env1, toGate, 1.00f);
+                p.matrix.add (env2, toFold, 0.45f);
+                p.matrix.add (velocity, toFold, 0.15f);
+                macros (p, true);
+                moving (p, env2, toFoldSym, 0.20f);
+                add ("Folded Bass", "Bass", p);
+            }
+
+            {
+                // A short, round pluck: sine and saw with a filter that
+                // closes in a tenth of a second.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.30; p.osc1Level = 0.50;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.40;
+                p.osc2Semitones = -12.0;
+                p.cutoff = 300.0; p.resonance = 1.4; p.filterKeyTrack = 0.6;
+                p.driveAmount = 2.0;
+                p.envelopes[0] = { 0.001, 0.350, 0.00, 0.120 };
+                p.envelopes[1] = { 0.001, 0.110, 0.00, 0.100 };
+                p.matrix.add (env2, toCutoff, 0.40f);
+                p.matrix.add (velocity, toCutoff, 0.15f);
+                macros (p, false);
+                moving (p, env2, toOsc1Pos, 0.15f);
+                add ("Pluck Bass", "Bass", p);
+            }
+
+            //------------------------------------------------------------------
+            // Lead.
+
+            {
+                // Two saws a fifth of a semitone apart, bright and forward,
+                // with glide and vibrato that arrives as the note is held.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.333; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.12;
+                p.cutoff = 2800.0; p.resonance = 1.3; p.filterKeyTrack = 0.7;
+                p.driveAmount = 2.5;
+                p.glideSeconds = 0.05;
+                p.envelopes[0] = { 0.004, 0.300, 0.90, 0.200 };
+                p.envelopes[1] = { 0.002, 0.400, 0.40, 0.200 };
+                p.envelopes[2] = { 0.600, 1.000, 1.00, 0.300 };
+                p.lfos[1].shape = LfoShape::sine; p.lfos[1].rateHz = 5.2;
+                p.matrix.add (env2, toCutoff, 0.20f);
+                macros (p, false);
+                moving (p, lfo2, toOsc1Pitch, 0.003f, Shape::asIs);
+                p.matrix.add (lfo2, toOsc2Pitch, 0.006f, Shape::asIs, env3);
+                add ("Saw Lead", "Lead", p);
+            }
+
+            {
+                // A hollow square with a slow pulse width sweep and a longer
+                // glide: the classic mono lead.
+                auto p = eastCoast();
+                p.osc1Table = pulse; p.osc1Position = 0.10; p.osc1Level = 0.60;
+                p.subLevel = 0.15;
+                p.cutoff = 2000.0; p.resonance = 1.0; p.filterKeyTrack = 0.6;
+                p.driveAmount = 1.5;
+                p.glideSeconds = 0.12;
+                p.envelopes[0] = { 0.005, 0.300, 0.85, 0.180 };
+                p.lfos[0].shape = LfoShape::triangle; p.lfos[0].rateHz = 0.6;
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pos, 0.15f, Shape::unipolar);
+                add ("Square Glide", "Lead", p);
+            }
+
+            {
+                // Driven hard into the cubic and folded a little, with the
+                // fold following the player's pressure.
+                auto p = eastCoast();
+                p.osc1Table = sync; p.osc1Position = 0.45; p.osc1Level = 0.33;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.18;
+                p.osc2Semitones = 12.03;
+                p.foldDrive = 2.5; p.foldMix = 0.30;
+                p.cutoff = 3500.0; p.resonance = 1.0; p.filterKeyTrack = 0.6;
+                p.driveAmount = 8.0; p.driveCurve = Curve::cubic;
+                p.envelopes[0] = { 0.003, 0.300, 0.90, 0.200 };
+                p.envelopes[1] = { 0.002, 0.500, 0.30, 0.200 };
+                p.matrix.add (env2, toOsc1Pos, 0.30f);
+                p.matrix.add (pressure, toFoldMix, 0.40f);
+                macros (p, false);
+                moving (p, env2, toFold, 0.10f);
+                add ("Screamer", "Lead", p);
+            }
+
+            {
+                // Nearly a sine, with a breath of noise and vibrato faded in
+                // over half a second.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.04; p.osc1Level = 0.70;
+                p.noiseLevel = 0.05; p.noiseColour = 0.4;
+                p.cutoff = 4000.0; p.resonance = 0.8; p.filterKeyTrack = 0.8;
+                p.glideSeconds = 0.04;
+                p.envelopes[0] = { 0.040, 0.300, 0.90, 0.250 };
+                p.lfos[1].shape = LfoShape::sine; p.lfos[1].rateHz = 5.8;
+                p.lfos[1].fadeSeconds = 0.5;
+                macros (p, false);
+                moving (p, lfo2, toOsc1Pitch, 0.004f);
+                add ("Whistle", "Lead", p);
+            }
+
+            {
+                // A sync lead whose sync sweep follows the note's own
+                // envelope, so every note opens with a tearing edge.
+                auto p = eastCoast();
+                p.osc1Table = sync; p.osc1Position = 0.10; p.osc1Level = 0.55;
+                p.subLevel = 0.15;
+                p.cutoff = 5000.0; p.resonance = 1.0; p.filterKeyTrack = 0.5;
+                p.driveAmount = 3.0; p.driveCurve = Curve::soft;
+                p.glideSeconds = 0.08;
+                p.envelopes[0] = { 0.003, 0.300, 0.85, 0.200 };
+                p.envelopes[1] = { 0.001, 0.600, 0.20, 0.250 };
+                p.matrix.add (env2, toOsc1Pos, 0.65f);
+                macros (p, false);
+                moving (p, env2, toCutoff, 0.10f);
+                add ("Tear Sync", "Lead", p);
+            }
+
+            //------------------------------------------------------------------
+            // Keys.
+
+            {
+                // Phase modulation at one to one with the index falling
+                // fast, which is the bark at the front of an electric piano,
+                // and a tine an octave and a fifth up that dies sooner.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.70;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.15;
+                p.osc2Semitones = 0.0;
+                p.fmAmount = 0.25;
+                p.cutoff = 6000.0; p.resonance = 0.7; p.filterKeyTrack = 0.5;
+                p.envelopes[0] = { 0.002, 2.200, 0.15, 0.350 };
+                p.envelopes[1] = { 0.001, 0.450, 0.05, 0.300 };
+                p.matrix.add (env2, toFm, 0.55f);
+                p.matrix.add (velocity, toFm, 0.35f);
+                // And the tremolo an electric piano's amplifier had, on the
+                // movement macro.
+                p.lfos[2].shape = LfoShape::sine; p.lfos[2].rateHz = 4.5;
+                p.lfos[2].retrigger = false;
+                macros (p, false);
+                moving (p, lfo3, toAmp, -0.12f, Shape::unipolar);
+                add ("Electric Tine", "Keys", p);
+            }
+
+            {
+                // Steady from the moment the key goes down to the moment it
+                // comes up, as an organ is, with a slow vibrato.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.25; p.osc1Level = 0.45;
+                p.osc2Table = harmonics; p.osc2Position = 0.05; p.osc2Level = 0.30;
+                p.osc2Semitones = 12.0;
+                p.subLevel = 0.30;
+                p.cutoff = 5000.0; p.resonance = 0.7;
+                p.driveAmount = 1.2;
+                p.envelopes[0] = { 0.004, 0.100, 1.00, 0.040 };
+                p.lfos[1].shape = LfoShape::sine; p.lfos[1].rateHz = 6.4;
+                p.lfos[1].retrigger = false;
+                macros (p, false);
+                moving (p, lfo2, toOsc1Pitch, 0.0015f);
+                moving (p, lfo2, toOsc2Pitch, 0.0015f);
+                add ("Drawbar Organ", "Keys", p);
+            }
+
+            {
+                // A narrow pulse through a resonant low pass that snaps open
+                // and shut, short and funky.
+                auto p = eastCoast();
+                p.osc1Table = pulse; p.osc1Position = 0.65; p.osc1Level = 0.45;
+                                p.cutoff = 900.0; p.resonance = 2.2; p.filterKeyTrack = 0.8;
+                p.driveAmount = 2.0;
+                p.envelopes[0] = { 0.001, 0.350, 0.25, 0.060 };
+                p.envelopes[1] = { 0.001, 0.120, 0.00, 0.060 };
+                p.matrix.add (env2, toCutoff, 0.35f);
+                p.matrix.add (velocity, toCutoff, 0.15f);
+                macros (p, false);
+                moving (p, env2, toOsc1Pos, -0.10f);
+                add ("Clavi Funk", "Keys", p);
+            }
+
+            {
+                // A soft wavetable key that brightens with velocity and
+                // drifts a little through its table while held.
+                auto p = eastCoast();
+                p.osc1Table = odd; p.osc1Position = 0.20; p.osc1Level = 0.55;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.30;
+                p.osc2Semitones = 12.0;
+                p.cutoff = 1800.0; p.resonance = 0.8; p.filterKeyTrack = 0.6;
+                p.envelopes[0] = { 0.003, 1.600, 0.30, 0.500 };
+                p.envelopes[1] = { 0.002, 0.800, 0.20, 0.400 };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.8;
+                p.matrix.add (env2, toCutoff, 0.20f);
+                p.matrix.add (velocity, toCutoff, 0.25f);
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pos, 0.10f);
+                add ("Velvet Keys", "Keys", p);
+            }
+
+            //------------------------------------------------------------------
+            // Bells.
+
+            {
+                // A modulator at an inharmonic ratio, about two point seven
+                // six, which is what makes the partials a bell's rather than
+                // a string's, with an index that rings away slower than it
+                // strikes. The ratio is chosen by ear and is not a measured
+                // bell: tuned bells have measured partial ratios, and this is
+                // not claiming any of them.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.70;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.10;
+                p.osc2Semitones = 17.58;
+                p.fmAmount = 0.6;
+                p.cutoff = 9000.0; p.resonance = 0.7;
+                p.envelopes[0] = { 0.001, 3.500, 0.00, 1.800 };
+                p.envelopes[1] = { 0.001, 1.500, 0.00, 1.200 };
+                p.matrix.add (env2, toFm, 0.40f);
+                p.matrix.add (velocity, toFm, 0.25f);
+                p.lfos[2].shape = LfoShape::sine; p.lfos[2].rateHz = 0.3;
+                macros (p, false);
+                moving (p, lfo3, toFm, 0.04f);
+                add ("Inharmonic Bell", "Bells", p);
+            }
+
+            {
+                // Small and high: the comb table plucked, two octaves up.
+                auto p = eastCoast();
+                p.osc1Table = comb; p.osc1Position = 0.15; p.osc1Level = 0.55;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.30;
+                p.osc2Semitones = 24.0;
+                p.cutoff = 8000.0; p.resonance = 0.8;
+                p.envelopes[0] = { 0.001, 1.200, 0.00, 0.900 };
+                p.envelopes[1] = { 0.001, 0.300, 0.00, 0.300 };
+                p.matrix.add (env2, toOsc1Pos, 0.30f);
+                macros (p, false);
+                moving (p, env2, toOsc2Level, 0.10f);
+                add ("Music Box", "Bells", p);
+            }
+
+            {
+                // A low metallic wash: folded phase modulation that swells
+                // and decays over several seconds.
+                auto p = westCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.75;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.40;
+                p.osc2Semitones = 6.47;
+                p.fmAmount = 1.2;
+                p.gateRange = 4.0; p.gateResting = 120.0; p.gateLag = 1.0;
+                p.foldDrive = 3.0; p.foldMix = 0.5;
+                p.envelopes[0] = { 0.010, 5.000, 0.00, 3.000 };
+                p.slopes[0] = { 1.7, 2.3, 0.0, true };
+                p.matrix.add (env1, toGate, 1.00f);
+                p.matrix.add (env1, toFm, 0.30f);
+                macros (p, true);
+                moving (p, slope1, toFold, 0.15f);
+                add ("Gong Wash", "Bells", p);
+            }
+
+            //------------------------------------------------------------------
+            // Brass and strings.
+
+            {
+                // A filter that opens a little slower than the note starts,
+                // with a touch of overshoot: the swell at the front of a
+                // brass section, played on saws.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.333; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.08;
+                p.cutoff = 600.0; p.resonance = 1.1; p.filterKeyTrack = 0.5;
+                p.driveAmount = 2.0;
+                p.envelopes[0] = { 0.030, 0.400, 0.90, 0.250 };
+                p.envelopes[1] = { 0.080, 0.500, 0.55, 0.300 };
+                p.matrix.add (env2, toCutoff, 0.40f);
+                p.matrix.add (velocity, toCutoff, 0.15f);
+                p.lfos[2].shape = LfoShape::sine; p.lfos[2].rateHz = 5.0;
+                p.lfos[2].fadeSeconds = 0.6;
+                macros (p, false);
+                moving (p, lfo3, toOsc1Pitch, 0.002f);
+                moving (p, lfo3, toOsc2Pitch, 0.002f);
+                add ("Synth Brass", "Brass and strings", p);
+            }
+
+            {
+                // Two saws beating against each other, a slow random drift
+                // on one of them, and a vibrato that arrives late.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.333; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.14;
+                p.cutoff = 2400.0; p.resonance = 0.8; p.filterKeyTrack = 0.4;
+                p.envelopes[0] = { 0.350, 0.800, 0.90, 0.900 };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.5;
+                p.lfos[1].shape = LfoShape::sine; p.lfos[1].rateHz = 4.8;
+                p.lfos[1].fadeSeconds = 0.8;
+                macros (p, false);
+                moving (p, lfo1, toOsc2Pitch, 0.0025f);
+                moving (p, lfo2, toOsc1Pitch, 0.002f);
+                add ("String Machine", "Brass and strings", p);
+            }
+
+            //------------------------------------------------------------------
+            // Pad.
+
+            {
+                // A wavetable swept end to end by a slow triangle, so the
+                // pad is a different colour every few seconds.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.30; p.osc1Level = 0.45;
+                p.osc2Table = odd; p.osc2Position = 0.40; p.osc2Level = 0.35;
+                p.osc2Semitones = 12.05;
+                p.cutoff = 3000.0; p.resonance = 0.8;
+                p.envelopes[0] = { 0.900, 1.500, 0.90, 1.500 };
+                p.lfos[0].shape = LfoShape::triangle; p.lfos[0].rateHz = 0.08;
+                p.lfos[0].retrigger = false;
+                p.lfos[1].shape = LfoShape::triangle; p.lfos[1].rateHz = 0.11;
+                p.lfos[1].retrigger = false;
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pos, 0.25f);
+                moving (p, lfo2, toOsc2Pos, 0.25f);
+                add ("Turning Tables", "Pad", p);
+            }
+
+            {
+                // Low, dark and wide: a sub heavy saw pair behind a closed
+                // filter that breathes once every eight beats.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.30; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.30; p.osc2Level = 0.40;
+                p.osc2Semitones = -11.9;
+                p.subLevel = 0.30;
+                p.cutoff = 450.0; p.resonance = 1.2; p.filterKeyTrack = 0.3;
+                p.envelopes[0] = { 1.200, 2.000, 0.90, 2.000 };
+                p.lfos[0].shape = LfoShape::sine; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 8.0; p.lfos[0].retrigger = false;
+                macros (p, false);
+                moving (p, lfo1, toCutoff, 0.12f, Shape::unipolar);
+                add ("Dark Cloud", "Pad", p);
+            }
+
+            {
+                // A twelfth above, softly, so the pad shimmers rather than
+                // thickens, and a slope wandering the first table.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.20; p.osc1Level = 0.50;
+                p.osc2Table = harmonics; p.osc2Position = 0.05; p.osc2Level = 0.22;
+                p.osc2Semitones = 19.03;
+                p.noiseLevel = 0.03; p.noiseColour = 0.3;
+                p.cutoff = 6000.0; p.resonance = 0.8;
+                p.envelopes[0] = { 1.500, 2.000, 0.90, 2.500 };
+                p.slopes[0] = { 3.0, 3.6, 0.0, true };
+                p.lfos[0].shape = LfoShape::sine; p.lfos[0].rateHz = 0.21;
+                p.lfos[0].retrigger = false;
+                macros (p, false);
+                moving (p, slope1, toOsc1Pos, 0.20f, Shape::bipolar);
+                moving (p, lfo1, toOsc2Level, 0.08f);
+                add ("Shimmer Pad", "Pad", p);
+            }
+
+            {
+                // A noise wash through a resonant band pass whose centre
+                // wanders: air with a pitch in it.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.30;
+                p.noiseLevel = 0.60; p.noiseColour = 0.5;
+                p.filterType = FilterType::bandpassQ;
+                p.cutoff = 1200.0; p.resonance = 6.0; p.filterKeyTrack = 1.0;
+                p.envelopes[0] = { 1.000, 2.000, 0.90, 2.000 };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.3;
+                macros (p, false);
+                moving (p, lfo1, toCutoff, 0.08f);
+                add ("Breath Pad", "Pad", p);
+            }
+
+            {
+                // The folder on a pad: a sine and a fifth, folded gently by
+                // a slope that takes eleven seconds to go round.
+                auto p = westCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.65;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.40;
+                p.osc2Semitones = 7.02;
+                p.gateRange = 3.0; p.gateResting = 200.0; p.gateLag = 1.0;
+                p.foldDrive = 2.0; p.foldMix = 0.6;
+                p.envelopes[0] = { 1.400, 2.000, 1.00, 2.500 };
+                p.slopes[0] = { 5.0, 6.0, 0.0, true };
+                p.matrix.add (env1, toGate, 0.80f);
+                macros (p, true);
+                moving (p, slope1, toFold, 0.15f);
+                moving (p, slope1, toGate, 0.10f);
+                add ("Folded Halo", "Pad", p);
+            }
+
+            //------------------------------------------------------------------
+            // Pluck.
+
+            {
+                // Bright and quick, for arpeggios.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.36; p.osc1Level = 0.45;
+                p.osc2Table = analogue; p.osc2Position = 0.36; p.osc2Level = 0.35;
+                p.osc2Semitones = 12.04;
+                p.cutoff = 900.0; p.resonance = 1.5; p.filterKeyTrack = 0.8;
+                p.envelopes[0] = { 0.001, 0.400, 0.00, 0.250 };
+                p.envelopes[1] = { 0.001, 0.180, 0.00, 0.150 };
+                p.matrix.add (env2, toCutoff, 0.45f);
+                p.matrix.add (velocity, toCutoff, 0.15f);
+                macros (p, false);
+                moving (p, env2, toResonance, 0.08f);
+                add ("Bright Pluck", "Pluck", p);
+            }
+
+            {
+                // Dark and short, like a palm muted string.
+                auto p = eastCoast();
+                p.osc1Table = pulse; p.osc1Position = 0.20; p.osc1Level = 0.60;
+                p.cutoff = 500.0; p.resonance = 1.0; p.filterKeyTrack = 0.7;
+                p.envelopes[0] = { 0.001, 0.200, 0.00, 0.080 };
+                p.envelopes[1] = { 0.001, 0.060, 0.00, 0.060 };
+                p.matrix.add (env2, toCutoff, 0.30f);
+                macros (p, false);
+                moving (p, env2, toOsc1Pos, 0.10f);
+                add ("Muted Pluck", "Pluck", p);
+            }
+
+            {
+                // A struck block: a sine and its twelfth, through the gate,
+                // with almost no sustain.
+                auto p = westCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.80;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.25;
+                p.osc2Semitones = 19.0;
+                p.gateRange = 6.0; p.gateResting = 70.0; p.gateLag = 0.35;
+                p.foldDrive = 1.6; p.foldMix = 0.25;
+                p.envelopes[0] = { 0.003, 0.600, 0.00, 0.400 };
+                p.matrix.add (env1, toGate, 0.85f);
+                p.matrix.add (velocity, toGate, 0.15f);
+                macros (p, true);
+                moving (p, velocity, toFoldMix, 0.20f);
+                add ("Wood Strike", "Pluck", p);
+            }
+
+            {
+                // A tempo locked gate on a saw pluck: every note stutters in
+                // sixteenths.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.34; p.osc1Level = 0.45;
+                p.osc2Table = analogue; p.osc2Position = 0.34; p.osc2Level = 0.35;
+                p.osc2Semitones = 7.0;
+                p.cutoff = 1200.0; p.resonance = 1.6; p.filterKeyTrack = 0.6;
+                p.envelopes[0] = { 0.001, 0.800, 0.20, 0.300 };
+                p.envelopes[1] = { 0.001, 0.300, 0.00, 0.200 };
+                p.lfos[0].shape = LfoShape::pulse; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 0.25; p.lfos[0].pulseWidth = 0.4;
+                p.matrix.add (env2, toCutoff, 0.35f);
+                p.matrix.add (lfo1, toAmp, -0.45f, Shape::unipolar, macro2);
+                macros (p, false);
+                add ("Sixteenth Pluck", "Pluck", p);
+            }
+
+            //------------------------------------------------------------------
+            // Rhythm: gates and steps locked to the tempo, so a held chord
+            // plays a part.
+
+            {
+                // A held chord chopped into eighths, with the cutoff
+                // stepping on a sample and hold.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.333; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.333; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.10;
+                p.cutoff = 1500.0; p.resonance = 2.5; p.filterKeyTrack = 0.5;
+                p.envelopes[0] = { 0.005, 0.500, 0.95, 0.300 };
+                p.lfos[0].shape = LfoShape::square; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 0.5;
+                p.lfos[1].shape = LfoShape::sampleAndHold; p.lfos[1].synced = true;
+                p.lfos[1].beatsPerCycle = 0.5;
+                p.matrix.add (lfo1, toAmp, -0.80f, Shape::unipolar);
+                macros (p, false);
+                moving (p, lfo2, toCutoff, 0.15f);
+                add ("Eighth Gate", "Rhythm", p);
+            }
+
+            {
+                // The same idea in triplets and on the wavetable instead of
+                // the filter.
+                auto p = eastCoast();
+                p.osc1Table = phase; p.osc1Position = 0.30; p.osc1Level = 0.50;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.30;
+                p.osc2Semitones = -12.0;
+                p.cutoff = 3500.0; p.resonance = 1.0;
+                p.envelopes[0] = { 0.005, 0.500, 0.95, 0.400 };
+                p.lfos[0].shape = LfoShape::sawDown; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 1.0 / 3.0;
+                p.lfos[1].shape = LfoShape::sampleAndHold; p.lfos[1].synced = true;
+                p.lfos[1].beatsPerCycle = 1.0 / 3.0;
+                p.matrix.add (lfo1, toAmp, -0.60f, Shape::unipolar);
+                macros (p, false);
+                moving (p, lfo2, toOsc1Pos, 0.25f);
+                add ("Triplet Steps", "Rhythm", p);
+            }
+
+            //------------------------------------------------------------------
+            // Percussion.
+
+            {
+                // A sine dropping three octaves in a few tens of
+                // milliseconds, with a click of noise at the front.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.90;
+                p.noiseLevel = 0.15;
+                p.cutoff = 9000.0;
+                p.driveAmount = 2.0; p.driveCurve = Curve::soft;
+                p.envelopes[0] = { 0.0005, 0.400, 0.00, 0.200 };
+                p.envelopes[1] = { 0.0005, 0.045, 0.00, 0.040 };
+                p.envelopes[2] = { 0.0005, 0.008, 0.00, 0.008 };
+                p.matrix.add (env2, toOsc1Pitch, 0.75f);
+                p.matrix.add (env3, toNoise, 0.40f);
+                p.matrix.add (macro4, toNoise, -0.10f, Shape::bipolar);
+                macros (p, false);
+                moving (p, env2, toDrive, 0.20f);
+                add ("Kick Body", "Percussion", p);
+            }
+
+            {
+                // A tuned body under a burst of noise.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.45;
+                p.noiseLevel = 0.55; p.noiseColour = 0.1;
+                p.cutoff = 8000.0; p.resonance = 0.9;
+                p.driveAmount = 2.0;
+                p.envelopes[0] = { 0.0005, 0.180, 0.00, 0.120 };
+                p.envelopes[1] = { 0.0005, 0.030, 0.00, 0.030 };
+                p.matrix.add (env2, toOsc1Pitch, 0.20f);
+                p.matrix.add (velocity, toNoise, 0.20f);
+                macros (p, false);
+                moving (p, env2, toCutoff, 0.10f);
+                add ("Snare Crack", "Percussion", p);
+            }
+
+            {
+                // Two squares at a ratio of about one and a half, as the
+                // metal percussion of early drum machines was built, through
+                // a band pass.
+                auto p = eastCoast();
+                p.osc1Table = pulse; p.osc1Position = 0.0; p.osc1Level = 0.90;
+                p.osc2Table = pulse; p.osc2Position = 0.0; p.osc2Level = 0.90;
+                p.osc2Semitones = 6.79;
+                p.filterType = FilterType::bandpass;
+                p.cutoff = 2600.0; p.resonance = 0.8; p.filterKeyTrack = 0.5;
+                p.envelopes[0] = { 0.0005, 0.450, 0.00, 0.250 };
+                macros (p, false);
+                moving (p, velocity, toCutoff, 0.10f);
+                add ("Clank Bell", "Percussion", p);
+            }
+
+            {
+                // A very short, bright tick.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.90;
+                p.noiseLevel = 0.50;
+                p.filterType = FilterType::highpass;
+                p.cutoff = 300.0; p.resonance = 1.2;
+                p.envelopes[0] = { 0.0005, 0.050, 0.00, 0.040 };
+                p.envelopes[1] = { 0.0005, 0.010, 0.00, 0.010 };
+                p.matrix.add (env2, toOsc1Pitch, 0.25f);
+                p.osc2Table = harmonics; p.osc2Level = 0.0;
+                p.osc2Semitones = 0.0;
+                macros (p, false);
+                moving (p, velocity, toCutoff, 0.10f);
+                add ("Rim Tick", "Percussion", p);
+            }
+
+            {
+                // Noise through a high pass, longer than the closed hat.
+                auto p = eastCoast();
+                p.osc1Table = bits; p.osc1Position = 0.9; p.osc1Level = 0.20;
+                p.noiseLevel = 0.85;
+                p.filterType = FilterType::highpass;
+                p.cutoff = 7000.0; p.resonance = 1.0;
+                p.envelopes[0] = { 0.0005, 0.450, 0.00, 0.300 };
+                macros (p, false);
+                moving (p, velocity, toCutoff, 0.08f);
+                add ("Open Hat", "Percussion", p);
+            }
+
+            {
+                // Noise swelling and falling in sixteenths through a band
+                // pass: a shaker played by holding the key.
+                auto p = eastCoast();
+                p.noiseLevel = 0.85; p.osc1Level = 0.0;
+                p.filterType = FilterType::bandpass;
+                p.cutoff = 6500.0; p.resonance = 1.5;
+                p.envelopes[0] = { 0.010, 0.300, 0.80, 0.100 };
+                p.lfos[0].shape = LfoShape::sawDown; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 0.25;
+                p.matrix.add (lfo1, toAmp, -0.75f, Shape::unipolar);
+                macros (p, false);
+                moving (p, lfo1, toCutoff, 0.05f);
+                add ("Held Shaker", "Percussion", p);
+            }
+
+            {
+                // A pitch that falls six octaves in a tenth of a second.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.1; p.osc1Level = 0.80;
+                p.cutoff = 6000.0; p.resonance = 2.0;
+                p.envelopes[0] = { 0.0005, 0.200, 0.00, 0.150 };
+                p.envelopes[1] = { 0.0005, 0.100, 0.00, 0.100 };
+                p.matrix.add (env2, toOsc1Pitch, 0.80f);
+                p.matrix.add (env2, toCutoff, 0.20f);
+                macros (p, false);
+                moving (p, env2, toResonance, 0.08f);
+                add ("Zap", "Percussion", p);
+            }
+
+            //------------------------------------------------------------------
+            // Effects.
+
+            {
+                // Pitch falling an octave and a half over two seconds with
+                // the resonance rising: the drop at the end of a build.
+                auto p = eastCoast();
+                p.osc1Table = analogue; p.osc1Position = 0.36; p.osc1Level = 0.40;
+                p.osc2Table = analogue; p.osc2Position = 0.36; p.osc2Level = 0.40;
+                p.osc2Semitones = 0.2;
+                p.cutoff = 3000.0; p.resonance = 2.0;
+                p.envelopes[0] = { 0.010, 2.000, 0.90, 0.500 };
+                p.envelopes[2] = { 2.000, 1.000, 1.00, 0.300 };
+                p.matrix.add (env3, toOsc1Pitch, -0.40f);
+                p.matrix.add (env3, toOsc2Pitch, -0.40f);
+                p.matrix.add (env3, toCutoff, -0.30f);
+                macros (p, false);
+                moving (p, env3, toResonance, 0.10f);
+                add ("Falling Drop", "Riser", p);
+            }
+
+            {
+                // Random pitches, a new one every sixteenth: the computer
+                // thinking. Atonal on purpose.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.10; p.osc1Level = 0.60;
+                p.cutoff = 5000.0; p.resonance = 1.0;
+                p.envelopes[0] = { 0.003, 0.500, 0.90, 0.200 };
+                p.lfos[0].shape = LfoShape::sampleAndHold; p.lfos[0].synced = true;
+                p.lfos[0].beatsPerCycle = 0.25;
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pitch, 0.25f);
+                add ("Random Bleeps", "Effect", p);
+            }
+
+            {
+                // Brown noise through a band pass drifting slowly: wind.
+                auto p = eastCoast();
+                p.osc1Level = 0.0;
+                p.noiseLevel = 0.90; p.noiseColour = 0.8;
+                p.filterType = FilterType::bandpassQ;
+                p.cutoff = 700.0; p.resonance = 4.0;
+                p.envelopes[0] = { 1.500, 2.000, 1.00, 2.500 };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.25;
+                p.lfos[1].shape = LfoShape::smoothRandom; p.lfos[1].rateHz = 0.4;
+                macros (p, false);
+                moving (p, lfo1, toCutoff, 0.15f);
+                moving (p, lfo2, toPan, 0.30f);
+                add ("Night Wind", "Effect", p);
+            }
+
+            {
+                // A tone sweeping six semitones either way and back: a siren.
+                auto p = eastCoast();
+                p.osc1Table = pulse; p.osc1Position = 0.0; p.osc1Level = 0.50;
+                p.cutoff = 4000.0; p.resonance = 1.0;
+                p.envelopes[0] = { 0.010, 0.500, 1.00, 0.200 };
+                p.lfos[0].shape = LfoShape::triangle; p.lfos[0].rateHz = 1.5;
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pitch, 0.12f);
+                add ("Siren Sweep", "Effect", p);
+            }
+
+            //------------------------------------------------------------------
+            // Drone and texture.
+
+            {
+                // A sine folded by a slope eight seconds long, with a fifth
+                // underneath: slow water.
+                auto p = westCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.0; p.osc1Level = 0.75;
+                p.osc2Table = harmonics; p.osc2Position = 0.0; p.osc2Level = 0.35;
+                p.osc2Semitones = -5.0;
+                p.noiseLevel = 0.02;
+                p.gateRange = 2.5; p.gateResting = 160.0; p.gateLag = 1.0;
+                p.foldDrive = 3.5; p.foldMix = 0.8;
+                p.envelopes[0] = { 1.500, 2.000, 1.00, 3.000 };
+                p.slopes[0] = { 3.6, 4.4, 0.2, true };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.15;
+                p.matrix.add (env1, toGate, 0.75f);
+                p.matrix.add (slope1, toGate, 0.25f);
+                macros (p, true);
+                moving (p, slope1, toFold, 0.25f);
+                moving (p, lfo1, toFoldSym, 0.20f);
+                add ("Tidal Drone", "Drone", p);
+            }
+
+            {
+                // Bits and noise through the gate, stepping at random.
+                auto p = westCoast();
+                p.osc1Table = bits; p.osc1Position = 0.60; p.osc1Level = 0.55;
+                p.osc2Table = cluster; p.osc2Position = 0.40; p.osc2Level = 0.30;
+                p.osc2Semitones = -7.0;
+                p.noiseLevel = 0.12; p.noiseColour = 0.6;
+                p.gateRange = 4.0; p.gateResting = 120.0; p.gateLag = 0.8;
+                p.foldDrive = 4.0; p.foldMix = 0.5;
+                p.envelopes[0] = { 1.000, 2.000, 0.90, 2.000 };
+                p.lfos[0].shape = LfoShape::sampleAndHold; p.lfos[0].rateHz = 3.0;
+                p.lfos[1].shape = LfoShape::smoothRandom; p.lfos[1].rateHz = 0.2;
+                p.matrix.add (env1, toGate, 0.70f);
+                p.matrix.add (lfo1, toGate, 0.15f, Shape::unipolar);
+                macros (p, true);
+                moving (p, lfo1, toOsc1Pos, 0.20f);
+                moving (p, lfo2, toOsc2Pos, 0.25f);
+                add ("Rust Field", "Texture", p);
+            }
+
+            {
+                // High partials of the harmonics table drifting in and out.
+                auto p = eastCoast();
+                p.osc1Table = harmonics; p.osc1Position = 0.70; p.osc1Level = 0.40;
+                p.osc2Table = comb; p.osc2Position = 0.50; p.osc2Level = 0.30;
+                p.osc2Semitones = 12.0;
+                p.cutoff = 7000.0; p.resonance = 0.8;
+                p.envelopes[0] = { 2.000, 2.000, 1.00, 3.000 };
+                p.lfos[0].shape = LfoShape::smoothRandom; p.lfos[0].rateHz = 0.12;
+                p.lfos[1].shape = LfoShape::smoothRandom; p.lfos[1].rateHz = 0.17;
+                macros (p, false);
+                moving (p, lfo1, toOsc1Pos, 0.20f);
+                moving (p, lfo2, toOsc2Pos, 0.25f);
+                add ("Glass Harmonics", "Texture", p);
+            }
+
             return out;
         }();
 
