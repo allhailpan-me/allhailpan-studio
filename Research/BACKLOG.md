@@ -300,7 +300,55 @@ signed overflow rather than a wrong answer, and a settings file is plain text
 that can hold exactly that. The test passes the two integer extremes for that
 reason, and without them both orderings pass.
 
-### What the audit found
+### What the second audit found
+
+The fixes were audited again rather than taken on trust, and that pass found
+six more, one of which is worth recording because it is the same fault the
+first pass had just removed.
+
+**The replacement text introduced its own wrong number.** The corrected
+comment said the distortion "swings more than twenty decibels between
+neighbouring half steps" and then cited three figures of its own that show
+14.1 dB. The probe said twenty decibels between neighbouring *tenths*, where
+the real figure is 7.2. Correcting a wrong number by writing a different
+wrong number is easier to do than it sounds, and the only thing that caught
+it was somebody re-measuring a sentence that already looked fixed.
+
+**A loaded trap in the harmonic measurement.** `worstHarmonic` maximised over
+every bin that passed `k != bin && k / bin <= 7`, which includes the
+fundamental's four neighbour bins, because `k / bin` is 0 or 1 for all of
+them. The comment directly above said those bins were leakage and not
+distortion. With the sine on an exact bin they hold ordinary noise and the
+measured margins do not move at all, which is why it survived. Move the sine
+half a bin off the grid, which is the obvious way to make the test more
+realistic, and the dithered check fails at -0.04 dB while the dither is
+working perfectly and the real harmonics sit 5 dB below the noise. Whoever
+did that would go looking at `Dither.h`.
+
+**Two comments claiming more generality than the measurement carries.**
+Asserting clearance over the record's own noise floor is less sensitive to
+the record length than a fixed threshold, not independent of it: the
+distortion sits still and the floor moves, so the worst clearance is 13.3 dB
+at n = 2^13 and 36.6 at 2^17. Halving n twice to speed the section up turns
+it red. The same holds at the top of the amplitude sweep, where clearance
+crosses the threshold between 96 and 128 steps. Both are written down now
+rather than left for somebody to discover.
+
+**The dithered check has a seed tail nothing mentioned.** Its margin is set
+by the exponential tail of one noise bin's power, not by the bin count the
+comment blamed. Measured over 700 seeds against all twelve amplitudes, four
+of 8400 draws cleared more than 10 dB, so about one seed in 175 would redden
+it. The seed is fixed so it cannot flake in CI, but changing the seed is not
+the free edit it looks like, and the comment now says so.
+
+Also: `DitherProbe.cpp` used `std::numeric_limits` without including
+`<limits>`, which compiles on libstdc++ by transitive include and nothing in
+CI compiles a probe at all, so it would have been found by whoever next tried
+to recheck the decision on another compiler. And a divide by zero guard had
+been dropped from the floor average.
+
+
+### What the first audit found
 
 Five findings, all fixed, plus the figures above. The one worth keeping in mind
 is the shape of the other two: a comment claiming the opposite of what the code
