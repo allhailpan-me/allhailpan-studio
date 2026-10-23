@@ -7,6 +7,187 @@ Newest first.
 
 ---
 
+## 2026-10-23: comping, which is the one edit that is the performance
+
+### What was looked at
+
+`Source/CompModel.h`, 403 lines, no JUCE: which take of a folder is heard
+where, and the equal-power crossfade at each join. Chosen because it had never
+been audited, because both the playback and the export paths read it, and
+because of what a fault in it costs. A comp is not a setting laid over a
+performance, it is the performance, so a wrong answer here is a click in a
+comped vocal or the wrong pass playing, and both are heard rather than
+reported.
+
+A priority 2 target in the brief's ordering rather than priority 1: its test
+was not the thin one its line count suggested. 473 lines, 4000 randomised
+comps, a unity power check at 600 points across every one of them. Not
+`Fx/Svf.h`, which open pull request #55 is changing, and not `Fx/Unit.h`, which
+the night of 2026-10-21 set aside for the right reason and which still has
+nothing referencing it.
+
+### Nothing in the arithmetic is wrong
+
+Said plainly because it is the result. 52 mutations, and separately four
+properties the test did not have were written as probes and run against the
+code as it stands before anything was changed:
+
+- A drag puts the take asked for across the stretch asked for and moves
+  nothing outside it: 200000 randomised drags onto comps already being worked
+  on, clean.
+- Normalising twice is normalising once: 200000 randomised lists of rubbish,
+  clean. The project relies on this, since it normalises on every edit and on
+  load.
+- `compTakeAt` and `buildCompSpans` never disagree about which take plays,
+  being two copies of one decision: clean.
+- A join is never wider than the crossfade asked for, and is exactly that wide
+  wherever the spans either side can hold it: clean.
+
+The segment cap is exact rather than off by one, and for a reason worth
+keeping: the implicit boundary inserted at zero copies the take of the one it
+displaces, so the merge of neighbours naming the same take always drops the
+old front, and 4096 stays 4096 even when the list that arrived started late.
+
+### What the test could not see
+
+**46 of 52 mutations are now caught. 36 were caught before.** The ten that got
+through fall into one group: the randomised comps checked *structure* and never
+*meaning*. They asked whether the result was normalised, whether the spans
+tiled the folder, whether the joins summed to unity power. They never once
+asked whether the take dragged for is the take heard.
+
+The sharpest demonstration is one line of the header. `setCompRegion` reads
+what plays at the far edge of the drag *before* erasing the boundaries inside
+it, and the comment above that line says why. Read it afterwards instead and
+every structural check in the file still passes: the result is normalised, it
+tiles, it sums to unity. What it does is hand the stretch after the drag to
+whatever was playing before it, so comping over the end of pass three deletes
+the whole of pass four's stretch. A line of the vocal is gone and the
+arrangement looks exactly right. The one hand written case of that shape, the
+nested region, happens to put no existing boundary strictly inside the new
+drag, which is the only arrangement where the two readings agree.
+
+The others:
+
+- **A join's width was never measured.** Every identity in the file is scale
+  free: doubling every crossfade leaves the equal-power sum at unity, the
+  windows disjoint and the reads in range. A folder asking for ten
+  milliseconds could have been given twenty at every join with nothing to say
+  so.
+- **`compTakeAt` was never checked against the spans**, though they are two
+  copies of one decision and the engine reads one while the playlist draws
+  from the other.
+- **A read range was never checked for running forwards.** It can only run
+  backwards where a take's audio misses its span entirely, which the
+  randomised cases produce often, and nothing downstream is written expecting
+  a length below zero.
+- **A crossfade that is not a number was never fed in.** Unreachable through
+  the project, where both the loader and the setter clamp to nought to 250 ms,
+  but the guards in `buildCompSpans` are real and a negative half width pulls
+  every read range inward from its own boundary rather than past it: a short
+  silence at every join, in the one calculation whose entire purpose is that
+  there are none.
+- **A boundary sitting on the folder's own end was never fed in.** Only a file
+  written by something else can produce one, which is exactly the case the
+  guard is for, and kept it asks for a final span of no length.
+- **The later of two edits on one spot was checked on three segments.** The
+  rule is implemented by sorting stably and letting each duplicate overwrite
+  the one before it, and on a short list an unstable sort is stable anyway:
+  libstdc++ insertion sorts anything up to sixteen elements. `std::sort` in
+  place of `std::stable_sort` passed, and would give a different comp on a
+  different standard library. The same fault `PanOneBreed.h` carries its own
+  generator to avoid, arriving by another route: a project that opens
+  differently depending on who built the studio. It is now checked on sixty
+  four doubled boundaries.
+
+### One comment was claiming a reason that does not apply
+
+Not a fault in the arithmetic, and recorded because this file keeps meeting
+the shape. The removal of non-finite boundaries in `normaliseCompSegments`
+said it was there to keep a NaN out of the sort comparator. The floor on every
+position runs before the sort, and `std::max (0.0, x)` returns its first
+argument when the comparison is false, so a NaN reaches the comparator as
+nought either way. The stated reason does not apply.
+
+The real one runs rather than being undefined, which makes it worse. A
+boundary with no position lands exactly on the folder's start carrying
+whatever take it named, and takes over the opening of the performance; an
+infinity below zero does the same. The comment now says that, and the test
+checks the list that comes back rather than only its invariants, because a
+boundary at zero naming a take that exists satisfies every invariant a
+normalised list has.
+
+### Three survivors that reasoning had wrong
+
+Worth recording as a method note. Nine mutations survived the strengthened
+test, and all nine had been reasoned through and written down as genuine
+no-ops. Diffing each mutant's whole output against the original's over a
+deterministic sweep of 30000 comps found that three of them changed it.
+
+- **The NaN removal**, above.
+- **The clamp of a drag into the folder** and **the floor on a drag's width**,
+  both of which looked redundant and are not. An untouched comp is an empty
+  list, meaning "the first take, all the way through", and normalising an
+  empty list spells that out as one segment at zero. The two are the same
+  performance, so no check on which take is heard can tell them apart. What
+  tells them apart is `TakeFolder::operator==`, which decides whether the
+  project is dirty and whether an edit reaches the undo stack: without those
+  guards a click that misses, or a drag off the end of the folder, pushes an
+  undo step for an edit that did not happen, against the rule that undo is one
+  step per finished edit rather than one per mouse movement. Every other test
+  in the file drags on a comp that has already been normalised, where both
+  spellings have collapsed to the same one, which is why the case was invisible.
+
+Reasoning about a no-op is not the same as measuring one. The diff is cheap
+and it should be the step, not the argument.
+
+### The six genuine no-ops
+
+Each measured byte for byte identical over the same sweep, not merely
+unobserved.
+
+| Mutation | Why it changes nothing |
+|---|---|
+| The folder's end is allowed a fade out | `boundary()` saturates at the folder length, so the span past the last boundary has zero width and the half width is zero regardless. Two independent mechanisms prevent a fade there |
+| The take index is not clamped before indexing the takes | `normaliseCompSegments` has already clamped every index below the take count, and does so against `min (numTakes, kMaxCompTakes)`, which stays in range even for a list longer than the cap |
+| The closing boundary is pushed even at the folder's end | Normalising erases any boundary at or past the end, so pushing it unconditionally is the same as not pushing it |
+| A boundary exactly at the far edge of the drag survives the erase | What plays after the drag is read before the erase, so the boundary pushed at that edge carries the same take, and the later-wins rule collapses the pair |
+| The renumbering uses `>=` rather than `>` | The preceding branch has already consumed the equal case, so the two conditions are the same condition |
+| The orphaned stretch's fallback take is not clamped | `compTakeRemoved` normalises before returning, which clamps it to exactly what the explicit clamp would have given |
+
+All six are defence in depth rather than dead code, and three of them are the
+second of two guards on the same thing. They stay.
+
+### What is now checked
+
+`Tests/CompModelTest.cpp`, 473 lines to 861, still 5 seconds under the
+sanitizers. The failure messages in the randomised loops are built only when
+something is wrong: four million eager concatenations cost six times the rest
+of the file put together.
+
+- **What a drag means**, over 20000 randomised drags onto comps already being
+  worked on: the take asked for is heard across the stretch asked for, and
+  everything outside it reads exactly what it read before.
+- **A drag that does nothing leaves an uncomped folder uncomped**, for five
+  shapes of nothing: off each end, a click, a drag narrower than the tenth of
+  a millisecond that is the floor, and one starting exactly at the end.
+- **A join is the width it was asked for**, never wider, and exactly right
+  where both spans either side can hold it.
+- **`compTakeAt` and the spans agree**, on every span of every randomised comp
+  and after every take deletion.
+- **No read range runs backwards.**
+- **A crossfade of NaN, of either infinity, and of two negative widths** gives
+  no join at all rather than a hole at every join, with unity power checked at
+  4000 points across the folder for each.
+- **A boundary on or a hair before the folder's end is dropped**, for five
+  positions around it.
+- **A boundary whose position is not a number is dropped rather than moved to
+  zero**, checked against the list itself.
+- **The later of two edits on one spot wins** on sixty four doubled
+  boundaries, which is long enough that an unstable sort reorders them.
+
+---
+
 ## 2026-10-21: the one pole section
 
 ### What was looked at

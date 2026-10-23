@@ -24,8 +24,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <random>
 #include <string>
+#include <utility>
 
 static int failures = 0;
 
@@ -134,6 +136,72 @@ static void checkFadeWindowsDisjoint (const std::vector<CompSpan>& spans, const 
         const auto f = spans[i].fade();
         check (f.inTo <= f.outFrom + 1.0e-12,
                label + ": the two crossfade windows of span " + std::to_string (i) + " overlap");
+    }
+}
+
+// A read range is the stretch of a take that is actually played, so it runs
+// forwards or it is empty. Left inverted it is a length below zero by the time
+// the engine turns it into a clip, and nothing downstream is written expecting
+// one. It can only arise where a take's audio misses its span entirely, which
+// the randomised cases below produce often.
+static void checkReadRangesOrdered (const std::vector<CompSpan>& spans, const std::string& label)
+{
+    for (size_t i = 0; i < spans.size(); ++i)
+        if (! (spans[i].readTo >= spans[i].readFrom))
+            fail (label + ": the read range of span " + std::to_string (i) + " runs backwards");
+}
+
+// A join is as wide as the crossfade the folder asked for, and narrower only
+// where a span beside it is too short to hold one.
+//
+// Worth stating because the width was the one thing about a join that nothing
+// here measured. Every identity above is scale free: doubling every crossfade
+// leaves the equal-power sum at unity, the windows disjoint and the reads in
+// range, so a folder asking for ten milliseconds could have been given twenty
+// at every join with nothing to say so.
+static void checkJoinWidths (const std::vector<CompSpan>& spans, double crossfade,
+                             const std::string& label)
+{
+    for (size_t i = 0; i < spans.size(); ++i)
+    {
+        const auto& s = spans[i];
+
+        if (! (s.fadeIn * 2.0 <= crossfade + 1.0e-12))
+            fail (label + ": the join at the start of span " + std::to_string (i)
+                        + " is wider than the crossfade asked for");
+        if (! (s.fadeOut * 2.0 <= crossfade + 1.0e-12))
+            fail (label + ": the join at the end of span " + std::to_string (i)
+                        + " is wider than the crossfade asked for");
+
+        // Where both spans either side of a join are longer than the whole
+        // crossfade, nothing is narrowing it and it has to be exactly what was
+        // asked for.
+        if (i > 0 && spans[i - 1].end - spans[i - 1].start > crossfade
+                  && s.end - s.start > crossfade
+                  && ! (std::abs (s.fadeIn * 2.0 - crossfade) <= 1.0e-9))
+            fail (label + ": the join before span " + std::to_string (i) + " is "
+                        + std::to_string (s.fadeIn * 2.0) + " wide, not the "
+                        + std::to_string (crossfade) + " it was asked for");
+    }
+}
+
+// `compTakeAt` and `buildCompSpans` are two copies of one decision: which take
+// is heard at a point. The engine reads the spans and the playlist draws from
+// compTakeAt, so a disagreement between them is a comp that plays one thing
+// and is drawn as another. A second copy of an answer is a second thing that
+// can be wrong, which this project has met often enough to check rather than
+// assume.
+static void checkSpansAgreeWithTakeAt (const std::vector<CompSpan>& spans,
+                                       const std::vector<CompSegment>& segs,
+                                       const std::string& label)
+{
+    for (size_t i = 0; i < spans.size(); ++i)
+    {
+        const double mid = 0.5 * (spans[i].start + spans[i].end);
+        if (compTakeAt (segs, mid) != spans[i].take)
+            fail (label + ": span " + std::to_string (i) + " plays take "
+                        + std::to_string (spans[i].take) + " where compTakeAt reads "
+                        + std::to_string (compTakeAt (segs, mid)));
     }
 }
 
@@ -386,7 +454,10 @@ int main()
             const auto spans = buildCompSpans (segs, takes, len, crossfade);
             checkSpansTile (spans, len, "random comp");
             checkReadsInsideTakes (spans, takes, "random comp");
+            checkReadRangesOrdered (spans, "random comp");
             checkFadeWindowsDisjoint (spans, "random comp");
+            checkJoinWidths (spans, crossfade, "random comp");
+            checkSpansAgreeWithTakeAt (spans, segs, "random comp");
 
             // Unity power, everywhere, when every take covers the folder. This
             // is the property that says the joins neither dip nor peak, and it
@@ -433,6 +504,8 @@ int main()
                 const auto after = buildCompSpans (comp, survivors, len, crossfade);
                 checkSpansTile (after, len, "after a take was deleted");
                 checkReadsInsideTakes (after, survivors, "after a take was deleted");
+                checkReadRangesOrdered (after, "after a take was deleted");
+                checkSpansAgreeWithTakeAt (after, comp, "after a take was deleted");
             }
         }
     }
@@ -462,6 +535,321 @@ int main()
         if (shortSpan != nullptr)
             checkClose (shortSpan->readTo, 6.0, 1.0e-12,
                         "the short take is read past the end of its audio");
+    }
+
+    // -----------------------------------------------------------------------
+    // What a drag is for, as opposed to what it leaves behind.
+    //
+    // Everything above checks the shape of the result: that it is normalised,
+    // that the spans tile the folder, that the joins sum to unity power. None
+    // of it asks the question the gesture exists to answer, which is whether
+    // the take asked for is heard across the stretch it was asked for and
+    // nothing outside that stretch moved. Four thousand randomised comps were
+    // being checked for structure and never once for meaning.
+    //
+    // The distinction is not academic, and the cheapest demonstration is one
+    // line of the header. `setCompRegion` reads what plays at the far edge of
+    // the drag before erasing the boundaries inside it, and the comment above
+    // that line says why. Read it afterwards instead and every structural
+    // check in this file still passes: the result is normalised, it tiles, it
+    // sums to unity. What it does is hand the stretch after the drag to
+    // whatever was playing before it, so comping over the end of pass three
+    // silently deletes the whole of pass four's stretch. A line of the vocal
+    // is gone and the arrangement looks exactly right.
+    {
+        std::mt19937 rng (20261023);
+
+        // Clear of the tenth of a millisecond within which two boundaries are
+        // one boundary, so a sample point is never inside the snapping.
+        const double margin = 1.0e-3;
+
+        for (int iteration = 0; iteration < 20000; ++iteration)
+        {
+            std::uniform_real_distribution<double> lenDist (0.5, 64.0);
+            std::uniform_int_distribution<int>     takeDist (1, 8);
+            const double len       = lenDist (rng);
+            const int    takeCount = takeDist (rng);
+
+            std::uniform_real_distribution<double> atDist (-2.0, len + 2.0);
+            std::uniform_int_distribution<int>     whichDist (0, takeCount - 1);
+            std::uniform_int_distribution<int>     regionDist (0, 6);
+
+            // A comp somebody has already been working on, so the drag has
+            // existing boundaries to land on, swallow and run past.
+            std::vector<CompSegment> segs;
+            const int regions = regionDist (rng);
+            for (int r = 0; r < regions; ++r)
+                setCompRegion (segs, atDist (rng), atDist (rng), whichDist (rng), takeCount, len);
+
+            normaliseCompSegments (segs, takeCount, len);
+            const auto before = segs;
+
+            double from = atDist (rng), to = atDist (rng);
+            const int take = whichDist (rng);
+            setCompRegion (segs, from, to, take, takeCount, len);
+
+            checkSegmentInvariants (segs, takeCount, len, "after one more drag");
+
+            // The gesture in its own terms: dragged right to left is the same
+            // region, and a drag is held inside the folder.
+            if (to < from)
+                std::swap (from, to);
+            from = std::max (0.0, from);
+            to   = std::min (to, len);
+
+            // The message is built only when something is wrong. Concatenating
+            // one per sample point costs more than every other check in this
+            // file put together, and there are four million of them.
+            const auto where = [&] (double at)
+            {
+                return "a drag of [" + std::to_string (from) + ", " + std::to_string (to)
+                         + "] to take " + std::to_string (take) + " in a folder of "
+                         + std::to_string (len) + " seconds, read at " + std::to_string (at);
+            };
+
+            if (to - from < kMinCompSpan)
+            {
+                check (segs == before, "a drag of no width still edited the comp");
+                continue;
+            }
+
+            for (int k = 0; k <= 200; ++k)
+            {
+                const double at = len * k / 201.0;
+
+                if (at > from + margin && at < to - margin)
+                {
+                    if (compTakeAt (segs, at) != take)
+                        fail (where (at) + ": the take dragged for is not the take heard");
+                }
+                else if (at < from - margin || at > to + margin)
+                {
+                    if (compTakeAt (segs, at) != compTakeAt (before, at))
+                        fail (where (at) + ": outside the drag, take "
+                                + std::to_string (compTakeAt (before, at)) + " became take "
+                                + std::to_string (compTakeAt (segs, at)));
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A crossfade width that is not a width.
+    //
+    // Not reachable through the project today: `ProjectIO` clamps the stored
+    // value to nought to 250 ms on load and `Project` clamps it the same way
+    // on the way in, so the guards in `buildCompSpans` are the second line
+    // rather than the first. A guard nothing exercises is a guard nobody
+    // notices going, and this one has a specific failure behind it rather than
+    // a crash: a negative half width pulls every read range inward from its
+    // own boundary instead of past it, so the comp acquires a short silence at
+    // every join. Holes in the performance, in the one piece of arithmetic
+    // whose entire purpose is that there are none.
+    {
+        const double len = 32.0;
+        const std::vector<CompTakeSpan> takes { { 0.0, len }, { 0.0, len } };
+        std::vector<CompSegment> segs;
+        setCompRegion (segs, 8.0, 16.0, 1, 2, len);
+        check (segs.size() == 3, "the two join case did not come out with two joins");
+
+        for (const double width : { std::numeric_limits<double>::quiet_NaN(),
+                                    std::numeric_limits<double>::infinity(),
+                                    -std::numeric_limits<double>::infinity(),
+                                    -4.0, -1.0e-9 })
+        {
+            const std::string label = "a crossfade of " + std::to_string (width);
+            const auto spans = buildCompSpans (segs, takes, len, width);
+
+            checkSpansTile (spans, len, label);
+            checkReadsInsideTakes (spans, takes, label);
+            checkReadRangesOrdered (spans, label);
+            checkFadeWindowsDisjoint (spans, label);
+            checkSpansAgreeWithTakeAt (spans, segs, label);
+
+            // No join at all, rather than one of some unimaginable width.
+            for (size_t i = 0; i < spans.size(); ++i)
+            {
+                checkClose (spans[i].fadeIn,  0.0, 0.0, label + ": a fade in appeared");
+                checkClose (spans[i].fadeOut, 0.0, 0.0, label + ": a fade out appeared");
+            }
+
+            // And every take is read right up to both its boundaries, so
+            // there is no hole anywhere across the folder.
+            for (int k = 0; k <= 4000; ++k)
+            {
+                const double at = len * k / 4001.0;
+                if (! (std::abs (compTotalPower (spans, at) - 1.0) <= 1.0e-12))
+                    fail (label + ": the comp does not sum to unity power at "
+                                + std::to_string (at) + "s");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A boundary sitting on, or a hair before, the folder's own end.
+    //
+    // `setCompRegion` will not make one: it clamps the drag to the folder and
+    // then declines to close a region that reaches the end. So this shape only
+    // arrives from a file written by something else, which is exactly the case
+    // the guard in `normaliseCompSegments` is for. Such a boundary governs
+    // nothing, and kept it asks for a final span of no length, or of less
+    // length than the tenth of a millisecond below which two boundaries are
+    // one boundary.
+    {
+        const double len = 16.0;
+        const std::vector<CompTakeSpan> takes { { 0.0, len }, { 0.0, len } };
+
+        for (const double at : { len, len - kMinCompSpan * 0.5, len - kMinCompSpan,
+                                 len + 1.0, len * 2.0 })
+        {
+            std::vector<CompSegment> segs { { 0.0, 0 }, { 8.0, 1 }, { at, 0 } };
+            normaliseCompSegments (segs, 2, len);
+
+            const std::string label = "a boundary at " + std::to_string (at)
+                                        + " in a folder of " + std::to_string (len);
+            checkSegmentInvariants (segs, 2, len, label);
+            check (segs.size() == 2,
+                   label + ": the boundary at the folder's end was not dropped");
+
+            const auto spans = buildCompSpans (segs, takes, len, 0.25);
+            checkSpansTile (spans, len, label);
+            checkJoinWidths (spans, 0.25, label);
+            checkSpansAgreeWithTakeAt (spans, segs, label);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The later edit wins where two boundaries land on one spot, on a list
+    // long enough that the sort has to earn it.
+    //
+    // There is a check on this above, on three segments, and it is not enough.
+    // The rule is implemented by sorting stably and letting each duplicate
+    // overwrite the one before it, and on a short list an unstable sort is
+    // stable anyway: libstdc++ insertion sorts anything up to sixteen
+    // elements, so `std::sort` in place of `std::stable_sort` passes the short
+    // case and then gives a different comp on a different standard library.
+    // That is the fault `PanOneBreed.h` carries its own generator to avoid,
+    // arriving by another route: a project that opens differently depending on
+    // who built the studio.
+    //
+    // Sixty four spots, each written twice. The first write of each names one
+    // take and the second names another, and the two alternate along the
+    // folder so that no neighbours agree and nothing merges away. Every spot
+    // has to read as its second write.
+    {
+        const double len   = 256.0;
+        const int    spots = 64;
+
+        std::vector<CompSegment> segs;
+        const auto second = [] (int i) { return 1 + (i % 2); };          // 1, 2, 1, 2, ...
+        const auto first  = [] (int i) { return 1 + ((i + 1) % 2); };    // 2, 1, 2, 1, ...
+
+        for (int i = 0; i < spots; ++i)
+            segs.push_back ({ 1.0 + (double) i * 4.0, first (i) });
+        for (int i = 0; i < spots; ++i)
+            segs.push_back ({ 1.0 + (double) i * 4.0, second (i) });
+
+        normaliseCompSegments (segs, 3, len);
+        checkSegmentInvariants (segs, 3, len, "sixty four doubled boundaries");
+
+        for (int i = 0; i < spots; ++i)
+        {
+            const double at = 1.0 + (double) i * 4.0 + 2.0;    // inside spot i
+            check (compTakeAt (segs, at) == second (i),
+                   "at spot " + std::to_string (i) + " the first write of the boundary won: "
+                     + "take " + std::to_string (compTakeAt (segs, at)) + " rather than "
+                     + std::to_string (second (i)));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A drag that does nothing, on a folder nobody has comped yet.
+    //
+    // This is the one state where "nothing happened" is hard to spell. An
+    // untouched comp is an empty list, which means "the first take, all the
+    // way through", and normalising an empty list spells that out as a single
+    // segment at zero. The two are the same performance, so no check on which
+    // take is heard can tell them apart, and every structural invariant holds
+    // for both.
+    //
+    // What tells them apart is `TakeFolder::operator==`, which is what decides
+    // whether the project is dirty and whether an edit goes on the undo stack.
+    // So a click that misses, or a drag entirely off the end of the folder,
+    // would mark the project changed and push an undo step for an edit that
+    // did not happen, against the rule that undo is one step per finished edit
+    // rather than one per mouse movement.
+    //
+    // Both guards that prevent it, the clamp of the drag into the folder and
+    // the floor on its width, looked like no-ops until they were diffed on
+    // this case: every other test here drags on a comp that has already been
+    // normalised, where both spellings have collapsed to the same one.
+    {
+        const double len = 16.0;
+
+        const std::vector<std::pair<double, double>> doNothing {
+            { len + 1.0, len + 5.0 },          // entirely past the end
+            { -9.0, -3.0 },                    // entirely before the start
+            { 4.0, 4.0 },                      // a click, not a drag
+            { 4.0, 4.0 + kMinCompSpan * 0.5 }, // a drag that went nowhere
+            { len, len + 2.0 },                // starting exactly at the end
+        };
+
+        for (const auto& [from, to] : doNothing)
+        {
+            std::vector<CompSegment> fresh;
+            setCompRegion (fresh, from, to, 1, 2, len);
+
+            const std::string label = "a drag of [" + std::to_string (from) + ", "
+                                        + std::to_string (to) + "] on a fresh folder";
+            check (fresh.empty(), label + " edited the comp anyway");
+        }
+
+        // And the same drags on a comp that is already spelled out leave it
+        // exactly as it was, which is the other half of the same promise.
+        for (const auto& [from, to] : doNothing)
+        {
+            std::vector<CompSegment> segs;
+            setCompRegion (segs, 4.0, 12.0, 1, 2, len);
+            const auto was = segs;
+            setCompRegion (segs, from, to, 0, 2, len);
+
+            check (segs == was, "a drag of [" + std::to_string (from) + ", "
+                                  + std::to_string (to) + "] on a comp edited it anyway");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A boundary whose position is not a number.
+    //
+    // It is dropped, and the thing to check is that it is dropped rather than
+    // moved. Every position in the list is floored at zero a few lines further
+    // down, and `std::max (0.0, x)` returns its first argument when the
+    // comparison is false, so a boundary that is not a number does not stay
+    // where it is: it lands exactly on the folder's start and takes over the
+    // opening of the performance with whatever take it was carrying. An
+    // infinity below zero does the same.
+    //
+    // There was already a case here feeding this function a list full of
+    // rubbish, and it checked the invariants of what came back. That cannot
+    // see this: a boundary at zero naming a take that exists satisfies every
+    // one of them. What it needs is the list itself.
+    {
+        const double len = 16.0;
+
+        for (const double bad : { std::numeric_limits<double>::quiet_NaN(),
+                                  -std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::infinity() })
+        {
+            std::vector<CompSegment> segs { { 0.0, 0 }, { 8.0, 1 }, { bad, 2 } };
+            normaliseCompSegments (segs, 3, len);
+
+            const std::string label = "a boundary at " + std::to_string (bad);
+            checkSegmentInvariants (segs, 3, len, label);
+            check (segs == std::vector<CompSegment> { { 0.0, 0 }, { 8.0, 1 } },
+                   label + " was moved rather than dropped");
+            check (compTakeAt (segs, 1.0) == 0,
+                   label + " took over the start of the performance");
+        }
     }
 
     if (failures == 0)
