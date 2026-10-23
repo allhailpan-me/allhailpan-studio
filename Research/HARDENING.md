@@ -7,6 +7,32 @@ Newest first.
 
 ---
 
+## 2026-10-23: comping, which is the one edit that is the performance
+
+### What is being audited
+
+`Source/CompModel.h`, 403 lines, no JUCE. Chosen because it has never been
+audited, because it is reached by both the playback and the export paths, and
+because of what a fault in it costs: a take folder's comp is not a setting on a
+performance, it is the performance, so a wrong answer here is a click in a
+comped vocal or the wrong pass playing, and both of those are heard rather than
+reported.
+
+Its test is not the thin one the line count suggests. 473 lines, 4000
+randomised comps, and a unity power check at 600 points across every one of
+them. So this is a priority 2 target in the brief's ordering, a test suspected
+of being weaker than it looks, rather than a header with nothing on it.
+
+Not `Fx/Svf.h`, which open pull request #55 is changing. Not `Fx/Unit.h`, which
+the night of 2026-10-21 set aside for the right reason and which still has
+nothing referencing it.
+
+### Still to do
+
+Everything below this line. Mutation set, survivors, judgement on each.
+
+---
+
 ## 2026-10-21: the one pole section
 
 ### What was looked at
