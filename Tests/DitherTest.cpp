@@ -163,6 +163,18 @@ int main()
         checkExact (modeToStored (modeFromStored (stored)), modeToStored (defaultMode),
                     "an out of range stored mode should read as the default");
 
+    // The same thing asked of depthAt directly, which is the only reason the
+    // check above holds. Removing depthFromStored's range guard altogether is
+    // a genuine no-op today, because depthAt's own default answers with the
+    // same depth, and the mutation pass found it so. The guard is kept
+    // because a function that is only right by virtue of another function's
+    // default is a trap for whoever edits the other function, and this is
+    // what fails on the day somebody does.
+    for (int stored : { -1000, -1, numDepths, 99999 })
+        checkExact ((double) (int) depthAt (stored), (double) (int) defaultDepth,
+                    "an unrecognised index should reach depthAt's default, "
+                    "which has to be the default depth");
+
     // A known gap, written down so it cannot quietly become a lie, the way
     // VoiceTest writes down the destinations nothing reaches yet.
     //
