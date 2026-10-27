@@ -7,6 +7,34 @@ Newest first.
 
 ---
 
+## 2026-10-27: the reduction to a word length, which only a file ever sees
+
+### What is being looked at
+
+`Source/Dither.h`, 495 lines with no JUCE, and its wiring in
+`Source/ExportJob.h`, 246 lines with no test at all. Chosen as an audit of
+recently merged work: pull request #54 landed four days ago, is the newest
+feature in the repository, and has never been read by anybody who was not
+writing it. It is also the one place where being wrong is invisible from
+inside the studio, because the only thing that ever sees a 16 bit code is the
+file.
+
+Every JUCE-free header in `Source` still has a test except `Fx/Unit.h`, which
+remains unreferenced scaffolding and which the night of 2026-10-21 set aside
+for that reason. Not `Fx/Svf.h` or `Tests/SvfTest.cpp`, which open pull
+request #55 is changing, and not `Source/AutomationCurve.h`,
+`Source/FaderLaw.h`, `Source/AudioEngine.*`, `Source/ProjectIO.cpp`,
+`Source/MixerComponent.h` or `Source/PlaylistComponent.cpp`, which open pull
+request #59 is changing.
+
+### Still to do
+
+- Audit the quantiser, the seeding, the left justification and the policy.
+- Reproduce every measured figure the header quotes.
+- Mutation test `Tests/DitherTest.cpp` under the sanitizers.
+
+---
+
 ## 2026-10-23: comping, which is the one edit that is the performance
 
 ### What was looked at
