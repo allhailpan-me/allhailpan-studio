@@ -75,14 +75,27 @@
     That last point is why the quantiser is in here rather than left to the
     file writer. JUCE's `writeFromFloatArrays` rounds to int32 and then
     narrows with an arithmetic right shift, `(uint16) (v >> 16)` at 16 bit and
-    `v >> 8` at 24, which is floor division: measured, a mean error of -0.4997
-    LSB, so every export this studio has written carries half an LSB of DC.
-    Inaudible at 24 bit, at -144 dBFS, which is why nothing ever said so. It
-    would also have spoiled the dither rather than defeating it outright, which
-    is worse to diagnose: floor is still a uniform quantiser, so the noise
+    `v >> 8` at 24, which is floor division, so every export this studio has
+    written carries half an LSB of DC. Inaudible at 24 bit, at -144 dBFS,
+    which is why nothing ever said so. It would also have spoiled the dither
+    rather than defeating it outright, which is worse to diagnose: floor is
+    still a uniform quantiser, so the noise
     modulation would still have been fixed and the constant first moment would
     have been -0.5 LSB instead of zero. A flat noise floor with a DC offset
     underneath it.
+
+    Where the half an LSB comes from, since JUCE cannot be compiled in the
+    sandbox and so no measurement of its own code can live in this
+    repository. `Tests/DitherProbe.cpp` reconstructs that path from the 9.0.3
+    sources, which it cites, and measures it: a mean error of -0.5000 LSB at
+    16 bit and -0.4981 at 24, against zero for the quantiser below. The two
+    also disagree about the code itself on half or more of a uniform spread of
+    samples, always by exactly one LSB, so a 24 bit export written now is not
+    bit identical to one written before this. Nothing about that is audible,
+    at 144 dB down, but it is worth knowing before concluding that something
+    in a mix has moved, because two bounces of an unchanged project are
+    otherwise the only way to tell a change in the mix from a change in the
+    noise.
 
     So the code is computed here and handed over already quantised, through
     `leftJustified`, which puts it where JUCE's own shift will put it back

@@ -542,7 +542,22 @@ private:
     void refreshDitherEnablement()
     {
         const auto depth = Prefs::exportDepthFor (depthBox.getSelectedId());
-        const bool dithered = depth == Dither::Depth::int16;
+
+        // Asked rather than recomputed. Writing the predicate out here as
+        // "depth == int16" would be a second implementation of modeFor, and
+        // the comment above promises the opposite: this box agrees with the
+        // engine, which it can only do by calling what the engine calls.
+        // Dither.h's own note on the policy says the same thing from the
+        // other end, that a user interface merely greying the control would
+        // leave the engine free to disagree with it.
+        //
+        // It matters because the policy is one somebody may well revisit:
+        // Dither.h records that Avid's documentation contradicts itself over
+        // whether 24 bit wants dither, and Research/BACKLOG.md carries the
+        // question. The day modeFor answers triangular for anything else,
+        // this control greys itself and prints "nothing to dither" over a
+        // file the engine dithered.
+        const bool dithered = Dither::modeFor (depth, Dither::Mode::triangular) != Dither::Mode::none;
 
         ditherBox.setEnabled (dithered);
 
