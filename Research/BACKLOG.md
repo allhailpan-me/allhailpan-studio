@@ -208,9 +208,17 @@ reaches -90 dB at the bottom of the travel and position 0 is exact silence, so
 there is a discontinuity of -90 dB at one point. That is what both references
 do: Ardour special cases `pos == 0.0` to return 0.0 and its continuous part
 only reaches -192.66 dB, and Behringer prints -inf below a scale that stops at
--60. The argument for it is that -90 dB is an amplitude of 3.16e-5, which is
-**below the least significant bit of a 16 bit file** (1/32768 is -90.3 dB), so
-the step is smaller than the quantisation of anything the studio can deliver.
+-60. The argument for it is that the step is **about one least significant bit of a
+16 bit file**: -90 dB is an amplitude of 3.1623e-5 and 1/32768 is 3.0518e-5,
+which is -90.31 dB, so it is 1.036 of one bit.
+
+An earlier version of this paragraph, and of the header's, said the step was
+**below** a 16 bit bit, which is false by 0.31 dB in the direction that
+flattered it. Found by the test refusing to assert it, and worth leaving the
+record of rather than quietly correcting, because it is the one number this
+decision rests on and the plausible wrong version of it read perfectly well.
+One bit at the bottom of a 16 bit file is still below what any converter
+resolves, so the argument survives being stated correctly.
 
 The alternative, making the bottom segment approach -inf continuously, was
 rejected: the gain would never reach zero, and a mixer summing sixteen inserts
@@ -252,6 +260,45 @@ in the audio path to blame for it.
 
 Every old gain fits inside the new range, because the old ceiling of +7.75 dB
 is below the new +10 dB, so no existing project loses anything at the top.
+
+### What the migration cannot do, found by the audit
+
+Translating a curve translates its points and **not the line between two of
+them**, because the two laws interpolate differently: a straight legacy segment
+was linear in position under `(v / 0.8)^2`, and a straight segment now is
+linear in decibels. So a migrated fade keeps both ends exactly and changes
+shape in between, by an amount that depends on how far it travels:
+
+| The fade | Worst departure from its old shape |
+|---|---|
+| 0 dB to -3 dB | 0.065 dB |
+| 0 dB to -10 dB | 0.716 dB |
+| 0 dB to -20 dB | 0.570 dB |
+| 0 dB to -60 dB | 13.600 dB, worst at 87 per cent through |
+| 0 dB to silence | 7.959 dB at the midpoint, 15.918 at three quarters |
+
+So a short fade is untouched and a long fade out drops away noticeably quicker
+than it did. `point.bend` is carried across untranslated as well, so a bent
+legacy segment is reshaped twice.
+
+Worth being clear that the new shape is the better one: a fade linear in
+decibels is what a fade is supposed to be, which is the same argument
+`AutomationCurve.h` already makes about its own bend. That is a reason the
+change is acceptable and it is not a reason to leave it unsaid, which is why it
+is in the header, here, and in the release notes.
+
+**Subdivision, deferred to a night of its own.** Holding the old path means
+sampling the legacy curve and emitting straight pieces in the new space, which
+turns somebody's two point fade into a nine or seventeen point one: the gesture
+they drew stops being editable as the gesture they drew. It also needs its own
+care at the tail of a fade to silence, where the old path runs to minus
+infinity and the new one stops at -90 dB, so a naive subdivision measures worse
+than no subdivision at all there. That is a feature with a test, not a line
+inside a loader. Whoever takes it should decide first whether preserving the
+drawn path is worth the point count, because it may well not be.
+
+`FaderLawTest.cpp` asserts the table above, so the gap cannot quietly become
+something else.
 
 ### Where the arithmetic lives
 

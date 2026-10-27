@@ -42,15 +42,32 @@
     because this project keeps a record of what a present, plausible and
     unsourced number costs. What Behringer does publish is the printed scale
     on the channel strip of the X32 operation manual: +10, +5, 0, -5, -10,
-    -20, -30, -40, -50, -60, -inf, on a 100 mm motorised fader. Those ticks
-    are **equally spaced in decibels within each segment**, 5 dB apart in the
-    top segment and 10 dB apart in the two below, which is what a piecewise
-    linear in decibels law predicts and is not what any smooth law gives. So
-    the four segments are derived from the manufacturer's own artwork. Two
-    independent open source implementations, `jtsage/x32_osc_state` and
-    `bitfocus/companion-module-behringer-x32`, agree to the digit, and
-    Behringer's own MIDI table lists "Faders - Value 95 = 0db", where
-    0.75 * 127 = 95.25.
+    -20, -30, -40, -50, -60, -inf, on a 100 mm motorised fader.
+
+    The evidence in that is **where those ticks sit along the fader**, and the
+    distinction is worth being careful about because the obvious reading of it
+    is vacuous. That +10, +5, 0, -5 and -10 are 5 dB apart is a fact about
+    which numbers somebody chose to print and says nothing whatever about the
+    mapping: any law at all can have those five labels. What a piecewise linear
+    in decibels law predicts, and what no smooth law gives, is that they are
+    **equally spaced in travel** within a segment and that the spacing changes
+    between segments. That is what the artwork shows and it is what
+    `FaderLawTest.cpp` asserts.
+
+    So three of the four segments are derived from the manufacturer's own
+    artwork. **The fourth is not, and that has to be said plainly.** The
+    printed scale runs -50, -60, -inf, so the bottom segment has its upper end
+    pinned by the -60 tick and nothing at the other end: -inf gives no slope.
+    Its 480 decibels per travel, and `floorDb` being -90 rather than any other
+    figure, come only from the two independent open source implementations,
+    `jtsage/x32_osc_state` and `bitfocus/companion-module-behringer-x32`, which
+    agree to the digit on all four segments. That matters more than it sounds,
+    because `floorDb` is the number the decision below about the step down to
+    silence rests on, and it is the one constant here with no manufacturer
+    document behind it.
+
+    Behringer's own MIDI table corroborates the unity point from a third
+    direction, listing "Faders - Value 95 = 0db", where 0.75 * 127 = 95.25.
 
     ## Why this law and not Ardour's
 
@@ -347,6 +364,37 @@ namespace FaderLaw
         would leave every drawn fade pointing somewhere else: a curve that sat
         at unity would come back at -4 dB, the same fault as above and harder
         to see because it only sounds wrong where the automation is playing.
+
+        **What this cannot translate is the line between two points, and that
+        is a real limitation rather than a rounding.** The two laws interpolate
+        differently: a straight legacy segment was linear in position under
+        `(v / 0.8)^2`, and a straight segment now is linear in decibels, which
+        is the shape a fade is supposed to have and is the better of the two.
+        So a migrated fade keeps both of its ends exactly and changes shape in
+        between, by an amount that depends on how far it travels:
+
+            0 dB to -3 dB      0.065 dB at worst
+            0 dB to -10 dB     0.716 dB
+            0 dB to -20 dB     0.570 dB
+            0 dB to -60 dB     13.600 dB, worst at 87 per cent through
+            0 dB to silence    7.959 dB at the midpoint, 15.918 at three quarters
+
+        A short fade is therefore untouched and a long fade out is noticeably
+        quicker to drop away. `point.bend` is carried across untranslated for
+        the same reason, so a bent legacy segment is reshaped twice.
+
+        Subdividing a legacy segment on load would hold the old path, and it
+        was not done. It would mean turning somebody's two point fade into a
+        nine or seventeen point one, so the gesture they drew stops being
+        editable as the gesture they drew, and it needs its own care around the
+        tail of a fade to silence, where the old path runs to minus infinity
+        and the new one stops at -90 dB. That is a night's work with its own
+        test, not a line inside a loader, and it is recorded in the backlog as
+        such. What is not acceptable is leaving it unsaid, which is why it is
+        here, in the backlog and in the release notes: a fade that changed
+        shape with nothing to say so is exactly the fault this header is
+        otherwise built to avoid. `FaderLawTest.cpp` asserts the figures above
+        so they cannot drift.
     */
     inline double legacyCurveValueToPosition (double legacyCurveValue) noexcept
     {

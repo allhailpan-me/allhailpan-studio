@@ -2304,7 +2304,9 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
         slot.buffer.copyFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
     }
 
-    // Fader (0.8 = unity), then the pan control.
+    // The fader, whose travel is 0..1 with unity at three quarters of it, then
+    // the pan control. What a position means is FaderLaw.h's, not this
+    // function's: see the load below.
     //
     // Which pair of gains a position means is in PanLaw.h, which has no JUCE
     // in it and is tested, because nothing here can announce that it is wrong:
@@ -2358,10 +2360,12 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // out does not error, does not crackle and looks entirely normal on a
     // meter. All that is left here is the load and the one multiply.
     //
-    // Once per block, not once per sample, which is what makes the pow and the
-    // log affordable. It is three transcendentals next to a whole block of
-    // audio, and the pan law above already costs three sines and three square
-    // roots under the -4.5 dB law.
+    // Once per block, not once per sample, which is what makes a pow
+    // affordable. One is all it is: positionToGain is a branch and a single
+    // std::pow, and the log10 in that header belongs to gainToPosition, which
+    // the engine never calls. Next to a whole block of audio that is nothing,
+    // and the pan law above already costs three sines and three square roots
+    // under the -4.5 dB law.
     const float fader = (float) FaderLaw::positionToGain ((double) v);
     const float gain  = from * fader;
 

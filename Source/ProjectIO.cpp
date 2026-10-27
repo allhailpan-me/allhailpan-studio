@@ -56,6 +56,11 @@ namespace
     // FaderLaw::legacyCurveValueToPosition are that translation, and they are
     // tested without JUCE because this loader is not.
     //
+    // A curve's points are translated and the line between two of them is not,
+    // because the two laws interpolate differently. A migrated fade therefore
+    // keeps its ends and changes shape in between. See FaderLaw.h for the
+    // figures: nothing over a fade of 20 dB or less, and real over a long one.
+    //
     // The bump is unconditional, as 2 to 6 were, and here it has to be: an
     // older loader reading a file saved by this build would read every fader
     // position as though it were still the old range, so a mix left at unity
@@ -799,10 +804,19 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             // than read. A missing attribute is unity either way, which is
             // what a file that never had a fader in it meant.
             //
-            // Clamped after the translation and not before it, so that a hand
-            // edited file claiming a position of 9 is brought to the top of
-            // the fader rather than through the old law from an impossible
-            // place.
+            // The jlimit is a backstop for a file at version 7 or later, and
+            // for a legacy file it does nothing: legacyPositionToGain clamps
+            // the old position to the old travel itself, so a hand edited file
+            // claiming a position of 9 goes through the old law as 1.25 and
+            // comes back at 0.943820, which is the old ceiling of +7.75 dB and
+            // is inside the new travel. That is the same answer the old loader
+            // gave, which clamped to 0..1.25 before applying the law.
+            //
+            // Said this way round because the inner clamp is what is doing the
+            // work. A reader who takes this comment to mean the jlimit handles
+            // it would be free to delete the inner clamp, and then a stored 9
+            // would reach the new law as position 0.943820 of its own travel
+            // rather than through the old law, which is a different number.
             const double storedVolume = e->getDoubleAttribute ("volume",
                                             fileVersion < 7 ? FaderLaw::legacyUnityPosition
                                                             : FaderLaw::unityPosition);
@@ -1076,6 +1090,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                     // would play back at -4 dB, which is the same fault as an
                     // untranslated fader and harder to notice, because it is
                     // only audible where the automation is.
+                    //
+                    // What this preserves is each point, not the line between
+                    // two of them. The two laws interpolate differently, so a
+                    // migrated fade keeps its ends and changes shape in
+                    // between: nothing worth hearing over a fade of 20 dB or
+                    // less, and 13.6 dB at worst over one of 60 dB. FaderLaw.h
+                    // has the table and the reason subdividing the segment was
+                    // not done here.
                     //
                     // Done here rather than in curveFromText because only
                     // this one target kind means a fader position: a pan curve

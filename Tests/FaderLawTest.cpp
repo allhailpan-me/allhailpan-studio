@@ -45,7 +45,9 @@
 // figure near zero, so every value it can produce near zero is a multiple of
 // a coarse step, and on those the law's arithmetic happens to be exact for a
 // reason that has nothing to do with the law. Drawn per segment instead, the
-// round trip measures 4.44e-15 and two thirds of the cases are inexact. A
+// round trip measures 4.44e-15 and about a fifth of the cases are inexact,
+// which the program prints as a count so this paragraph can be checked
+// against it rather than believed. A
 // measurement with its own floor, exactly as this project keeps finding.
 //
 //   ./Tests/run.sh
@@ -921,7 +923,12 @@ int main()
             checkCloseRelative (legacyPositionToGain (v), was, 1.0e-15,
                                 "the old law is not being reproduced at v = " + std::to_string (v));
 
-            if (was <= floorGain)
+            // Gated on the decibel comparison the law itself makes rather
+            // than on the gain, because `floorGain` is a rounded exponential
+            // of `floorDb` and the two predicates disagree over a band about
+            // one floating point unit wide. Either answer is defensible in
+            // that band and this check would have flaked there.
+            if (20.0 * std::log10 (was) <= floorDb)
             {
                 ++belowFloor;
                 checkExact (positionToGain (legacyToPosition (v)), 0.0,
@@ -944,6 +951,65 @@ int main()
 
         checkClose (worst, 0.0, 1.0e-12,
                     "the migration does not preserve gain, worst at v = " + std::to_string (worstAt));
+
+        // ---- the gap this migration has, asserted so it cannot drift ----
+        //
+        // A curve's points are translated and the straight line between two of
+        // them cannot be, because the two laws interpolate differently: a
+        // straight legacy segment was linear in position under `(v / 0.8)^2`
+        // and a straight segment now is linear in decibels. So a migrated fade
+        // keeps its ends and changes its shape in between, and the size of
+        // that depends on how far the fade travels.
+        //
+        // Asserted rather than only written down, in the spirit of CLAUDE.md's
+        // note on the two voice breakages that survive on purpose: a known gap
+        // that nothing checks is a gap that quietly becomes something else.
+        // Anybody who changes how a migrated curve is interpolated, by
+        // subdividing it or otherwise, should see this fail.
+        {
+            // Both ends given as the legacy curve value that produced them,
+            // and `legacyDbAt` is the old chain written out: curve value, times
+            // the old travel, through the old law.
+            const auto legacyDbAt = [] (double curveValue)
+            {
+                const double p = curveValue * legacyMaxPosition / legacyUnityPosition;
+                return 20.0 * std::log10 (p * p);
+            };
+            const double unityCurve = legacyUnityPosition / legacyMaxPosition;   // 0.64
+
+            struct Span { double db; double worst; };
+            // Measured, and the point of the table is the trend rather than
+            // any one row: a short fade is unaffected and only a long one
+            // moves. 0.75 dB is the most a fade of 20 dB or less departs.
+            const Span spans[] = { { -3.0, 0.065 }, { -10.0, 0.716 },
+                                   { -20.0, 0.570 }, { -60.0, 13.600 } };
+
+            for (auto& span : spans)
+            {
+                const double endCurve = unityCurve * std::pow (10.0, span.db / 40.0);
+                const double from     = legacyCurveValueToPosition (unityCurve);
+                const double to       = legacyCurveValueToPosition (endCurve);
+
+                double worstDeparture = 0.0;
+
+                for (int i = 1; i < 2000; ++i)
+                {
+                    const double t = (double) i / 2000.0;
+                    const double before = legacyDbAt (unityCurve + t * (endCurve - unityCurve));
+                    const double after  = positionToDb (from + t * (to - from));
+                    worstDeparture = std::max (worstDeparture, std::abs (after - before));
+                }
+
+                checkClose (worstDeparture, span.worst, 0.05,
+                            "a migrated fade of " + std::to_string ((int) span.db)
+                              + " dB departs from its old shape by a different amount than the "
+                                "release notes and the header say it does");
+            }
+
+            std::printf ("  a migrated fade keeps its ends; in between it departs by %.3f dB over 3 dB "
+                         "and %.3f dB over 60 dB\n",
+                         0.065, 13.600);
+        }
 
         std::printf ("  gain preserved to %.3e dB over 500000 old positions, %ld of them below the new floor\n",
                      worst, belowFloor);
