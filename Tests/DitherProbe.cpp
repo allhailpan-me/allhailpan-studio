@@ -21,11 +21,17 @@
 // What the sweep shows, which is the part worth not relearning. Undithered
 // distortion is not monotonic in amplitude and is not even close to it. It
 // depends on where the sine's peaks happen to fall relative to the codes,
-// so it swings by up to 14.1 dB between neighbouring half steps and 7.2 dB
-// between neighbouring tenths: at 3.5 steps the worst harmonic is -25.4 dB,
-// at 4.0 it is -39.5, at 4.5 it is -28.6. Four steps is a local best case
-// rather than a worst case, which is what the draft's comment claimed it
-// was.
+// so it swings by up to 14.1 dB between neighbouring half steps over 1.5 to
+// 16, and by 7.2 dB between neighbouring tenths over 1.5 to 8: at 3.5 steps
+// the worst harmonic is -25.4 dB, at 4.0 it is -39.5, at 4.5 it is -28.6.
+// Four steps is a local best case rather than a worst case, which is what
+// the draft's comment claimed it was.
+//
+// Both figures are swept at the bottom of this file, and both ranges are
+// part of the figure rather than a detail of how it was taken: the same
+// tenth of a step swings by 14.3 dB if the sweep is carried out to 64. A
+// spacing quoted without its range is the same mistake as an aliasing figure
+// quoted without its band.
 //
 // That is why the test sweeps rather than picking an amplitude. A single
 // chosen amplitude with a fixed threshold is a measurement of where the
@@ -40,6 +46,7 @@
 #include <complex>
 #include <cstdio>
 #include <limits>
+#include <random>
 #include <vector>
 
 using namespace Dither;
@@ -113,6 +120,51 @@ namespace
                  db (std::sqrt (floorSum / (double) floorCount)),
                  db (harmonic[3]), db (harmonic[5]), db (harmonic[7]) };
     }
+
+    // The path an export took before Dither.h existed, reconstructed from the
+    // JUCE 9.0.3 sources rather than from memory, so the claim that it left
+    // half a least significant bit of direct current in every file can be
+    // rechecked here instead of being taken on trust. JUCE cannot be compiled
+    // in the sandbox, which is why this is a reconstruction and why it lives
+    // in a probe rather than in the test.
+    //
+    // `AudioFormatWriter::convertFloatsToInts`, juce_AudioFormatWriter.cpp:
+    //
+    //     *dest = roundToInt (std::numeric_limits<int>::max() * samp);
+    //
+    // with the rails pinned at `std::numeric_limits<int>::min()` and `max()`
+    // for inputs at or past full scale. The WAV writer then narrows that
+    // through `AudioData::Int16::setAsInt32LE`, `(uint16) (newValue >> 16)`,
+    // or `AudioData::Int24::setAsInt32LE`, `littleEndian24BitToChars
+    // (newValue >> 8, data)`, both in juce_AudioDataConverters.h.
+    //
+    // `juce::roundToInt` is the magic number trick, the value added to
+    // 1.5 * 2^52 and the low word of the double read back as an integer,
+    // which is round to nearest with ties to even under the default rounding
+    // mode. `std::nearbyint` gives the same answer for every input in range
+    // and needs no type punning.
+    //
+    // Two things about it are the point. The scale is 2^31 - 1 rather than
+    // 2^31, so the code is already very slightly low before the shift; and
+    // the shift is floor division, so the error is in (-1, 0] rather than
+    // centred. Those are what the mean below measures.
+    // Takes a float, as the real one does: `convertFloatsToInts` reads a
+    // `const float*` and widens each sample to double, so the mix has already
+    // been through a 24 bit mantissa before any of this happens. Handing this
+    // a double and the quantiser a float would be comparing two different
+    // signals, and at 24 bit that alone moves how often they disagree by
+    // sixteen points, because near full scale the float grid is only twice as
+    // fine as the code grid.
+    int oldPathCode (float sample, Depth d)
+    {
+        const double x = (double) sample;
+
+        const int wide = x <= -1.0 ? std::numeric_limits<int>::min()
+                       : x >=  1.0 ? std::numeric_limits<int>::max()
+                                   : (int) std::nearbyint ((double) std::numeric_limits<int>::max() * x);
+
+        return wide >> (32 - bitsFor (d));
+    }
 }
 
 int main()
@@ -176,6 +228,110 @@ int main()
 
     std::printf ("\nover that sweep: undithered clears by at least %.2f dB,\n", worstUndithered);
     std::printf ("                 dithered  clears by at most   %.2f dB\n", worstDithered);
+
+    // How far the undithered distortion moves between one amplitude and the
+    // next, which is the figure the comment at the top of this file quotes
+    // and the whole reason the test sweeps rather than choosing an amplitude.
+    //
+    // Swept here rather than read off the tables above, because the answer
+    // depends on the range as much as on the spacing and the tables print
+    // neither. The same tenth of a step swings by 7.2 dB up to 8 steps and by
+    // 14.3 dB up to 64, because the amplitudes at which a sine's peaks land
+    // unluckily thin out as it gets louder, so a wider range has further to
+    // fall between two of them. Quoting a spacing without its range is the
+    // same mistake as quoting an aliasing figure without its band.
+    std::printf ("\nThe largest change in the worst harmonic between neighbouring\n");
+    std::printf ("amplitudes, undithered. A spacing is only meaningful with its range.\n\n");
+    std::printf (" spacing | range          | largest swing | at amp\n");
+    std::printf ("---------+----------------+---------------+--------\n");
+
+    const auto largestSwing = [n, lowBin] (double step, double from, double to)
+    {
+        double worst = 0.0, worstAt = from, previous = 0.0;
+        bool   havePrevious = false;
+
+        // Counted in whole steps rather than accumulated, so the grid is the
+        // one the range names however many points it takes.
+        const int points = (int) std::lround ((to - from) / step) + 1;
+
+        for (int i = 0; i < points; ++i)
+        {
+            const double amp = from + step * (double) i;
+            const double db  = measure (amp, Mode::none, n, lowBin, 0xbeef'0003ull).worstDb;
+
+            if (havePrevious && std::abs (db - previous) > worst)
+            {
+                worst   = std::abs (db - previous);
+                worstAt = amp;
+            }
+
+            previous = db;
+            havePrevious = true;
+        }
+
+        std::printf ("  %5.2f  | %5.2f to %-5.2f | %9.2f dB  | %6.2f\n",
+                     step, from, to, worst, worstAt);
+    };
+
+    largestSwing (0.5, 1.5, 16.0);
+    largestSwing (0.1, 1.5,  8.0);
+    largestSwing (0.1, 1.5, 16.0);
+    largestSwing (0.1, 1.5, 64.0);
+
+    // What moving the export off JUCE's own narrowing actually changed, which
+    // the header claims and nothing else in the repository measures.
+    std::printf ("\nThe old path against this one. A direct current sweep for the mean\n");
+    std::printf ("error, in least significant bits, and a uniform spread of samples for\n");
+    std::printf ("how often the two disagree about the code.\n\n");
+    std::printf (" depth | old mean | new mean | codes differing | worst disagreement\n");
+    std::printf ("-------+----------+----------+-----------------+-------------------\n");
+
+    for (auto d : { Depth::int16, Depth::int24 })
+    {
+        const double scale = scaleFor (d);
+
+        double oldSum = 0.0, newSum = 0.0;
+        const int steps = 200000;
+
+        // Swept across four steps either side of zero, finely, which is the
+        // shape of the worst case for a quantiser's mean: the error of a
+        // floor is the fractional part of the position and nothing else, so
+        // an even sweep across whole steps is what averages it honestly.
+        for (int i = 0; i < steps; ++i)
+        {
+            const double codePosition = -4.0 + 8.0 * (double) i / (double) steps;
+            const double x = codePosition / scale;
+
+            oldSum += (double) oldPathCode ((float) x, d) - codePosition;
+
+            Quantiser plain (d, Mode::none, 1);
+            newSum += (double) plain.code ((float) x) - codePosition;
+        }
+
+        std::mt19937_64 rng (20261027ull);
+        std::uniform_real_distribution<double> anywhere (-1.0, 1.0);
+
+        long differing = 0;
+        int  worst = 0;
+        const long trials = 2000000;
+
+        for (long i = 0; i < trials; ++i)
+        {
+            const double x = anywhere (rng);
+
+            Quantiser plain (d, Mode::none, 1);
+            const int gap = plain.code ((float) x) - oldPathCode ((float) x, d);
+
+            if (gap != 0)
+                ++differing;
+
+            worst = std::max (worst, std::abs (gap));
+        }
+
+        std::printf (" %-5s | %8.4f | %8.4f | %13.1f %% | %6d LSB\n",
+                     name (d), oldSum / (double) steps, newSum / (double) steps,
+                     100.0 * (double) differing / (double) trials, worst);
+    }
 
     return 0;
 }

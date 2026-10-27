@@ -7,6 +7,226 @@ Newest first.
 
 ---
 
+## 2026-10-27: the reduction to a word length, which only a file ever sees
+
+### What was looked at
+
+`Source/Dither.h`, 495 lines with no JUCE, and its wiring in
+`Source/ExportJob.h`, 246 lines with no test at all. Chosen as an audit of
+recently merged work: pull request #54 landed four days before this and is the
+newest feature in the repository, and nothing had read it since it was
+written. It is also the one place where being wrong is invisible from inside
+the studio. Playback hands floats to the driver and reduces nothing, so the
+only thing that ever sees a 16 bit code is the file.
+
+Every JUCE-free header in `Source` still has a test except `Fx/Unit.h`, which
+remains unreferenced scaffolding and which the night of 2026-10-21 set aside
+for that reason. Not `Fx/Svf.h`, which open pull request #55 is changing, and
+not `AutomationCurve.h`, `FaderLaw.h`, `AudioEngine.*`, `ProjectIO.cpp`,
+`MixerComponent.h`, `PlaylistComponent.cpp`, `RELEASE_NOTES.md` or
+`Research/BACKLOG.md`, which open pull request #59 is changing.
+
+### Nothing in it is wrong today
+
+Said plainly because it is the result. The quantiser, the dither's
+distribution, the seeding, the integer and float export paths and the
+preference translation are all correct, and an independent read by the auditor
+found no live fault either. 38 mutations, every one of them built with the
+sanitizers `Tests/run.sh` uses.
+
+Specifically checked and sound:
+
+- Two streams in one export can never coincide. The seeds are consecutive
+  integers into SplitMix64, one per channel per file, so stream B's state is
+  always stream A's plus one and the two state sets can only meet at a lag of
+  the additive constant's inverse modulo 2^64, of order 10^19 samples.
+  Measured at the export's own seeds over 4194304 draws: a correlation of
+  -0.0007 between the master's two channels, inside the sampling spread, and
+  not one identical draw at the same index.
+- The dither state is continuous for the whole render and cannot restart. The
+  quantisers are built once in `open` before `renderOffline` is called and
+  live in a `std::map` node whose address is stable, and `renderOffline` fixes
+  its block size once, so `codes.resize` happens on the first block only.
+- No path writes 16 bit undithered or 24 bit dithered. One `Depth` is in play,
+  everything derives from it, and `modeFor` is idempotent and applied twice.
+  `describeFormat` reports the mode after the policy, so the status line
+  cannot name a dither the file did not get.
+- At 32 bit float, `writeFromFloatArrays` really does pass the floats through
+  untouched. Read in the 9.0.3 sources: it casts straight to `const int**`
+  when the writer is a floating point one, and `Int32::setAsInt32LE` is a
+  32 bit copy with a byte swap on a big endian host.
+- Every JUCE signature the change uses, against the real 9.0.3 headers, and
+  `leftJustified` against the two narrowings it is built to undo.
+
+### One real gap, and it is this project's recurring fault in a new place
+
+Adding a fourth depth would have gone unnoticed, and `Dither.h` expressly
+contemplates somebody adding one: its note on stored indices records 8 bit as
+a candidate deliberately left out.
+
+Three switches on `Depth` have no `default` and a `return` after the closing
+brace, which exists to silence a warning about control reaching the end of a
+non-void function. Its side effect is that a new enumerator falls through to
+the 24 bit answer rather than failing to compile, and nothing in the project
+is built with `-Werror`, so the unhandled case is three warnings in a CI log.
+
+The test could not see it because its property loop ran over a hand written
+list of three depths rather than over the depths a stored id reaches. Proven
+rather than reasoned: adding `Depth::int8` at the end, with `numDepths`,
+`depthAt`, `depthToStored` and `name` updated and only `bitsFor` left alone,
+compiles with one warning and prints "all checks passed".
+
+What that export would have been: the 24 bit word length, scale, rails and
+shift, with the preferences menu and the export's own status line both saying
+"8 bit" over a file that is 24, and `modeFor` answering none, so the one depth
+that needs dither more than any other would have been written without it.
+Nothing errors.
+
+### Three claims that nothing produced
+
+The header's figures mostly hold up. Rerun tonight, `Tests/DitherProbe.cpp`
+gives 36.58 dB against "at least 36.6 dB clear" undithered, 4.06 against "at
+most 4.1", and -25.36, -39.45 and -28.55 against "-25.4 at three and a half
+steps, -39.5 at four, -28.6 at four and a half". Three did not.
+
+**A swing of 7.2 dB between neighbouring tenths of a step.** The probe sweeps
+nothing at tenth step spacing, so the figure cannot be read off anything it
+prints. It is real over 1.5 to 8 steps, and it is 14.3 dB over the 1.5 to 64
+its own table covers, so the range was the whole number: the amplitudes at
+which a sine's peaks land unluckily thin out as it gets louder, so a wider
+sweep has further to fall between two of them. Both spacings are swept now and
+both ranges are stated. 14.09 dB between half steps over 1.5 to 16, 7.22 dB
+between tenths over 1.5 to 8, 14.27 dB between tenths over 1.5 to 64.
+
+**A mean error of -0.4997 LSB, attributed to JUCE's own narrowing.** No
+measurement of JUCE's path can live in this repository, because JUCE cannot be
+compiled in the sandbox. The probe now reconstructs it from the 9.0.3 sources
+it cites, `convertFloatsToInts` and the two `setAsInt32LE` narrowings, and
+measures -0.5000 LSB at 16 bit and -0.4981 at 24 against zero for the
+quantiser in `Dither.h`. The reconstruction has to be handed a float rather
+than a double, as the real one is: near full scale a float's grid is only
+twice as fine as a 24 bit code's, and getting that wrong moves the figures by
+sixteen points.
+
+**A threshold of 7 dB in `DitherTest`, where the code uses 1.** The sentence
+compared 7 dB against 7 dB and so said nothing. It is the one check in the
+file that tells summed dither from differenced dither, which makes it the
+comment a future reader is most likely to lean on.
+
+### One thing that was a second opinion rather than a fault
+
+`PreferencesWindow::refreshDitherEnablement` computed the dither policy a
+second time, as `depth == Dither::Depth::int16`, and drove both the control's
+enablement and which of two paragraphs the user reads from it. Its own comment
+promises the opposite, that the box agrees with the engine rather than the
+other way round, and `Dither.h` says the same from the other end: "a user
+interface that merely greyed the control would leave the engine free to
+disagree with it." It agreed by copying the predicate. It calls `modeFor` now.
+
+Nothing is wrong in a built file today, because the two answers coincide. The
+day the policy moves, and `Dither.h` records that Avid's own documentation
+contradicts itself over whether 24 bit wants dither, the window would grey the
+dither box and print "nothing to dither at 24 bit" over a file the engine had
+dithered.
+
+### Three survivors, all genuine no-ops
+
+- **Two independent draws differenced rather than summed**, `a - b` instead of
+  `a + b`. Mathematically the same thing: the same triangular density, the
+  same variance, and the same flat spectrum, because the two draws are
+  independent. The alternative the header actually warns about is the first
+  difference of successive draws, which is a high pass, and that one is caught
+  by the spectrum check, reading 1.10 where 3.0 is expected.
+- **Removing `depthFromStored`'s range guard.** `depthAt`'s own `default`
+  answers with the same depth, so the guard's removal changes nothing. It
+  stops being a no-op the moment that default moves, so there is now a check
+  that an unrecognised index reaches the default depth through `depthAt`
+  itself. Moving that default to 32 bit float fails it.
+- **Removing `modeFromStored`'s range guard.** Already recorded as a no-op in
+  the test, with the two static assertions that fail on the day a third mode
+  or a different default makes the bound observable.
+
+### What is now checked
+
+- The depth property loop runs over `depthAt` for every stored id rather than
+  over a hand written list, and no two depths may share a word length or a
+  name. That is what catches a new entry falling through `bitsFor` once
+  somebody has done everything the compiler forces.
+- A `static_assert` on `numDepths` fails to compile and names what to update,
+  so the hand written list the reachability check needs cannot quietly become
+  a lie. Checked both ways, the way `VoiceTest` handles its list of
+  destinations nothing reaches yet: adding a depth without listing it fails to
+  compile, and listing one whose word length was forgotten fails the run.
+- The generator's own identity, pinned against the reference
+  implementation's published output for a seed of zero. Two breakages that
+  survived everything else, an even additive constant and a dropped final
+  avalanche, are caught by it. Neither moves the density, the moments, the
+  spectrum or the independence of two channels by anything a few million
+  draws can measure, because what they cost is quality a long way out.
+- That an unrecognised stored index reaches `depthAt`'s default, which is what
+  makes the surviving no-op above a no-op.
+- The old narrowing path, reconstructed and measured in the probe, so the half
+  a least significant bit of direct current every export used to carry is a
+  number the repository produces rather than one it quotes.
+
+### Left alone deliberately
+
+- **`RELEASE_NOTES.md`**, which says of the new export settings that "the
+  default is still 24 bit, and at 24 bit the dither is off, so an export you
+  do not reconfigure writes the same file it always did". The last clause is
+  not true: the probe measures the old and new paths disagreeing about the
+  code on half or more of a uniform spread of samples, always by exactly one
+  LSB, which is the same half an LSB of offset the paragraph two above it
+  describes being fixed. Nothing about it is audible, at 144 dB down, and the
+  intent, that no setting moved under anybody, is right. Not corrected here
+  because open pull request #59 is changing that file. Worth a sentence from
+  whoever lands next: it is the page somebody checks when two bounces of an
+  unchanged project do not compare equal.
+- **`Research/BACKLOG.md`**, which carries the 7.2 dB figure as "the real
+  figure is 7.2" without its range, for the same reason.
+- **The three switches themselves.** Giving them a `default` that throws, or
+  building with `-Werror=switch`, would be a better guard than a test, and
+  `-Werror` across this project is a decision with consequences for every
+  platform build rather than a hardening change. The test now fails both ways,
+  which is enough to stop the fault.
+- **`ExportJob`'s discarded `write` return.** A disk filling up part way
+  through truncates the file and the studio still reports a successful export.
+  Identical to the behaviour before #54, so not a regression, and it is one
+  `if` away from being reportable. Noted for a night that is fixing rather
+  than proving.
+- **`getDepth` and `getDither` on `ExportJob`**, which have no callers.
+
+### Mutation testing
+
+38 mutations of `Dither.h`, each compiled with
+`-fsanitize=address,undefined -fno-sanitize-recover=undefined` against the
+suite's own flags. Against the test as it stood, 30 were caught and 8
+survived. Against the test as it stands now, 35 are caught and the 3 above
+survive as genuine no-ops.
+
+Aimed at what would be a real mistake rather than at scoring: the quantiser
+rounding changed to a floor and to a truncation toward zero, the dither
+applied after the rounding instead of before, one draw instead of two and
+three instead of two, the draw's width halved and doubled, the draw left
+uncentred, the scale and both rails moved by one, the left justifying shift
+moved by one, the policy relaxed to dither 24 bit and ignored altogether, the
+clamp removed and its bounds swapped, the NaN guard removed, every channel
+given the same stream, the generator's additive constant made even, its final
+avalanche dropped, its state left unadvanced, two stored indices swapped, a
+word length and a name made wrong, `isFixedPoint` inverted, `numDepths` left
+one short, both range guards removed, `depthAt`'s default moved, and a fourth
+depth added in the two ways somebody would really add one.
+
+Three of the catches are worth naming for what caught them rather than for
+being caught. Removing the clamp is caught by the full scale checks; removing
+the NaN guard is caught by the sanitizers alone, with the program dying on the
+undefined cast rather than failing a check, which is the argument for running
+them; and giving every channel the same stream is caught by cancellation,
+because two identical sequences subtract to exactly nothing and read as no
+dither at all.
+
+---
+
 ## 2026-10-23: comping, which is the one edit that is the performance
 
 ### What was looked at
