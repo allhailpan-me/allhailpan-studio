@@ -29,6 +29,19 @@ blindly. Newest first.
 
 ## 2026-10-27: the fader law, and where unity sits on the travel
 
+### Status: built, tested, audited, and waiting on a human to merge it
+
+Pull request **#59**, marked ready for review. The tests job, `ubuntu-latest`
+and `windows-latest` are all green; `macos-latest` was still building, which is
+routine here and has not failed. The release notes are on the branch rather
+than written after the merge, so they go in with it.
+
+The session that built it was **not permitted to merge without review**, so the
+merge is the owner's to make. Nothing is left to do on the branch. A later
+night should not pick the fader law up again: if #59 is still open, it needs a
+click and not more work, and if it has been merged then this entry is the
+record of it.
+
 ### What was looked at
 
 | Candidate | Verdict |
