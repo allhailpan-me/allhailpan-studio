@@ -779,31 +779,25 @@ int main()
             check (p >= minPosition && p <= maxPosition, "a gain that is not a number left the travel");
         }
 
-        // The two entry points to the inverse disagree about an infinite
-        // input, and the disagreement is pinned here rather than left loose so
-        // that it cannot change without somebody deciding to change it.
+        // The two entry points to the inverse have to agree about an infinite
+        // input, which is asserted rather than assumed because they did not.
+        // `gainToPosition` guarded on `! std::isfinite` and so lumped an
+        // infinity in with a NaN, sending an infinite gain to the bottom while
+        // `dbToPosition` sent plus infinity to the top: the same request at
+        // opposite ends of the fader. A gain above the ceiling saturates, which
+        // is what the header says and what an infinity is a limiting case of,
+        // so both now give the top.
         //
-        // `dbToPosition` sends plus infinity to the top of the fader, on the
-        // reading that an unreachable loudness saturates at the top.
-        // `gainToPosition` sends an infinite gain to the bottom, because its
-        // guard catches every non-finite input before the logarithm, so it
-        // never reaches the branch that would have gone the other way. The
-        // bottom is the answer that agrees with `positionToDb` and
-        // `positionToGain`, which both read any non-finite input as the floor,
-        // and it is the quiet one, which is the rule the header argues for.
-        // But it is not what the gain function's own comment claims, which
-        // says a gain above the ceiling saturates, and infinity is above the
-        // ceiling.
-        //
-        // Nothing in the studio can produce an infinite gain: the forward law
-        // is bounded by the ceiling and the old law by 2.44. So this is a
-        // consistency wart rather than a fault, and it is asserted as it
-        // stands. Whichever way it is resolved, resolving it should fail this.
-        checkExact (gainToPosition (inf), minPosition,
-                    "an infinite gain changed which end of the fader it reads as. The header's rule is "
-                    "that a non-finite input goes quiet, but dbToPosition sends plus infinity to the top, "
-                    "so the two entry points to the inverse disagree and this is the assertion that "
-                    "says so. Change it deliberately, not by accident");
+        // Asserted against dbToPosition rather than against maxPosition
+        // directly, because what is being checked is that the two routes into
+        // the inverse answer the same question the same way.
+        checkExact (gainToPosition (inf), dbToPosition (inf),
+                    "the two entry points to the inverse disagree about an infinite input: an infinite "
+                    "gain and an infinite decibel figure are the same request and must land at the same "
+                    "end of the fader");
+        checkExact (gainToPosition (inf), maxPosition,
+                    "an infinite gain is above the ceiling, so it should saturate at the top of the "
+                    "fader rather than reading as something off the end of it");
         checkExact (gainToPosition (-inf), minPosition, "a gain of minus infinity is not the bottom of the fader");
 
         // The migration reads whatever is in the file, so every one of its

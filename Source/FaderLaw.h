@@ -108,9 +108,15 @@
     point. Both references do this: Ardour special cases `pos == 0.0` to return
     0.0 while its continuous part only reaches -192.66 dB, and Behringer prints
     -inf below a scale that stops at -60. The argument for it rather than
-    against it is that -90 dB is an amplitude of 3.16e-5 and the least
-    significant bit of a 16 bit file is 1/32768, which is -90.3 dB: the step is
-    smaller than the quantisation of anything the studio can deliver. The
+    against it is that the step is **about one least significant bit of a 16 bit
+    file**: -90 dB is an amplitude of 3.1623e-5, the least significant bit of a
+    16 bit file is 1/32768 = 3.0518e-5, which is -90.31 dB, so the step is 1.036
+    of one. Not smaller than it. An earlier version of this comment claimed
+    smaller, which is the sentence this whole decision rests on and was wrong by
+    0.31 dB in the direction that flattered it, found by the test refusing to
+    assert it. One bit at the bottom of a 16 bit file is below what any
+    converter resolves, so the argument survives being stated correctly, which
+    is the only form it is worth having. The
     alternative, bending the bottom segment to approach -inf, was rejected
     because the gain would then never reach zero, and a mixer summing sixteen
     inserts at -70 dB each is not silent. A fader pulled all the way down has
@@ -158,10 +164,25 @@ namespace FaderLaw
     */
     inline double positionToDb (double position) noexcept
     {
-        // A position that is not a number comes from a corrupt project file or
+        // A position that is not finite comes from a corrupt project file or
         // from a control that has gone wrong, and the quiet answer is the safe
         // one: a fader that has lost its position should not be louder than
         // the one next to it.
+        //
+        // This is where a position and a gain are treated differently on a
+        // non-finite input, so the rule is worth stating once. **A position is
+        // bounded and a gain is not.** The fader has two physical ends, so a
+        // position outside them carries no meaning at all and is read as
+        // corruption. A gain or a decibel figure has a ceiling here but no
+        // upper bound as a quantity, so an infinite one is a limiting case of
+        // "louder than the ceiling" and saturates at the top, which is what
+        // `dbToPosition` and `gainToPosition` both do.
+        //
+        // So `positionToDb` of an infinity is the floor while `dbToPosition`
+        // of an infinity is the top, and those two are not inverses there.
+        // That is deliberate. The alternative, reading an infinite position as
+        // the top because the clamp below would have taken it there, means a
+        // corrupt project file opens with a strip at full.
         if (! std::isfinite (position))
             return floorDb;
 
@@ -221,14 +242,28 @@ namespace FaderLaw
         fader. A gain above the ceiling saturates rather than extrapolating:
         the fader has a top and a number that cannot be reached on it has to
         come back as the top rather than as something off the end of it.
+
+        An infinite gain is therefore the top, which is worth saying because
+        this function used to send it to the bottom. It guarded on
+        `! std::isfinite` and so lumped an infinity in with a NaN, which left
+        the two entry points to this inverse disagreeing about the same
+        request: `dbToPosition` sent plus infinity to the top and this sent an
+        infinite gain to the bottom, and neither the comment above nor the rest
+        of the header said why. They agree now, and they agree by composition
+        rather than by a second special case, because 20 log10 of an infinity
+        is an infinity and `dbToPosition` already saturates. A NaN is a
+        different thing and still goes quiet: it means the gain carries no
+        information, and a control that has lost its value should not come back
+        louder than the one next to it.
     */
     inline double gainToPosition (double gain) noexcept
     {
-        // Checked before the logarithm rather than after it, because log10 of
-        // a negative is a quiet NaN that would then be clamped to a position
-        // in range, and a NaN gain should read as silence rather than as
-        // whatever the clamp happens to produce.
-        if (! std::isfinite (gain) || gain <= 0.0)
+        // A NaN is checked before the logarithm rather than after it. Not
+        // because log10 would produce something worse, since dbToPosition
+        // handles a NaN itself and gives the same answer, but because the
+        // intent is worth being able to read here: a gain that is not a number
+        // is the bottom of the fader by decision.
+        if (std::isnan (gain) || gain <= 0.0)
             return minPosition;
 
         return dbToPosition (20.0 * std::log10 (gain));
