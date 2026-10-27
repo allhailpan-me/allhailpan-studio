@@ -68,11 +68,14 @@
 // and run under sanitizers on its own. See Tests/AutomationCurveTest.cpp.
 // ---------------------------------------------------------------------------
 
-// The mixer fader's travel. Named because automation has to map a curve onto
-// it and the interface has to draw the same travel, and the two disagreeing
-// would mean a fader that automation could not reach the top of.
-inline constexpr float kUnityFaderGain = 0.8f;    // 0 dB
-inline constexpr float kMaxFaderGain   = 1.25f;
+// The mixer fader's travel used to be named here, as kUnityFaderGain = 0.8
+// and kMaxFaderGain = 1.25, because automation had to map a curve onto it and
+// the interface had to draw the same travel. Both now live in FaderLaw.h with
+// the law that gives them meaning, because a travel and the gain it produces
+// are one decision and keeping them in two files is how they come to disagree.
+//
+// They were never gains either, whatever the names said: they were positions,
+// and the gain was computed from them in the engine.
 
 // What kind of thing a moving value is pointed at. Here rather than beside the
 // rest of the target, because which range a reading means is arithmetic and
@@ -101,7 +104,18 @@ inline float autoControlValue (AutoTargetKind kind, double curveValue) noexcept
 
     switch (kind)
     {
-        case AutoTargetKind::insertVolume: return (float) (v * (double) kMaxFaderGain);
+        // A fader position is already 0..1, so this is the identity, and it
+        // is written out rather than left to fall through: the travel is a
+        // decision that belongs in one place, and a fader whose top moved
+        // would need changing here and nowhere else.
+        //
+        // What this means for a drawn curve is worth knowing. A curve stores
+        // the position, not the gain, so a straight line in the lane is
+        // straight in decibels within one of the law's segments, which is
+        // what a fade is supposed to be. Storing the gain instead would make
+        // a straight line a fade that is fast at the start and slow at the
+        // end.
+        case AutoTargetKind::insertVolume: return (float) v;
         case AutoTargetKind::insertPan:    return (float) (v * 2.0 - 1.0);
         case AutoTargetKind::channelParam:
         case AutoTargetKind::insertFxParam: break;
@@ -119,7 +133,7 @@ inline double autoCurveValueFor (AutoTargetKind kind, double controlValue) noexc
 
     switch (kind)
     {
-        case AutoTargetKind::insertVolume: return std::clamp (controlValue / (double) kMaxFaderGain, 0.0, 1.0);
+        case AutoTargetKind::insertVolume: return std::clamp (controlValue, 0.0, 1.0);
         case AutoTargetKind::insertPan:    return std::clamp ((controlValue + 1.0) * 0.5, 0.0, 1.0);
         case AutoTargetKind::channelParam:
         case AutoTargetKind::insertFxParam: break;

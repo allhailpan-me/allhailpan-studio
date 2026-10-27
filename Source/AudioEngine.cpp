@@ -2037,7 +2037,8 @@ void AudioEngine::applyCurve (const AutoCurveRT& curve, double beat)
                 return;
             auto& volume = controls[(size_t) target.insert].volume;
             if (std::abs (volume.load() - wanted) > 1.0e-5f)
-                volume.store (juce::jlimit (0.0f, kMaxFaderGain, wanted));
+                volume.store (juce::jlimit ((float) FaderLaw::minPosition,
+                                            (float) FaderLaw::maxPosition, wanted));
             return;
         }
 
@@ -2352,7 +2353,16 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
 
     soloRamp[(size_t) index] = to;
 
-    const float fader = (v / 0.8f) * (v / 0.8f);
+    // What the position means is in FaderLaw.h, which has no JUCE in it and is
+    // tested, for the same reason the pan law above is: a fader law a decibel
+    // out does not error, does not crackle and looks entirely normal on a
+    // meter. All that is left here is the load and the one multiply.
+    //
+    // Once per block, not once per sample, which is what makes the pow and the
+    // log affordable. It is three transcendentals next to a whole block of
+    // audio, and the pan law above already costs three sines and three square
+    // roots under the -4.5 dB law.
+    const float fader = (float) FaderLaw::positionToGain ((double) v);
     const float gain  = from * fader;
 
     // Worked out per block rather than kept somewhere. In balance mode that is

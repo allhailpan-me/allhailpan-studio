@@ -1138,7 +1138,7 @@ void PlaylistComponent::paintCurve (juce::Graphics& g, const Clip& c, juce::Rect
     if (kind == AutoTargetKind::insertVolume || kind == AutoTargetKind::insertPan)
     {
         const double rest = autoCurveValueFor (kind, kind == AutoTargetKind::insertVolume
-                                                       ? (double) kUnityFaderGain : 0.0);
+                                                       ? FaderLaw::unityPosition : 0.0);
         g.setColour (Ahp::muted.withAlpha (0.3f * alpha));
         g.fillRect (body.getX(), curveValueToY (body, rest) - 0.5f, body.getWidth(), 1.0f);
     }
