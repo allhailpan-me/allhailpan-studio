@@ -59,6 +59,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <string>
@@ -188,10 +189,31 @@ int main()
         checkExact (modeToStored (modeFromStored (i)), i,
                     "a stored mode in range should round trip");
 
-    const Depth depths[] = { Depth::int16, Depth::int24, Depth::float32 };
+    // Every entry the enum has, written out by hand deliberately. The
+    // reachability check further down asks whether some stored id reaches
+    // each one, which a list built out of depthAt could not ask at all.
+    //
+    // Nothing in C++ counts an enum's entries, so what keeps this list honest
+    // is the assertion under it, which is the discipline the Mode bound above
+    // uses and the one VoiceTest uses for the destinations nothing reaches
+    // yet. A new depth cannot be reached from a stored id without numDepths
+    // moving, and numDepths cannot move without this failing to compile and
+    // sending whoever moved it here.
+    const Depth everyDepth[] = { Depth::int16, Depth::int24, Depth::float32 };
 
-    for (auto d : depths)
+    static_assert (numDepths == 3,
+                   "a new depth needs adding to everyDepth below, and to bitsFor, "
+                   "name and depthToStored, none of which the compiler forces");
+
+    // The properties below are checked over the depths a stored id really
+    // reaches rather than over the list above. The list is what somebody
+    // updates by hand; the stored ids are what the preferences window builds
+    // its menu from and what the engine exports at. They coincide today, and
+    // the reachability check is what says so.
+    for (int i = 0; i < numDepths; ++i)
     {
+        const Depth d = depthAt (i);
+
         // The name is what the preferences menu shows and what the export's
         // own report says it wrote, so a swapped pair is a studio telling
         // somebody it wrote a 24 bit file when it wrote a 16 bit one.
@@ -235,7 +257,7 @@ int main()
     // count one short therefore drops an entry from the menu and turns the
     // setting it had saved into the default on the next launch, with nothing
     // anywhere to say that the choice has gone.
-    for (auto d : depths)
+    for (auto d : everyDepth)
     {
         bool reachable = false;
 
@@ -245,6 +267,35 @@ int main()
 
         check (reachable, std::string ("no stored id reaches ") + name (d));
     }
+
+    // No two depths may share a word length or a name.
+    //
+    // This is the check that catches a new depth added to the enum and to the
+    // stored ids but not to bitsFor, whose switch has no default to stop at:
+    // it falls through to the return after the closing brace, which is the 24
+    // bit answer. Nothing in the project is built with -Werror, so the
+    // unhandled case is three warnings in a CI log and a build that works.
+    //
+    // What it would then do is worth writing down, because it is this
+    // project's recurring fault in a new place. Adding 8 bit at the end, which
+    // the note in Dither.h about stored indices expressly contemplates, would
+    // give it the 24 bit word length, the 24 bit scale, the 24 bit rails and
+    // the 24 bit shift, while the menu and the export's own status line both
+    // say "8 bit" over a file that is 24. And modeFor would answer none, so
+    // the one depth that needs dither more than any other would be written
+    // without it. Nothing errors.
+    for (int i = 0; i < numDepths; ++i)
+        for (int j = i + 1; j < numDepths; ++j)
+        {
+            const Depth a = depthAt (i), b = depthAt (j);
+
+            check (bitsFor (a) != bitsFor (b),
+                   std::string ("two depths share a word length: ") + name (a)
+                       + " and " + name (b) + " are both " + std::to_string (bitsFor (a)) + " bit");
+
+            check (std::string (name (a)) != name (b),
+                   std::string ("two depths share a name: ") + name (a));
+        }
 
     for (auto m : { Mode::none, Mode::triangular })
     {
@@ -307,6 +358,51 @@ int main()
             {
                 fail ("a 24 bit code should survive JUCE's shift: " + std::to_string (code));
                 ok = false;
+            }
+        }
+    }
+
+    // =====================================================================
+    // The generator is the one it says it is
+    // =====================================================================
+    //
+    // Everything else in this file measures the dither's distribution, which
+    // is what the paper specifies and what the sound depends on. Two
+    // breakages of the generator pass all of it: making the additive constant
+    // even, which freezes the low bit of the state and halves the period, and
+    // dropping the final avalanche step. Neither moves the density, the
+    // moments, the flatness of the spectrum or the independence of two
+    // channels by anything a measurement over a few million draws can see,
+    // because what they cost is quality a long way out, so the only check
+    // that can see them at all is the identity of the stream itself.
+    //
+    // Pinned against the reference implementation's own output for a seed of
+    // zero, from Vigna's splitmix64.c, and not against this code's answer: a
+    // figure generated by the thing under test moves when it moves and
+    // pins nothing. Dither.h names SplitMix64 by name, so this is also what
+    // makes that claim checkable rather than decorative.
+    {
+        const std::uint64_t published[] = { 0xe220'a839'7b1d'cdafull,
+                                            0x6e78'9e6a'a1b9'65f4ull,
+                                            0x06c4'5d18'8009'454full,
+                                            0xf88b'b8a8'724c'81ecull,
+                                            0x1b39'896a'51a8'749bull,
+                                            0x53cb'9f0c'747e'a2eaull };
+
+        std::uint64_t state = 0;
+
+        for (size_t i = 0; i < std::size (published); ++i)
+        {
+            const std::uint64_t got = nextRandom (state);
+
+            if (got != published[i])
+            {
+                char said[128];
+                std::snprintf (said, sizeof (said),
+                               "draw %zu of SplitMix64 from seed 0 should be %016llx, not %016llx",
+                               i, (unsigned long long) published[i], (unsigned long long) got);
+                fail (said);
+                break;
             }
         }
     }
@@ -888,7 +984,7 @@ int main()
         // And flat across the bands rather than merely near the right level
         // in each, which is the form that catches a tilt. A first order high
         // pass would read about 1.0 at the bottom and 5.0 at the top, so a
-        // ratio of 7 dB is far more than any plausible estimation spread and
+        // ratio of 1 dB is far more than any plausible estimation spread and
         // far less than the 7 dB that error would show.
         const double tiltDb = 10.0 * std::log10 (highest / lowest);
         check (tiltDb < 1.0,
