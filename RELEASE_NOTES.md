@@ -35,7 +35,7 @@ different places on screen, because the scale under them changed, but what each
 track is actually doing is identical to the hundredth of a decibel. The
 translation goes through the gain rather than through where the handle sat,
 which sounds like a technicality and is the whole thing: done the other way,
-every track in every old project would have come back about 4 dB quieter, by a
+every track in every old project would have come back about 4.4 dB quieter, by a
 different amount each, and it would have sounded like the mix had drifted with
 nothing to point at.
 

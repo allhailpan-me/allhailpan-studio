@@ -559,22 +559,40 @@ static void testControlRanges()
 
     // The named positions, so that changing a range has to be a decision
     // rather than an accident.
-    // Asserted in decibels rather than against the range's own constants,
-    // which is the difference between checking that two numbers in the same
-    // file agree and checking that automation can reach the fader. The old
-    // version of this compared autoControlValue against kMaxFaderGain, so it
-    // would have passed unchanged if both had been wrong together.
-    checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 1.0),
-                FaderLaw::maxPosition, 1.0e-9, "a curve at the top does not reach the top of the fader");
-    checkClose (FaderLaw::positionToDb (autoControlValue (AutoTargetKind::insertVolume, 1.0)),
-                FaderLaw::ceilingDb, 1.0e-9, "a curve at the top is not the fader's ceiling");
+    //
+    // Which of these checks is load bearing is worth being exact about,
+    // because the comment here used to credit the wrong one. It said the
+    // decibel check was the strengthening and dismissed the comparison
+    // against the range's own constant as two numbers in the same file
+    // agreeing. It is the other way round.
+    //
+    // The decibel check cannot see a curve that overshoots the top of the
+    // travel, because FaderLaw::positionToDb clamps its argument before it
+    // branches: it answers exactly +10 dB for a position of 1, of 1.25, of 2
+    // and of a billion alike. So it catches an undershoot and is blind to an
+    // overshoot, which is the direction a return of the old 1.25 travel would
+    // come from. The comparison against FaderLaw::maxPosition is what catches
+    // that, and a mutation scaling both directions of the conversion by 1.25
+    // was caught by that line alone.
+    //
+    // Both are kept, one for each direction of the error, and the overshoot
+    // is now also asserted on the raw position where the law's clamp cannot
+    // reach it.
+    const double curveAtTop = (double) autoControlValue (AutoTargetKind::insertVolume, 1.0);
+
+    checkClose (curveAtTop, FaderLaw::maxPosition, 1.0e-9,
+                "a curve at the top does not reach the top of the fader");
+    check (curveAtTop <= FaderLaw::maxPosition,
+           "a curve at the top overshoots the fader's travel, where the law's clamp would hide it");
+    checkClose (FaderLaw::positionToDb (curveAtTop), FaderLaw::ceilingDb, 1.0e-9,
+                "a curve at the top is not the fader's ceiling");
     checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 0.0),
                 0.0, 0.0, "a curve at the bottom does not silence the fader");
     check (FaderLaw::positionToGain (autoControlValue (AutoTargetKind::insertVolume, 0.0)) == 0.0,
            "a curve at the bottom is not exact silence");
     checkClose (autoCurveValueFor (AutoTargetKind::insertVolume, FaderLaw::unityPosition),
                 FaderLaw::unityPosition, 1.0e-9,
-                "0 dB is not where the fader's own unity is");
+                "the resting fader does not come back as its own position in a curve");
     checkClose (FaderLaw::positionToDb (autoControlValue (AutoTargetKind::insertVolume,
                                             autoCurveValueFor (AutoTargetKind::insertVolume,
                                                                FaderLaw::unityPosition))),
