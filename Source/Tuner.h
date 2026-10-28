@@ -212,8 +212,28 @@ struct Spec
 {
     double sampleRate = 44100.0;
 
-    // B0 and B6 at A4 = 440.
-    double lowestHz  = 30.867706;
+    // The range SEARCHED, which is deliberately wider at the bottom than the
+    // range of notes a player is tuning.
+    //
+    // A tuner whose search stopped at the lowest note it covers could not tell
+    // anybody that note was flat, which is the one thing they are looking at
+    // it to find out. Measured: with the search floor at B0 exactly, a B0 that
+    // is 49 cents flat cannot be read at all, because its period is longer
+    // than the longest lag computed.
+    //
+    // So the floor is five semitones below B0, which is 23.1247 Hz. That is
+    // not a round number chosen for headroom: it is Korg's own design target,
+    // printed on the GA-1's specification page and in the GA-50 manual as
+    // 23.12 Hz, being B0 with the five semitones of flat tuning those
+    // instruments offer (30.8677 * 2^(-5/12) = 23.1247). Taking the same floor
+    // means a five string bass tuned down to drop A still reads.
+    //
+    // The top is B6, where Korg's guitar range stops. Measured accuracy there
+    // is 0.12 cents on a sine, against the plus or minus one cent Boss and
+    // Korg claim, and it degrades above it: 0.25 cents at 2.5 kHz and 0.68 at
+    // 3.5 kHz, as the period shrinks towards the handful of samples where a
+    // three point parabola has nothing left to work with.
+    double lowestHz  = 23.124651;
     double highestHz = 1975.533205;
 
     /** The paper's absolute threshold, from step 4. Also readable, in the
@@ -232,8 +252,15 @@ struct Spec
 
         Two is taken, which puts three periods in the buffer, because the buffer
         the estimator has to hold is W + tauMax rather than W. Temporal
-        resolution is free in a tuner: 97 ms at 44.1 kHz is nothing next to the
-        time somebody takes to turn a machine head. */
+        resolution is free in a tuner: the 130 ms that comes to at 44.1 kHz is
+        nothing next to the time somebody takes to turn a machine head.
+
+        What it costs is not free, and is measured rather than assumed: one
+        reading over that window is about nine milliseconds of work in a
+        release build, which is why this runs on whatever thread drives the
+        display and not in the device callback, and why ten readings a second
+        is plenty. Raising the search floor shortens the window quadratically:
+        a floor of 160 Hz costs 0.22 ms. */
     int windowPeriods = 2;
 
     /** The paper low passes the signal before analysis, by "convolution with a
