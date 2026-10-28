@@ -9,24 +9,74 @@ Newest first.
 
 ## 2026-10-28: the fader law, and the translation of every fader already saved
 
-### In progress
+### What was looked at
 
-Target picked as an audit of recently merged work. Pull request #59 merged at
-00:33 UTC today and is the newest thing in the repository: `Source/FaderLaw.h`,
-406 new lines with no JUCE, plus its wiring in `AudioEngine.{h,cpp}`,
-`MixerComponent.h`, `ProjectIO.cpp`, `AutomationCurve.h` and
-`PlaylistComponent.cpp`. The night of 2026-10-27 set these files aside by name
-because #59 was open and changing them, so nothing has read them since they
-were written.
+Pull request #59 merged at 00:33 UTC today and is the newest thing in the
+repository: `Source/FaderLaw.h`, 406 new lines with no JUCE, plus its wiring in
+`AudioEngine.{h,cpp}`, `MixerComponent.h`, `ProjectIO.cpp`, `AutomationCurve.h`
+and `PlaylistComponent.cpp`. Picked as an audit of recently merged work. The
+night of 2026-10-27 set these files aside by name because #59 was open and
+changing them, so nothing had read them since they were written.
 
 It is also the highest stake shape of change this project sees. The law being
 wrong makes a fader feel odd; the migration being wrong moves every fader in
-every project the owner has ever saved, and neither errors, crackles or looks
+every project the owner has ever saved, and neither errors, crackles nor looks
 wrong on a meter.
 
-Still to do: mutation test `Tests/FaderLawTest.cpp` against `FaderLaw.h` with
-the sanitizers, audit the wiring independently, and check the header's measured
-claims still come from something that runs.
+### The law and the migration are right, and the test is as strong as it looks
+
+Said plainly because it is the result. 47 mutations of `Source/FaderLaw.h`,
+every one built with the sanitizers `Tests/run.sh` uses
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`). 37 caught,
+10 survived, and **every one of the ten is a provable no-op rather than a
+gap**, which is unusual and is the reason this entry is short on findings
+about the arithmetic.
+
+Caught, among others: every one of the eight segment constants in the forward
+law and all four in the inverse, each of the three breakpoints moved, the two
+middle segments swapped in both directions, the clamp removed, a corrupt
+position reading as unity rather than as the floor, amplitude decibels written
+as power decibels in either direction, the ceiling, the floor, the unity point,
+the old travel restored, the old law's square dropped, and both of the two
+ways to get the migration wrong that the header warns about: routing it
+through the fraction of the travel rather than through the gain (caught at
+0.640000 against 0.750000) and handing a gain to `dbToPosition` as though it
+were a decibel figure.
+
+The ten survivors are three families, and each is a no-op for a structural
+reason rather than by luck:
+
+**Six boundary flips, `>=` to `>`, at every breakpoint in both directions.**
+The law is continuous at all three breakpoints, so the segment above and the
+segment below return the same double there and which one claims the boundary
+cannot be observed. Measured at the breakpoints: the two segments differ by
+exactly 0.000e+00 at 0.0625, 0.25 and 0.5. The same holds for the inverse's
+two end guards: at -90 dB the floor branch gives position 0 and the bottom
+segment also gives exactly 0, and at +10 dB the ceiling branch gives 1 and the
+top segment also gives exactly 1.
+
+**Three guards whose fall-through reaches the same answer.** Dropping the NaN
+check in `gainToPosition` sends a NaN through `log10` into `dbToPosition`,
+which rejects a non-finite figure itself and returns the same 0. The header
+already says this in as many words, and it is now confirmed by measurement
+rather than by reading. `gain <= 0` relaxed to `gain < 0` sends a gain of zero
+through `log10` to minus infinity and `dbToPosition` saturates it to the same
+0. `legacyPosition <= 0` relaxed to `< 0` reaches `legacyPositionToGain`,
+which returns 0 for a position of 0, and `gainToPosition` of 0 is the same 0.
+All three guards exist to make the intent readable and to keep a logarithm of
+zero off the path, not to change an answer, which is what the header claims
+for them.
+
+**One redundant clamp.** Removing `std::min (legacyCurveValue, 1.0)` from
+`legacyCurveValueToPosition` changes nothing, because
+`legacyPositionToGain` clamps to the old travel itself one call further in. A
+curve value of 2.0 gives 0.943820 either way.
+
+### Still to do
+
+Correcting four claims that nothing produces, and one assertion in
+`AutomationCurveTest` that cannot fail in the direction it was written for.
+
 
 ---
 
