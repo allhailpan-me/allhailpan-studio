@@ -12,6 +12,7 @@
 #include "InputSource.h"
 #include "RecordAlign.h"
 #include "PanLaw.h"
+#include "FaderLaw.h"
 #include "SoloGraph.h"
 
 // ---------------------------------------------------------------------------
@@ -182,7 +183,16 @@ public:
     struct InsertControls
     {
         juce::String name;
-        std::atomic<float> volume { 0.8f };     // fader position 0..1.25 (0.8 = 0 dB)
+        // A fader position, 0 at the bottom and 1 at the top, which
+        // FaderLaw.h turns into gain. Unity is three quarters of the way up.
+        //
+        // It used to be stored over 0..1.25 with unity at 0.8, which is 0.640
+        // of the travel, and the gain was (v / 0.8)^2 computed in the engine.
+        // That put unity in a place no console puts it and gave the fader a
+        // ceiling of +7.75 dB, which is 1.25 divided by 0.8 and then squared
+        // rather than a figure anybody chose. A project saved under the old
+        // range is translated on load, through gain: see FaderLaw.h.
+        std::atomic<float> volume { (float) FaderLaw::unityPosition };
         std::atomic<float> pan    { 0.0f };     // -1..1
 
         // Whether that pan control is a balance control or a panner. Balance

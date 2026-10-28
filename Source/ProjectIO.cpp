@@ -33,7 +33,40 @@ namespace
     // solo isolate somebody set on their reverb returns would be silently
     // gone, so solo would then behave differently from the way they set it up
     // with nothing to say that the file had said otherwise.
-    constexpr int formatVersion = 6;
+    // 7 changes what a stored fader position means. Up to 6 it was a number
+    // in 0..1.25 whose gain was (v / 0.8)^2, so unity sat at 0.640 of the
+    // travel and the ceiling was +7.75 dB. It is now a position in 0..1 under
+    // the law in FaderLaw.h, where unity is exactly 0.75 and the ceiling is
+    // +10 dB.
+    //
+    // This is the one bump so far where older files do **not** load unchanged,
+    // and that is the whole difficulty of it. Two things carry the old
+    // meaning and both have to be translated: each insert's `volume`, and the
+    // value of every automation curve aimed at one, because a curve is stored
+    // 0..1 and was multiplied by the old travel of 1.25 to reach a position.
+    //
+    // Both go through gain, never through the fraction of the travel. Going
+    // through the travel fraction looks right and is a silent disaster: old
+    // unity is 0.640 of the travel and new unity is 0.75, so a fader saved at
+    // 0 dB would come back at position 0.640, which is -4 dB. Every track of
+    // every existing project would come back quieter, by an amount depending
+    // on where its fader happened to be, and it would present as "my old
+    // mixes all sound wrong and the balance has moved" with nothing anywhere
+    // in the audio path to blame for it. FaderLaw::legacyToPosition and
+    // FaderLaw::legacyCurveValueToPosition are that translation, and they are
+    // tested without JUCE because this loader is not.
+    //
+    // A curve's points are translated and the line between two of them is not,
+    // because the two laws interpolate differently. A migrated fade therefore
+    // keeps its ends and changes shape in between. See FaderLaw.h for the
+    // figures: nothing over a fade of 20 dB or less, and real over a long one.
+    //
+    // The bump is unconditional, as 2 to 6 were, and here it has to be: an
+    // older loader reading a file saved by this build would read every fader
+    // position as though it were still the old range, so a mix left at unity
+    // would come back at 0.75 of 1.25 under the old law, which is +3.5 dB on
+    // every strip at once. Refusing to open it is the only honest answer.
+    constexpr int formatVersion = 7;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -310,7 +343,7 @@ void ProjectIO::resetEngine (AudioEngine& engine)
 
         auto& ctl = engine.insert (i);
         ctl.name = i == 0 ? juce::String ("Master") : "Insert " + juce::String (i);
-        ctl.volume.store (0.8f);
+        ctl.volume.store ((float) FaderLaw::unityPosition);
         ctl.pan.store (0.0f);
         ctl.panMode.store (PanLaw::defaultMode);
 
@@ -675,6 +708,11 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     if (root->getIntAttribute ("version", 1) > formatVersion)
         return juce::Result::fail ("This project was made with a newer version of ALLHAILPAN Studio. Please update.");
 
+    // Read before anything is restored, because two things in this file carry
+    // a meaning that changed at version 7 and both need to know whether they
+    // are reading an older one. See the note on formatVersion.
+    const int fileVersion = root->getIntAttribute ("version", 1);
+
     const auto projectDir = file.getParentDirectory();
 
     resetEngine (engine);
@@ -761,7 +799,32 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
             auto& ctl = engine.insert (i);
             ctl.name = e->getStringAttribute ("name", ctl.name);
-            ctl.volume.store ((float) juce::jlimit (0.0, 1.25, e->getDoubleAttribute ("volume", 0.8)));
+            // A file older than 7 stores a position over 0..1.25 under the
+            // old (v / 0.8)^2 law, so it is translated through gain rather
+            // than read. A missing attribute is unity either way, which is
+            // what a file that never had a fader in it meant.
+            //
+            // The jlimit is a backstop for a file at version 7 or later, and
+            // for a legacy file it does nothing: legacyPositionToGain clamps
+            // the old position to the old travel itself, so a hand edited file
+            // claiming a position of 9 goes through the old law as 1.25 and
+            // comes back at 0.943820, which is the old ceiling of +7.75 dB and
+            // is inside the new travel. That is the same answer the old loader
+            // gave, which clamped to 0..1.25 before applying the law.
+            //
+            // Said this way round because the inner clamp is what is doing the
+            // work. A reader who takes this comment to mean the jlimit handles
+            // it would be free to delete the inner clamp, and then a stored 9
+            // would reach the new law as position 0.943820 of its own travel
+            // rather than through the old law, which is a different number.
+            const double storedVolume = e->getDoubleAttribute ("volume",
+                                            fileVersion < 7 ? FaderLaw::legacyUnityPosition
+                                                            : FaderLaw::unityPosition);
+            const double faderPosition = fileVersion < 7
+                                           ? FaderLaw::legacyToPosition (storedVolume)
+                                           : storedVolume;
+            ctl.volume.store ((float) juce::jlimit (FaderLaw::minPosition,
+                                                    FaderLaw::maxPosition, faderPosition));
             ctl.pan.store ((float) juce::jlimit (-1.0, 1.0, e->getDoubleAttribute ("pan", 0.0)));
             // Insert 0 is always a balance control whatever the file says.
             // The master is what every other insert is summed into, so there
@@ -1018,6 +1081,32 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 {
                     clip.curve->target = readTarget (*a);
                     clip.curve->points = curveFromText (a->getAllSubText());
+
+                    // A curve aimed at a fader is stored as a position, and
+                    // what a position means changed at version 7, so every
+                    // point in an older one is translated. Translating the
+                    // fader and leaving the curves would leave every drawn
+                    // fade pointing somewhere else: a curve sitting at unity
+                    // would play back at -4 dB, which is the same fault as an
+                    // untranslated fader and harder to notice, because it is
+                    // only audible where the automation is.
+                    //
+                    // What this preserves is each point, not the line between
+                    // two of them. The two laws interpolate differently, so a
+                    // migrated fade keeps its ends and changes shape in
+                    // between: nothing worth hearing over a fade of 20 dB or
+                    // less, and 13.6 dB at worst over one of 60 dB. FaderLaw.h
+                    // has the table and the reason subdividing the segment was
+                    // not done here.
+                    //
+                    // Done here rather than in curveFromText because only
+                    // this one target kind means a fader position: a pan curve
+                    // and a plugin parameter curve are unaffected, and a
+                    // translation applied to all of them would quietly bend
+                    // every automation lane in the project.
+                    if (fileVersion < 7 && clip.curve->target.kind == AutoTargetKind::insertVolume)
+                        for (auto& point : clip.curve->points)
+                            point.value = FaderLaw::legacyCurveValueToPosition (point.value);
                 }
 
                 // Normalised on the way in rather than trusted, so a hand

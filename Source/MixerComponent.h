@@ -350,9 +350,14 @@ private:
 
             fader.setSliderStyle (juce::Slider::LinearVertical);
             fader.setTextBoxStyle (juce::Slider::NoTextBox, true, 0, 0);
-            fader.setRange (0.0, 1.25, 0.001);
+            fader.setRange (FaderLaw::minPosition, FaderLaw::maxPosition, 0.001);
             fader.setValue (ctl.volume.load(), juce::dontSendNotification);
-            fader.setDoubleClickReturnValue (true, 0.8);
+            // Back to exactly unity, which is what Logic's option click and
+            // Ardour's set_default_value both do. Deliberately not a snap or a
+            // detent: neither of them has one on the fader, and a snap at
+            // unity would make -0.3 dB unreachable. Ardour's only detents are
+            // on the panner and two monitor section knobs.
+            fader.setDoubleClickReturnValue (true, FaderLaw::unityPosition);
             fader.setColour (juce::Slider::trackColourId, Ahp::panel3);
             fader.setColour (juce::Slider::thumbColourId, Ahp::bone);
             fader.onValueChange = [this]
@@ -743,10 +748,19 @@ private:
                         getLocalBounds().reduced (4).withTop (23).withHeight (12), juce::Justification::centred);
 
             const float v  = ctl.volume.load();
-            const float db = juce::Decibels::gainToDecibels ((v / 0.8f) * (v / 0.8f), -100.0f);
+            // Asked of the law directly rather than converted back from the
+            // gain, so the figure printed is the figure the scale is defined
+            // in and a rounding in the gain cannot move it.
+            //
+            // Silence is the gain being zero and nothing else, which is why
+            // this asks about the position rather than comparing the decibel
+            // figure against a threshold: the bottom of the travel is -90 dB
+            // and anything below that is the fader being closed.
+            const bool  silent = FaderLaw::positionToGain ((double) v) <= 0.0;
+            const float db     = (float) FaderLaw::positionToDb ((double) v);
             g.setColour (Ahp::muted);
             g.setFont (juce::FontOptions (10.0f));
-            g.drawText (db <= -99.0f ? juce::String ("-inf") : juce::String (db, 1),
+            g.drawText (silent ? juce::String ("-inf") : juce::String (db, 1),
                         getLocalBounds().withTrimmedBottom (26).removeFromBottom (14), juce::Justification::centred);
 
             // The outline Ardour draws on a strip that is quiet only because
@@ -925,7 +939,7 @@ private:
 
                 if (result == 2)
                 {
-                    ctl.volume.store (0.8f);
+                    ctl.volume.store ((float) FaderLaw::unityPosition);
                     ctl.pan.store (0.0f);
 
                     // Through the engine, and taking the solo state with it: a

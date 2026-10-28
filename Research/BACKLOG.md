@@ -27,6 +27,302 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-27: the fader law, and where unity sits on the travel
+
+### Status: built, tested, audited, and waiting on a human to merge it
+
+Pull request **#59**, marked ready for review. The tests job, `ubuntu-latest`
+and `windows-latest` are all green; `macos-latest` was still building, which is
+routine here and has not failed. The release notes are on the branch rather
+than written after the merge, so they go in with it.
+
+The session that built it was **not permitted to merge without review**, so the
+merge is the owner's to make. Nothing is left to do on the branch. A later
+night should not pick the fader law up again: if #59 is still open, it needs a
+click and not more work, and if it has been merged then this entry is the
+record of it.
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **The fader law** | **Chosen.** Deferred on 2026-10-08, 10-13, 10-15, 10-21 and 10-22, each time as a real gap that wanted a night of its own because it changes the meaning of every stored `volume` in every saved project. This is that night, and the night of 10-22 had already narrowed what is actually wrong, which is what makes it buildable in one sitting. |
+| MIDI record alignment | Deferred a sixth time, same reason and no new one: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| Punch in and punch out recording | Deferred, same reason as 10-21 and 10-22. Still wants a published answer to what happens to the audio already on the track, and still reaches `Project`, `ProjectIO`, `CompModel`, the playlist and the engine at once. |
+| A tuner | Deferred. Still wants a published pitch detector and a window. |
+| Noise shaping on export | Deferred, not re-rejected. The 10-22 entry left it as "worth a night of its own, from the paper itself, with the filter designed at the running rate", and nothing about tonight changes that. |
+
+### A correction to the 2026-10-22 entry
+
+That entry says the fader's ceiling is **+3.88 dB**. It is **+7.75 dB**. The
+law is `(v / 0.8)^2`, so the ceiling is `(1.25 / 0.8)^2 = 2.4414` as an
+amplitude, and the entry converted `1.25 / 0.8 = 1.5625` to decibels without
+squaring it first. The 2026-10-13 entry had it right at "about +7.75 dB".
+Recorded rather than quietly fixed, because the wrong figure is half as far out
+as the right one and either would have read as plausible.
+
+Everything else in that entry survives measurement, including the part that
+matters most: **the taper is not the problem.** `(v / 0.8)^2` gives the -20 dB
+to -6 dB region 25.07 per cent of the travel, against 28.17 for Ardour and
+22.50 for the X32. Three nights in a row wrote down "the taper is wrong" as the
+reason to do this work, and it was not the reason.
+
+### What was chosen, and why
+
+What is genuinely wrong is three things, none of them the curve's shape:
+
+- **Unity sits at 0.640 of the travel**, where every reference puts it between
+  0.75 and 0.782. A fader whose 0 dB point is almost two thirds of the way up
+  has a third of its travel spent on boost nobody uses.
+- **The ceiling is +7.75 dB**, which is `1.25` divided by `0.8` and then
+  squared. Nobody chose that number, and it is the same category of accident
+  as a magic constant.
+- **There is no defined floor.** The bottom of the travel is gain 0 by
+  arithmetic rather than by decision, and no part of the scale is written down,
+  so the number next to the fader cannot be checked against anything.
+
+The law adopted is the **Behringer X32's**: piecewise linear in decibels in
+four segments, unity at exactly 0.75 of the travel, ceiling +10 dB, and exact
+silence at the bottom. Three reasons, in order of weight:
+
+1. **Its inverse is exact and cheap.** A fader position has to round trip
+   through a saved project file and through automation curves without drifting,
+   and the old stored positions have to be translated by converting the old
+   gain to the new position. Within a segment the law is affine in decibels, so
+   it inverts to a floating point unit by construction: measured max position
+   round trip error 1.11e-16 against Ardour's 1.33e-15. Ardour's law needs
+   `pow(x, 8)` against `pow(x, 1/8)`, a matched pair of transcendentals.
+2. **Unity lands on a number that can be printed and typed.** Exactly 0.75,
+   and every labelled tick lands on a dyadic fraction of the travel: 1/16, 1/8,
+   3/16, 1/4, 3/8, 1/2, 5/8, 3/4, 7/8, 1. Ardour's unity is `(32/33)^8 =
+   0.7817867535191608`, which cannot be drawn as a tick without writing that
+   expression into the layout code, and which **moves to 0.6616 the moment the
+   ceiling is raised past +6 dB**, because Ardour rescales the gain rather than
+   the position. The one virtue Ardour's law has does not survive asking it for
+   a different ceiling.
+3. **The owner records through a Behringer UMC1820.** Behringer's own fader
+   convention is the one he is most likely to already have in his hands, and it
+   is the one reference here whose scale can be held against a photograph of
+   real hardware rather than against another program.
+
+The ceiling being a number somebody chose is the point of it. Ardour's
++6.0206 dB is the decibel value of the coefficient 2.0, which is the same kind
+of artefact as the +7.75 dB being replaced; Behringer printed **+10** on the
+strip.
+
+### Where the behaviour came from
+
+**The law itself could not be obtained from Behringer.** Said plainly, because
+this project keeps a record of the shape of failure where a number is present,
+plausible and unsourced. What was obtained:
+
+- **Behringer's own printed fader scale**, from the X32-TP operation manual's
+  channel strip artwork: the ticks are **+10, +5, 0, -5, -10, -20, -30, -40,
+  -50, -60, -inf**, on a 100 mm motorised fader. That is the manufacturer
+  stating the ceiling, the floor and the intermediate scale.
+- **Two independent open source implementations that agree to the digit**:
+  `jtsage/x32_osc_state` (`src/enums/mod.rs`, `level_to_string` and
+  `level_from_string`) and `bitfocus/companion-module-behringer-x32`
+  (`src/util.ts`, `floatToDB` and `dbToFloat`). Both write the same four
+  affine segments with the same breakpoints.
+- **A fourth corroboration** from Behringer's X32 MIDI table: "Faders - Value
+  95 = 0db" for 7 bit fader controllers, and `0.75 * 127 = 95.25`, which
+  rounds to 95.
+
+The strongest part of that evidence is the printed scale itself: within each
+segment Behringer's ticks are **equally spaced in decibels**, 5 dB apart in the
+top segment and 10 dB apart in the two below it. That is what a piecewise
+linear in decibels law predicts and is not what any smooth law gives, so the
+four segments are derived from the manufacturer's own artwork rather than taken
+on the implementations' word. The segments were derived from the eleven row
+tick table rather than transcribed from either implementation's code.
+
+| Segment | Position | Decibels | Forward | Inverse |
+|---|---|---|---|---|
+| 4 | 0.5 .. 1.0 | -10 .. +10 | `dB = 40p - 30` | `p = (dB + 30) / 40` |
+| 3 | 0.25 .. 0.5 | -30 .. -10 | `dB = 80p - 50` | `p = (dB + 50) / 80` |
+| 2 | 0.0625 .. 0.25 | -60 .. -30 | `dB = 160p - 70` | `p = (dB + 70) / 160` |
+| 1 | 0 .. 0.0625 | -90 .. -60 | `dB = 480p - 90` | `p = (dB + 90) / 480` |
+| - | p = 0 | -inf | gain = 0 exactly | - |
+
+The eleven row tick table, which is what the test asserts:
+
+| dB | Position | As a fraction | Gain |
+|---|---|---|---|
+| +10 | 1.0000 | 1 | 3.16227766017 |
+| +5 | 0.8750 | 7/8 | 1.77827941004 |
+| **0** | **0.7500** | **3/4** | **1.0** |
+| -5 | 0.6250 | 5/8 | 0.562341325190 |
+| -10 | 0.5000 | 1/2 | 0.316227766017 |
+| -20 | 0.3750 | 3/8 | 0.1 |
+| -30 | 0.2500 | 1/4 | 0.0316227766017 |
+| -40 | 0.1875 | 3/16 | 0.01 |
+| -50 | 0.1250 | 1/8 | 0.00316227766017 |
+| -60 | 0.0625 | 1/16 | 0.001 |
+| -inf | 0.0000 | 0 | 0.0 exactly |
+
+**Ardour's law, read from its own source** and rejected rather than guessed at.
+It is `gain_to_position` and `position_to_gain` in `libs/pbd/pbd/control_math.h`
+lines 28 to 46, not in `utils.cc` where it is usually said to be:
+`p = ((6 log2(g) + 192) / 198)^8`, with unity at `(32/33)^8` and a ceiling of
+exactly gain 2.0, which is +6.0206 dB. Its ceiling is the config file only
+variable `max-gain`, not exposed in Ardour's preferences, and
+`gain_to_slider_position_with_max` rescales the **gain**, which is why its
+unity point moves when the ceiling does.
+
+**On the authority of any of this**, from Ardour's own author, Paul Davis, on
+linux-audio-dev in May 2009: Ardour's mapping is "rather arbitrary but
+definitely comfortable", and "the specs for various standard meters and for
+various standard faders do not use the same scale". Nothing standardises a
+fader law, and the backlog should stop implying one exists.
+
+### What was confirmed as a trap rather than a source
+
+**`iec_scale` is not a fader law and must never be used as one.** It is
+`log_meter` in Ardour's `libs/ardour/ardour/logmeter.h`, sitting literally next
+to `meter_deflect_vu`, `_ppm`, `_din`, `_nordic` and `_k`. It is a **meter
+deflection** function: unity at `100/115 = 0.8696` of the scale, and a hard
+floor that returns 0 below -70 dB. It is the single most widely copied function
+in amateur audio code and copying it here would implement a VU meter's needle
+as a fader's travel. Checked: it appears nowhere in this repository.
+
+**IEC 60268-17 is the standard volume indicator and IEC TR 60268-18 is the
+digital peak programme meter.** Neither is a fader law, and the AES standards
+list has nothing on faders either. Anybody who reaches for a standard number
+here will find a meter and implement the wrong thing.
+
+### The ceilings other studios ship, and what could not be sourced
+
+| Studio | Ceiling | Source |
+|---|---|---|
+| Cubase and Nuendo | **+12 dB**, and +6 dB for projects made before Cubase 5.5 | **Primary.** Steinberg's own Project Setup documentation, "Volume Max" |
+| Ardour | **+6.0206 dB** (`max-gain = 2.0`), config file only | **Primary.** Its own source, and its author in writing |
+| Behringer X32 | **+10 dB** | **Primary.** Behringer's own printed fader scale |
+| Harrison Mixbus | Presumed Ardour's, being Ardour derived | **Inferred, not sourced.** Harrison's manual states no range |
+| Reaper, Pro Tools, Logic, Studio One | **Could not be obtained** | Nothing. Reaper's user guide PDF truncates before the page, and no Avid, Apple or PreSonus hosted document reachable from here states a fader range |
+
+The widely repeated figures for those last four, +12 for Pro Tools and Reaper,
++6 for Logic, +10 for Studio One, are **recorded here as unsourced** so that no
+later night supplies them from memory. There is no consensus ceiling: +6, +10
+and +12 are all shipping in programs whose documentation says so.
+
+Logic does document the gesture rather than the range, which is worth having:
+"Option-click the Volume fader to return it to a neutral level (0 dB gain)".
+Ardour does the same through `gain_slider->set_default_value`, and **neither
+has a detent or a snap on the fader**. Checked in Ardour's tree: the only
+detents are on the panner and two monitor section knobs. A snap at unity would
+make -0.3 dB unreachable, so there is none here either, and a double click
+returns to exactly unity.
+
+### The decisions taken without a primary source, recorded as decisions
+
+**The jump to silence at the very bottom.** The continuous part of the law
+reaches -90 dB at the bottom of the travel and position 0 is exact silence, so
+there is a discontinuity of -90 dB at one point. That is what both references
+do: Ardour special cases `pos == 0.0` to return 0.0 and its continuous part
+only reaches -192.66 dB, and Behringer prints -inf below a scale that stops at
+-60. The argument for it is that the step is **about one least significant bit of a
+16 bit file**: -90 dB is an amplitude of 3.1623e-5 and 1/32768 is 3.0518e-5,
+which is -90.31 dB, so it is 1.036 of one bit.
+
+An earlier version of this paragraph, and of the header's, said the step was
+**below** a 16 bit bit, which is false by 0.31 dB in the direction that
+flattered it. Found by the test refusing to assert it, and worth leaving the
+record of rather than quietly correcting, because it is the one number this
+decision rests on and the plausible wrong version of it read perfectly well.
+One bit at the bottom of a 16 bit file is still below what any converter
+resolves, so the argument survives being stated correctly.
+
+The alternative, making the bottom segment approach -inf continuously, was
+rejected: the gain would never reach zero, and a mixer summing sixteen inserts
+at -70 dB each is not silent. A fader pulled all the way down has to give
+nothing.
+
+**The slope is discontinuous at the three breakpoints**, jumping from 40 to 80
+to 160 to 480 decibels per full travel. This is the real console's behaviour and
+is why Behringer's printed ticks change spacing at -10 and -30, so it is a
+modelled behaviour rather than a defect, but it means an automation ramp
+crossing a breakpoint has a kink in its fade rate. Written into the header so
+the next person does not read the kink as a bug and smooth it out.
+
+**Automation curves keep storing the fader position**, so a line drawn straight
+in the lane is straight in decibels within a segment, which is what a fade is
+supposed to be. The alternative, storing gain, would make a drawn straight line
+a fade that is fast at the start and slow at the end.
+
+**No 1024 step quantisation.** The X32 quantises its fader to 1024 steps
+because its fader is a physical component behind an analogue to digital
+converter. These positions are floating point numbers. The figure is recorded
+in case a hardware control surface ever arrives: the finest step would be
+40/1023 = 0.0391 dB at the top and 480/1023 = 0.469 dB at the bottom.
+
+### The migration, which is the dangerous half
+
+Every existing project stores a fader position in 0 .. 1.25 under the old law,
+and every existing automation curve stores a value in 0 .. 1 that was multiplied
+by 1.25 to reach that same travel. Both have to be translated, and **the
+translation goes through gain, not through the fraction of the travel**.
+
+Translating the travel fraction instead is the trap, and it is worth writing
+down because it looks right: old unity is at 0.640 of the travel and new unity
+is at 0.75, so a fader stored at 0.8 would come back at a position of 0.64,
+which is **-4 dB**. Every track of every existing project would come back
+quieter, by an amount that depends where its fader was, and it would present as
+"my old mixes all sound wrong and the balance has moved" with nothing anywhere
+in the audio path to blame for it.
+
+Every old gain fits inside the new range, because the old ceiling of +7.75 dB
+is below the new +10 dB, so no existing project loses anything at the top.
+
+### What the migration cannot do, found by the audit
+
+Translating a curve translates its points and **not the line between two of
+them**, because the two laws interpolate differently: a straight legacy segment
+was linear in position under `(v / 0.8)^2`, and a straight segment now is
+linear in decibels. So a migrated fade keeps both ends exactly and changes
+shape in between, by an amount that depends on how far it travels:
+
+| The fade | Worst departure from its old shape |
+|---|---|
+| 0 dB to -3 dB | 0.065 dB |
+| 0 dB to -10 dB | 0.716 dB |
+| 0 dB to -20 dB | 0.570 dB |
+| 0 dB to -60 dB | 13.600 dB, worst at 87 per cent through |
+| 0 dB to silence | 7.959 dB at the midpoint, 15.918 at three quarters |
+
+So a short fade is untouched and a long fade out drops away noticeably quicker
+than it did. `point.bend` is carried across untranslated as well, so a bent
+legacy segment is reshaped twice.
+
+Worth being clear that the new shape is the better one: a fade linear in
+decibels is what a fade is supposed to be, which is the same argument
+`AutomationCurve.h` already makes about its own bend. That is a reason the
+change is acceptable and it is not a reason to leave it unsaid, which is why it
+is in the header, here, and in the release notes.
+
+**Subdivision, deferred to a night of its own.** Holding the old path means
+sampling the legacy curve and emitting straight pieces in the new space, which
+turns somebody's two point fade into a nine or seventeen point one: the gesture
+they drew stops being editable as the gesture they drew. It also needs its own
+care at the tail of a fade to silence, where the old path runs to minus
+infinity and the new one stops at -90 dB, so a naive subdivision measures worse
+than no subdivision at all there. That is a feature with a test, not a line
+inside a loader. Whoever takes it should decide first whether preserving the
+drawn path is worth the point count, because it may well not be.
+
+`FaderLawTest.cpp` asserts the table above, so the gap cannot quietly become
+something else.
+
+### Where the arithmetic lives
+
+`Source/FaderLaw.h`, with no JUCE in it, so the whole law and the whole
+migration are testable under sanitizers. The engine keeps only the load and the
+one multiply. This is the same split `PanLaw.h` already uses and for the same
+reason: a fader law a decibel out does not error, does not crackle, and looks
+entirely normal on a meter.
+
+---
+
 ## 2026-10-22: a bit depth to export at, and the dither that makes it honest
 
 ### What was looked at

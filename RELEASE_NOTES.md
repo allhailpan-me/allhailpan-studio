@@ -1,6 +1,57 @@
-Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**Your faders have a proper scale now, and 0 dB is three quarters of the way
+up.** The number under each fader means something it can be checked against,
+and the fader itself sits where a fader sits on a desk.
+
+What was there before was not chosen so much as arrived at. Unity, the point
+where a track is neither turned up nor down, sat about two thirds of the way up
+the travel, so a third of every fader was spent on boost. The top of the travel
+was +7.75 dB, which is not a number anybody picked: it falls out of the
+arithmetic that was in there. And the bottom had no defined value at all, so
+the figure printed under the fader could not be held against anything.
+
+The scale is the one on a Behringer desk: +10 at the top, 0 at three quarters,
+-5 and -10 as you come down through the middle, then -20, -30, -40, -50, -60,
+and silence at the very bottom. Pulling a fader all the way down now gives you
+nothing, exactly, rather than something very quiet. Double click a fader and it
+goes back to precisely 0 dB. There is no detent or snap at unity, deliberately,
+because a snap there would make -0.3 dB impossible to set.
+
+Behringer was the reference rather than Ardour or Cubase for two reasons: it is
+the desk convention most likely to already be in your hands given what you
+record through, and its scale lands on numbers that can actually be drawn on a
+fader. Ardour puts unity at 0.782 of the travel, which is a figure you cannot
+mark, and it moves if you change the ceiling. Worth saying that nothing in the
+audio world standardises this. There is no specification for a fader law, every
+studio picks one, and the ceilings genuinely disagree: Cubase uses +12, Ardour
++6, this desk +10.
+
+**Every mix you have already saved comes back at exactly the level you left
+it.** That was the part worth being careful about. The faders will be in
+different places on screen, because the scale under them changed, but what each
+track is actually doing is identical to the hundredth of a decibel. The
+translation goes through the gain rather than through where the handle sat,
+which sounds like a technicality and is the whole thing: done the other way,
+every track in every old project would have come back about 4 dB quieter, by a
+different amount each, and it would have sounded like the mix had drifted with
+nothing to point at.
+
+Two things to know about old projects. Volume automation is translated the same
+way, so every point you drew plays back at the level you drew it at, but the
+line between two points is a slightly different shape than it was, because a
+fade is now drawn in decibels, which is what a fade should be. On a short fade
+that is nothing you would hear. On a long fade out it is real: the fade drops
+away a bit quicker than it used to. If you have a long fade at the end of
+something and it sounds faster than you remember, that is this, and the new
+shape is the more conventional one.
+
+And this version changes the project file, so **a project saved by this build
+cannot be opened by an earlier one.** It will say so clearly rather than
+opening it wrong, but if you keep an older copy of the studio around, do not
+save over your only copy of something you still need to open there.
 
 **You can choose what an export is written as, and 16 bit is dithered.**
 Preferences has an Export tab with two settings: the bit depth, and whether

@@ -341,6 +341,7 @@ braces on their own line.
 | `LoudnessMeter.h` | ITU-R BS.1770-4, verified against EBU Tech 3341 |
 | `TruePeak.h` | True peak to BS.1770-4 Annex 2: the 4x oversampling the standard specifies. No JUCE |
 | `PanLaw.h` | What the pan control means: a balance control or a panner, and the law a panner follows. No JUCE |
+| `FaderLaw.h` | What a fader's travel means: unity at three quarters of it, a +10 dB ceiling, silence at the bottom, and the translation of every position saved under the law before it. No JUCE |
 | `SongLength.h` | Where playback loops with no loop range set: the end of the bar the last clip finishes in. No JUCE |
 | `LatencyDelay.h` | The fixed delay used to line signal paths up |
 | `RecordAlign.h` | Where a recorded take belongs: the round trip taken back off a capture, and the split into loop passes. No JUCE |

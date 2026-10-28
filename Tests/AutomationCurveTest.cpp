@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 
 #include "AutomationCurve.h"
+#include "FaderLaw.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -558,13 +559,26 @@ static void testControlRanges()
 
     // The named positions, so that changing a range has to be a decision
     // rather than an accident.
+    // Asserted in decibels rather than against the range's own constants,
+    // which is the difference between checking that two numbers in the same
+    // file agree and checking that automation can reach the fader. The old
+    // version of this compared autoControlValue against kMaxFaderGain, so it
+    // would have passed unchanged if both had been wrong together.
     checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 1.0),
-                (double) kMaxFaderGain, 1.0e-9, "a curve at the top does not reach the top of the fader");
+                FaderLaw::maxPosition, 1.0e-9, "a curve at the top does not reach the top of the fader");
+    checkClose (FaderLaw::positionToDb (autoControlValue (AutoTargetKind::insertVolume, 1.0)),
+                FaderLaw::ceilingDb, 1.0e-9, "a curve at the top is not the fader's ceiling");
     checkClose ((double) autoControlValue (AutoTargetKind::insertVolume, 0.0),
                 0.0, 0.0, "a curve at the bottom does not silence the fader");
-    checkClose (autoCurveValueFor (AutoTargetKind::insertVolume, (double) kUnityFaderGain),
-                (double) kUnityFaderGain / (double) kMaxFaderGain, 1.0e-9,
+    check (FaderLaw::positionToGain (autoControlValue (AutoTargetKind::insertVolume, 0.0)) == 0.0,
+           "a curve at the bottom is not exact silence");
+    checkClose (autoCurveValueFor (AutoTargetKind::insertVolume, FaderLaw::unityPosition),
+                FaderLaw::unityPosition, 1.0e-9,
                 "0 dB is not where the fader's own unity is");
+    checkClose (FaderLaw::positionToDb (autoControlValue (AutoTargetKind::insertVolume,
+                                            autoCurveValueFor (AutoTargetKind::insertVolume,
+                                                               FaderLaw::unityPosition))),
+                0.0, 1.0e-9, "a curve drawn at the resting fader does not play back at 0 dB");
 
     checkClose ((double) autoControlValue (AutoTargetKind::insertPan, 0.5), 0.0, 1.0e-9,
                 "the middle of a pan curve is not centre");
