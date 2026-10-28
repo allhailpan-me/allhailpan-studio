@@ -1067,6 +1067,118 @@ int main()
         checkExact (legacyPositionToGain (legacyUnityPosition), 1.0, "old unity was not unity gain");
     }
 
+    // ---- the figures the prose rests on ------------------------------------
+    //
+    // Every number below is quoted in a comment somewhere that a reader will
+    // lean on, and none of them was produced by anything that runs until now.
+    // Three of them were wrong when this was written, which is the reason this
+    // section exists rather than an argument that it should.
+    std::printf ("the counterfactuals and figures the comments quote\n");
+
+    {
+        // The counterfactual the migration's whole emphasis rests on: what a
+        // fader saved at old unity would come back at if the migration went
+        // through the fraction of the travel instead of through the gain.
+        // Quoted in four comments across FaderLaw.h and ProjectIO.cpp, and as
+        // "-4 dB" in all four until tonight. It is exactly -4.40, and every
+        // other figure in those headers is given to four significant digits.
+        checkExact (legacyUnityPosition / legacyMaxPosition, 0.64,
+                    "old unity is not 0.640 of the old travel");
+        checkClose (positionToDb (legacyUnityPosition / legacyMaxPosition), -4.40, 5.0e-13,
+                    "the migration counterfactual is not -4.40 dB");
+
+        // What an older build would read out of a file saved by this law, if
+        // the format version had not been bumped. This is the paragraph in
+        // ProjectIO.cpp that justifies making the bump unconditional, and the
+        // point of it is the shape rather than the size: the error is a
+        // different number at every point on the travel, so the balance moves
+        // and no move of the master puts it back. Asserted as the three
+        // figures that paragraph now quotes.
+        struct Reading { double stored; double expectedError; const char* what; };
+
+        const Reading readings[] =
+        {
+            { unityPosition, -1.12, "a strip left at unity" },
+            { maxPosition,   -6.12, "a strip at the top of the travel" },
+            { 0.0625,       +15.71, "a strip down at -60 dB" }
+        };
+
+        double lowest  =  1.0e9;
+        double highest = -1.0e9;
+
+        for (const Reading& r : readings)
+        {
+            // The old loader's own arithmetic, which is what an older build
+            // still contains: it clamped to the old travel and applied
+            // (v / 0.8)^2. legacyPositionToGain is that function preserved.
+            const double asOldLoaderReadsIt = 20.0 * std::log10 (legacyPositionToGain (r.stored));
+            const double error = asOldLoaderReadsIt - positionToDb (r.stored);
+
+            checkClose (error, r.expectedError, 0.005,
+                        std::string (r.what) + " does not move by the figure the format bump cites");
+
+            lowest  = std::min (lowest,  error);
+            highest = std::max (highest, error);
+        }
+
+        // The claim is that this is not a uniform offset. A single figure "on
+        // every strip at once" would have a spread of zero, and an earlier
+        // version of that paragraph said exactly that.
+        check (highest - lowest > 20.0,
+               "an older build's misreading is close to uniform, so the balance would not move");
+
+        std::printf ("  an older build reading this law's file: %+.2f dB to %+.2f dB across the travel,"
+                     " a spread of %.2f dB\n", lowest, highest, highest - lowest);
+
+        // The cost of the version gate misfiring in the other direction: a
+        // file already saved under this law, migrated a second time. Nothing
+        // in the loader does this, and the gate that prevents it needs JUCE
+        // and so is not compiled here, so this pins what it is worth rather
+        // than that it is prevented.
+        checkClose (positionToDb (legacyToPosition (unityPosition)), -1.12, 0.005,
+                    "unity migrated twice does not land where the log says");
+        check (positionToDb (legacyToPosition (0.0625)) - positionToDb (0.0625) > 15.0,
+               "a second migration does not move a quiet strip up, so the gate guards nothing");
+
+        // Both halves of the warning in ProjectIO.cpp about the inner clamp.
+        // A hand edited position of 9 saturates to the old ceiling as the code
+        // stands, and the gain it would reach with that clamp deleted is
+        // 126.5625, which the new law saturates to the top of its travel: the
+        // +10 dB the warning now cites, not the 0.943820 it used to.
+        checkExact (legacyToPosition (9.0), legacyToPosition (legacyMaxPosition),
+                    "a hand edited old position of 9 does not saturate to the old ceiling");
+        checkClose (positionToDb (legacyToPosition (9.0)), 7.7528, 1.0e-4,
+                    "the old ceiling is not +7.75 dB");
+
+        const double unclamped = (9.0 / legacyUnityPosition) * (9.0 / legacyUnityPosition);
+        checkCloseRelative (unclamped, 126.5625, 1.0e-15,
+                            "the gain an unclamped stored 9 reaches is not 126.5625");
+        checkExact (positionToDb (gainToPosition (unclamped)), ceilingDb,
+                    "an unclamped stored 9 does not saturate at the new ceiling");
+
+        // The two clamps in the curve path are redundant, and a reader is
+        // entitled to know which one is load bearing. Removing the outer one
+        // was a surviving mutation tonight, and it survives because
+        // legacyPositionToGain clamps to the old travel a call further in.
+        for (double c : { 1.0 + 1.0e-12, 2.0, 1.0e9 })
+            checkExact (legacyCurveValueToPosition (c),
+                        gainToPosition (legacyPositionToGain (c * legacyMaxPosition)),
+                        "the outer curve clamp is doing something the inner clamp does not");
+
+        // The step at the bottom of the travel, which is the one decision in
+        // this header with no manufacturer document behind it. The header's
+        // argument is that the step is about one least significant bit of a
+        // 16 bit file, and it is 1.036 of one rather than less than one. An
+        // earlier version of that sentence claimed smaller.
+        const double stepInBits = std::pow (10.0, floorDb / 20.0) * 32768.0;
+        checkClose (stepInBits, 1.0362, 5.0e-4,
+                    "the step down to silence is not the stated fraction of a 16 bit bit");
+        check (stepInBits > 1.0,
+               "the step down to silence is being claimed as smaller than one bit again");
+        std::printf ("  the step down to silence is %.4f of a 16 bit LSB, and the argument needs it near one\n",
+                     stepInBits);
+    }
+
     if (failures == 0)
         std::printf ("FaderLawTest: all checks passed\n");
     else

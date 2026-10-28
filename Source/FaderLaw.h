@@ -161,7 +161,16 @@ namespace FaderLaw
 
     /** The ceiling, +10 dB, and the lowest decibel figure the continuous part
         of the law reaches. Named rather than written as literals at the call
-        sites because the interface draws the scale and the tests assert it.
+        sites so that the law has one statement of where its ends are.
+
+        Who reads them, said accurately because the first version of this
+        comment claimed the interface draws a scale from them: only the tests,
+        in `FaderLawTest.cpp` and `AutomationCurveTest.cpp`. Neither constant
+        appears anywhere in `Source` outside this header. The mixer strip is a
+        plain vertical slider with a numeric decibel readout beside it and no
+        printed ticks, so the eleven figures this law is derived from are
+        asserted and not drawn. Drawing them is worth doing and is not done
+        yet.
 
         `floorDb` is where the bottom of the travel sits, not where silence is:
         silence is position 0 and nothing else. */
@@ -206,11 +215,24 @@ namespace FaderLaw
         const double p = std::clamp (position, minPosition, maxPosition);
 
         // Ordered from the top down because that is where a fader spends its
-        // life, and each test is the lower edge of the segment above. The
-        // forward direction branches on position and the inverse below
-        // branches on decibels, which is the asymmetry worth being careful
-        // about: a boundary made inclusive on one side and exclusive on the
-        // other is silent everywhere except at the breakpoint itself.
+        // life, and each test is the lower edge of the segment above.
+        //
+        // Which side of each comparison the boundary falls on is a tidiness
+        // rather than a decision, and that is worth saying because it reads
+        // like one. The law is continuous at all three breakpoints, so the
+        // segment above and the segment below return the same double there
+        // and whichever claims the boundary cannot be told apart. Measured:
+        // the two segments differ by exactly zero at 0.0625, 0.25 and 0.5,
+        // and flipping every `>=` here and in the inverse to `>` moves no
+        // reading in the test suite. The same holds at the two ends, where
+        // the floor branch and the bottom segment both give position 0 at
+        // -90 dB and the ceiling branch and the top segment both give 1 at
+        // +10 dB.
+        //
+        // What is not free is the breakpoint value itself. Moving 0.5 to 0.55
+        // puts a jump of tens of decibels at one position and leaves the rest
+        // of the law correct, which is why the test approaches each breakpoint
+        // a single double at a time rather than on any grid.
         if (p >= 0.5)    return p * 40.0  - 30.0;
         if (p >= 0.25)   return p * 80.0  - 50.0;
         if (p >= 0.0625) return p * 160.0 - 70.0;
@@ -327,7 +349,8 @@ namespace FaderLaw
         the whole content of this function and it is worth the emphasis,
         because going through the travel fraction looks right and is a silent
         disaster: old unity is 0.640 of the travel and new unity is 0.75, so a
-        fader saved at 0 dB would come back at position 0.640, which is -4 dB.
+        fader saved at 0 dB would come back at position 0.640, which is
+        -4.40 dB.
         Every track of every existing project would come back quieter, by an
         amount depending on where its fader happened to be, and it would
         present as "my old mixes all sound wrong and the balance has moved"
@@ -362,7 +385,7 @@ namespace FaderLaw
         The new travel is 0 .. 1, so a curve value and a position are now the
         same number, and translating the fader without translating the curves
         would leave every drawn fade pointing somewhere else: a curve that sat
-        at unity would come back at -4 dB, the same fault as above and harder
+        at unity would come back at -4.40 dB, the same fault as above and harder
         to see because it only sounds wrong where the automation is playing.
 
         **What this cannot translate is the line between two points, and that
