@@ -72,10 +72,159 @@ for them.
 `legacyPositionToGain` clamps to the old travel itself one call further in. A
 curve value of 2.0 gives 0.943820 either way.
 
-### Still to do
+### Six claims that nothing produced, one of them load bearing
 
-Correcting four claims that nothing produces, and one assertion in
-`AutomationCurveTest` that cannot fail in the direction it was written for.
+The arithmetic is sound and the prose around it was not. Every figure below was
+checked against the real header rather than reasoned about, and all six are
+corrected and now asserted in `FaderLawTest` so they cannot drift again.
+
+**The sentence justifying the one irreversible decision in the change.** The
+project file format version is bumped unconditionally at `ProjectIO.cpp:64`, so
+a file saved by this build cannot be opened by an earlier one at all. The
+paragraph defending that said an older loader would read "+3.5 dB on every
+strip at once". It is wrong in size, in sign and in shape. Measured against the
+old law preserved in `legacyPositionToGain`:
+
+    stored 1.0000  new law  +10.000 dB   an old build reads  +3.876 dB   -6.124
+    stored 0.7500  new law   +0.000 dB   an old build reads  -1.121 dB   -1.121
+    stored 0.5000  new law  -10.000 dB   an old build reads  -8.165 dB   +1.835
+    stored 0.2500  new law  -30.000 dB   an old build reads -20.206 dB   +9.794
+    stored 0.0625  new law  -60.000 dB   an old build reads -44.288 dB  +15.712
+
+A mix left at unity comes back 1.12 dB **quieter**, not 3.5 dB louder, and the
+error is a different number at every point on the travel: a spread of 21.84 dB
+across it. So the failure is a balance change rather than a level change, which
+is the worse of the two and cannot be undone by moving the master. The decision
+is right and the gate works. Only the argument for it was wrong, and it was
+wrong in the direction that flattered it, which is the second time this project
+has found that exact shape in a sentence a decision rests on.
+
+**A warning that argued for the deletion it exists to prevent.** The loader
+holds a `jlimit` and, one call further in, `legacyPositionToGain` clamps the old
+position to the old travel. The comment at `ProjectIO.cpp:815` tells the next
+reader not to delete the inner clamp, and then quotes 0.943820 as what would
+happen if they did. 0.943820 is what the code gives **with** the clamp. Without
+it a hand edited `volume="9"` reaches a gain of 126.5625 and saturates at the
+new ceiling: +10 dB, where the old loader gave +7.75 dB, and the `jlimit`
+cannot catch it because 1.0 is inside its own range. A reader who checked that
+comment against the code would have concluded the clamp was a no-op and removed
+it. This is the latency graph's fault in a new place: a comment claiming the
+opposite of what the code does.
+
+**A fade written the wrong way round.** `AutomationCurve.h` explains storing a
+position rather than a gain by saying that storing the gain would make a
+straight line "fast at the start and slow at the end". For a fade out, linear
+in gain is the other way round: it reaches -6 dB only at the halfway point,
+-20 dB at nine tenths and -40 dB at ninety-nine hundredths, so nearly all the
+audible travel is in the last tenth of the gesture. True for a fade in, and the
+direction that matters here is a fade out.
+
+**A scale nothing draws.** `ceilingDb` and `floorDb` were said to be named
+constants "because the interface draws the scale and the tests assert it".
+Neither appears anywhere in `Source` outside `FaderLaw.h`; the only consumers
+are two test files. The mixer strip is a plain vertical slider with a numeric
+decibel readout and no printed ticks, so the eleven figures this law is derived
+from are asserted and not drawn. The release notes promise the user a Behringer
+scale beside the fader. The positions are all correct under the law, and there
+is nothing there to look at. Recorded as the honest statement plus a note that
+drawing it is worth doing and is not done.
+
+**A counterfactual quoted to one digit where everything else has four.** The
+figure for a migration routed through the fraction of the travel instead of
+through the gain appears as "-4 dB" in four comments. It is -4.4000. In a header
+that quotes 0.943820, 7.11e-15 and 13.600, a round -4 reads as a different kind
+of number than it is.
+
+**One claim that was true and unobservable.** The forward law's comment presents
+the inclusivity of its segment comparisons as an asymmetry "worth being careful
+about", silent "everywhere except at the breakpoint itself". It is silent at the
+breakpoint too, because the law is continuous there: the segment above and the
+segment below return the same double. That is why six of the ten surviving
+mutations survived. Rewritten to say what is actually fragile, which is the
+breakpoint value rather than the comparison: moving 0.5 to 0.55 was caught at
+once.
+
+### One test that could not fail in the direction it was written for
+
+`Tests/AutomationCurveTest.cpp` asserts that a curve at the top of its range
+reaches the top of the fader, in two ways, and its comment credited the wrong
+one. `FaderLaw::positionToDb` clamps its argument before it branches, so
+comparing it against `ceilingDb` answers exactly +10 dB for a position of 1, of
+1.25, of 2 and of a billion alike. It catches an undershoot and is blind to an
+overshoot, which is the direction a silent return of the old 1.25 travel comes
+from. The comment called that check the strengthening and dismissed the
+comparison against `FaderLaw::maxPosition`, which is the line that was actually
+doing the work, as "two numbers in the same file agreeing".
+
+Proven rather than reasoned: scaling both directions of
+`autoControlValue`/`autoCurveValueFor` by 1.25, which restores the old travel
+on both sides and is exactly the regression that would move every drawn fade,
+was caught by that one line alone. The overshoot is now asserted on the raw
+position where the clamp cannot reach it, and the same mutation is caught by
+two checks. The comment says which does what.
+
+### What the wiring looks like, which is clean
+
+Audited independently, with every numeric claim rechecked here against the real
+header. No behavioural fault.
+
+- **The version gate cannot misfire in either direction.** `formatVersion = 7`
+  is written in one place and read in one, both migrations gate on the same
+  `fileVersion < 7`, and `load` is the only entry point and resets the engine
+  and project first, so there is no import, append or autosave path that
+  re-enters a migration on already migrated state. A v6 file is migrated once,
+  a v7 file is read raw, an older build refuses a v7 file outright through the
+  newer-than-us check. End to end: stored 0.8, old unity, comes back 0.750000
+  exactly; stored 1.25, the old ceiling, comes back 0.943820, which is +7.7528
+  dB, the same gain the old loader gave; stored 0 is exact silence; a missing
+  attribute is unity under both versions.
+- **Playback matches export.** `FaderLaw::positionToGain` is called from
+  exactly one place in the engine, inside `processInsert`, which both the device
+  callback and `renderOffline` reach, the stem sink included. There is no second
+  fader computation anywhere. Send levels are raw linear gains that never went
+  through a fader law and correctly needed no migration.
+- **The audio thread is clean.** Once per insert per block, seventeen per
+  block, not per sample: a finite test, a clamp, up to three comparisons and
+  one `std::pow`. No allocation, lock, log or container growth. The engine
+  never calls `gainToPosition`, so it never pays the `log10`: its only caller
+  is the migration, on the message thread inside the loader. The new code is
+  also more robust than the old on this path, because a NaN position now gives
+  gain 0 rather than filling the buffer with NaN.
+- **New state needs four things, and this change introduces none.** Insert
+  volume lives in `AudioEngine::InsertControls`, is saved, restored, and reset
+  in `resetEngine`, which both `load` and `newProject` call. It was never in
+  the undo snapshot and still is not, which is right: #59 changes the meaning
+  of an existing attribute rather than adding state.
+- **Every call site of the old travel moved.** `kUnityFaderGain` and
+  `kMaxFaderGain` are gone from `Source` entirely and no `1.25` survives
+  outside comments. The slider range and double click value, the context menu
+  reset, the decibel readout, the automation clamp, the atomic's default, the
+  loader default, the automation lane's rest rule and both directions of the
+  curve conversion all moved. The places a missed call site could have hidden
+  were checked too: no modulator can be aimed at a fader, the master readout is
+  a peak meter rather than a fader, and there is no second fader anywhere in
+  the mixer.
+
+### A gap worth a night of its own
+
+**Nothing executes the migration's wiring.** The law and the migration are
+tested to half a million cases each, and the decisions that call them are all
+in `ProjectIO.cpp`, which needs JUCE and so is compiled by neither the test job
+nor anything in the sandbox. The suite stays green if somebody drops
+`fileVersion < 7` from either migration, migrates `insertPan` curves too, or
+drops the curve migration entirely.
+
+The code as merged does none of these and no path to any of them could be
+constructed. But what the gate is worth is now pinned in `FaderLawTest` rather
+than left to a reader: a v7 file read as legacy a second time moves unity down
+1.12 dB, the old ceiling down 4.88 dB and a strip at -60 dB **up** 15.71 dB, so
+it is the same balance change as above and it would present as "the mixes I
+saved since the update have moved" with nothing in the audio path to blame.
+
+A small harness stubbing the three JUCE calls the volume hunk uses
+(`getDoubleAttribute`, `jlimit`, `atomic<float>::store`) would execute the gate
+itself. That is the recommended target for a later night, and it is the last
+thing about this change that is not proven.
 
 
 ---
