@@ -48,11 +48,11 @@ namespace
     // Both go through gain, never through the fraction of the travel. Going
     // through the travel fraction looks right and is a silent disaster: old
     // unity is 0.640 of the travel and new unity is 0.75, so a fader saved at
-    // 0 dB would come back at position 0.640, which is -4.40 dB. Every track of
-    // every existing project would come back quieter, by an amount depending
-    // on where its fader happened to be, and it would present as "my old
-    // mixes all sound wrong and the balance has moved" with nothing anywhere
-    // in the audio path to blame for it. FaderLaw::legacyToPosition and
+    // 0 dB would come back at position 0.640, which is -4.40 dB. Every
+    // track of every existing project would come back quieter, by an amount
+    // depending on where its fader happened to be, and it would present as
+    // "my old mixes all sound wrong and the balance has moved" with nothing
+    // anywhere in the audio path to blame for it. FaderLaw::legacyToPosition and
     // FaderLaw::legacyCurveValueToPosition are that translation, and they are
     // tested without JUCE because this loader is not.
     //
@@ -1100,9 +1100,9 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                     // point in an older one is translated. Translating the
                     // fader and leaving the curves would leave every drawn
                     // fade pointing somewhere else: a curve sitting at unity
-                    // would play back at -4.40 dB, which is the same fault as an
-                    // untranslated fader and harder to notice, because it is
-                    // only audible where the automation is.
+                    // would play back at -4.40 dB, which is the same fault
+                    // as an untranslated fader and harder to notice, because
+                    // it is only audible where the automation is.
                     //
                     // What this preserves is each point, not the line between
                     // two of them. The two laws interpolate differently, so a

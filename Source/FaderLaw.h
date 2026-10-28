@@ -350,11 +350,10 @@ namespace FaderLaw
         because going through the travel fraction looks right and is a silent
         disaster: old unity is 0.640 of the travel and new unity is 0.75, so a
         fader saved at 0 dB would come back at position 0.640, which is
-        -4.40 dB.
-        Every track of every existing project would come back quieter, by an
-        amount depending on where its fader happened to be, and it would
-        present as "my old mixes all sound wrong and the balance has moved"
-        with nothing anywhere in the audio path to blame for it.
+        -4.40 dB. Every track of every existing project would come back
+        quieter, by an amount depending on where its fader happened to be,
+        and it would present as "my old mixes all sound wrong and the balance
+        has moved" with nothing anywhere in the audio path to blame for it.
 
         Silence maps to silence exactly, rather than through a logarithm of
         zero.
@@ -385,8 +384,9 @@ namespace FaderLaw
         The new travel is 0 .. 1, so a curve value and a position are now the
         same number, and translating the fader without translating the curves
         would leave every drawn fade pointing somewhere else: a curve that sat
-        at unity would come back at -4.40 dB, the same fault as above and harder
-        to see because it only sounds wrong where the automation is playing.
+        at unity would come back at -4.40 dB, the same fault as above and
+        harder to see because it only sounds wrong where the automation is
+        playing.
 
         **What this cannot translate is the line between two points, and that
         is a real limitation rather than a rounding.** The two laws interpolate
