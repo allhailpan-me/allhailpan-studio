@@ -27,6 +27,295 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-28: a tuner, and the pitch detector it is built on
+
+### Status: research recorded, building
+
+### What was looked at
+
+| Candidate | Verdict |
+|---|---|
+| **A tuner** | **Chosen.** Deferred on 10-21, 10-22 and 10-27, every time with the same one line reason: "still wants a published pitch detector and a window". That is a research problem rather than a design problem, which makes it exactly the thing to send a researcher at, and the answer came back complete. The owner records guitar, every studio and every pedal ships a tuner, and the studio has none, so tuning means reaching for something that is not this studio. |
+| MIDI record alignment | Deferred a seventh time, same reason: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| Punch in and punch out recording | Deferred, same reason as 10-21, 10-22 and 10-27. Still wants a published answer to what happens to the audio already on the track, and still reaches `Project`, `ProjectIO`, `CompModel`, the playlist and the engine at once. |
+| Noise shaping on export | Deferred, not re-rejected. Still "worth a night of its own, from the paper itself, with the filter designed at the running rate". |
+
+### What was chosen, and why
+
+YIN, implemented from the paper, with the note and cents arithmetic over it and
+a gate in front of the display.
+
+The reason for choosing a time domain estimator rather than looking for the
+tallest peak in a spectrum is the one fault that matters most here, and it is
+sourced. A plucked string's fundamental can be weak or missing and the pitch
+is still at the fundamental: Wolfe, "Musical sounds and musical signals",
+"If the fundamental is removed, the combined wave still has a period 1/f1, and
+still has the same pitch." A spectral peak picker reads the loudest partial
+and lands an octave up. The difference function dips at the period whether or
+not there is energy at that frequency. Worse, the McLeod thesis records that
+for complex tones below 200 Hz "the pitch is mainly determined by the fourth
+and fifth harmonics", and every note on a bass and the bottom four strings of
+a guitar is in that band.
+
+### Where the behaviour came from
+
+Alain de Cheveigne and Hideki Kawahara, "YIN, a fundamental frequency
+estimator for speech and music", JASA 111(4), April 2002, pp. 1917-1930,
+DOI 10.1121/1.1458024. The JASA original is paywalled; a full text copy was
+read at cagnazzo.wp.imt.fr, whose text layer has OCR damage, so every equation
+and every constant below was obtained twice in independent requests and
+cross-checked. One disagreement was found and is recorded under the traps.
+
+The six steps, as the paper defines them:
+
+- Eq. (6), the difference function: `d_t(tau) = sum_{j=1..W} (x_j - x_{j+tau})^2`.
+  Gross error rate 1.95 per cent, against 10.0 for the plain autocorrelation
+  of step 1.
+- Eq. (8), the cumulative mean normalised difference function: `d'_t(0) = 1`,
+  and otherwise `d_t(tau)` over the running mean of `d_t(1..tau)`. The paper
+  says it "starts at 1 rather than 0". Error rate 1.69 per cent.
+- The absolute threshold, **0.1**: "choose the smallest value of tau that gives
+  a minimum of d' deeper than that threshold. If none is found, the global
+  minimum is chosen instead." Error rate 0.78 per cent.
+- Parabolic interpolation over each local minimum and its two immediate
+  neighbours. Error rate 0.77 per cent.
+- The best local estimate, which takes it to 0.5 per cent and is not built
+  here. It is a time continuity heuristic for a speech corpus where F0 moves
+  continuously, and a tuner has a better conditioned version of the same idea
+  available, because the note it is looking at is meant to be steady. The
+  stability gate below is that version.
+
+### The two corrections the research made to the premise it was given
+
+Both worth recording, because either one taken the wrong way round leaves
+somebody tuning the parameter that cannot fix what they are looking at.
+
+- **The cumulative mean normalisation guards against reading too high, not too
+  low.** The paper: replacing d by d' "reduces 'too high' errors", and lets you
+  "do away with the upper frequency limit of the search range". The mechanism,
+  from the authors' own later paper, is that it "avoids 'too high' F0
+  estimation errors that arise if the algorithm incorrectly chooses the
+  zero-lag dip", which `d'_t(0) = 1` is what prevents.
+- **The guard against reading an octave down is the absolute threshold with the
+  first dip rule, and nothing else.** The paper's motivation for that step is
+  the case where "one of the higher-order dips of the difference function is
+  deeper than the period dip", and the higher order dips sit at multiples of
+  the period. So the rule is the smallest lag below the threshold, not the
+  deepest dip, and an implementation that takes the global minimum passes every
+  obvious test and reports an octave down on exactly the signal a tuner sees.
+
+### The one detail in step 5 that decides whether it was implemented or read
+
+The paper is explicit that the interpolation's two outputs come from two
+different functions, and this is the part that gets dropped. Quoting: "the
+ordinate of the interpolated minimum is used in the dip-selection process",
+and then "the estimate obtained in this way is slightly biased. To avoid this
+bias, the abscissa of the corresponding minimum of the raw difference function
+d(t) is used instead."
+
+| quantity | taken from |
+|---|---|
+| the depth, for the threshold test | the interpolated minimum of `d'` |
+| the lag, for the period | the interpolated minimum of the raw `d` |
+
+The paper reports the bias and does not state its cause, so the comment in the
+header says that rather than inventing a mechanism.
+
+### Why the interpolation is the whole accuracy budget rather than a refinement
+
+Computed from the equal tempered frequencies, and the reason the test tolerance
+is what it is:
+
+| note | sample rate | period, samples | one cent, in samples of lag |
+|---|---|---|---|
+| B0 30.8677 Hz | 44100 | 1428.68 | 0.825 |
+| B0 30.8677 Hz | 48000 | 1555.02 | 0.898 |
+| E2 82.4069 Hz | 44100 | 535.15 | 0.309 |
+| E2 82.4069 Hz | 48000 | 582.48 | 0.336 |
+
+Without sub-sample interpolation the lag quantisation alone is 1.2 cents at the
+bottom of the range and 3.2 cents at guitar low E, which is worse than every
+shipping tuner. With it, the interpolator only has to be good to about a third
+of a sample, which a three point parabola comfortably is.
+
+### The window, which is the half of the question that had been deferred
+
+The buffer the estimator has to hold is `W + tau_max`, not `W`, because
+`d_t(tau)` at the longest lag reads `x` up to `t + W + tau_max`. The paper's
+own `W = T_max = 25 ms` is that: two periods of the lowest note. Three sources
+agree on the floor and they reconcile exactly:
+
+- The paper: "the integration window must be no shorter than the largest
+  expected period", and "a larger window leads to fewer errors at the expense
+  of reduced temporal resolution".
+- de Cheveigne and Baskind, Eurospeech 2003: "time resolution is optimal (one
+  can't go below 2T)".
+- Boersma 1993: at least three periods of the minimum pitch per window.
+
+Allocating only `W` and computing `d` out to `tau_max` is an off-by-`tau_max`
+read past the end of the buffer. This project has already shipped the
+analogous fault once, in a delay line that read one sample past its buffer, so
+the bound is asserted rather than assumed.
+
+The lowest note covered is **B0, 30.8677 Hz**, the low B of a five string bass,
+which is also what Korg's own tuners are designed around: the GA-50 manual
+gives its bass range as B0 to B5 and shows the low end as 23.12 Hz, which is
+B0 taken down the five semitones its flat tuning feature offers
+(B0 = 30.8677, times 2^(-5/12), is 23.1247, matching Korg's printed figure).
+`W = 2 tau_max` gives Boersma's three periods in the buffer, which is 97 ms at
+44.1 kHz. Latency is free in a tuner and every source says a longer window
+means fewer errors.
+
+### The reference pitch, and what shipping products offer
+
+ISO 16, "Acoustics: Standard tuning frequency", specifies A = 440 Hz and was
+last confirmed in 2022. Its full text is paywalled; two catalogue entries agree
+on the value and on the half hertz tolerance it allows, which is itself about
+2 cents at A4.
+
+| product | range | step | source |
+|---|---|---|---|
+| Logic Pro Tuner | 410 to 470 Hz | 0.1 Hz | Apple's own help page |
+| Korg CA-50 | 410 to 480 Hz | 1 Hz | Korg's specification page |
+| Peterson StroboStomp HD | 390 to 490 Hz | 0.1 Hz | Peterson's own manual |
+| Boss TU-3 | 436 to 445 Hz | 1 Hz | Roland's own manual |
+| Korg Pitchblack X | 436 to 445 Hz | 1 Hz | Korg's specification page |
+
+410 to 480 in 0.1 Hz steps is taken: the widest range among the pure tuners and
+the finest step among all of them. There is no standard for the adjustable
+range, only for the 440, and the header says so.
+
+One discrepancy found and reported rather than resolved: the Boss TU-3 manual's
+specification table says 436 to 445 while its own body text says 438 to 445.
+The table is treated as primary, and the TU-3W table independently agrees with
+it.
+
+### What accuracy is worth claiming
+
+| product | claimed accuracy |
+|---|---|
+| Boss TU-3 and TU-3W | plus or minus 1 cent |
+| Korg CA-50 | plus or minus 1 cent, specified on a sine wave |
+| Korg GA-1 | plus or minus 1 cent or better, for guitar and bass sounds |
+| Korg Pitchblack X | plus or minus 0.1 cent, in strobe display mode only |
+| Peterson StroboStomp HD | 0.1 cent, true strobe |
+
+So the industry answer is two tiers, 1 cent for a chromatic tuner and 0.1 for a
+strobe, and the honest part of those specifications is the qualifications: a
+sine wave, or strobe mode only. Neither claims the figure on an arbitrary
+instrument signal. The test asserts better than 1 cent on synthetic signals
+whose answer is known exactly, and deliberately asserts no cents figure on
+anything resembling a recorded note, for the reason in the next section.
+
+Perceptual anchor, from the McLeod thesis: "humans can hear a pitch change of 8
+cents in a pure tone". One cent is well inside that.
+
+### The trap that decides whether this is right or merely present
+
+**A plucked steel string is sharp when it is struck and falls by twelve times a
+tuner's entire error budget while it rings.** Hodgkinson, Timoney and
+Lazzarini, DAFx-10, fit the fundamental of an acoustic guitar's open low E to
+`f0(t) = (f0_0 - f0_inf) exp(-t/tau) + f0_inf` and measured
+**f0_0 = 83.4 Hz, f0_inf = 82.8 Hz, tau = 0.38 s**. That is a fall of
+**12.5 cents** with a 0.38 second time constant, and 0.6 cents of it is still
+left a second after the pluck. The mechanism is tension modulation: transverse
+vibration raises the tension and so the pitch.
+
+So any test that plucks a string and asserts a cents figure without saying when
+it reads is measuring the string rather than the estimator, and a tuner with no
+gate in front of it reads sharp on every note and disagrees with the pedal on
+the floor.
+
+No manufacturer documents what to do about it. The Boss, Korg, Peterson, Apple
+and Cockos manuals were all read and none states a level gate, a hold time or a
+stability criterion. The only acknowledgements are indirect: Peterson tells the
+player to pluck with a thumb rather than a plectrum, and that "it's OK if the
+strobe image doesn't completely stop"; Korg specifies one tuner's range on a
+sine wave and another's "for guitar and bass sounds"; Apple says only "play a
+single note". So `CLAUDE.md`'s rule for where no standard exists applies: the
+gate is a decision, it is written down as one, and the arithmetic behind each
+figure is in the header.
+
+What the gate is made of, and why each part is there rather than invented:
+
+- **The periodicity test comes free from the paper.** The threshold is readable
+  as "the proportion of aperiodic power" the estimator will tolerate, so during
+  an attack nothing falls below 0.1 and the estimator is in its global minimum
+  fallback. That fallback exists so the estimator always returns something; a
+  tuner does not have to show it. Nothing below the threshold is therefore
+  reported as "not a note yet" rather than as a number.
+- **A stability requirement across consecutive frames**, which is the tuner's
+  better conditioned substitute for the step 5 the paper adds and this does not.
+- **A level floor**, because an open string ringing down ends in noise. Boersma
+  has a silence threshold for the same job, at 0.05 in his worked example, but
+  that is a speech analysis constant and is not presented here as a tuner one.
+
+The arithmetic that sets the stability figure is worth keeping, because it says
+something a tuner's manual does not. On the measured glide, the pitch moves by
+`12.5 exp(-t/0.38) (1 - exp(-dt/0.38))` cents between two frames `dt` apart, so
+at 100 ms spacing the movement between adjacent frames is 0.231 of whatever is
+still left to fall. Releasing the display when that movement drops below `c`
+cents therefore leaves about `c/0.231`, call it four and a half times `c`,
+still to come. Getting within one cent of where the string is going to settle
+means waiting for the movement to fall under about a quarter of a cent, which
+on these measured constants is roughly nine tenths of a second after the pluck.
+That is not a defect to be tuned out: it is how long the string takes. It is
+also, for what it is worth, about how long a tuning pedal appears to take.
+
+### What was deliberately not sourced, and is marked as such in the header
+
+- **No published gross error figure for YIN on guitar or bass.** The paper's own
+  words: it "has been only informally evaluated on music". The error rates
+  above are speech corpora and are not quoted as instrument figures anywhere in
+  the code or the test.
+- **The cause of step 5's interpolation bias.** The paper states the bias and
+  the remedy and not the reason.
+- **No measurement of how far a plucked string's second harmonic exceeds its
+  fundamental.** The CCRMA, UNSW and Penn State sources were read and none gives
+  a formula for plucked harmonic amplitudes against pluck position. So no
+  numeric claim about harmonic amplitudes is made. The general argument for a
+  time domain method stands on the missing fundamental and middle harmonic
+  sources quoted above, which are sourced.
+- **The McLeod Pitch Method could not be obtained.** The ICMC 2005 paper is
+  linked from the authors' own page but the href is stripped in conversion, a
+  constructed URL was refused, and it is indexed nowhere else reachable. The
+  author's thesis gives the SNAC function, but its chapter 6, which holds the
+  peak picking rule, is past the text extraction cap. The threshold 0.93 that
+  circulates for it is available only from a third party's API documentation
+  reporting what the paper uses, so it is not written down anywhere here. This
+  is the reason YIN was chosen over MPM and not a judgement about which is
+  better: YIN could be had complete, and this project cannot cite a constant it
+  only has second hand.
+- **ISO 16 and the MIDI specifications** are paywalled or behind a login. The
+  equal temperament formula is cited to Wolfe's page at the University of New
+  South Wales rather than implying a MIDI document that was not read.
+
+### Rejected
+
+- **Plain autocorrelation.** Rejected on the research rather than on taste, and
+  rejected precisely where a bass needs it: McGonegal, Rabiner and Rosenberg,
+  IEEE Trans. ASSP 25(3), 1977, found "the AUTOC method performed worst on
+  low-pitched speakers and best on high-pitched speakers", and that it needs
+  contour smoothing to be usable at all.
+- **Porting an existing implementation.** aubio is GPL and TarsosDSP is GPL
+  family, and while GPL-3.0 and AGPL-3.0 may be combined through section 13 of
+  each, neither is the paper. The equations above are the whole algorithm and
+  implementing a published algorithm from its description depends on nobody's
+  code. librosa's `yin` is ISC licensed and cites the same paper, and the right
+  use of it is offline, to generate expected values to check against, which is
+  what was done rather than porting it.
+- **A fixed 1 kHz low pass, as the paper used.** The paper low passes by
+  "convolution with a 1-kHz square window" and that is kept, but not at 1 kHz.
+  A square window of length `sr/1000` has its first null at 1 kHz, and measured
+  against its own response that puts a note at the top of a tuner's range 28 dB
+  down, which is throwing away the signal the tuner is there to read. The length
+  is chosen from the highest note being searched instead, by a stated droop
+  criterion, and the header says that this is a departure from the paper and
+  why. The paper's own warning in the other direction is respected: the cutoff
+  is never set from the detected pitch, which would be a feedback path.
+
+---
+
 ## 2026-10-27: the fader law, and where unity sits on the travel
 
 ### Status: built, tested, audited, and waiting on a human to merge it
