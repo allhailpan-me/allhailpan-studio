@@ -7,6 +7,29 @@ Newest first.
 
 ---
 
+## 2026-10-28: the fader law, and the translation of every fader already saved
+
+### In progress
+
+Target picked as an audit of recently merged work. Pull request #59 merged at
+00:33 UTC today and is the newest thing in the repository: `Source/FaderLaw.h`,
+406 new lines with no JUCE, plus its wiring in `AudioEngine.{h,cpp}`,
+`MixerComponent.h`, `ProjectIO.cpp`, `AutomationCurve.h` and
+`PlaylistComponent.cpp`. The night of 2026-10-27 set these files aside by name
+because #59 was open and changing them, so nothing has read them since they
+were written.
+
+It is also the highest stake shape of change this project sees. The law being
+wrong makes a fader feel odd; the migration being wrong moves every fader in
+every project the owner has ever saved, and neither errors, crackles or looks
+wrong on a meter.
+
+Still to do: mutation test `Tests/FaderLawTest.cpp` against `FaderLaw.h` with
+the sanitizers, audit the wiring independently, and check the header's measured
+claims still come from something that runs.
+
+---
+
 ## 2026-10-27: the reduction to a word length, which only a file ever sees
 
 ### What was looked at
