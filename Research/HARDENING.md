@@ -7,6 +7,36 @@ Newest first.
 
 ---
 
+## 2026-10-29: the loudness meter, which is the one number other people check
+
+### What is being looked at
+
+`Source/LoudnessMeter.h`, 409 lines, and `Tests/LoudnessMeterTest.cpp`, which
+covers it. A priority 2 target in the brief's ordering: a test suspected of
+being weaker than it looks. Nothing has merged since the night of 2026-10-28,
+so there was no recently merged work to audit, and the only JUCE-free header
+in `Source` still without a test is `Fx/Unit.h`, which two earlier nights set
+aside as unreferenced scaffolding and which still has nothing including it.
+
+Picked because of the ratio: 409 lines of source to 534 of test is the
+thinnest cover of any real arithmetic header here, and because of the stake.
+Every other number this studio reports is checked by the owner's own ears.
+A LUFS figure is checked by Spotify, Apple Music and YouTube, which is the
+whole reason for measuring it, so a meter that is half a decibel out is not
+slightly wrong: it is making a claim about agreement that it cannot support,
+and nothing about the number looks wrong.
+
+Not `Fx/Svf.h` or `Tests/SvfTest.cpp`, which open pull request #55 is
+changing, and not `AudioEngine.*`, `InputSource.h`, `MainComponent.*`,
+`Tuner.h`, `TunerPanel.h` or `Tests/run.sh`, which open pull request #61 is
+changing.
+
+### Still to do
+
+Mutation testing, the missing checks it calls for, and the result.
+
+---
+
 ## 2026-10-28: the fader law, and the translation of every fader already saved
 
 ### What was looked at
