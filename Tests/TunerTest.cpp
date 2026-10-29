@@ -24,7 +24,6 @@
 #include "Tuner.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -296,11 +295,12 @@ static void testEstimatorSweep()
 
         const int n = det.requiredSampleCount();
 
-        // Up to the frequency the one cent tier is claimed to, not up to the
-        // search ceiling. The span between them is searched so that a note
-        // there is named correctly rather than an octave out, and is checked
-        // for exactly that in testFullRange; holding it to a cents figure here
-        // would be asserting something the header says it does not do.
+        // Up to the frequency the one cent tier is CLAIMED to, not up to the
+        // search ceiling, which runs an octave and a bit above it. The span
+        // between them is searched so that a note there is named correctly
+        // rather than an octave out, and testFullRange checks it for exactly
+        // that; holding it to a cents figure here would be asserting something
+        // the header says this does not do.
         std::uniform_real_distribution<double> pitch (std::log2 (175.0),
                                                       std::log2 (spec.accurateToHz * 0.98));
         std::uniform_int_distribution<int>     count (1, 24);
@@ -328,11 +328,11 @@ static void testEstimatorSweep()
             // the fundamental's, so an estimator that reported the
             // fundamental there would be wrong.
             // And not in the top semitone or two of the range, where a note
-            // with no fundamental at all reads an octave up because the lag at
+            // with no fundamental at all reads an octave UP because the lag at
             // half its period has come inside the searched range. Measured:
             // clean through 1800 Hz, once in sixty at 1900, and five to ten
             // times in sixty at B6. The header records why that is structural
-            // rather than fixable, and why the signal is one no instrument
+            // rather than fixable here, and why it is a signal no instrument
             // makes; the bound is here so this sweep tests the case it is
             // actually about rather than that one.
             const bool missing = partials >= 3 && f0 <= 1800.0 && drop (rng) == 0;
@@ -429,7 +429,7 @@ static void testFullRange()
         {
             const double f0 = Tuner::Scale::noteHz (midi);
 
-            if (f0 > spec.highestHz)
+            if (f0 > spec.accurateToHz)
                 continue;
 
             const auto v = synth (series (f0, 6, 1.0, 0.0, 0.2, rng, true),
@@ -536,16 +536,17 @@ static void testFullRange()
 
     std::printf ("  a low B two hundred cents flat still reads, which is the point of the floor\n");
 
-    // The other end. The range SEARCHED goes to C8, above the range the one
-    // cent tier is claimed over, and the reason is a failure rather than
-    // tidiness: a note above the search ceiling has no period inside the lags
-    // searched, so the first dip that is inside the range is the one at twice
-    // the period and the estimator reports an exact octave down, steadily,
-    // with the threshold satisfied. Measured with the ceiling at B6, a 2.5 kHz
-    // tone read 1250 Hz as a confident reading.
+    // The other end, where two different things are true over two different
+    // spans and the test has to say which is which.
     //
-    // So two different things are asserted over the two spans: the cents tier
-    // up to B6, and merely the right note up to C8.
+    // A note above the SEARCH ceiling has no period inside the lags computed,
+    // so the first dip that is inside the range is the one at twice the
+    // period, and the estimator reports an exact octave down with the
+    // threshold satisfied and nothing to say it is wrong. Measured with the
+    // ceiling at B6, a 2.5 kHz tone read 1250 Hz as a confident reading, which
+    // is what a pinch harmonic or a whistle produces. The ceiling is C8 now,
+    // above the top note of a piano, and the one cent tier is claimed only to
+    // B6. So: the cents tier up to B6, and merely the right note up to C8.
     {
         Tuner::Spec spec;
         spec.sampleRate = 44100.0;
@@ -573,7 +574,7 @@ static void testFullRange()
             const double cents = Tuner::Scale::centsBetween (e.hz, f0);
 
             // No octave error anywhere inside the searched range, which is
-            // what the ceiling is for.
+            // the whole reason the ceiling is above the claimed range.
             check (std::abs (cents) < 50.0,
                    "the note at midi " + std::to_string (midi)
                    + " was named more than a quarter tone out, which at this end "
@@ -585,7 +586,6 @@ static void testFullRange()
 
             if (f0 <= spec.accurateToHz)
             {
-                // And the tier, over the span it is claimed over.
                 checkNear (cents, 0.0, 1.0, "the one cent tier at midi "
                                             + std::to_string (midi));
                 ++testedB6;
@@ -604,12 +604,13 @@ static void testFullRange()
                "the searched range is no wider than the range the tier is claimed "
                "over, so nothing above B6 is being checked for an octave error");
 
-        // B6 itself, which a truncated decimal literal once excluded from
-        // every sweep in this file: `highestHz` was B6 rounded down, so a
-        // `f0 > highestHz` skip dropped the one note the header named as the
-        // top of the range. A mutation that made the highest note read an
-        // octave down went unnoticed because of it.
+        // B6 itself, which a truncated decimal literal once excluded from every
+        // sweep in this file: the constant naming it was 1975.533205 and B6 is
+        // 1975.5332050245, so a `f0 > limit` skip dropped the one note the
+        // header calls the top of the range, and a breakage that made it read
+        // an octave down went unnoticed through a whole run.
         const double b6 = Tuner::Scale::noteHz (95);
+
         check (b6 <= spec.accurateToHz,
                "B6 is above the frequency the tier is claimed to, so it is being "
                "skipped by every sweep that stops there");
@@ -664,9 +665,8 @@ static void testPureToneAccuracy()
             ++tested;
         }
 
-        std::printf ("  %5.0f Hz: %d tones from 175 Hz to %.0f Hz, worst %+.5f cents"
-                     " (at %.1f Hz)\n",
-                     sampleRate, tested, spec.accurateToHz, worst, worstHz);
+        std::printf ("  %5.0f Hz: %d tones from 175 Hz up, worst %+.5f cents (at %.1f Hz)\n",
+                     sampleRate, tested, worst, worstHz);
 
         // Measured at 0.12 cents at the top of the tuner's range, so a fifth
         // of a cent is a real bound rather than a generous one.
@@ -1175,14 +1175,13 @@ static void testNotANote()
 }
 
 //==============================================================================
-// 8b. A note that is dying away, which is what a plucked string does and what
-//     no other signal in this file does.
+// 8b. A note dying away, which is what a plucked string does and what no other
+//     signal in this file did.
 //==============================================================================
 static void testDecayingNote()
 {
     std::printf ("Detector: a note decaying, which every other signal here does not\n");
 
-    std::mt19937 rng (43u);
     const double sampleRate = 44100.0;
 
     Tuner::Spec spec;
@@ -1218,24 +1217,24 @@ static void testDecayingNote()
 
             std::printf ("%+7.3f%c ", cents, e.periodic ? ' ' : '*');
 
-            // The claim, and it is the interesting one. A decaying signal makes
-            // the difference function rise with lag, because the two windows
-            // being compared no longer hold the same energy, so the dip is
-            // pulled off the true period and the interpolated vertex can land
-            // outside the three points it was fitted through. Where that costs
-            // more than a cent, it is because the note is dying so fast that
-            // the buffer is not periodic any more, and the threshold has
-            // already thrown the reading away: the error never reaches the
-            // display.
+            // The claim here is the interesting one, and it is about the gate
+            // as much as the estimator. A decaying signal makes the difference
+            // function rise with lag, because the two windows being compared
+            // no longer hold the same energy, so the dip is pulled off the
+            // true period and the interpolated vertex can land outside the
+            // three points it was fitted through. Where that costs more than a
+            // cent it is because the note is dying so fast that the buffer is
+            // not periodic any more, and the threshold has already thrown the
+            // reading away: the error never reaches the display.
             //
             // Measured, with T60 from ten seconds down to seven tenths, every
-            // note reads inside a third of a cent. Below that the readings go
+            // note reads inside a third of a cent. Below that the readings run
             // to several cents and every one of them is rejected.
             if (e.periodic)
             {
                 checkNear (cents, 0.0, 1.0,
-                           "a decaying note that the threshold accepted was read "
-                           "more than a cent out, at " + std::to_string (f0)
+                           "a decaying note the threshold accepted was read more "
+                           "than a cent out, at " + std::to_string (f0)
                            + " Hz decaying at " + std::to_string (decay));
                 ++displayed;
             }
@@ -1248,8 +1247,8 @@ static void testDecayingNote()
         std::printf ("\n");
     }
 
-    std::printf ("  (* = rejected by the threshold and so never shown)\n");
-    std::printf ("  %d readings accepted, all inside a cent; %d rejected\n",
+    std::printf ("  (* = rejected by the threshold, so never shown)\n");
+    std::printf ("  %d readings accepted, every one inside a cent; %d rejected\n",
                  displayed, rejected);
 
     check (displayed > 20, "too few decaying notes were accepted to mean anything");
@@ -1257,9 +1256,10 @@ static void testDecayingNote()
            "no decaying note was rejected, so nothing here exercises the threshold "
            "throwing away a reading the interpolation could not manage");
 
-    // A note decaying at a rate a guitar actually decays at must be read, not
-    // rejected. A plucked string rings for seconds; if the threshold refused
-    // those the tuner would show nothing on the one signal it exists for.
+    // And the other half: a note decaying at a rate a real string decays at
+    // must be READ, not rejected. A plucked string rings for seconds, and if
+    // the threshold refused those the tuner would show nothing on the one
+    // signal it exists for.
     for (double decay : { 0.7, 1.4, 2.3 })
         for (double f0 : { 82.406889, 329.627557 })
         {
@@ -1274,6 +1274,7 @@ static void testDecayingNote()
                                                           * (double) i / sampleRate));
 
             const auto e = det.estimate (v.data(), n);
+
             check (e.periodic, "a note decaying at a rate a real string decays at was "
                                "rejected, so the tuner would show nothing");
             checkNear (Tuner::Scale::centsBetween (e.hz, f0), 0.0, 0.6,
@@ -1340,25 +1341,32 @@ static void testGate()
     // A note quieter than the floor is not read, however periodic it is. This
     // is the open string ringing down into the noise.
     {
+        // The levels here are absolute, in dBFS, and not computed from
+        // `levelFloorDb`. Derived from the constant they followed it wherever
+        // it moved and the check became vacuous: a floor of -200 dB, which is
+        // a tuner that chases a closed input's own noise, passed the whole
+        // suite. These two bracket -55 dB and nothing else.
         an.reset();
-        const double quiet = std::pow (10.0, (gate.levelFloorDb - 12.0) / 20.0);
+        const double quiet = std::pow (10.0, -70.0 / 20.0);
         const auto v = synth ({ { 220.0, quiet, 0.0 } }, sampleRate, n);
 
         for (int frame = 0; frame < 10; ++frame)
             check (! an.process (v.data(), n).hasNote,
-                   "a note under the level floor was shown");
+                   "a note at -70 dBFS was shown, so the level floor is too low to "
+                   "keep the tuner off a ringing string's own noise floor");
 
-        // And just above the floor it is read, so the floor is a floor rather
+        // And a quiet but real signal is read, so the floor is a floor rather
         // than a wall.
         an.reset();
-        const double loud = std::pow (10.0, (gate.levelFloorDb + 12.0) / 20.0) * 1.4142;
+        const double loud = std::pow (10.0, -30.0 / 20.0);
         const auto w = synth ({ { 220.0, loud, 0.0 } }, sampleRate, n);
 
         bool shown = false;
         for (int frame = 0; frame < 10; ++frame)
             shown = shown || an.process (w.data(), n).hasNote;
 
-        check (shown, "a note above the level floor was never shown");
+        check (shown, "a note at -30 dBFS was never shown, so the level floor is "
+                      "high enough to refuse a quietly recorded instrument");
     }
 
     // The history does not carry across notes. Without this, the first frame
@@ -1381,26 +1389,63 @@ static void testGate()
         check (! r.hasNote,
                "a new note after silence was shown on its first frame, so the "
                "stability history is carrying across notes");
+    }
 
-        // The SAME note interrupted, which is the case the check above cannot
-        // see and the reason it is not enough on its own. Four frames of the
-        // old note left in the history disagree with one frame of a different
-        // note, so that check passes whether the history was cleared or not: it
-        // only fails when one frame is enough on its own. Interrupting the same
-        // note is what separates the two, because the frames either side of the
-        // gap agree, so a history that survived the gap is already unanimous and
-        // the display is released on the first frame after it.
+    // The same check again with the SAME note either side of the silence, and
+    // this is the one that actually tests it. The two note version above
+    // passes whether the history is cleared or not: a fifth disagrees with
+    // every stale frame, so the stability test holds the display back either
+    // way, and removing the clear entirely passed that check.
+    //
+    // The fault it hides is narrow and real. A string is flattened by roughly
+    // the twelve cents of its own attack glide, so its first sharp reading can
+    // land within a third of a cent of the previous note's settled pitch, and
+    // the tuner then says "in tune" on a string that is twelve cents flat.
+    {
         an.reset();
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        const std::vector<float> silence ((size_t) n, 0.0f);
 
-        for (int frame = 0; frame < gate.stabilityFrames - 1; ++frame)
-            check (! an.process (first.data(), n).hasNote,
-                   "a note was shown before the frames required agreed");
+        for (int frame = 0; frame < 8; ++frame)
+            an.process (v.data(), n);
+
+        check (an.process (v.data(), n).hasNote, "the note was never shown");
 
         an.process (silence.data(), n);
 
-        check (! an.process (first.data(), n).hasNote,
-               "a frame of silence did not restart the stability count, so the "
-               "history is surviving an interruption");
+        check (! an.process (v.data(), n).hasNote,
+               "the same note after a silence was shown on its first frame, so the "
+               "stability history survived the signal going away");
+
+        // And it comes back, so clearing the history is not a stall.
+        bool shown = false;
+        for (int frame = 0; frame < gate.stabilityFrames + 2; ++frame)
+            shown = shown || an.process (v.data(), n).hasNote;
+
+        check (shown, "the note never came back after the silence");
+    }
+
+    // A buffer too short to analyse is the ring having nothing new to hand
+    // over. That is not news and it is not silence: blanking the display for
+    // it is a flicker on an ordinary frame, and clearing the history for it is
+    // a stall.
+    {
+        an.reset();
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+
+        for (int frame = 0; frame < 8; ++frame)
+            an.process (v.data(), n);
+
+        const auto shown = an.process (v.data(), n);
+        check (shown.hasNote, "the note was never shown");
+
+        const auto starved = an.process (v.data(), n - 1);
+        check (starved.hasNote, "a buffer too short to analyse blanked the display");
+        checkNear (starved.hz, shown.hz, 0.0, "the held reading is not the last one");
+        check (starved.midi == shown.midi, "the held reading named a different note");
+
+        check (an.process (v.data(), n).hasNote,
+               "a buffer too short to analyse threw the stability history away");
     }
 
     // The reference pitch reaches the reading, and only the reading: moving it
@@ -1477,20 +1522,21 @@ static void testPluckedGlide()
     }
 
     // Read it the way a display would, AT EVERY FRAME RATE a display might
-    // plausibly run at. Sweeping this is the whole point of the section.
+    // plausibly run at. Sweeping this rather than fixing it is the whole point
+    // of the section.
     //
-    // The first version of the gate asked that the last few readings lie
-    // within a fixed number of cents of their mean, which has no notion of
-    // time, so how close the reading was to the truth when the display opened
-    // depended entirely on how often the caller asked. This test fixed the
-    // hop at a tenth of a second and so could not see it: at thirty frames a
-    // second that gate showed the string 1.50 cents sharp and at sixty 3.32,
-    // against the one cent the whole design is built around. The criterion is
-    // a rate now, which takes the frame rate out of the answer, and this is
-    // the check that says so rather than the comment that claims it.
+    // The gate used to ask that the last four readings lie within a quarter of
+    // a cent of their mean, which has no notion of time, so how close the
+    // reading was to the truth when the display opened depended entirely on
+    // how often the caller asked. This test fixed the hop at a tenth of a
+    // second and so could not see it: at thirty frames a second that gate
+    // showed the string 1.50 cents sharp and at sixty 3.32, against the one
+    // cent the whole design is built around. The criterion is a rate now,
+    // which takes the frame rate out of the answer, and this is the check that
+    // establishes that rather than the comment that claims it.
     std::printf ("  the string falls %.1f cents with a %.2f s time constant\n",
                  totalCents, tau);
-    std::printf ("  %-8s %-12s %-14s %s\n", "fps", "opens at", "cents sharp", "rate when it opens");
+    std::printf ("  %-6s %-11s %-14s %s\n", "fps", "opens at", "cents sharp", "rate when it opens");
 
     double worstShown = 0.0;
 
@@ -1524,7 +1570,7 @@ static void testPluckedGlide()
             }
         }
 
-        std::printf ("  %-8.0f %-12.2f %+-14.3f %.3f\n", fps, shownAt, shownCents, shownRate);
+        std::printf ("  %-6.0f %-11.2f %+-14.3f %.3f\n", fps, shownAt, shownCents, shownRate);
 
         check (frames > 10, "the glide was not read over enough frames");
         check (shownAt > 0.0, "the glide was never read at all, so the gate never opens");
@@ -1533,13 +1579,20 @@ static void testPluckedGlide()
         check (shownAt > 0.3, "a reading was shown while the string was still falling fast");
 
         // The bound the gate's own arithmetic promises, and unlike the frame
-        // counting version it is a statement about the string rather than
-        // about the caller: on an exponential settle, dR/dt = -R/tau, so
-        // releasing at a rate of r cents per second leaves r*tau to come. The
-        // factor of two is because the rate is measured from the spread of a
-        // few samples of an exponential rather than from its derivative, which
-        // underestimates it by up to about that much at the slowest frame
-        // rates tried here.
+        // counting version this is a statement about the string rather than
+        // about the caller: on an exponential settle dR/dt = -R/tau, so
+        // releasing at a rate of r cents per second leaves r*tau to come.
+        //
+        // The factor of two is because the rate is estimated from the spread
+        // of a few samples of an exponential rather than from its derivative,
+        // which understates it by up to about that much at the slowest rates
+        // swept here. It is deliberately not larger. The looser bound this
+        // replaced, c * frames / (1 - exp(-hop/tau)), came to four and a half
+        // cents, which turned out to be enough room for the stability history
+        // to be kept in the wrong units and still pass: measured in
+        // hundredths of an octave instead of cents, twelve times looser, the
+        // gate opened at 0.50 s and 3.95 cents out, inside that bound and four
+        // times the tier this tuner claims.
         const double promised = 2.0 * gate.settleCentsPerSecond * tau;
 
         check (std::abs (shownCents) <= promised,
@@ -1547,13 +1600,12 @@ static void testPluckedGlide()
                "gate's own rate criterion allows, so the gate is not doing "
                "what its arithmetic says");
 
-        // And an absolute bound as well as that derived one, because the
+        // And an absolute bound as well as the derived one, because the
         // derived one is computed from the gate's own constants: loosen the
         // rate and the bound loosens with it, so by itself it cannot tell a
         // gate that waits from one that does not. One cent is what Boss and
         // Korg claim and is the whole reason this gate exists, so that is what
-        // the number a player is actually shown is held to, at every frame
-        // rate.
+        // the number a player is actually shown is held to, at every rate.
         check (std::abs (shownCents) <= 1.0,
                "the first reading shown was more than a cent from where the "
                "string settles, which is the error a tuner that displays the "
@@ -1566,9 +1618,10 @@ static void testPluckedGlide()
     std::printf ("  worst over every frame rate: %+.3f cents from the settled pitch\n",
                  worstShown);
 
-    // The claim this section exists to make: the reading does not get worse as
-    // the display gets faster. A twelvefold change in frame rate moved it by
-    // 3.0 cents under the frame counting gate.
+    // The claim this section exists to make, and the one the old gate failed:
+    // the reading does not get worse as the display gets faster. A twelvefold
+    // change in frame rate moved it by 3.0 cents before, and moves it by 0.3
+    // now.
     check (std::abs (worstShown) <= 1.0,
            "the gate's accuracy still depends on the caller's frame rate");
 
@@ -1696,12 +1749,11 @@ static void testInputRing()
         unsized.clear();
     }
 
-    // Audio arriving between one snapshot and the next is the normal case and
-    // must not be reported as a tear. This is the half of the tear check a
-    // single thread can reach: with the writer idle while readLatest runs, the
-    // counter it reads before the copy and the one it reads after are always
-    // equal, so nothing here puts the comparison itself to the question. The
-    // concurrent section below does that.
+    // The tear check: the writer overtaking the reader has to be detected,
+    // because a torn snapshot is a discontinuity in the middle of the buffer
+    // and an estimator reads it as a perfectly plausible wrong pitch. Driven
+    // deterministically here rather than by racing threads, by writing past
+    // the snapshot between the two reads the check is made of.
     {
         Tuner::InputRing r;
         r.setSize (256);
@@ -1722,170 +1774,139 @@ static void testInputRing()
         check (r.readLatest (dest2), "a snapshot of the newest audio was rejected");
     }
 
-    // The tear check itself, with a real writer, because it is a comparison of
-    // two reads of a counter taken either side of the copy and nothing a single
-    // thread does can get a write in between them. Removing the check entirely
-    // and comparing against the snapshot length instead of the ring's capacity
-    // both leave every single threaded caller's behaviour untouched.
+    // And the tear check with a writer actually running, which is the only way
+    // to test it at all. The two counter reads inside `readLatest` have nothing
+    // between them single threaded, so `after` always equals `before` and the
+    // expression is a constant: removing the check entirely, loosening it by a
+    // factor of four, and replacing it with `after == before` all passed
+    // everything above.
     //
-    // This is the one place in the file that races deliberately. That is what
-    // the thing under test is: the writer is a device callback that may not
-    // lock, so the reader copies while the writer runs and detects afterwards
-    // whether it was overtaken. The payload is a ramp that steps by one every
-    // sample, so a snapshot the writer overwrote partway through shows a step
-    // that is not one.
-    //
-    // The ramp restarts well inside the integers a float holds exactly. The
-    // first version of this counted up without wrapping, and the writer passed
-    // 2^24 partway through the second phase, after which consecutive integers
-    // are no longer distinct in a float and every snapshot read as torn. A test
-    // signal that cannot represent what it is looking for reports the fault it
-    // was written to find.
+    // Both directions matter. Too permissive hands back a torn buffer, which
+    // reads as a plausible wrong pitch. Too strict refuses every snapshot while
+    // a device is running, which is a tuner that silently never shows anything,
+    // and no single threaded check would see that either.
     {
-        const float ramp = 1048576.0f;
+        Tuner::InputRing r;
+        const int want = 4096;
+        r.setSize (want * 4);
 
-        // Two sizes, because the two halves of the check need opposite
-        // conditions, and each phase runs until it has seen the case it is
-        // there for. A snapshot that nearly fills a small ring is overtaken
-        // constantly, which is what exercises detection. A snapshot of an
-        // eighth of a large one is not, which is what exercises the other
-        // side: a read the writer stayed clear of has to come back, or a tuner
-        // fed continuously would refuse every snapshot and show nothing at all.
-        //
-        // The second one is deliberately a megabyte, which takes about a
-        // millisecond to copy. The first version asked for four kilobytes and
-        // was over in twenty microseconds, so whether a write landed inside the
-        // copy was down to where the scheduler happened to put a timeslice: it
-        // passed, and then reported no interleaving at all on the next run.
-        // Making the copy long enough that a running writer cannot miss it is
-        // what turns that from luck into a measurement.
-        struct Phase { int cap, want, leastAttempts; bool wantRefusals; const char* what; };
+        std::vector<float> block (128, 1.0f);
 
-        int everRefused = 0, everOvertakenButClear = 0;
+        for (int i = 0; i < want * 4; i += 128)
+            r.write (block.data(), 128);
 
-        for (const auto& phase : { Phase { 4096, 3840, 2000, true, "nearly a small ring" },
-                                   Phase { 1 << 21, 1 << 18, 40, false, "an eighth of a large one" } })
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &block, &stop]
         {
-            // Sized before the writer starts and left alone afterwards: setSize
-            // allocates and resets the counter, which is a handover and not
-            // something to do underneath a running callback.
-            Tuner::InputRing r;
-            r.setSize (phase.cap);
+            while (! stop.load (std::memory_order_relaxed))
+                r.write (block.data(), 128);
+        });
 
-            std::atomic<bool> stop { false };
+        std::vector<float> dest ((size_t) want);
+        int accepted = 0;
+        const int attempts = 2000;
 
-            std::thread writer ([&r, &stop, ramp]
-            {
-                std::vector<float> block (128);
-                float i = 0.0f;
-
-                while (! stop.load (std::memory_order_relaxed))
-                {
-                    for (auto& s : block)
-                    {
-                        s = i;
-                        i = i + 1.0f >= ramp ? 0.0f : i + 1.0f;
-                    }
-
-                    r.write (block.data(), (int) block.size());
-                }
-            });
-
-            std::vector<float> dest ((size_t) phase.want);
-            int accepted = 0, refused = 0, torn = 0, clear = 0, clearWithWriterMoving = 0;
-
-            // Waiting for the ring to fill rather than counting the empty
-            // attempts, which a reader spinning on an empty ring burns through
-            // in microseconds.
-            while (r.totalWritten() < (std::uint64_t) phase.want)
-                std::this_thread::yield();
-
-            // Up to a few seconds of trying, but only while the case this
-            // phase exists to produce has not been seen yet. Two threads
-            // interleaving is the one thing in this file that is not in the
-            // test's hands, so it is given time rather than assumed, and
-            // asserted afterwards so a run that never managed it says so
-            // instead of passing on cases that did not arise.
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds (4);
-
-            for (int attempt = 0;
-                 attempt < phase.leastAttempts
-                   || (! (phase.wantRefusals ? refused > 0 : clearWithWriterMoving > 0)
-                       && std::chrono::steady_clock::now() < deadline);
-                 ++attempt)
-            {
-                const std::uint64_t before = r.totalWritten();
-                const bool ok = r.readLatest (dest);
-                const std::uint64_t after = r.totalWritten();
-
-                // The writer stayed clear of the snapshot if it never advanced
-                // far enough to wrap onto the oldest sample copied, and such a
-                // snapshot is intact whatever order the copy happened in, so
-                // the check has no business refusing it.
-                const bool stayedClear = after - before + (std::uint64_t) phase.want
-                                           <= (std::uint64_t) phase.cap;
-
-                if (stayedClear)
-                {
-                    ++clear;
-                    check (ok, std::string ("a snapshot the writer stayed clear of was "
-                                            "refused, so the tear check is refusing audio "
-                                            "that merely arrived during the copy: ")
-                               + phase.what);
-
-                    if (after > before)
-                        ++clearWithWriterMoving;
-                }
-
-                if (! ok)
-                {
-                    ++refused;
-                    continue;
-                }
-
+        for (int i = 0; i < attempts; ++i)
+            if (r.readLatest (dest))
                 ++accepted;
 
-                for (int i = 1; i < phase.want; ++i)
-                {
-                    const float expected = dest[(size_t) (i - 1)] + 1.0f >= ramp
-                                             ? 0.0f : dest[(size_t) (i - 1)] + 1.0f;
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
 
-                    if (dest[(size_t) i] != expected)
-                    {
-                        ++torn;
-                        break;
-                    }
-                }
-            }
+        std::printf ("  %d of %d snapshots accepted with a writer running flat out\n",
+                     accepted, attempts);
 
-            std::printf ("  %-24s %d accepted, %d refused, %d the writer stayed clear of"
-                         " (%d of those with it running)\n",
-                         phase.what, accepted, refused, clear, clearWithWriterMoving);
+        // Not all of them: a writer with no device pacing it really can lap a
+        // reader, and those are rightly refused. The claim is that audio which
+        // merely arrived is not a refusal. Measured at 1994 of 2000; comparing
+        // against the count before the copy instead of against the ring's
+        // capacity measures 73.
+        check (accepted > attempts / 2,
+               "most snapshots were refused with a writer running, so the tear check "
+               "is refusing audio that arrived rather than audio that was overwritten");
+    }
 
-            check (torn == 0, std::string ("a snapshot the tear check accepted had a "
-                                           "discontinuity in it, which an estimator reads "
-                                           "as a plausible wrong pitch: ") + phase.what);
-            check (accepted > 0, std::string ("every snapshot was refused: ") + phase.what);
+    // And the other direction, which the check above cannot see: a tear has to
+    // be noticed when there is one. Asking for a snapshot one sample short of
+    // the whole ring means the writer only has to advance a single sample
+    // during the copy for the oldest sample in it to have been overwritten, so
+    // an implementation that detects tears sees one almost at once and an
+    // implementation that returns true unconditionally never will.
+    //
+    // Bounded by the writer's own progress rather than by a number of
+    // attempts, so a machine that schedules these two threads unevenly makes
+    // this slower rather than flaky.
+    {
+        Tuner::InputRing r;
+        const int cap = 8192;
+        r.setSize (cap);
 
-            everRefused += refused;
-            everOvertakenButClear += clearWithWriterMoving;
+        std::vector<float> block (128, 1.0f);
 
-            stop.store (true, std::memory_order_relaxed);
-            writer.join();
+        for (int i = 0; i < cap; i += 128)
+            r.write (block.data(), 128);
+
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &block, &stop]
+        {
+            while (! stop.load (std::memory_order_relaxed))
+                r.write (block.data(), 128);
+        });
+
+        std::vector<float> dest ((size_t) cap - 1);
+        const std::uint64_t startedAt = r.totalWritten();
+        const std::uint64_t budget    = 200ull * (std::uint64_t) cap;
+
+        int refused = 0;
+        int tried   = 0;
+
+        while (refused == 0 && r.totalWritten() - startedAt < budget)
+        {
+            ++tried;
+
+            if (! r.readLatest (dest))
+                ++refused;
         }
 
-        // Both halves of the check have to have been reached, or the two
-        // assertions above are passing on cases that never arose. These are the
-        // only assertions in the file that depend on two threads interleaving,
-        // which is why they are counted and printed rather than assumed.
-        check (everRefused > 0,
-               "the writer never overtook a snapshot, so nothing here exercised "
-               "the tear check doing its job");
-        check (everOvertakenButClear > 0,
-               "the writer never advanced during a snapshot it stayed clear of, so "
-               "nothing here separates a tear check from a check that merely asks "
-               "whether any audio arrived");
+        const std::uint64_t wrote = r.totalWritten() - startedAt;
+
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+
+        std::printf ("  %d of %d nearly whole ring snapshots refused, writer wrote %llu\n",
+                     refused, tried, (unsigned long long) wrote);
+
+        check (refused > 0,
+               "a snapshot one sample short of the whole ring was accepted while a "
+               "writer ran over it, so a torn buffer would reach the estimator and be "
+               "read as a plausible wrong pitch");
     }
+
+    // Three breakages of the ring this file deliberately does NOT catch, named
+    // here so nobody hunts for the test that should have caught them.
+    //
+    // Loosening the tear bound by a factor of four, rather than removing it,
+    // survives both checks above. The two of them bracket the bound's effect
+    // from either side and neither can land on it: a nearly whole ring
+    // snapshot refuses at any bound of one capacity or more, and a small
+    // snapshot out of a large ring is accepted at any of them. Hitting the
+    // difference would mean a reader starved for between one and four ring
+    // lengths of audio during a single copy, which on the shipped sizes is
+    // between two and eight seconds of starvation inside a copy of a few tens
+    // of microseconds. No test can arrange that without a seam inside the two
+    // counter reads, and the shipped bound is still the right one: a reader
+    // that really was starved that long must be refused rather than handed a
+    // buffer with a two second old discontinuity in the middle of it.
+    //
+    // And the two memory orders. Making the write counter's store relaxed, or
+    // the load that pairs with it, removes the guarantee that a reader seeing
+    // the counter also sees the samples behind it. Nothing single threaded can
+    // observe that, the threaded checks above pass with either, and x86
+    // supplies the ordering in hardware whatever the source says. Only a
+    // ThreadSanitizer build would flag the missing pair, and run.sh builds with
+    // AddressSanitizer, which cannot be combined with it.
 
     // Clearing resets both the audio and the count.
     {
@@ -1956,6 +1977,247 @@ static void testEndToEnd()
 }
 
 //==============================================================================
+// 13. Clarity, which is a claimed output, and the half of step 5 that decides
+//     whether a dip clears the threshold.
+//==============================================================================
+static void testClarity()
+{
+    std::printf ("Detector: clarity, which is what the display is handed\n");
+
+    std::mt19937 rng (23u);
+    const double sampleRate = 44100.0;
+    const auto spec = fastSpec (sampleRate);
+
+    Tuner::Detector det;
+    det.configure (spec);
+    const int n = det.requiredSampleCount();
+
+    // Silence repeats nothing, so it is the least periodic thing there is.
+    // Reporting the deepest possible dip on a buffer of zeroes is a display
+    // reading "rock solid" on an unplugged socket, and that was reachable: a
+    // breakage that made a silent buffer report d' = 0 passed every other
+    // check in this file, because the level floor refuses the note anyway and
+    // nothing looked at the number next to it.
+    {
+        const std::vector<float> silence ((size_t) n, 0.0f);
+        checkNear (det.estimate (silence.data(), n).clarity, 0.0, 1.0e-12,
+                   "silence was reported as perfectly clear");
+
+        const std::vector<float> dc ((size_t) n, 0.4f);
+        checkNear (det.estimate (dc.data(), n).clarity, 0.0, 1.0e-12,
+                   "a constant signal was reported as perfectly clear");
+
+        Tuner::Analyser an;
+        an.configure (spec);
+        checkNear (an.process (silence.data(), n).clarity, 0.0, 1.0e-12,
+                   "the reading handed to the display calls silence perfectly clear");
+    }
+
+    // A signal that repeats exactly is clear, and noise is not.
+    {
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        checkNear (det.estimate (v.data(), (int) v.size()).clarity, 1.0, 1.0e-4,
+                   "a signal that repeats exactly is not perfectly clear");
+
+        std::normal_distribution<double> nd (0.0, 0.2);
+        std::mt19937 local (1000u);
+        std::vector<float> w ((size_t) n);
+
+        for (auto& sample : w)
+            sample = (float) nd (local);
+
+        check (det.estimate (w.data(), n).clarity < 0.5, "noise was reported as clear");
+    }
+
+    // Step 5's first half, which the header singles out as the detail that
+    // decides whether the paper was implemented or read: the depth compared
+    // against the threshold is the INTERPOLATED ordinate of the dip, and the
+    // vertex of a parabola through a local minimum sits at or below the
+    // sampled value. Measuring it shallower than it is, by a sign error or by
+    // using the sampled value, is invisible at the default threshold of 0.1
+    // and shows up the moment the threshold is tightened: a signal that
+    // repeats exactly has a dip of zero, so it has to clear any threshold at
+    // all.
+    {
+        Tuner::Spec tight = spec;
+        tight.threshold = 1.0e-6;
+
+        Tuner::Detector td;
+        td.configure (tight);
+
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false),
+                              sampleRate, td.requiredSampleCount());
+        const auto e = td.estimate (v.data(), (int) v.size());
+
+        check (e.periodic,
+               "an exactly periodic signal did not clear the tightest threshold the "
+               "spec allows, so its dip is being measured shallower than it is");
+        checkNear (Tuner::Scale::centsBetween (e.hz, 220.0), 0.0, 1.0,
+                   "the reading at the tightest threshold");
+    }
+}
+
+//==============================================================================
+// 14. Eq. (8) against an EXACT closed form.
+//
+// This is the only check that can see a few per cent of distortion in the
+// cumulative mean. Taking the mean over tau + 1 terms rather than tau scales
+// every d' by tau/(tau + 1), which is four per cent at the shortest lag
+// searched and a twentieth of a per cent at the longest. It changes no reading
+// on any signal this file generates, and it is a bias towards reading HIGH at
+// short lags, which is the thing Eq. (8) exists to prevent.
+//
+// The closed form has to be exact. The asymptotic d(tau) = 2 A^2 W sin^2(w
+// tau / 2) agrees with the real difference function only to about five per
+// cent, which is larger than the faults being looked for: the measurement's
+// own floor would have been the answer.
+//==============================================================================
+static void testCumulativeMeanAgainstClosedForm()
+{
+    std::printf ("Detector: step 3, Eq. (8) against its closed form\n");
+
+    const double sampleRate = 44100.0;
+    const double pi = 3.14159265358979323846;
+    double worstAll = 0.0;
+
+    for (double f : { 300.0, 900.0, 1800.0 })
+    {
+        Tuner::Detector d;
+        d.configure (fastSpec (sampleRate));
+
+        const int n       = d.requiredSampleCount();
+        const int W       = d.windowSampleCount();
+        const int N       = d.lowPassLength();
+        const int lastLag = d.maxLagSamples();
+
+        // One sinusoid, because a square window averaged to unity gain leaves a
+        // sinusoid a sinusoid exactly: the gain is the Dirichlet kernel and the
+        // delay is (N-1)/2 at every frequency. The amplitude cancels, d' being
+        // scale free. The delay does not, which is why the filter length has to
+        // be read back out of the detector.
+        std::vector<float> v ((size_t) n);
+
+        for (int i = 0; i < n; ++i)
+            v[(size_t) i] = (float) (0.25 * std::sin (2.0 * pi * f * (double) i / sampleRate));
+
+        d.estimate (v.data(), n);
+        const auto& got = d.normalisedDifference();
+
+        const double w   = 2.0 * pi * f / sampleRate;
+        const double psi = w * (double) (N - 1) / 2.0;
+
+        double running = 0.0;
+        double worst = 0.0;
+
+        for (int tau = 1; tau <= lastLag; ++tau)
+        {
+            // d(tau) = 4 B^2 sin^2(w tau/2) sum_j cos^2(w j + psi + w tau/2),
+            // and sum_{j<W} cos^2(a + w j) = W/2 + cos(2a + w(W-1)) sin(wW) / (2 sin w).
+            const double a   = psi + w * (double) tau / 2.0;
+            const double sum = (double) W / 2.0
+                               + std::cos (2.0 * a + w * (double) (W - 1))
+                                 * std::sin (w * (double) W) / (2.0 * std::sin (w));
+            const double sn  = std::sin (w * (double) tau / 2.0);
+            const double closed = 4.0 * sn * sn * sum;
+
+            running += closed;
+
+            // Eq. (8) as the paper writes it: the cumulative MEAN over 1..tau.
+            const double want = closed / (running / (double) tau);
+            const double rel  = std::abs (got[(size_t) tau] - want) / std::max (1.0e-3, want);
+
+            if (tau >= d.minLagSamples() && rel > worst)
+                worst = rel;
+        }
+
+        if (worst > worstAll)
+            worstAll = worst;
+    }
+
+    std::printf ("  worst relative disagreement with the closed form %.3e\n", worstAll);
+
+    // Measured at 4e-9. A mean over tau + 1 terms reads 4.5e-2, dividing by the
+    // cumulative sum instead of the mean reads 1.0, and a window that shrinks
+    // with the lag reads 0.34.
+    check (worstAll < 1.0e-6,
+           "Eq. (8) does not agree with its closed form, so the normalisation is not "
+           "the cumulative mean the paper specifies");
+}
+
+//==============================================================================
+// 15. The rates the studio actually runs at.
+//
+// Every other arithmetic test in Tests/ covers 96 and 192 kHz and this one
+// covered only 44.1 and 48. The window is a fixed duration, so the lag the
+// interpolator is working in grows with the rate and the accuracy question is
+// not the same question at the top of the range.
+//==============================================================================
+static void testHighSampleRates()
+{
+    std::printf ("Detector: 96 and 192 kHz, which nothing else here covered\n");
+
+    for (double sampleRate : { 96000.0, 192000.0 })
+    {
+        Tuner::Detector det;
+        det.configure (fastSpec (sampleRate));
+
+        const int n = det.requiredSampleCount();
+        double worst = 0.0;
+
+        // Notes spread across the range `fastSpec` searches, read as a harmonic
+        // series rather than as a tone: the reading has to be the fundamental
+        // at every rate, not just at the two the rest of this file uses.
+        for (int midi = 56; midi <= 88; midi += 4)
+        {
+            std::mt19937 rng ((unsigned) midi);
+            const double f0 = Tuner::Scale::noteHz (midi);
+            const auto v = synth (series (f0, 8, 1.0, 0.0, 0.25, rng, true), sampleRate, n);
+            const auto e = det.estimate (v.data(), n);
+
+            check (e.periodic, "a harmonic series was not read as periodic");
+
+            const double cents = Tuner::Scale::centsBetween (e.hz, f0);
+
+            if (std::abs (cents) > std::abs (worst))
+                worst = cents;
+        }
+
+        std::printf ("  %.0f Hz: buffer %d samples (%.1f ms), worst %+.5f cents\n",
+                     sampleRate, n, 1000.0 * (double) n / sampleRate, worst);
+
+        check (std::abs (worst) <= 1.0,
+               "the reading at 96 or 192 kHz is more than a cent out, which is outside "
+               "what a chromatic tuner claims");
+
+        // And one reading on the real spec, whose window at these rates is the
+        // longest buffer the estimator ever handles: twenty five thousand
+        // samples at 192 kHz, against five and a half thousand at 44.1. The
+        // search floor is in hertz, so nothing about the lag arithmetic is
+        // exercised at that length by the rates above.
+        Tuner::Spec full;
+        full.sampleRate = sampleRate;
+
+        Tuner::Detector low;
+        low.configure (full);
+
+        std::mt19937 rng (7u);
+        const double f0 = Tuner::Scale::noteHz (40);       // E2, a guitar's low string
+        const auto v = synth (series (f0, 8, 1.0, 0.0, 0.25, rng, true),
+                              sampleRate, low.requiredSampleCount());
+        const auto e = low.estimate (v.data(), low.requiredSampleCount());
+
+        check (e.periodic, "a low E was not read as periodic on the full range spec");
+        std::printf ("  %.0f Hz: the full range spec reads a low E %+.5f cents out, "
+                     "over %d samples\n",
+                     sampleRate, Tuner::Scale::centsBetween (e.hz, f0),
+                     low.requiredSampleCount());
+
+        checkNear (Tuner::Scale::centsBetween (e.hz, f0), 0.0, 1.0,
+                   "a low E on the full range spec");
+    }
+}
+
+//==============================================================================
 int main()
 {
     testScale();
@@ -1972,6 +2234,9 @@ int main()
     testPluckedGlide();
     testInputRing();
     testEndToEnd();
+    testClarity();
+    testCumulativeMeanAgainstClosedForm();
+    testHighSampleRates();
 
     if (failures != 0)
     {

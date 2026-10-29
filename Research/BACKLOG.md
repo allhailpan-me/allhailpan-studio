@@ -27,9 +27,15 @@ blindly. Newest first.
 
 ---
 
-## 2026-10-28: a tuner, and the pitch detector it is built on
+## 2026-10-28 and 2026-10-29: a tuner, and the pitch detector it is built on
 
-### Status: research recorded, building
+### Status: built, tested, mutation tested, audited
+
+The night of 10-28 was cut off after the arithmetic and its test had landed.
+The night of 10-29 finished it rather than starting anything new: the engine's
+input tap, the window and the readout, then a mutation run and an audit, both
+of which found real work. What they found and what was done about it is at the
+end of this entry.
 
 ### What was looked at
 
@@ -331,6 +337,122 @@ it makes it read sharp.
 - **ISO 16 and the MIDI specifications** are paywalled or behind a login. The
   equal temperament formula is cited to Wolfe's page at the University of New
   South Wales rather than implying a MIDI document that was not read.
+
+### What finishing it on 10-29 found
+
+The JUCE half is small: a tap in the device callback, a thread that runs the
+estimator, and a readout. The work was in what the mutation run and the audit
+said about the half that had already landed.
+
+**Seven mutations of `Tuner.h` survived the test as it stood**, and not one of
+them was a fault in the estimator. Every one was a check that could not see the
+thing it was written for, and two of them are worth remembering as shapes
+rather than as incidents:
+
+- **A check whose own bound is computed from the constant it is checking is not
+  a check.** The glide test bounded how far a reading could be from the settled
+  pitch by `stabilityCents * stabilityFrames / (1 - exp(-dt/tau))`, read
+  straight out of the constant under test. Loosen the constant twelve times and
+  the bound loosens twelve times with it, so a gate that opened at 3.95 cents
+  out, four times the tier this tuner claims, passed. The same shape killed the
+  level floor check: the quiet test signal was computed from the floor, so a
+  floor of -200 dB, which is a tuner chasing a closed input's own noise floor,
+  passed too. Both now use absolute figures and a bound derived from the
+  window's permitted spread rather than from the constant.
+- **A check can test the wrong half of the thing it names.** The check written
+  for "the stability history does not carry across notes" played 220 Hz and
+  then 330 Hz, and a fifth disagrees with every stale frame, so the stability
+  test holds the display back whether or not the history was cleared. Removing
+  the clear entirely passed it. The same note either side of the silence is
+  what tests it, and the fault it guards against is narrow and real: a plucked
+  string is flattened by roughly the twelve cents of its own attack glide, so
+  its first sharp reading can land within a third of a cent of the previous
+  note's settled pitch, and the tuner then says "in tune" on a string that is
+  twelve cents flat.
+
+The other five: a silent buffer reporting perfect clarity, which is a display
+reading "rock solid" on an unplugged socket; step 5's interpolated depth, the
+half the header singles out as the detail that decides whether the paper was
+implemented or read, invisible at a threshold of 0.1 and caught by tightening
+the threshold instead; Eq. (8)'s cumulative mean taken over one term too many,
+which is a bias towards reading high at short lags and changes no reading on
+anything the suite generates, caught against the **exact** closed form of a
+sinusoid's difference function (the asymptotic form agrees only to five per
+cent, so the measurement's own floor would have been larger than the fault);
+and the ring's tear check, where removing it, loosening it fourfold and
+replacing it with a did-anything-arrive test all passed, because single
+threaded the two counter reads inside `readLatest` have nothing between them.
+That one now has a writer behind it, which is why `Tests/run.sh` gains
+`-pthread`.
+
+**Three breakages are deliberately not caught**, and are named in the test so
+nobody hunts for the check that should have caught them: the tear bound
+loosened by a factor of four rather than removed, which would need a reader
+starved for between two and eight seconds inside a copy of a few tens of
+microseconds, and the two memory orders, which only a ThreadSanitizer build
+could see and `run.sh` builds with AddressSanitizer.
+
+**The audit found two faults in the new code and a pile of overclaimed
+comments.**
+
+- **The display held a dead note for ever.** The ring's write counter is
+  monotonic and nothing resets it, so "enough audio has arrived" latches true
+  the first time it does, and the ring goes on holding the last tenth of a
+  second of whatever was played. An estimator handed the same buffer every pass
+  reads it as perfectly periodic. So an interface unplugged mid session, or a
+  machine that slept, left a bright settled note on screen for the rest of the
+  session with nothing to say it was not live. Whether audio is still arriving
+  is a question about the counter **moving**, not about its value.
+- **The estimator's cost grows as the square of the sample rate**, and five
+  places stated nine milliseconds a reading as though it were a property of the
+  code. Measured: 9 ms at 44.1 kHz, 11 at 48, 48 at 96 and 197 at 192. At 192
+  kHz, asking for a reading every hundred milliseconds spins a core for as long
+  as the window is open, in a process that is also running a device callback.
+  The thread now sleeps for three times whatever the reading cost, which holds
+  it under a quarter of a core at every rate the studio runs at, and a slower
+  reading rate makes the gate stricter rather than wrong.
+- **The window was modal**, copied from `showPreferencesWindow`, where modality
+  is right. A tuner is used while a session is live, and a modal one takes the
+  transport, the mixer and every input gain with it.
+
+Plus: the test covered 44.1 and 48 kHz only, where every other arithmetic test
+here covers 96 and 192, so the longest buffer the estimator ever handles had
+never been exercised; and several comments said more than the code did, which
+is the failure this project keeps meeting. The gate's own figure was derived
+for one step rather than for four frames agreeing, understating its own 1.40
+second wait as nine tenths of a second; the ring's slack was quoted from a
+search floor that was later lowered five semitones; the operation count was out
+by a factor of seven; `norm[0] = 1.0` is a dead store whose comment credited it
+with a guard that belongs to the normalisation as a whole; and the reference
+range was called the widest documented when this very file tabulates a wider
+one.
+
+### What is left, and is the next night's work
+
+**Decimate the tuner's tap to a fixed analysis rate.** This is the proper fix
+for the cost above, and it is a research job rather than a design one, which is
+why it was not done tonight. The highest note searched is B6 at 1975 Hz, so the
+analysis needs nothing like 192 kHz, and running at a fixed rate would make the
+cost constant and the frame spacing honest at every device setting. What it
+needs first is the decimation filter's specification: the square window
+already in front of the estimator is designed for 1 dB of droop at the top
+note and has 13 dB sidelobes, which is nowhere near enough stopband to decimate
+through, so whatever folds would land in the band the estimator is reading. A
+night should go to the filter, with a stated stopband and a measurement, rather
+than to dropping samples and hoping.
+
+Two smaller things, recorded rather than done:
+
+- **`AudioEngine::sampleRate` is a plain `double`** written by the device
+  thread and now read by the analysis thread as well as the message thread.
+  Formally a data race, harmless in practice on an aligned double, and not
+  introduced here: the message thread already read it that way. Worth making an
+  atomic on a night that is touching the engine's state anyway.
+- **The ring's samples are plain `float` loads and stores** across two threads
+  by design, which is the usual tear and detect pattern and is benign on every
+  target this builds for, but is undefined behaviour by the standard and would
+  be flagged by ThreadSanitizer. `std::atomic_ref<float>` with relaxed ordering
+  is the formal spelling.
 
 ### Rejected
 

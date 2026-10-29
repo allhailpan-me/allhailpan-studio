@@ -79,13 +79,18 @@ namespace Tuner
     itself about 2 cents at A4, so the standard is looser than this tuner.
 
     The reference is adjustable because every shipping tuner's is. There is no
-    standard for the *range*, only for the 440, so the range here is the widest
-    and finest of the CHROMATIC tuners whose own documentation could be read:
-    410 to 480 comes from Korg's CA-50 specification and the tenth of a hertz
-    step from Logic Pro's Tuner and Peterson's StroboStomp HD. Peterson's own
-    range is wider still, 390 to 490, and is deliberately not followed: that is
-    a strobe tuner for intonation work rather than a chromatic tuner, and 410
-    to 480 already spans every reference pitch in use.
+    standard for the *range*, only for the 440, so this one is taken from what
+    the products' own documentation gives: 410 to 480 is Korg's CA-50
+    specification, and the tenth of a hertz step is Logic Pro's Tuner and
+    Peterson's StroboStomp HD, which are the finest of them.
+
+    It is not the widest. Peterson's own manual gives the StroboStomp HD as 390
+    to 490, wider on both sides, and that is left out deliberately rather than
+    overlooked: 410 to 480 spans every historical and regional tuning anybody
+    plays at, and a range that reaches 390 makes a mistyped reference land
+    further from 440 before the clamp catches it. Written down because the
+    research record tabulates the wider figure and a later reader would
+    otherwise take this for an oversight.
 */
 struct Scale
 {
@@ -233,11 +238,10 @@ struct Spec
     // is ONE CENT flat already cannot be read, because its period is already
     // longer than the longest lag computed. The reading saturates at the floor
     // and says nearly in tune while the string is out; at 49 cents flat it
-    // reads 48 cents sharp of the truth.
-    //
-    // So this is not headroom against an extreme case. Without it the tuner
-    // cannot read the lowest note it covers from the moment that note needs
-    // tuning, which is the only moment anybody looks.
+    // reads 48 cents sharp of the truth. So this is not headroom against an
+    // extreme case: without it the tuner cannot read the lowest note it covers
+    // from the moment that note needs tuning, which is the only moment anybody
+    // looks.
     //
     // So the floor is five semitones below B0, which is 23.1247 Hz. That is
     // not a round number chosen for headroom: it is Korg's own design target,
@@ -249,28 +253,28 @@ struct Spec
     // The ceiling is C8, which is the top of the detection range Boss print
     // for the TU-3 and Korg for the CA-50, and the top note of a piano.
     //
-    // It is deliberately higher than the range this tuner claims to be
-    // ACCURATE over, which is `accurateToHz` below, and the reason is a
-    // failure rather than a preference. Nothing above the ceiling has a period
-    // inside the lags searched, so the first dip that IS inside the range is
-    // the one at twice the period, and the estimator reports an exact octave
-    // down, steadily, with the threshold satisfied and nothing to say it is
-    // wrong. Measured with the ceiling at B6: a 2.5 kHz tone read 1250 Hz and
-    // a 3.5 kHz tone read 1750 Hz, both as confident readings a player would
+    // It is deliberately above the range this tuner claims to be ACCURATE
+    // over, which is `accurateToHz` below, and the reason is a failure rather
+    // than a preference. Nothing above the ceiling has a period inside the
+    // lags searched, so the first dip that IS inside the range is the one at
+    // twice the period, and the estimator reports an exact octave down,
+    // steadily, with the threshold satisfied and nothing to say it is wrong.
+    // Measured with the ceiling at B6: a 2.5 kHz tone read 1250 Hz and a
+    // 3.5 kHz tone read 1750 Hz, both as confident readings a player would
     // believe. A pinch harmonic, a whistle or a squeal does that.
     //
     // Putting the ceiling at C8 does not make that impossible, it moves it
     // above the top note of a piano and above the top of every shipping
     // tuner's published range, which is as far as it can honestly be moved:
     // the first dip rule that protects the bottom of the range is the same
-    // rule that exposes the top of it, and no choice of ceiling removes that.
+    // rule that exposes the top of it, and no ceiling removes that.
     double lowestHz  = 23.124651;
     double highestHz = 4186.009045;
 
     /** The top of the range this tuner claims the one cent tier over, and the
         frequency the low pass is designed to pass.
 
-        B6, where Korg's guitar range stops. These are two different numbers
+        B6, where Korg's guitar range stops. Two numbers rather than one
         because they answer two different questions, and tying them together
         costs something either way: designing the filter at the ceiling leaves
         almost no filtering, and measured, that is the difference between
@@ -286,28 +290,24 @@ struct Spec
         the span above it is searched so that a note there is named correctly
         rather than an octave out, not so that it is named to within a cent.
 
-        Written to more figures than it looks like it needs, because B6 is
-        1975.5332050245 and a literal rounded down to 1975.533205 is BELOW the
-        note it names. Every sweep that stops at this frequency then silently
-        drops B6, which is how a breakage that made the highest note in the
-        range read an octave down went unnoticed through a whole test run.
+        Written to more figures than it looks to need, because B6 is
+        1975.5332050245 and a literal rounded to 1975.533205 is BELOW the note
+        it names. Every sweep that stops at this frequency then silently drops
+        B6, which is how a breakage that made the highest note in the range
+        read an octave down went unnoticed through a whole test run.
 
         ONE MEASURED LIMIT AT THIS END, recorded rather than left to be found.
-        A note whose fundamental is missing entirely reads an octave up in the
-        top semitone or so of this span: measured over sixty random amplitude
-        and phase draws per case, harmonics two upward with no fundamental read
-        correctly every time at 200, 400, 700, 1000, 1300, 1600 and 1800 Hz,
-        once in sixty at 1900, and five to ten times in sixty at B6 itself.
-        What makes it reachable there and nowhere else is that the lag at half
-        the period only comes inside the searched range once the period is
-        about twice the shortest lag, which is the top of this span.
-
-        It is the same first dip rule that protects the bottom of the range,
-        seen from the other side, so it is structural rather than a bug to be
-        fixed here. It is also a signal no instrument makes: a note at 1900 Hz
-        with no energy at 1900 Hz. The case it is modelled on, where the
-        fundamental really is weak or absent, is a bass or the bottom strings
-        of a guitar, two or three octaves below any of this. */
+        A note whose fundamental is missing entirely reads an octave UP in the
+        top semitone or so of this span, because the lag at half its period has
+        come inside the searched range. Over sixty random amplitude and phase
+        draws per case, harmonics two upward with no fundamental read correctly
+        every time at 200, 400, 700, 1000, 1300, 1600 and 1800 Hz, once in
+        sixty at 1900, and five to ten times in sixty at B6 itself. It is the
+        same first dip rule seen from the other side, so it is structural, and
+        it is a signal no instrument makes: a note at 1900 Hz with no energy at
+        1900 Hz. The case it models, where the fundamental really is weak or
+        absent, is a bass or the bottom strings of a guitar, two or three
+        octaves below any of this. */
     double accurateToHz = 1975.5332050245;
 
     /** The paper's absolute threshold, from step 4. Also readable, in the
@@ -330,11 +330,11 @@ struct Spec
         nothing next to the time somebody takes to turn a machine head.
 
         What it costs is not free, and is measured rather than assumed: one
-        reading over that window is a few milliseconds of work in a release
-        build, which is why this runs on whatever thread drives the display and
-        not in the device callback, and why ten readings a second is plenty.
-        The work is the number of lags times the window, so raising the search
-        floor shortens it quadratically. */
+        reading over that window is about nine milliseconds of work in a
+        release build, which is why this runs on whatever thread drives the
+        display and not in the device callback, and why ten readings a second
+        is plenty. Raising the search floor shortens the window quadratically:
+        a floor of 160 Hz costs 0.22 ms. */
     int windowPeriods = 2;
 
     /** The paper low passes the signal before analysis, by "convolution with a
@@ -411,10 +411,14 @@ struct Spec
 /** YIN.
 
     Holds its own scratch buffers, sized once by `configure`, so `estimate`
-    allocates nothing. It is not safe to call from the audio thread anyway,
-    because one reading over the default window is seven million multiply and
-    add operations, but a reading that allocated would also stall whatever
-    thread is running the user interface.
+    allocates nothing. It is not safe to call from the audio thread anyway: Eq.
+    (6) runs the window against every lag, which at 44.1 kHz is seven million
+    iterations of a subtract and a multiply-add, about nine milliseconds. The
+    count is proportional to the square of the sample rate, because both the
+    window and the longest lag are a fixed duration, so at 192 kHz it is 138
+    million iterations and two tenths of a second. Whatever drives the display
+    has to budget for that; `TunerPanel.h` has the measured table and what it
+    does about it.
 */
 class Detector
 {
@@ -524,6 +528,13 @@ public:
     int lowPassLength()       const noexcept { return filterLength; }
     const Spec& spec()        const noexcept { return s; }
 
+    /** Eq. (8)'s output, for the one check that can see a few per cent of
+        distortion in the cumulative mean: a sinusoid's difference function has
+        an exact closed form, so the normalisation can be compared against it
+        term by term rather than through whatever pitch comes out the far end.
+        Nothing in the studio reads this. */
+    const std::vector<double>& normalisedDifference() const noexcept { return norm; }
+
     /** `x` must hold at least `requiredSampleCount()` samples; the most recent
         ones are the ones analysed, so a longer buffer is read from its end. */
     Estimate estimate (const float* x, int n) noexcept
@@ -578,17 +589,19 @@ public:
         }
 
         // ---- step 3, Eq. (8): the cumulative mean normalised difference ----
-        // "starts at 1 rather than 0". In the paper that is what keeps a
-        // search out of the dip at lag zero, which is the deepest dip in the
-        // raw function and would report an arbitrarily high frequency: it is
-        // the step that guards against reading too HIGH, and it is not what
-        // guards against reading an octave down, which is the threshold below.
+        // The normalisation is the step that guards against reading too HIGH:
+        // d(0) is zero and so would be the deepest dip in the raw function, and
+        // dividing by the running mean is what stops a search falling into it.
+        // It is not what guards against reading an octave DOWN; that is the
+        // threshold below.
         //
-        // Here the stored value at index 0 is never read, because the search
-        // starts at tauMinSamples and that is at least 2. The paper's guard is
-        // doing its work through the running mean over every lag from 1, which
-        // is what makes the dips comparable to each other at all; the value at
-        // lag zero is written so that this is the function the paper defines.
+        // The paper says d' "starts at 1 rather than 0", and this writes that
+        // down, but nothing here reads it: `tauMinSamples` is at least 2, so
+        // neither the dip test nor the fallback ever looks at lag 0 or 1.
+        // Mutation testing found this to be a dead store, and it is kept
+        // because the function is the paper's and a reader comparing the two
+        // should find every line of Eq. (8) present. What actually keeps the
+        // search off the zero lag dip is that minimum lag.
         norm[0] = 1.0;
         double running = 0.0;
 
@@ -849,13 +862,32 @@ private:
        of the same idea available, because the note it is looking at is meant
        to be steady.
 
+    WHERE THE STABILITY FIGURE COMES FROM, AND WHAT IT COSTS
+
+    This arithmetic is worth keeping, because it says something no tuner's
+    manual does. On the measured glide, the pitch moves between two frames dt
+    apart by
+
+        12.5 * exp(-t/0.38) * (1 - exp(-dt/0.38))  cents
+
+    so at 100 ms spacing the movement between adjacent frames is 0.231 of
+    whatever is still left to fall.
+
+    The gate asks for more than one such step, and that is what sets the figure.
     WHY THE CRITERION IS A RATE, AND NOT A SPREAD ACROSS FRAMES
 
-    The first version of this asked that the last few readings all lie within
-    c cents of their mean. That is the obvious thing to write and it is wrong,
-    because it has no notion of time: the spread across k frames depends
-    entirely on how often the caller asks. An audit measured what that costs,
-    on this very glide, by varying nothing but the display's frame rate:
+    The obvious thing to write, and what this did first, is to ask that the
+    last few readings all lie within some number of cents of their mean. It is
+    wrong, and the way it is wrong is instructive, because the bound it
+    satisfies is real: the spread across a window of `frames - 1` hops is at
+    most twice the tolerance, so the amount still to fall is bounded by
+    `R(t) * (exp((frames - 1) * hop / tau) - 1)`. That is a true statement and
+    it contains `hop`. The criterion has no notion of time, so how close the
+    reading is to the truth when the display opens depends entirely on how
+    often the caller asks for one.
+
+    An audit measured what that costs, on this very glide, varying nothing but
+    the display's frame rate:
 
     | frames per second | gate opens at | sharp when it opens |
     |---|---|---|
@@ -865,29 +897,31 @@ private:
     | 30 | 0.86 s | +1.50 cents |
     | 60 | 0.56 s | +3.32 cents |
 
-    So the whole design, built around the one cent tier, came apart on a
-    choice of timer interval that nobody had been told was load bearing, and a
-    readout on a thirty hertz timer would have shipped a tuner reading one and
-    a half cents sharp on every plucked note. That is exactly the fault the
-    gate exists to prevent, arriving through the gate itself.
+    So the whole design, built around the one cent tier, came apart on a choice
+    of timer interval, and a readout on an ordinary thirty hertz timer would
+    have shipped a tuner reading one and a half cents sharp on every plucked
+    note: the fault the gate exists to prevent, arriving through the gate
+    itself. It could be held together by a constant in the readout matching an
+    assumption in here, which is exactly the arrangement `CLAUDE.md` records
+    going wrong before, where the figure lived in the window and nothing
+    tested it.
 
-    The fix is to measure the thing that actually matters, which is how fast
-    the pitch is still moving. On an exponential settle the remaining offset
-    obeys dR/dt = -R/tau, so releasing the display once the rate falls below r
-    cents per second leaves
+    So measure the thing that actually matters, which is how fast the pitch is
+    still moving. On an exponential settle `dR/dt = -R/tau`, so releasing once
+    the rate falls below `r` cents per second leaves
 
         R = r * tau
 
-    still to come, and tau belongs to the string rather than to the display.
-    The frame rate drops out. With the measured tau of 0.38 s, r has to be
-    under about 2.6 cents per second to land inside the one cent tier, and the
-    figure taken below is 1.3, which measures between 0.5 and 0.8 cents
-    remaining across every frame rate from 5 to 60 per second.
+    still to come, and `tau` belongs to the string rather than to the display.
+    The frame rate drops out of the answer. With the measured `tau` of 0.38 s,
+    `r` has to be under about 2.6 to land inside the one cent tier; 1.3 is
+    taken, and it measures between 0.17 and 0.46 cents remaining across every
+    frame rate from 5 to 60 per second.
 
-    What it costs is a second or so of waiting, and that is not a defect to be
-    tuned out: it is how long the string takes, and about how long a tuning
-    pedal appears to take. A tighter figure does not make the tuner faster, it
-    makes it read sharp.
+    What it costs is about a second and a half of waiting, which is slower than
+    a pedal appears to be, and the trade is deliberate: the alternative is a
+    display that opens earlier on a string that is still falling. A tighter
+    figure does not make the tuner faster, it makes it read sharp.
 */
 struct GateSettings
 {
@@ -898,31 +932,31 @@ struct GateSettings
     double levelFloorDb = -55.0;
 
     /** How many consecutive readings the rate is measured across. Four, which
-        spans three intervals, so at the default frame rate the rate is
-        measured over three tenths of a second. */
+        spans three hops, so at the default frame rate the rate is measured
+        over three tenths of a second. */
     int stabilityFrames = 4;
 
     /** How slowly the pitch must be moving before a number is shown, in cents
         per second.
 
-        The criterion is a rate rather than a spread for the reason in the
-        comment above: a spread depends on the caller's frame rate and a rate
-        does not. 1.3 cents per second leaves about `r * tau` still to fall,
-        which on the measured tau of 0.38 s is half a cent. */
+        A rate rather than a spread, for the reason in the comment above: a
+        spread depends on the caller's frame rate and a rate does not. 1.3
+        leaves about `r * tau` still to fall, which on the measured tau of
+        0.38 s is half a cent. */
     double settleCentsPerSecond = 1.3;
 
     /** The interval between calls to `Analyser::process`, in seconds.
 
-        This is the one number in here the caller has to get right, because the
-        rate above cannot be measured without it. A readout on a timer should
-        pass its own interval; passing a figure that does not match how often
-        `process` is really called scales the measured rate by exactly the
-        ratio of the two, which is the fault the table above describes.
+        This is the one figure in here the caller has to get right, because a
+        rate cannot be measured without it, and it is a parameter rather than
+        an assumption so that it is the caller's own number rather than a
+        constant in two places that have to agree. Passing a figure that does
+        not match how often `process` is really called scales the measured rate
+        by exactly the ratio of the two.
 
-        A tenth of a second, which is ten readings a second. That is fast
-        enough that a player sees the needle respond and slow enough that the
-        analysis, which is a few milliseconds of work, costs a few per cent of
-        one core. */
+        A tenth of a second, which is ten readings a second: fast enough that a
+        player sees the needle respond, and slow enough that the analysis,
+        which is a few milliseconds of work, costs a few per cent of one core. */
     double frameSeconds = 0.1;
 };
 
@@ -969,8 +1003,8 @@ public:
         // which is the middle of the attack.
         g.stabilityFrames = std::max (2, g.stabilityFrames);
 
-        // A rate of zero would ask for a pitch that has stopped moving to the
-        // last bit, which never happens, so the display would never open.
+        // A rate of zero asks for a pitch that has stopped moving to the last
+        // bit, which never happens, so the display would never open.
         g.settleCentsPerSecond = std::max (1.0e-4, g.settleCentsPerSecond);
         g.frameSeconds         = std::min (1.0, std::max (1.0e-3, g.frameSeconds));
         reset();
@@ -1045,10 +1079,11 @@ public:
 
         if ((int) history.size() >= g.stabilityFrames)
         {
-            // How far the pitch travelled across the window, over how long the
-            // window is. The spread of the readings rather than the first to
-            // last difference, so that a pitch wandering up and down is not
-            // read as settled because it happened to come back.
+            // How far the pitch travelled across the window, over how long
+            // the window is. The spread of the readings rather than the first
+            // to last difference, so that a pitch wandering up and down is not
+            // read as settled because it happened to come back to where it
+            // started.
             double lowest = history.front(), highest = history.front();
 
             for (auto c : history)
@@ -1058,17 +1093,16 @@ public:
             }
 
             const double span = (double) (history.size() - 1) * g.frameSeconds;
-            const double rate = (highest - lowest) / std::max (1.0e-9, span);
 
-            r.movingCentsPerSecond = rate;
+            r.movingCentsPerSecond = (highest - lowest) / std::max (1.0e-9, span);
 
-            if (rate <= g.settleCentsPerSecond)
+            if (r.movingCentsPerSecond <= g.settleCentsPerSecond)
             {
                 // The newest frame rather than the mean. The gate has already
                 // established that the pitch is barely moving across the
                 // window, so the mean buys nothing, and on a pitch that is
                 // still creeping the mean is the stalest of the readings
-                // rather than the closest to where the string is going. The
+                // rather than the closest to where the string is going. An
                 // audit measured the difference at 0.20 cents on the glide.
                 const auto note = Scale::describe (e.hz, referenceHz);
 
@@ -1110,20 +1144,29 @@ private:
     estimator reads as a perfectly plausible and completely wrong pitch, so
     this cannot be left to chance.
 
-    HOW BIG THE RING HAS TO BE, which is a correctness requirement rather than
-    a performance tip. The writer publishes its counter AFTER copying its
-    block, so the second read understates how far an in-progress block has
-    already reached, by up to one block. The check is therefore blind to that
-    block, and the requirement is
+    HOW BIG THE RING HAS TO BE is a correctness requirement rather than a
+    performance tip, and it is worth stating as one. The writer publishes its
+    counter AFTER copying its block, so the second read understates how far an
+    in-progress block has already reached, by up to one block. The check is
+    therefore blind to that block, and the requirement is
 
         capacity >= snapshot + 2 * largest block the callback will deliver
 
     Measured with two real threads: at a capacity of the snapshot plus 64, with
     512 sample blocks, 38 per cent of the snapshots this accepted were torn. At
     the snapshot plus 512 it was 29 out of 147572, and at four times the
-    snapshot it was none out of 412710. The default window is 5734 samples at
-    44.1 kHz, so four times that is the size to ask for, and it leaves the
-    reader three tenths of a second to copy.
+    snapshot it was none out of 412710.
+
+    The engine's ring is 96000 samples, which is half a second at the highest
+    rate the studio runs at and two and a sixth seconds at 44.1 kHz, against a
+    snapshot of 130 ms at every rate. So it clears the requirement by a wide
+    margin, and the reader has between a third of a second and two seconds to
+    copy it, for a copy that is a few tens of microseconds.
+
+    The counter is also monotonic and is never reset, which a reader has to know
+    rather than discover: "enough has arrived" latches true the first time it
+    does, so whether audio is still arriving is a question about the counter
+    moving and not about its value. `TunerPanel.h` is where that is answered.
 */
 class InputRing
 {
