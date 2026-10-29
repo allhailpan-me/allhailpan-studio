@@ -27,6 +27,58 @@ blindly. Newest first.
 
 ---
 
+## 2026-10-29: whether the loudness histogram's ceiling should move
+
+Handed on rather than taken, because it changes a design constant and costs
+work in the device callback, and the night that found it was a hardening run.
+
+`LoudnessMeter.h` stores its block distribution as a histogram from -70 to +30
+LUFS at a hundredth of an LU per bin, which is 10000 bins and about 160 KB. The
+ceiling was chosen because +30 LUFS is thirty decibels past anything a
+converter can pass, so nothing can reach it without a gain mistake upstream.
+The night of 2026-10-29 fixed the part of that which was a fault: a programme
+above +29.995 LUFS used to report no integrated figure at all, because the
+relative gate landed in the catch all top bin and the rule that decides the
+gate's own bin by its centre then discarded the only bin with anything in it.
+
+What is left is a degradation rather than a fault. Above the ceiling every
+block shares one bin, so the relative gate cannot separate them and the figure
+is the ungated mean of everything up there. Measured: 5 s at +60 then 50 s at
++31 reads +49.540 where the exact gated figure is +59.875, and over four
+hundred thousand randomised programmes the worst case is 9.5 LU low. The
+loudness range collapses to 0.0 LU up there for the same reason, which the mix
+report prints in its warning colour.
+
+The question is whether that is worth removing. Raising `highestLufs` to +150
+makes the measured case exact: it was tried and it reads +59.875. The costs are
+that `numBins` goes from 10000 to 22000, so the histogram grows from about
+160 KB to about 350 KB, which is nothing, and that `updateIntegrated` scans
+`numBins - from` bins once per 100 ms block in the device callback, which
+roughly doubles. That is still a small number against a 100 ms budget, but it
+is audio thread work added to buy accuracy in a band that only a mistake
+reaches.
+
+Three things worth weighing, written down so the decision is made on them
+rather than remade from scratch:
+
+- Any finite histogram has a top, so raising it narrows the band this happens
+  in rather than removing it. +150 LUFS is 150 dB past full scale, which is
+  past anything a float mixer reaches without something diverging.
+- The reading up there is already finite and already says the master is tens of
+  decibels too loud, which is the only thing anybody needs from a meter at that
+  point. Getting it exact buys precision in a reading nobody will act on
+  precisely.
+- Against that: the ceiling's original justification was that nothing could
+  reach it, and that reasoning is what produced the fault. A constant chosen
+  because a case is unreachable is the shape of thing this project keeps having
+  to fix.
+
+Not urgent either way. The fault is fixed and the limit is documented in the
+header and pinned by a test that requires the figure to stay finite and above
++30.
+
+---
+
 ## 2026-10-27: the fader law, and where unity sits on the travel
 
 ### Status: built, tested, audited, and waiting on a human to merge it

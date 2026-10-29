@@ -7,6 +7,310 @@ Newest first.
 
 ---
 
+## 2026-10-29: the loudness meter, which is the one number other people check
+
+### What was looked at
+
+`Source/LoudnessMeter.h`, 409 lines, and `Tests/LoudnessMeterTest.cpp`, which
+covers it. A priority 2 target in the brief's ordering: a test suspected of
+being weaker than it looks. Nothing had merged since the night of 2026-10-28,
+so there was no recently merged work to audit, and the only JUCE-free header in
+`Source` still without a test is `Fx/Unit.h`, which two earlier nights set
+aside as unreferenced scaffolding and which still has nothing including it.
+
+Picked on the ratio and on the stake. 409 lines of source to 534 of test was
+the thinnest cover of any real arithmetic header here. And every other number
+this studio reports is checked by the owner's own ears, while a LUFS figure is
+checked by Spotify, Apple Music and YouTube, which is the entire reason for
+measuring it. A meter half a decibel out is not slightly wrong: it is making a
+claim about agreement that it cannot support, and nothing about the number
+looks wrong.
+
+Not `Fx/Svf.h` or `Tests/SvfTest.cpp`, which open pull request #55 is changing,
+and not `AudioEngine.*`, `InputSource.h`, `MainComponent.*`, `Tuner.h`,
+`TunerPanel.h` or `Tests/run.sh`, which open pull request #61 is changing.
+
+### The test was much weaker than it looked, and one thing was wrong
+
+108 mutations of `LoudnessMeter.h` against the test as it stood, every one of
+them built the way `Tests/run.sh` builds
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`). **64 caught,
+44 survived.** That is the worst ratio any night here has recorded, and it has
+one cause: every single case in the test put the same signal in both channels,
+and every case but one measured a steady tone. A steady tone reads the same
+through a window of any length, and two identical channels cannot tell a sum of
+two channels from one channel counted twice.
+
+The method was the two pass one, fast build first and then the sanitizers on
+everything that survived it, and that mattered: `ring-pre-increment` and
+`ring-wrap-off-by-one` both write one past the end of the 400 ms window, and
+both pass a plain `-O2` build. They are the fourth and fifth breakages on this
+project to look like survivors and turn out to be out of bounds accesses, so
+the warning in CLAUDE.md and in both agent descriptions is now five for five.
+
+### The fault
+
+**A programme above +29.995 LUFS reported no integrated loudness at all.**
+
+The histogram runs to +30 LUFS, so its top bin is where everything past that is
+clamped: a catch all, rather than the hundredth of an LU every other bin is.
+The relative gate sits 10 LU under the gated mean, so a programme that loud
+puts the gate in that same top bin, and `updateIntegrated`'s rule that decides
+the gate's own bin by its centre then discarded the one bin holding every block
+there was. `count` fell to zero and the reading fell to the -200 sentinel.
+
+Measured at +45 LUFS: **-200.000 before, +45.007 after.** The fix is one
+condition, exempting the top bin from the centre rule, because its centre says
+nothing about its contents.
+
+How reachable: it takes about thirty decibels of gain past full scale, so it
+takes a mistake upstream, a plugin with a broken output stage or a gain
+staging accident. Which is exactly when somebody opens the mix report to find
+out what happened. What it told them was the quietest possible number for the
+loudest possible signal, which reads as silence. That is the shape this project
+keeps meeting, except inverted rather than approximate, which is worse: a
+figure 3 dB out invites doubt, and a figure that says silence while the room is
+deafening sends the owner looking at their monitors.
+
+Past the top of the histogram the figure degrades rather than being exact, and
+the first version of this entry and of the header comment both said exact,
+which the auditor caught and which is worth recording as the mistake it was.
+The top bin is a catch all, so the relative gate cannot separate the blocks
+inside it: everything above +30 is counted whether it belongs above the gate or
+below it, and the figure comes out as the ungated mean of all of it. Measured
+on 5 s at +60 followed by 50 s at +31, where the gate at +49.5 should drop the
+quiet fifty seconds: +49.540 reported against an exact gated figure of +59.875,
+so 10.3 LU low. Randomised over four hundred thousand programmes the worst case
+is 9.5 LU low. The range collapses to nothing up there for the same reason.
+
+So the fix is better rather than right, which is the honest way to put it, and
+it is still the right change: a finite figure that says the master is tens of
+decibels past full scale is what somebody needs at that point, and no figure at
+all is not a quiet reading but the absence of one. `MixReportPanel` hides the
+whole report below -150, so what the owner actually saw was a report that never
+appeared and a line inviting them to press play. Whether to raise the ceiling
+is a separate decision, written up in `Research/BACKLOG.md` with the
+measurement, because any finite histogram has a top and raising it narrows the
+band this happens in rather than removing it, at the cost of a longer scan in
+the device callback. The test now pins what is true up there rather than what
+would be nice: finite, and still above +30.
+
+One other number in the header was wrong in the line this change rewrote. It
+said a converter would have clipped forty decibels before +30 LUFS. A 1 kHz
+sine at 0 dBFS in both channels reads 0 LUFS, which the test now asserts, so it
+is thirty.
+
+### What the survivors asked for, and what was written
+
+Eleven new checks, each one there because a breakage survived everything
+already in the file:
+
+- **Both channels, and their sum.** Reading the left channel twice passed every
+  compliance case. Now: a tone in the left reads the same as the same tone in
+  the right, both channels together read exactly 3.0103 dB above one, a
+  different tone in each channel reads the power sum of the two single channel
+  readings to five decimal places, and a peak present only in the right
+  channel is reported. That last one needed its own case because the peak
+  detectors are per channel too.
+- **A mono call.** `process` promises to measure at most the first two
+  channels, and that promise is the only thing between a mono bus and a read
+  past the end of the caller's array. Asserted with an array that has exactly
+  one entry in it, so the sanitizers would stop on a second read, and the
+  reading has to be 3.0103 dB under the same signal in two channels.
+- **The 400 ms window.** A 300 ms one passed, because a steady tone reads the
+  same through any window. A tone sounding 100 ms in every 400 ms does not: a
+  correct window always holds exactly a quarter of it and reads 6.0206 dB down,
+  steadily, at every hop. A 300 ms window holds between none of it and all of
+  it depending on where it sits. Measured: -29.014 against the -29.021 the
+  duty cycle says, and steady to four decimal places.
+- **The 3 s window, from both sides.** Nothing before 3.3 s, which is when the
+  thirtieth 400 ms block lands. One second after a 20 dB step the reading is
+  still at -28.36, and 3.3 s after it has arrived at -22.99. A shorter window
+  fails the first and a longer one the second.
+- **Both ends of the histogram.** A -69.5 LUFS programme reads -69.493, a
+  -70.5 LUFS one reads nothing at all, and +31 and +45 LUFS programmes read
+  themselves. The quiet end also exercises the clamp in `binFor`, which nothing
+  did before: the relative gate only falls off the bottom of the histogram
+  when the programme is quiet enough for its mean minus 10 LU to sit under -70,
+  and the quietest programme anywhere in the old test was -36 dBFS.
+- **The curve at every rate a device can open at.** Designing the 38 Hz
+  highpass at a fixed 48 kHz passed everything, because the sweep only ever
+  visited 48 kHz and the two checks that do visit other rates both use a 1 kHz
+  tone, where that filter is flat to a hundredth of a decibel. At 96 kHz its
+  corner would sit at 19 Hz instead of 38. Now measured relative to each rate's
+  own 1 kHz reading, which is the right way round: the shape is what the
+  weighting is, and the absolute calibration is pinned separately because the
+  standard's highpass numerator is not normalised, so its passband gain moves
+  by two hundredths of a decibel between rates.
+- **A peak reading with an upper bound.** The old check only ever asked for
+  more than 2.5 dBTP, so measuring the peak after K-weighting passed it
+  comfortably: the weighting lifts the 12 kHz signal that case uses by about
+  4 dB, so the reading went further up rather than wrong. Everywhere else it
+  would read high, which is the direction that tells somebody a master is over
+  when it is not. Plain sines at 50, 400 and 1000 Hz now have to read their own
+  amplitude within a tenth of a decibel.
+- **The loudness range's own gate.** It could be 10 LU instead of 20 and
+  nothing noticed, because every passage the old cases gated out was far enough
+  down that any threshold between 10 and 30 would have removed it. The gate
+  matters in the ordinary direction: a chorus 15 LU above a verse is a dynamic
+  record, and a 10 LU gate throws the verse away and reports it as flat. Now a
+  passage 15 LU down reads 15.000 LU and one 25 LU down reads 3.450.
+- **Reset.** It was not called anywhere in the test, and thirteen separate
+  breakages of it survived. It is a live path: the mix report's reset button
+  sets a flag the device callback acts on. Now a meter that has measured a loud
+  programme, been reset, and measured a staircase reads bit for bit what a new
+  meter reads on that staircase, and one second after a reset it reports
+  nothing for the three second figure rather than the old programme's.
+- **Preparing again.** The owner changing the device's sample rate runs
+  `audioDeviceAboutToStart`, which prepares the meter again, and `prepare`
+  resizes the 400 ms window. If it did not also reset the position into that
+  window, a change from 96 kHz down to 44.1 kHz would leave the position past
+  the end of the shorter buffer. Nothing had prepared a meter twice.
+- **That none of it allocates.** The header opens by saying everything in it
+  runs on the audio thread and the histograms exist for that reason, and
+  nothing checked it. The test replaces the global `new` and `delete` and
+  requires zero allocations across a second of metering, a reset, and a block
+  after it.
+
+A staircase rather than two levels for the reset check, and the reason is worth
+keeping: what a reset can get wrong is the relative gate, by carrying the old
+programme's block count into the new mean, which moves the gate by a decibel or
+two. A programme of two levels does not notice a gate moving if it stays on the
+same side of both. A programme spread across the histogram notices at once.
+Measured: 0.58 LU of error on the staircase, and none at all on two levels.
+
+Two other things changed. The curve tolerance went from 0.03 dB to 0.00002,
+because designing from the prototype reproduces the standard's own 48 kHz table
+to **1.6e-07 dB**: the old figure was discarding five orders of magnitude of
+resolution and let six different constants be rounded, among them writing `sin`
+where `tan` belongs, which costs 0.024 dB. And the header claimed verification
+against EBU Tech 3341 cases 1, 2 and 15 to 19. The cases its own test runs are
+1, 2, 3 and 9; 15 to 19 are the peak cases and are run against the detector in
+`TruePeakTest`. Said accurately now.
+
+### After
+
+109 mutations against the strengthened test, the two that aimed at code since
+removed having nothing left to break and one new one aiming at the fix itself.
+**94 caught, 15 survived**, against 64 and 44 before. All fifteen are no-ops,
+and the judgement on each is below. The shape of them is worth noting: nine of
+the fifteen are the histogram's own quantisation, which is the one
+approximation the header already says it makes.
+
+- **`binat-no-half`**, a bin's lower edge where its centre belongs: half a bin,
+  0.005 LU.
+- **`binfor-ceil`** and **`binfor-off-by-one`**, every block one bin up, so
+  half a bin of displacement in where the gate falls. No-ops by design rather
+  than by luck. The header says the bins hold the
+  exact energies rather than their own value, so the only approximation left is
+  which side of a gate the one bin containing it falls on. These three are
+  that approximation, measured.
+- **`integrated-tie-flipped`** and **`lra-tie-flipped`**, the centre rule
+  inverted for the gate's own bin: one bin's blocks in or out. Still a no-op,
+  but the first version of this entry gave the bin width, 0.01 LU, as though it
+  were the error, and it is not. A block crossing the gate moves the reading by
+  10*log10((n+1)/n) for the n blocks already counted, which is 1.16 LU on a
+  five block programme, and on two equal passages 12.7875 dB apart, where the
+  gate lands exactly on the quieter one, measures a **2.75 LU step**. What the
+  half bin bounds is the disagreement with another meter, because the standard
+  has the same cliff in the same place, and half a bin is a twentieth of the
+  tolerance compliance allows. The verdict stands and the reason given for it
+  did not.
+- **`lra-rank-fraction-total`**, **`lra-rank-no-plus-one`** and
+  **`lra-seen-strict`**, each moving a percentile by one rank. Tech 3342 says
+  to take the 95th and the 10th percentile and does not say which of the
+  several nearest rank conventions to use. libebur128 rounds where this floors,
+  which agrees at the 95th and is one rank apart at the 10th, worth a few
+  hundredths of an LU on a real distribution. Deliberately not changed:
+  swapping one unspecified convention for another is not a fix.
+- **`chain-highpass-first`**, the highpass before the shelf: exact. Two linear
+  time invariant sections in cascade commute and each carries its own state.
+- **`filled-no-clamp`**, `filled` growing without bound: no-op for every
+  reading, since it is only ever read as `filled >= blockSamples`. The clamp is
+  still load bearing, because `filled` is an `int` stepped once per sample and
+  without it a rolling transport overflows it after about twelve and a half
+  hours at 48 kHz. Catching that would take a twelve hour test.
+- **`hop-off-by-one`**, a hop of 4801 samples rather than 4800: 100.02 ms
+  instead of 100. Every figure here is a mean square over a window and a
+  hundredth of a per cent of hop moves none of them by anything approaching
+  the 0.1 LU the standard allows.
+- **`integrated-no-gate-guard`** and **`lra-min-count-gone`**, two early
+  returns that never fire: redundant, proven. With nothing gated the mean is
+  0.0 over 0, which is a NaN, `loudnessOf` answers -200 to it because NaN
+  fails its `> 0.0` test, the gate lands under the histogram, the clamp in
+  `binFor` pins the scan to bin 0, nothing is in any bin and the same -200
+  comes out of the bottom. Both kept as statements of intent.
+- **`lra-no-floor-at-zero`**, the `max (0.0, ...)` on the range: the percentile
+  walk is monotonic in its fraction, so the 95th can never come out below the
+  10th. Defensive, kept.
+- **`reset-keeps-ring`**, `reset` keeping the short term ring's contents and
+  its running sum and resetting only the position: a no-op, and a neat one.
+  `blocksSeen` is still reset, so nothing is reported until thirty new blocks
+  have landed, and by then every stale entry has been subtracted and every new
+  one added, so the running sum has arrived at the right value by its own
+  bookkeeping. The `fill` and the `blockRingSum = 0.0` are belt and braces.
+  Kept, because they cost nothing and the next person should not have to work
+  that out.
+
+Two guards were taken back out rather than kept. The fix above needed the top
+bin exempting from the centre rule in `updateIntegrated`, and the same rule
+appears twice in `updateRange`; exempting it there as well was written, then
+mutation tested, then removed, because up there every reading that survives the
+gate is in that one bin and no percentile can separate them, so the range is
+zero either way. The comment in `updateRange` now says so, to stop the next
+reader adding a line that nothing can distinguish from its absence.
+
+### Audited by somebody who did not write it
+
+As CLAUDE.md requires for anything touching audio, and it earned its keep. The
+`auditor` agent was given the change and the five things the author was least
+sure of. Four held: the fix is sufficient and cannot leave `count` at zero at
+either end of the histogram, the bottom bin genuinely needs no exemption, the
+two exemptions left out of `updateRange` are no-ops over four hundred thousand
+randomised histograms and byte identical output on the whole suite, and the
+0.00002 dB tolerance has eight orders of margin rather than one, since nudging
+every `std::sin` in the test by an ulp moves the measured error by nothing at
+all once it is cast to float.
+
+The fifth did not hold. The claim that the figure stayed exact past the top of
+the histogram was false by up to 10 LU, in three places, one of them the
+sentence justifying the fix. All three are corrected above. It also found that
+the replaced `operator new` leaves AddressSanitizer's heap checking and
+LeakSanitizer both intact, proven by planting a bounds error and a leak and
+watching each one get reported through the replacement, which is worth knowing
+because that check is only worth anything if the hook really does intercept the
+meter's own vectors.
+
+And a premise the author had wrong: the suite does not run on three platforms.
+`build.yml` runs `Tests/run.sh` in one `ubuntu-latest` job and the platform
+matrix never compiles anything under `Tests/`, so Windows and macOS exposure is
+a developer running it locally.
+
+### What is now proven that was not
+
+That both channels are measured and that their energies add. The equal weight
+itself is pinned by compliance cases 1 and 2 and by the 3.0103 dB check, not by
+the power sum case, which takes its expectation from the meter's own single
+channel readings and would be satisfied by a meter weighting both channels by a
+half. The comment on it says so now, because the other reading of it is
+flattering. That a mono call
+reads one channel and nothing past it. That the momentary window is 400 ms and
+the short term one three seconds, rather than merely some length that a steady
+tone cannot tell apart. That the weighting curve is the same curve at 44.1,
+88.2, 96 and 192 kHz and not only at the 48 the standard tabulates, to within
+0.02 dB. Not below about 32 kHz, where the bilinear warping grows past that:
+0.051 dB at 22.05 kHz, still inside what compliance allows, and now said in the
+check rather than covered by a claim about every rate. That the curve reproduces the standard's own table to 1.6e-07 dB, so
+none of its constants can be rounded. That the peak reading is of the waveform
+and not of the weighted signal, from both sides. That the absolute gate is at
+-70 LUFS and that the histogram holds whatever it is given at either end. That
+the loudness range's relative gate is 20 LU and not 10. That reset leaves the
+meter indistinguishable from a new one. That a change of sample rate does not
+leave the window indexing past its own end. And that none of it allocates,
+which the header has claimed since it was written.
+
+---
+
 ## 2026-10-28: the fader law, and the translation of every fader already saved
 
 ### What was looked at
