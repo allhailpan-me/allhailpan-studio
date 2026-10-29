@@ -24,10 +24,11 @@
 // whether the peak reading has an upper bound, and what reset does.
 //
 // Sources:
-//   ITU-R BS.1770-4, Tables 1 and 2 (K-weighting coefficients at 48 kHz)
-//   ITU-R BS.1770-4, section 2 (the channel sum, each of a stereo pair
-//     weighing 1.0) and the 400 ms and 3 s window lengths
-//   EBU Tech 3341, Table 1, cases 1, 2, 3 and 9
+//   ITU-R BS.1770-4, Tables 1 and 2 (K-weighting coefficients at 48 kHz),
+//     the channel sum with each of a stereo pair weighing 1.0, the 400 ms
+//     gating block, and Annex 2 for the peak
+//   EBU Tech 3341, for the three second short term window, which BS.1770-4
+//     does not define, and Table 1, cases 1, 2, 3 and 9
 //   EBU Tech 3342, for the loudness range: the spread between the 95th and
 //     the 10th percentile of the short term readings, gated at -70 LUFS
 //     absolutely and then 20 LU below the mean of what survives that
@@ -248,7 +249,13 @@ static void kWeightingMatchesTheStandard()
     }
 }
 
-/** The same curve at every rate a device can open at.
+/** The same curve at 44.1, 88.2, 96 and 192 kHz.
+
+    Not at every rate `prepare` will accept: it clamps at 8 kHz, and below
+    about 32 kHz the bilinear warping grows past what is allowed here, 0.051 dB
+    at 22.05 kHz against the 0.02 below. That is still inside the 0.1 LU
+    compliance allows, so it is a limit of this check rather than of the meter,
+    and it is said here rather than implied by a wider claim.
 
     The sweep above establishes the curve at 48 kHz only, and the two checks
     that do visit other rates both use a 1 kHz tone, where the 38 Hz highpass
@@ -270,6 +277,11 @@ static void theWeightingCurveIsTheSameAtEveryRate()
     {
         const double atOneKilohertz = measuredKWeightingDb (1000.0, sampleRate);
 
+        // Every frequency in this list, and in the sweep above, holds a whole
+        // number of periods in 400 ms at every one of these rates, which is
+        // why the window contributes nothing and the agreement is to seven
+        // decimal places. Adding 70 Hz or 7 kHz would break that and nothing
+        // here would say why.
         for (double f : { 40.0, 100.0, 500.0, 1500.0, 3000.0, 8000.0 })
         {
             if (f > 0.4 * sampleRate)
@@ -296,7 +308,7 @@ static void theWeightingCurveIsTheSameAtEveryRate()
     disagree with every other meter while looking perfectly healthy. */
 static void gainAtOneKilohertzIsWhatTheOffsetAssumes()
 {
-    std::printf ("the gain at 1 kHz is the 0.691 dB the offset cancels, at every rate\n");
+    std::printf ("the gain at 1 kHz is the 0.691 dB the offset cancels, at each of four rates\n");
 
     for (double sampleRate : { 44100.0, 48000.0, 88200.0, 96000.0 })
     {
@@ -692,8 +704,14 @@ static void bothChannelsAreMeasuredAndSummed()
 
     // A different tone in each channel, so nothing can pass by reading one of
     // them twice, and the two channels' filter states have to be separate.
-    // The standard's sum is over channel energies, so the reading follows from
-    // the two single channel readings and nothing else.
+    //
+    // What this pins is additivity and that separateness, and not the absolute
+    // weight each channel carries: it takes its expectation from the meter's
+    // own two single channel readings, so a meter weighting both channels by a
+    // half would satisfy it exactly. The absolute weight is pinned by the
+    // 3.0103 dB above and by compliance cases 1 and 2, which is why that is
+    // not a gap. It is worth being clear about which of the two this case is
+    // doing, because the other reading of it is flattering.
     const auto onLeft  = sine (1000.0, -20.0, 5.0, sampleRate);
     const auto onRight = sine (3000.0, -26.0, 5.0, sampleRate);
     const std::vector<float> quiet (onLeft.size(), 0.0f);
@@ -926,12 +944,50 @@ static void theAbsoluteGateIsAtSeventyLufs()
     // reached by a mistake somewhere upstream. What it must not do is read the
     // loudest possible programme as the quietest possible number, which is
     // what tells somebody their master is silent when it is deafening.
+    //
+    // +45 is the one that does the work here and +31 is the control. At +31
+    // the gate lands at +21, which is an ordinary bin, so that case reads
+    // correctly with or without the exemption in updateIntegrated. Do not trim
+    // this to its first entry.
     for (double levelDb : { 31.0, 45.0 })
     {
         const double got = integratedOf (levelDb);
         std::printf ("    a %+.0f LUFS programme reads %+9.3f\n", levelDb, got);
         check (std::abs (got - levelDb) < 0.1,
                "a programme at " + std::to_string ((int) levelDb) + " LUFS read "
+                   + std::to_string (got));
+    }
+
+    // A steady programme above the top of the histogram reads exactly, because
+    // there is nothing for the gate to exclude. One with dynamics up there
+    // does not, and this is what the limit actually is rather than what it
+    // would be nice for it to be: everything above +30 shares one bin, so the
+    // relative gate cannot separate it, and the figure comes out as the
+    // ungated mean. On 5 s at +60 followed by 50 s at +31 the exact gated
+    // answer is +59.875, since the gate at +49.5 should drop the quiet fifty
+    // seconds, and this reads +49.540.
+    //
+    // So what is asserted is what survives up there and is worth having: a
+    // finite figure that still says the master is far past full scale. The
+    // -200 sentinel this used to return is not a quiet reading, it is the
+    // absence of one, and MixReportPanel hides the whole report below -150,
+    // so what the owner saw was a report that never appeared.
+    {
+        LoudnessMeter meter;
+        meter.prepare (sampleRate);
+        const auto veryLoud = sine (1000.0, 60.0, 5.0, sampleRate);
+        const auto loud     = sine (1000.0, 31.0, 50.0, sampleRate);
+        feedChannels (meter, veryLoud, veryLoud);
+        feedChannels (meter, loud, loud);
+
+        const double got = meter.getIntegratedLufs();
+        std::printf ("    +60 for 5 s then +31 for 50 s reads %+9.3f\n", got);
+
+        check (got > -150.0,
+               "a programme tens of decibels past full scale reported no figure at all: "
+                   + std::to_string (got));
+        check (got > 30.0,
+               "a programme every block of which is above +30 LUFS read "
                    + std::to_string (got));
     }
 }

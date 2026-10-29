@@ -230,21 +230,47 @@ private:
     // A gated measurement cannot be made incremental: the relative gate
     // depends on the average of everything measured so far, so a block that
     // was included an hour ago can fall below the gate now. What can be
-    // bounded is how the distribution is stored. A hundredth of an LU per bin
-    // is finer than the tolerance the standard is specified to by a factor of
-    // ten, and the bins hold the exact energies rather than the bin's own
-    // value, so the only approximation left is which side of a gate the one
-    // bin containing it falls on.
+    // bounded is how the distribution is stored. A hundredth of an LU per bin,
+    // and the bins hold the exact energies rather than the bin's own value, so
+    // the only approximation left is which side of a gate the one bin
+    // containing it falls on.
+    //
+    // What that hundredth bounds is where the gate effectively sits, to within
+    // half a bin. It is not an error bar on the figure, and reading it as one
+    // would be a mistake: a block crossing the gate moves the answer by
+    // 10*log10((n+1)/n) for the n blocks already counted, which is 1.16 LU on
+    // a five block programme, and on two equal passages 12.7875 dB apart,
+    // where the gate lands exactly on the quieter one, measures a 2.75 LU
+    // step. The standard has that same cliff in the same place, so what is
+    // bounded by half a bin is the disagreement with another meter, and half a
+    // bin is a twentieth of the tolerance compliance allows.
     //
     // The range runs from -70, which is the absolute gate and therefore the
-    // quietest value that can ever count, to +30, which no mix reaches
-    // because a converter would have clipped forty decibels earlier. Past
-    // the top the integrated figure is still exact, because a bin holds the
-    // energies rather than its own value, but the range collapses to nothing:
-    // every block is in one bin, so no percentile can separate them. That is
-    // the right trade for a figure nobody can reach without a gain mistake
-    // somewhere upstream, and it is not the same thing as reporting no figure
-    // at all, which is what the tie rule in updateIntegrated used to do.
+    // quietest value that can ever count, to +30, which is thirty decibels
+    // past anything a converter could pass and so takes a gain mistake
+    // somewhere upstream to reach.
+    //
+    // Past the top it degrades rather than failing, and the degradation is
+    // worth stating precisely because an earlier version of this comment
+    // claimed the figure stayed exact up there and it does not. The top bin
+    // is a catch all, so the relative gate cannot separate the blocks inside
+    // it: everything above +30 is counted whether it belongs above the gate
+    // or below it, and what comes out is the ungated mean of all of it.
+    // Measured on 5 s at +60 followed by 50 s at +31, where the gate should
+    // drop the quiet fifty seconds: this reports +49.540 where the exact
+    // gated figure is +59.875. Randomised over four hundred thousand
+    // programmes the worst case is 9.5 LU low. The range collapses to nothing
+    // up there for the same reason, one bin being unsplittable by any
+    // percentile.
+    //
+    // Which is still a long way better than what it replaced, namely no
+    // figure at all: the reading up there is finite and says correctly that
+    // the master is tens of decibels too loud, and that is the only thing
+    // anybody needs from it at that point. Raising the ceiling would narrow
+    // the band this happens in rather than remove it, because any finite
+    // histogram has a top, and it would grow the per block scan that runs in
+    // the device callback. That trade is written up in Research/BACKLOG.md
+    // rather than taken here.
     static constexpr double binsPerLu = 100.0;
     static constexpr double lowestLufs = -70.0;
     static constexpr double highestLufs = 30.0;
@@ -335,11 +361,14 @@ private:
             //
             // Never the top bin, because that one is not a hundredth of an LU
             // wide: it is where everything above +30 LUFS is clamped, so its
-            // centre says nothing about what is in it. A programme loud enough
-            // to put the gate up there has every block it owns in that bin, and
-            // dropping it by the rule below reported the loudest possible
+            // centre says nothing about what is in it. When the gate lands up
+            // there, every block that gets past it is in that bin, because the
+            // scan starts at the gate, so dropping the bin by the rule below
+            // left nothing counted at all and reported the loudest possible
             // programme as the quietest possible number. Measured at +45 LUFS:
-            // -200 before this line, +45.007 after it.
+            // -200 before this line, +45.007 after it. What it does not buy is
+            // an exact figure up there, for the reason set out where the range
+            // of the histogram is declared.
             if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
                 continue;
             sum   += blockEnergy[(size_t) bin];

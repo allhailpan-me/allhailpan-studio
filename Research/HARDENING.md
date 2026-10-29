@@ -72,11 +72,33 @@ keeps meeting, except inverted rather than approximate, which is worse: a
 figure 3 dB out invites doubt, and a figure that says silence while the room is
 deafening sends the owner looking at their monitors.
 
-Past the top of the histogram the integrated figure is now exact, because a bin
-holds the energies rather than its own value. The range still collapses to
-nothing up there, since every block is in one bin and no percentile can
-separate them. That is a documented limit rather than a fault, and the header
-says so.
+Past the top of the histogram the figure degrades rather than being exact, and
+the first version of this entry and of the header comment both said exact,
+which the auditor caught and which is worth recording as the mistake it was.
+The top bin is a catch all, so the relative gate cannot separate the blocks
+inside it: everything above +30 is counted whether it belongs above the gate or
+below it, and the figure comes out as the ungated mean of all of it. Measured
+on 5 s at +60 followed by 50 s at +31, where the gate at +49.5 should drop the
+quiet fifty seconds: +49.540 reported against an exact gated figure of +59.875,
+so 10.3 LU low. Randomised over four hundred thousand programmes the worst case
+is 9.5 LU low. The range collapses to nothing up there for the same reason.
+
+So the fix is better rather than right, which is the honest way to put it, and
+it is still the right change: a finite figure that says the master is tens of
+decibels past full scale is what somebody needs at that point, and no figure at
+all is not a quiet reading but the absence of one. `MixReportPanel` hides the
+whole report below -150, so what the owner actually saw was a report that never
+appeared and a line inviting them to press play. Whether to raise the ceiling
+is a separate decision, written up in `Research/BACKLOG.md` with the
+measurement, because any finite histogram has a top and raising it narrows the
+band this happens in rather than removing it, at the cost of a longer scan in
+the device callback. The test now pins what is true up there rather than what
+would be nice: finite, and still above +30.
+
+One other number in the header was wrong in the line this change rewrote. It
+said a converter would have clipped forty decibels before +30 LUFS. A 1 kHz
+sine at 0 dBFS in both channels reads 0 LUFS, which the test now asserts, so it
+is thirty.
 
 ### What the survivors asked for, and what was written
 
@@ -177,14 +199,23 @@ approximation the header already says it makes.
 
 - **`binat-no-half`**, a bin's lower edge where its centre belongs: half a bin,
   0.005 LU.
-- **`binfor-ceil`** and **`binfor-off-by-one`**, every block one bin up: 0.01
-  LU. No-ops by design rather than by luck. The header says the bins hold the
+- **`binfor-ceil`** and **`binfor-off-by-one`**, every block one bin up, so
+  half a bin of displacement in where the gate falls. No-ops by design rather
+  than by luck. The header says the bins hold the
   exact energies rather than their own value, so the only approximation left is
   which side of a gate the one bin containing it falls on. These three are
   that approximation, measured.
 - **`integrated-tie-flipped`** and **`lra-tie-flipped`**, the centre rule
-  inverted for the gate's own bin: one bin's blocks in or out, 0.01 LU wide.
-  The same approximation again.
+  inverted for the gate's own bin: one bin's blocks in or out. Still a no-op,
+  but the first version of this entry gave the bin width, 0.01 LU, as though it
+  were the error, and it is not. A block crossing the gate moves the reading by
+  10*log10((n+1)/n) for the n blocks already counted, which is 1.16 LU on a
+  five block programme, and on two equal passages 12.7875 dB apart, where the
+  gate lands exactly on the quieter one, measures a **2.75 LU step**. What the
+  half bin bounds is the disagreement with another meter, because the standard
+  has the same cliff in the same place, and half a bin is a twentieth of the
+  tolerance compliance allows. The verdict stands and the reason given for it
+  did not.
 - **`lra-rank-fraction-total`**, **`lra-rank-no-plus-one`** and
   **`lra-seen-strict`**, each moving a percentile by one rank. Tech 3342 says
   to take the 95th and the 10th percentile and does not say which of the
@@ -229,14 +260,47 @@ gate is in that one bin and no percentile can separate them, so the range is
 zero either way. The comment in `updateRange` now says so, to stop the next
 reader adding a line that nothing can distinguish from its absence.
 
+### Audited by somebody who did not write it
+
+As CLAUDE.md requires for anything touching audio, and it earned its keep. The
+`auditor` agent was given the change and the five things the author was least
+sure of. Four held: the fix is sufficient and cannot leave `count` at zero at
+either end of the histogram, the bottom bin genuinely needs no exemption, the
+two exemptions left out of `updateRange` are no-ops over four hundred thousand
+randomised histograms and byte identical output on the whole suite, and the
+0.00002 dB tolerance has eight orders of margin rather than one, since nudging
+every `std::sin` in the test by an ulp moves the measured error by nothing at
+all once it is cast to float.
+
+The fifth did not hold. The claim that the figure stayed exact past the top of
+the histogram was false by up to 10 LU, in three places, one of them the
+sentence justifying the fix. All three are corrected above. It also found that
+the replaced `operator new` leaves AddressSanitizer's heap checking and
+LeakSanitizer both intact, proven by planting a bounds error and a leak and
+watching each one get reported through the replacement, which is worth knowing
+because that check is only worth anything if the hook really does intercept the
+meter's own vectors.
+
+And a premise the author had wrong: the suite does not run on three platforms.
+`build.yml` runs `Tests/run.sh` in one `ubuntu-latest` job and the platform
+matrix never compiles anything under `Tests/`, so Windows and macOS exposure is
+a developer running it locally.
+
 ### What is now proven that was not
 
-That both channels are measured and summed with equal weight. That a mono call
+That both channels are measured and that their energies add. The equal weight
+itself is pinned by compliance cases 1 and 2 and by the 3.0103 dB check, not by
+the power sum case, which takes its expectation from the meter's own single
+channel readings and would be satisfied by a meter weighting both channels by a
+half. The comment on it says so now, because the other reading of it is
+flattering. That a mono call
 reads one channel and nothing past it. That the momentary window is 400 ms and
 the short term one three seconds, rather than merely some length that a steady
 tone cannot tell apart. That the weighting curve is the same curve at 44.1,
 88.2, 96 and 192 kHz and not only at the 48 the standard tabulates, to within
-0.02 dB. That the curve reproduces the standard's own table to 1.6e-07 dB, so
+0.02 dB. Not below about 32 kHz, where the bilinear warping grows past that:
+0.051 dB at 22.05 kHz, still inside what compliance allows, and now said in the
+check rather than covered by a claim about every rate. That the curve reproduces the standard's own table to 1.6e-07 dB, so
 none of its constants can be rounded. That the peak reading is of the waveform
 and not of the weighted signal, from both sides. That the absolute gate is at
 -70 LUFS and that the histogram holds whatever it is given at either end. That
