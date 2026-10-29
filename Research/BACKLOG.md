@@ -427,19 +427,122 @@ with a guard that belongs to the normalisation as a whole; and the reference
 range was called the widest documented when this very file tabulates a wider
 one.
 
+### What a second audit found, after the wiring had landed
+
+A separate auditor and a separate mutation harness went over the arithmetic
+while the wiring was being written, between them 88 deliberate breakages, each
+compiled with the sanitizers `Tests/run.sh` uses. Six of the breakages are
+caught by AddressSanitizer alone and produce no failing check at all, so a
+plain `-O2` harness would have called them survivors, which is the thing
+`CLAUDE.md` warns about and is now twice demonstrated on this project.
+
+Four findings, worst first.
+
+**The gate's accuracy depended on how often the caller asked it for a
+reading**, and this is the one worth remembering. It asked that the last four
+readings lie within a quarter of a cent of their mean: the obvious thing to
+write, and it has no notion of time, so the spread it measures is a function
+of the frame rate. Measured on the glide, varying nothing else:
+
+| readings per second | gate opens at | sharp when it opens |
+|---|---|---|
+| 10 | 1.40 s | +0.37 cents |
+| 15 | 1.23 s | +0.57 cents |
+| 20 | 1.05 s | +0.93 cents |
+| 30 | 0.86 s | +1.50 cents |
+| 60 | 0.56 s | +3.32 cents |
+
+As wired it was not broken. The readout analyses on its own thread paced at a
+hundred milliseconds and leaves the thirty hertz timer to repaint, and that
+pacing was chosen deliberately and commented. But it held together only
+because a constant in the window matched an assumption in `Tuner.h` with
+nothing checking that it did, which is exactly the arrangement this file
+already records going wrong: the record of the recording alignment says "the
+fourth thing wrong with it is why: the figure was in the window, where nothing
+tests it". A tuner reading one and a half cents sharp on every plucked note
+was one timer interval away, and the test could not have seen it because it
+fixed the hop.
+
+The criterion is a rate now, and the arithmetic is simpler than what it
+replaced. On an exponential settle `dR/dt = -R/tau`, so releasing once the
+rate falls below `r` cents per second leaves `R = r tau` to come, and `tau`
+belongs to the string rather than to the display: the frame rate drops out.
+The readout passes its own pacing figure as `GateSettings::frameSeconds`
+rather than agreeing with anything. Measured, the first reading shown now sits
+between 0.17 and 0.46 cents from where the string settles across every rate
+from 5 to 60 a second, and the test sweeps the rate rather than fixing it.
+
+**Above the search ceiling it reported an exact octave down, confidently.** A
+note above the ceiling has no period inside the lags computed, so the first dip
+that is inside the range is the one at twice the period. With the ceiling at B6
+a 2.5 kHz tone read 1250 Hz and a 3.5 kHz tone read 1750 Hz, both steady, with
+the threshold satisfied and nothing to say they were wrong. That is a pinch
+harmonic, a whistle or a squeal, and a musician would believe it.
+
+The ceiling is C8 now, the top of the detection range Boss print for the TU-3
+and Korg for the CA-50, and the top note of a piano. It does not make the
+failure impossible, it moves it above anything an instrument plays. The range
+the one cent tier is claimed over stays at B6 and is a separate number, because
+the low pass is designed from it: design the filter at the ceiling and almost
+no filtering is left, which is measurably the difference between inside the
+tier and outside it.
+
+Lowering the shortest lag to reach C8 exposed one new limit, measured rather
+than left to be found: a note with no fundamental at all reads an octave **up**
+in the top semitone of the claimed range, because the lag at half its period
+has come inside the searched range. Over sixty random amplitude and phase draws
+per case it is clean at 200, 400, 700, 1000, 1300, 1600 and 1800 Hz, once in
+sixty at 1900, and five to ten in sixty at B6. It is the first dip rule seen
+from the other side, so it is structural rather than a bug, and it is a signal
+no instrument makes: a note at 1900 Hz with no energy at 1900 Hz.
+
+**B6 was never tested, by any sweep in the file**, because the constant naming
+it was `1975.533205` and B6 is `1975.5332050245`. A literal rounded down is
+below the note it names, so every sweep that stopped there dropped the one note
+the header calls the top of the range, and a breakage that made the highest
+note read an octave down went unnoticed through a whole run. Worth filing next
+to the other faults here that were a digit rather than a decision.
+
+**No test signal decayed**, which is what a plucked string does and what this
+tuner exists to read. There is one now, and it answered the open question the
+mutation run had raised about the clamp on the interpolated shift. A decaying
+signal makes the difference function rise with lag, because the two windows
+being compared no longer hold the same energy, so the dip is pulled off the
+true period and the clamp can be the less accurate of the two options. But
+where that costs more than a cent, the note is dying fast enough that the
+buffer is not periodic any more and the threshold has already thrown the
+reading away: the error never reaches the display. Every note with a T60 from
+ten seconds down to seven tenths reads inside a third of a cent; below that the
+readings run to several cents and every one of them is rejected.
+
+Also found and fixed: the glide's derived bound was loose by a factor of eleven
+and would have accepted a gate showing the string 5.16 cents out; three
+comments said the opposite of the code, the filter consuming its extra samples
+at the newest end rather than the oldest, the stability history being in
+absolute cents rather than note space, and the value at lag zero being written
+but never read; and the required ring capacity is a correctness requirement
+rather than a performance tip, `capacity >= snapshot + 2 * largest block`,
+written as one now with the measured tearing rates behind it.
+
 ### What is left, and is the next night's work
 
 **Decimate the tuner's tap to a fixed analysis rate.** This is the proper fix
 for the cost above, and it is a research job rather than a design one, which is
-why it was not done tonight. The highest note searched is B6 at 1975 Hz, so the
-analysis needs nothing like 192 kHz, and running at a fixed rate would make the
-cost constant and the frame spacing honest at every device setting. What it
-needs first is the decimation filter's specification: the square window
-already in front of the estimator is designed for 1 dB of droop at the top
-note and has 13 dB sidelobes, which is nowhere near enough stopband to decimate
-through, so whatever folds would land in the band the estimator is reading. A
-night should go to the filter, with a stated stopband and a measurement, rather
-than to dropping samples and hoping.
+why it was not done tonight. The highest note the one cent tier is claimed to
+is B6 at 1975 Hz and the search ceiling is C8 at 4186, so the analysis needs
+nothing like 192 kHz, and running at a fixed rate would make the cost constant
+at every device setting. What it needs first is the decimation filter's
+specification: the square window already in front of the estimator is designed
+for 1 dB of droop at the top of the claimed range and has 13 dB sidelobes,
+which is nowhere near enough stopband to decimate through, so whatever folds
+would land in the band the estimator is reading. A night should go to the
+filter, with a stated stopband and a measurement, rather than to dropping
+samples and hoping.
+
+Note that the frame spacing is no longer part of this: the gate's criterion is
+a rate in cents per second and the readout hands it its own pacing figure, so
+how often the analysis runs does not change how close to settled a displayed
+reading is. That was not true when this paragraph was first written.
 
 Two smaller things, recorded rather than done:
 
