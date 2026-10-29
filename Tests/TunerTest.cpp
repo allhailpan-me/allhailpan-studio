@@ -23,9 +23,11 @@
 // ---------------------------------------------------------------------------
 #include "Tuner.h"
 
+#include <atomic>
 #include <cstdio>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int failures = 0;
@@ -1121,25 +1123,32 @@ static void testGate()
     // A note quieter than the floor is not read, however periodic it is. This
     // is the open string ringing down into the noise.
     {
+        // The levels here are absolute, in dBFS, and not computed from
+        // `levelFloorDb`. Derived from the constant they followed it wherever
+        // it moved and the check became vacuous: a floor of -200 dB, which is
+        // a tuner that chases a closed input's own noise, passed the whole
+        // suite. These two bracket -55 dB and nothing else.
         an.reset();
-        const double quiet = std::pow (10.0, (gate.levelFloorDb - 12.0) / 20.0);
+        const double quiet = std::pow (10.0, -70.0 / 20.0);
         const auto v = synth ({ { 220.0, quiet, 0.0 } }, sampleRate, n);
 
         for (int frame = 0; frame < 10; ++frame)
             check (! an.process (v.data(), n).hasNote,
-                   "a note under the level floor was shown");
+                   "a note at -70 dBFS was shown, so the level floor is too low to "
+                   "keep the tuner off a ringing string's own noise floor");
 
-        // And just above the floor it is read, so the floor is a floor rather
+        // And a quiet but real signal is read, so the floor is a floor rather
         // than a wall.
         an.reset();
-        const double loud = std::pow (10.0, (gate.levelFloorDb + 12.0) / 20.0) * 1.4142;
+        const double loud = std::pow (10.0, -30.0 / 20.0);
         const auto w = synth ({ { 220.0, loud, 0.0 } }, sampleRate, n);
 
         bool shown = false;
         for (int frame = 0; frame < 10; ++frame)
             shown = shown || an.process (w.data(), n).hasNote;
 
-        check (shown, "a note above the level floor was never shown");
+        check (shown, "a note at -30 dBFS was never shown, so the level floor is "
+                      "high enough to refuse a quietly recorded instrument");
     }
 
     // The history does not carry across notes. Without this, the first frame
@@ -1162,6 +1171,63 @@ static void testGate()
         check (! r.hasNote,
                "a new note after silence was shown on its first frame, so the "
                "stability history is carrying across notes");
+    }
+
+    // The same check again with the SAME note either side of the silence, and
+    // this is the one that actually tests it. The two note version above
+    // passes whether the history is cleared or not: a fifth disagrees with
+    // every stale frame, so the stability test holds the display back either
+    // way, and removing the clear entirely passed that check.
+    //
+    // The fault it hides is narrow and real. A string is flattened by roughly
+    // the twelve cents of its own attack glide, so its first sharp reading can
+    // land within a third of a cent of the previous note's settled pitch, and
+    // the tuner then says "in tune" on a string that is twelve cents flat.
+    {
+        an.reset();
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        const std::vector<float> silence ((size_t) n, 0.0f);
+
+        for (int frame = 0; frame < 8; ++frame)
+            an.process (v.data(), n);
+
+        check (an.process (v.data(), n).hasNote, "the note was never shown");
+
+        an.process (silence.data(), n);
+
+        check (! an.process (v.data(), n).hasNote,
+               "the same note after a silence was shown on its first frame, so the "
+               "stability history survived the signal going away");
+
+        // And it comes back, so clearing the history is not a stall.
+        bool shown = false;
+        for (int frame = 0; frame < gate.stabilityFrames + 2; ++frame)
+            shown = shown || an.process (v.data(), n).hasNote;
+
+        check (shown, "the note never came back after the silence");
+    }
+
+    // A buffer too short to analyse is the ring having nothing new to hand
+    // over. That is not news and it is not silence: blanking the display for
+    // it is a flicker on an ordinary frame, and clearing the history for it is
+    // a stall.
+    {
+        an.reset();
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+
+        for (int frame = 0; frame < 8; ++frame)
+            an.process (v.data(), n);
+
+        const auto shown = an.process (v.data(), n);
+        check (shown.hasNote, "the note was never shown");
+
+        const auto starved = an.process (v.data(), n - 1);
+        check (starved.hasNote, "a buffer too short to analyse blanked the display");
+        checkNear (starved.hz, shown.hz, 0.0, "the held reading is not the last one");
+        check (starved.midi == shown.midi, "the held reading named a different note");
+
+        check (an.process (v.data(), n).hasNote,
+               "a buffer too short to analyse threw the stability history away");
     }
 
     // The reference pitch reaches the reading, and only the reading: moving it
@@ -1275,15 +1341,30 @@ static void testPluckedGlide()
     // about c / (1 - exp(-dt/tau)) still to come. With four frames agreeing
     // within c of their mean the spread across the window is what is bounded
     // rather than the step, so the bound is loosened by the number of frames.
-    const double perFrame  = 1.0 - std::exp (-0.1 / tau);
-    const double remaining = gate.stabilityCents * (double) gate.stabilityFrames / perFrame;
+    // Derived the tight way. Let R(t) be the cents still to fall at time t.
+    // Every frame in the gate's window sits within `stabilityCents` of their
+    // common mean, so the spread across the window is at most twice that, and
+    // the window is `stabilityFrames - 1` hops wide:
+    //
+    //     R(t) * (exp((frames - 1) * hop / tau) - 1)  <=  2 * stabilityCents
+    //
+    // The looser bound, c * frames / (1 - exp(-hop/tau)), is four and a half
+    // cents here, which turned out to be enough room for the stability history
+    // to be kept in the wrong units and still pass: measured in hundredths of
+    // an octave instead of cents, which is twelve times looser, the gate opened
+    // at 0.50 s and 3.95 cents out, inside that bound and four times the tier
+    // this tuner claims. A factor of two of headroom is kept on the tight
+    // bound, which is what the measured 0.37 cents sits comfortably inside.
+    const double spread    = std::exp ((double) (gate.stabilityFrames - 1) * 0.1 / tau) - 1.0;
+    const double remaining = 2.0 * (2.0 * gate.stabilityCents / spread);
 
     std::printf ("  derived bound on what is left to fall when the gate opens: %.2f cents\n",
                  remaining);
 
     check (std::abs (shownCents) <= remaining,
-           "the reading shown was further from the settled pitch than the gate's "
-           "own figure allows, so the gate is not doing what its arithmetic says");
+           "the reading shown was further from the settled pitch than a quarter of a "
+           "cent of frame to frame agreement allows, so the stability history is not "
+           "being measured in cents");
 
     // And it does settle: by the end of the glide the reading is on the pitch
     // the string actually lands on.
@@ -1426,6 +1507,59 @@ static void testInputRing()
         check (r.readLatest (dest2), "a snapshot of the newest audio was rejected");
     }
 
+    // And the tear check with a writer actually running, which is the only way
+    // to test it at all. The two counter reads inside `readLatest` have nothing
+    // between them single threaded, so `after` always equals `before` and the
+    // expression is a constant: removing the check entirely, loosening it by a
+    // factor of four, and replacing it with `after == before` all passed
+    // everything above.
+    //
+    // Both directions matter. Too permissive hands back a torn buffer, which
+    // reads as a plausible wrong pitch. Too strict refuses every snapshot while
+    // a device is running, which is a tuner that silently never shows anything,
+    // and no single threaded check would see that either.
+    {
+        Tuner::InputRing r;
+        const int want = 4096;
+        r.setSize (want * 4);
+
+        std::vector<float> block (128, 1.0f);
+
+        for (int i = 0; i < want * 4; i += 128)
+            r.write (block.data(), 128);
+
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &block, &stop]
+        {
+            while (! stop.load (std::memory_order_relaxed))
+                r.write (block.data(), 128);
+        });
+
+        std::vector<float> dest ((size_t) want);
+        int accepted = 0;
+        const int attempts = 2000;
+
+        for (int i = 0; i < attempts; ++i)
+            if (r.readLatest (dest))
+                ++accepted;
+
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+
+        std::printf ("  %d of %d snapshots accepted with a writer running flat out\n",
+                     accepted, attempts);
+
+        // Not all of them: a writer with no device pacing it really can lap a
+        // reader, and those are rightly refused. The claim is that audio which
+        // merely arrived is not a refusal. Measured at 1994 of 2000; comparing
+        // against the count before the copy instead of against the ring's
+        // capacity measures 73.
+        check (accepted > attempts / 2,
+               "most snapshots were refused with a writer running, so the tear check "
+               "is refusing audio that arrived rather than audio that was overwritten");
+    }
+
     // Clearing resets both the audio and the count.
     {
         ring.clear();
@@ -1495,6 +1629,247 @@ static void testEndToEnd()
 }
 
 //==============================================================================
+// 13. Clarity, which is a claimed output, and the half of step 5 that decides
+//     whether a dip clears the threshold.
+//==============================================================================
+static void testClarity()
+{
+    std::printf ("Detector: clarity, which is what the display is handed\n");
+
+    std::mt19937 rng (23u);
+    const double sampleRate = 44100.0;
+    const auto spec = fastSpec (sampleRate);
+
+    Tuner::Detector det;
+    det.configure (spec);
+    const int n = det.requiredSampleCount();
+
+    // Silence repeats nothing, so it is the least periodic thing there is.
+    // Reporting the deepest possible dip on a buffer of zeroes is a display
+    // reading "rock solid" on an unplugged socket, and that was reachable: a
+    // breakage that made a silent buffer report d' = 0 passed every other
+    // check in this file, because the level floor refuses the note anyway and
+    // nothing looked at the number next to it.
+    {
+        const std::vector<float> silence ((size_t) n, 0.0f);
+        checkNear (det.estimate (silence.data(), n).clarity, 0.0, 1.0e-12,
+                   "silence was reported as perfectly clear");
+
+        const std::vector<float> dc ((size_t) n, 0.4f);
+        checkNear (det.estimate (dc.data(), n).clarity, 0.0, 1.0e-12,
+                   "a constant signal was reported as perfectly clear");
+
+        Tuner::Analyser an;
+        an.configure (spec);
+        checkNear (an.process (silence.data(), n).clarity, 0.0, 1.0e-12,
+                   "the reading handed to the display calls silence perfectly clear");
+    }
+
+    // A signal that repeats exactly is clear, and noise is not.
+    {
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        checkNear (det.estimate (v.data(), (int) v.size()).clarity, 1.0, 1.0e-4,
+                   "a signal that repeats exactly is not perfectly clear");
+
+        std::normal_distribution<double> nd (0.0, 0.2);
+        std::mt19937 local (1000u);
+        std::vector<float> w ((size_t) n);
+
+        for (auto& sample : w)
+            sample = (float) nd (local);
+
+        check (det.estimate (w.data(), n).clarity < 0.5, "noise was reported as clear");
+    }
+
+    // Step 5's first half, which the header singles out as the detail that
+    // decides whether the paper was implemented or read: the depth compared
+    // against the threshold is the INTERPOLATED ordinate of the dip, and the
+    // vertex of a parabola through a local minimum sits at or below the
+    // sampled value. Measuring it shallower than it is, by a sign error or by
+    // using the sampled value, is invisible at the default threshold of 0.1
+    // and shows up the moment the threshold is tightened: a signal that
+    // repeats exactly has a dip of zero, so it has to clear any threshold at
+    // all.
+    {
+        Tuner::Spec tight = spec;
+        tight.threshold = 1.0e-6;
+
+        Tuner::Detector td;
+        td.configure (tight);
+
+        const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false),
+                              sampleRate, td.requiredSampleCount());
+        const auto e = td.estimate (v.data(), (int) v.size());
+
+        check (e.periodic,
+               "an exactly periodic signal did not clear the tightest threshold the "
+               "spec allows, so its dip is being measured shallower than it is");
+        checkNear (Tuner::Scale::centsBetween (e.hz, 220.0), 0.0, 1.0,
+                   "the reading at the tightest threshold");
+    }
+}
+
+//==============================================================================
+// 14. Eq. (8) against an EXACT closed form.
+//
+// This is the only check that can see a few per cent of distortion in the
+// cumulative mean. Taking the mean over tau + 1 terms rather than tau scales
+// every d' by tau/(tau + 1), which is four per cent at the shortest lag
+// searched and a twentieth of a per cent at the longest. It changes no reading
+// on any signal this file generates, and it is a bias towards reading HIGH at
+// short lags, which is the thing Eq. (8) exists to prevent.
+//
+// The closed form has to be exact. The asymptotic d(tau) = 2 A^2 W sin^2(w
+// tau / 2) agrees with the real difference function only to about five per
+// cent, which is larger than the faults being looked for: the measurement's
+// own floor would have been the answer.
+//==============================================================================
+static void testCumulativeMeanAgainstClosedForm()
+{
+    std::printf ("Detector: step 3, Eq. (8) against its closed form\n");
+
+    const double sampleRate = 44100.0;
+    const double pi = 3.14159265358979323846;
+    double worstAll = 0.0;
+
+    for (double f : { 300.0, 900.0, 1800.0 })
+    {
+        Tuner::Detector d;
+        d.configure (fastSpec (sampleRate));
+
+        const int n       = d.requiredSampleCount();
+        const int W       = d.windowSampleCount();
+        const int N       = d.lowPassLength();
+        const int lastLag = d.maxLagSamples();
+
+        // One sinusoid, because a square window averaged to unity gain leaves a
+        // sinusoid a sinusoid exactly: the gain is the Dirichlet kernel and the
+        // delay is (N-1)/2 at every frequency. The amplitude cancels, d' being
+        // scale free. The delay does not, which is why the filter length has to
+        // be read back out of the detector.
+        std::vector<float> v ((size_t) n);
+
+        for (int i = 0; i < n; ++i)
+            v[(size_t) i] = (float) (0.25 * std::sin (2.0 * pi * f * (double) i / sampleRate));
+
+        d.estimate (v.data(), n);
+        const auto& got = d.normalisedDifference();
+
+        const double w   = 2.0 * pi * f / sampleRate;
+        const double psi = w * (double) (N - 1) / 2.0;
+
+        double running = 0.0;
+        double worst = 0.0;
+
+        for (int tau = 1; tau <= lastLag; ++tau)
+        {
+            // d(tau) = 4 B^2 sin^2(w tau/2) sum_j cos^2(w j + psi + w tau/2),
+            // and sum_{j<W} cos^2(a + w j) = W/2 + cos(2a + w(W-1)) sin(wW) / (2 sin w).
+            const double a   = psi + w * (double) tau / 2.0;
+            const double sum = (double) W / 2.0
+                               + std::cos (2.0 * a + w * (double) (W - 1))
+                                 * std::sin (w * (double) W) / (2.0 * std::sin (w));
+            const double sn  = std::sin (w * (double) tau / 2.0);
+            const double closed = 4.0 * sn * sn * sum;
+
+            running += closed;
+
+            // Eq. (8) as the paper writes it: the cumulative MEAN over 1..tau.
+            const double want = closed / (running / (double) tau);
+            const double rel  = std::abs (got[(size_t) tau] - want) / std::max (1.0e-3, want);
+
+            if (tau >= d.minLagSamples() && rel > worst)
+                worst = rel;
+        }
+
+        if (worst > worstAll)
+            worstAll = worst;
+    }
+
+    std::printf ("  worst relative disagreement with the closed form %.3e\n", worstAll);
+
+    // Measured at 4e-9. A mean over tau + 1 terms reads 4.5e-2, dividing by the
+    // cumulative sum instead of the mean reads 1.0, and a window that shrinks
+    // with the lag reads 0.34.
+    check (worstAll < 1.0e-6,
+           "Eq. (8) does not agree with its closed form, so the normalisation is not "
+           "the cumulative mean the paper specifies");
+}
+
+//==============================================================================
+// 15. The rates the studio actually runs at.
+//
+// Every other arithmetic test in Tests/ covers 96 and 192 kHz and this one
+// covered only 44.1 and 48. The window is a fixed duration, so the lag the
+// interpolator is working in grows with the rate and the accuracy question is
+// not the same question at the top of the range.
+//==============================================================================
+static void testHighSampleRates()
+{
+    std::printf ("Detector: 96 and 192 kHz, which nothing else here covered\n");
+
+    for (double sampleRate : { 96000.0, 192000.0 })
+    {
+        Tuner::Detector det;
+        det.configure (fastSpec (sampleRate));
+
+        const int n = det.requiredSampleCount();
+        double worst = 0.0;
+
+        // Notes spread across the range `fastSpec` searches, read as a harmonic
+        // series rather than as a tone: the reading has to be the fundamental
+        // at every rate, not just at the two the rest of this file uses.
+        for (int midi = 56; midi <= 88; midi += 4)
+        {
+            std::mt19937 rng ((unsigned) midi);
+            const double f0 = Tuner::Scale::noteHz (midi);
+            const auto v = synth (series (f0, 8, 1.0, 0.0, 0.25, rng, true), sampleRate, n);
+            const auto e = det.estimate (v.data(), n);
+
+            check (e.periodic, "a harmonic series was not read as periodic");
+
+            const double cents = Tuner::Scale::centsBetween (e.hz, f0);
+
+            if (std::abs (cents) > std::abs (worst))
+                worst = cents;
+        }
+
+        std::printf ("  %.0f Hz: buffer %d samples (%.1f ms), worst %+.5f cents\n",
+                     sampleRate, n, 1000.0 * (double) n / sampleRate, worst);
+
+        check (std::abs (worst) <= 1.0,
+               "the reading at 96 or 192 kHz is more than a cent out, which is outside "
+               "what a chromatic tuner claims");
+
+        // And one reading on the real spec, whose window at these rates is the
+        // longest buffer the estimator ever handles: twenty five thousand
+        // samples at 192 kHz, against five and a half thousand at 44.1. The
+        // search floor is in hertz, so nothing about the lag arithmetic is
+        // exercised at that length by the rates above.
+        Tuner::Spec full;
+        full.sampleRate = sampleRate;
+
+        Tuner::Detector low;
+        low.configure (full);
+
+        std::mt19937 rng (7u);
+        const double f0 = Tuner::Scale::noteHz (40);       // E2, a guitar's low string
+        const auto v = synth (series (f0, 8, 1.0, 0.0, 0.25, rng, true),
+                              sampleRate, low.requiredSampleCount());
+        const auto e = low.estimate (v.data(), low.requiredSampleCount());
+
+        check (e.periodic, "a low E was not read as periodic on the full range spec");
+        std::printf ("  %.0f Hz: the full range spec reads a low E %+.5f cents out, "
+                     "over %d samples\n",
+                     sampleRate, Tuner::Scale::centsBetween (e.hz, f0),
+                     low.requiredSampleCount());
+
+        checkNear (Tuner::Scale::centsBetween (e.hz, f0), 0.0, 1.0,
+                   "a low E on the full range spec");
+    }
+}
+
+//==============================================================================
 int main()
 {
     testScale();
@@ -1510,6 +1885,9 @@ int main()
     testPluckedGlide();
     testInputRing();
     testEndToEnd();
+    testClarity();
+    testCumulativeMeanAgainstClosedForm();
+    testHighSampleRates();
 
     if (failures != 0)
     {

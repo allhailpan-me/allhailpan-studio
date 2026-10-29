@@ -79,11 +79,18 @@ namespace Tuner
     itself about 2 cents at A4, so the standard is looser than this tuner.
 
     The reference is adjustable because every shipping tuner's is. There is no
-    standard for the *range*, only for the 440, so the range here is the widest
-    and finest of the products whose own documentation could be read: 410 to 480
-    comes from Korg's CA-50 specification, which is the widest of the pure
-    tuners, and the tenth of a hertz step from Logic Pro's Tuner and Peterson's
-    StroboStomp HD, which are the finest.
+    standard for the *range*, only for the 440, so this one is taken from what
+    the products' own documentation gives: 410 to 480 is Korg's CA-50
+    specification, and the tenth of a hertz step is Logic Pro's Tuner and
+    Peterson's StroboStomp HD, which are the finest of them.
+
+    It is not the widest. Peterson's own manual gives the StroboStomp HD as 390
+    to 490, wider on both sides, and that is left out deliberately rather than
+    overlooked: 410 to 480 spans every historical and regional tuning anybody
+    plays at, and a range that reaches 390 makes a mistyped reference land
+    further from 440 before the clamp catches it. Written down because the
+    research record tabulates the wider figure and a later reader would
+    otherwise take this for an oversight.
 */
 struct Scale
 {
@@ -337,10 +344,14 @@ struct Spec
 /** YIN.
 
     Holds its own scratch buffers, sized once by `configure`, so `estimate`
-    allocates nothing. It is not safe to call from the audio thread anyway,
-    because it costs on the order of four million operations per reading, but a
-    reading that allocated would also stall whatever thread is running the
-    user interface.
+    allocates nothing. It is not safe to call from the audio thread anyway: Eq.
+    (6) runs the window against every lag, which at 44.1 kHz is seven million
+    iterations of a subtract and a multiply-add, about nine milliseconds. The
+    count is proportional to the square of the sample rate, because both the
+    window and the longest lag are a fixed duration, so at 192 kHz it is 138
+    million iterations and two tenths of a second. Whatever drives the display
+    has to budget for that; `TunerPanel.h` has the measured table and what it
+    does about it.
 */
 class Detector
 {
@@ -441,6 +452,13 @@ public:
     int lowPassLength()       const noexcept { return filterLength; }
     const Spec& spec()        const noexcept { return s; }
 
+    /** Eq. (8)'s output, for the one check that can see a few per cent of
+        distortion in the cumulative mean: a sinusoid's difference function has
+        an exact closed form, so the normalisation can be compared against it
+        term by term rather than through whatever pitch comes out the far end.
+        Nothing in the studio reads this. */
+    const std::vector<double>& normalisedDifference() const noexcept { return norm; }
+
     /** `x` must hold at least `requiredSampleCount()` samples; the most recent
         ones are the ones analysed, so a longer buffer is read from its end. */
     Estimate estimate (const float* x, int n) noexcept
@@ -495,11 +513,19 @@ public:
         }
 
         // ---- step 3, Eq. (8): the cumulative mean normalised difference ----
-        // "starts at 1 rather than 0", which is the whole point: d(0) is zero
-        // and would otherwise be the deepest dip in the function, and a search
-        // that fell into it would report an arbitrarily high frequency. This is
-        // the step that guards against reading too HIGH. It is not what guards
-        // against reading an octave down; that is the threshold below.
+        // The normalisation is the step that guards against reading too HIGH:
+        // d(0) is zero and so would be the deepest dip in the raw function, and
+        // dividing by the running mean is what stops a search falling into it.
+        // It is not what guards against reading an octave DOWN; that is the
+        // threshold below.
+        //
+        // The paper says d' "starts at 1 rather than 0", and this writes that
+        // down, but nothing here reads it: `tauMinSamples` is at least 2, so
+        // neither the dip test nor the fallback ever looks at lag 0 or 1.
+        // Mutation testing found this to be a dead store, and it is kept
+        // because the function is the paper's and a reader comparing the two
+        // should find every line of Eq. (8) present. What actually keeps the
+        // search off the zero lag dip is that minimum lag.
         norm[0] = 1.0;
         double running = 0.0;
 
@@ -766,16 +792,26 @@ private:
         12.5 * exp(-t/0.38) * (1 - exp(-dt/0.38))  cents
 
     so at 100 ms spacing the movement between adjacent frames is 0.231 of
-    whatever is still left to fall. Releasing the display once that movement
-    drops below c cents therefore still leaves about c/0.231, call it four and
-    a half times c, to come. Getting within one cent of where the string will
-    settle means waiting for the movement to fall under about a quarter of a
-    cent, which on these constants is roughly nine tenths of a second after the
-    pluck.
+    whatever is still left to fall.
 
-    That is not a defect to be tuned out. It is how long the string takes, and
-    it is about how long a tuning pedal appears to take. A tighter figure here
-    does not make the tuner faster, it makes it read sharp.
+    The gate asks for more than one such step, and that is what sets the figure.
+    Every frame in the window has to sit within `stabilityCents` of their common
+    mean, so the spread across a window `stabilityFrames - 1` hops wide is at
+    most twice that, and the amount still to fall when it opens is bounded by
+
+        R(t) * (exp((frames - 1) * hop / tau) - 1)  <=  2 * stabilityCents
+
+    which on four frames, a 100 ms hop and a 0.38 s time constant is 0.42
+    cents. Measured, it opens 1.40 seconds after the pluck and 0.37 cents from
+    where the string settles.
+
+    Taking one step instead of the window gives 0.9 seconds, and that is the
+    figure this comment used to quote. It was wrong by more than half, because
+    four frames agreeing is a much stronger condition than one step being
+    small. The honest figure is a second and a half, which is slower than a
+    pedal appears to be, and the trade is deliberate: the alternative is a
+    display that opens earlier on a string that is still falling, which is a
+    tuner that reads sharp. A tighter `stabilityCents` does not make it faster.
 */
 struct GateSettings
 {
@@ -786,8 +822,12 @@ struct GateSettings
     double levelFloorDb = -55.0;
 
     /** How many consecutive readings must agree, and how closely, before a
-        number is shown. Four frames within a quarter of a cent, for the reason
-        in the comment above. */
+        number is shown.
+
+        Four frames, each within a quarter of a cent of their common mean, so
+        the spread the window permits is half a cent rather than a quarter.
+        That distinction is what the bound in the comment above is derived
+        from, and the test asserts the bound rather than the constants. */
     int    stabilityFrames = 4;
     double stabilityCents  = 0.25;
 };
@@ -956,8 +996,16 @@ private:
     this cannot be left to chance.
 
     Make the ring several times the snapshot length and it effectively never
-    happens: at 44.1 kHz a 97 ms snapshot out of a 400 ms ring gives the
-    reader three tenths of a second to copy four thousand samples.
+    happens. The engine's ring is 96000 samples, which is half a second at the
+    highest rate the studio runs at and two and a sixth seconds at 44.1 kHz,
+    against a snapshot of 130 ms at every rate. So the reader has between a
+    third of a second and two seconds to copy it, depending on the rate, for a
+    copy that is a few tens of microseconds.
+
+    The counter is also monotonic and is never reset, which a reader has to know
+    rather than discover: "enough has arrived" latches true the first time it
+    does, so whether audio is still arriving is a question about the counter
+    moving and not about its value. `TunerPanel.h` is where that is answered.
 */
 class InputRing
 {

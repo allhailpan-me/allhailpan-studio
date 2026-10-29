@@ -1,6 +1,9 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <algorithm>
 #include <atomic>
+#include <memory>
+#include <cmath>
 #include <vector>
 #include "AhpLookAndFeel.h"
 #include "AudioEngine.h"
@@ -19,10 +22,35 @@
 
 /** Runs the estimator.
 
-    The estimator costs about nine milliseconds a reading, which is why this
-    is a thread rather than a timer callback: ten of those a second on the
-    message thread is a tenth of the interface's time, and it would be felt as
-    a stutter in everything else while the tuner is open.
+    A reading costs about nine milliseconds at 44.1 kHz, which is why this is
+    a thread rather than a timer callback: ten of those a second on the message
+    thread is a tenth of the interface's time and would be felt as a stutter in
+    everything else while the tuner is open.
+
+    THE COST GROWS AS THE SQUARE OF THE SAMPLE RATE, which is a property of the
+    window rather than of this code and is the reason for the duty cycle below.
+    The window is a fixed duration, so both the window and the longest lag are
+    proportional to the rate, and the difference function's work is their
+    product. Measured, release build:
+
+    | sample rate | buffer       | one reading |
+    |---|---|---|
+    |  44100 | 5734  (130 ms) |   9 ms |
+    |  48000 | 6239  (130 ms) |  11 ms |
+    |  96000 | 12473 (130 ms) |  48 ms |
+    | 192000 | 24939 (130 ms) | 197 ms |
+
+    So at 192 kHz a hundred milliseconds between readings is not available at
+    any price, and asking for it would spin a core for as long as the window is
+    open. `sleepFor` backs the spacing off instead, to whatever keeps this
+    thread under a quarter of a core. A slower reading rate makes the gate
+    stricter rather than wrong: four frames then span more of the string's
+    settling, so the display opens later and closer to where the note is going.
+
+    The real fix is to decimate the tap to a fixed analysis rate rather than
+    run the estimator at whatever the interface happens to be set to, which is
+    a filter design job with a specification behind it, and it is written up as
+    the next step in `Research/BACKLOG.md`.
 
     Published through a spin lock rather than an atomic because a `Reading` is
     several numbers that have to agree with each other. Neither side of that
@@ -41,10 +69,10 @@ public:
         if (isThreadRunning())
             return;
 
-        // A reading is wanted ten times a second and takes about nine
-        // milliseconds, so this thread is asleep for the great majority of its
-        // life. Below normal priority so that it cannot take time from the
-        // interface even if a future search range made a reading dearer.
+        // Low priority, and held to a quarter of a core by its own duty cycle,
+        // because this shares a process with a realtime device callback. At
+        // 44.1 kHz it is asleep for nine tenths of its life; at the top of the
+        // studio's rate range it is asleep for three quarters of it.
         startThread (juce::Thread::Priority::low);
     }
 
@@ -66,9 +94,17 @@ public:
             display needs this to tell "nothing yet" from "nothing there". */
         int  readings = 0;
 
-        /** True when the ring has not yet handed over a full window. At 44.1
-            kHz that is the first tenth of a second after the tuner opens, and
-            for as long as a device is closed it never stops being true. */
+        /** True when there is no live audio to read: either a full window has
+            not arrived yet, or none has arrived for the last few passes.
+
+            The second half is not a nicety. The ring's counter is monotonic
+            and nothing resets it, so "enough has ever arrived" latches true
+            the moment it does, and the ring goes on holding the last tenth of
+            a second of whatever was played. An estimator handed the same
+            buffer every pass reads it as perfectly periodic, so a device that
+            stops, because an interface was unplugged or the machine slept,
+            would leave a bright settled note on the display for the rest of
+            the session with nothing to say it was not live. */
         bool waitingForAudio = true;
     };
 
@@ -89,6 +125,8 @@ private:
         std::vector<float> window;
         double configuredRate = 0.0;
         std::uint64_t baseline = 0;
+        std::uint64_t lastWritten = 0;
+        int quietPasses = 0;
         int readings = 0;
 
         while (! threadShouldExit())
@@ -118,14 +156,41 @@ private:
 
             analyser.setReferenceHz (wantedReference.load());
 
-            Snapshot next;
-            next.readings = readings;
+            // Whether the device is still delivering, which the ring's own
+            // counter cannot say on its own: it is monotonic, so it has to be
+            // compared against what it was last pass rather than against a
+            // threshold. A few passes of grace because a pass where no block
+            // happened to land is normal on a loaded machine, and blanking the
+            // display for that would be a flicker.
+            const auto writtenNow = ring.totalWritten();
+            quietPasses = writtenNow == lastWritten ? quietPasses + 1 : 0;
+            lastWritten = writtenNow;
 
             const bool enoughAudio = configuredRate > 0.0
                                   && ! window.empty()
-                                  && ring.totalWritten() - baseline >= (std::uint64_t) window.size();
+                                  && writtenNow - baseline >= (std::uint64_t) window.size();
 
-            if (enoughAudio && ring.readLatest (window))
+            const bool live = enoughAudio && quietPasses < quietPassesAllowed;
+
+            Snapshot next;
+            next.readings = readings;
+
+            if (! live)
+            {
+                // Nothing to read. The history goes with it, and the next full
+                // window is counted from here, so a device that stops and comes
+                // back, or is swapped for another one at the same rate, cannot
+                // have the two spliced into one analysis window: that splice
+                // reads as a perfectly plausible wrong pitch.
+                if (quietPasses >= quietPassesAllowed)
+                {
+                    analyser.reset();
+                    baseline = writtenNow;
+                }
+
+                next.waitingForAudio = true;
+            }
+            else if (ring.readLatest (window))
             {
                 next.reading = analyser.process (window.data(), (int) window.size());
                 next.readings = ++readings;
@@ -138,9 +203,8 @@ private:
                 // the next pass is a tenth of a second away. What is kept is
                 // the previous reading, so the display holds rather than
                 // flickering to dashes and back.
-                const auto held = latest();
-                next.reading = held.reading;
-                next.waitingForAudio = ! enoughAudio;
+                next.reading = latest().reading;
+                next.waitingForAudio = false;
             }
 
             {
@@ -148,11 +212,17 @@ private:
                 published = next;
             }
 
-            // Ten readings a second, measured from the start of the work
-            // rather than the end of it, so the rate does not drift with how
-            // long a reading took.
+            // Ten readings a second where that is affordable, measured from the
+            // start of the work rather than the end of it so the rate does not
+            // drift with how long a reading took. Where it is not affordable,
+            // this thread sleeps for three times what the reading cost instead,
+            // which holds it under a quarter of a core at every sample rate the
+            // studio runs at. Asking for a tenth of a second at 192 kHz, where
+            // a reading is two tenths, would spin a core for as long as the
+            // window is open, in a process that is also running a device
+            // callback.
             const double spent = juce::Time::getMillisecondCounterHiRes() - startedAt;
-            const double sleepFor = juce::jlimit (1.0, frameMs, frameMs - spent);
+            const double sleepFor = std::max (frameMs - spent, spent * 3.0);
 
             if (threadShouldExit())
                 break;
@@ -166,6 +236,12 @@ private:
         agreeing frames a shorter wait and so a weaker promise about how close
         to settled the string is. */
     static constexpr double frameMs = 100.0;
+
+    /** How many passes with no new audio at all before the display is blanked.
+        Three of them is about three tenths of a second, which is longer than
+        any block the studio can be asked for and short enough that nobody
+        reads a dead note off the screen. */
+    static constexpr int quietPassesAllowed = 3;
 
     AudioEngine& engine;
     std::atomic<double> wantedReference { Tuner::Scale::standardReferenceHz };
@@ -225,33 +301,25 @@ public:
 
         refreshSources();
         setSize (420, 300);
+
+        // The tap and the thread run for exactly as long as this component
+        // exists, rather than being hung off visibility. The window owns the
+        // component and is destroyed when it is closed, so that is the same
+        // span and it is deterministic: nothing can leave the engine copying
+        // input into a ring that nothing is reading.
+        engine.setTunerListening (true);
+        analysis.start();
+        startTimerHz (30);
     }
 
     ~TunerComponent() override
     {
-        // The thread first, then the tap: stopping the tap first would leave
+        // The thread first, then the tap. Stopping the tap first would leave
         // the thread reading a ring nothing is filling, which is harmless but
-        // means the window can only be closed a tenth of a second later than
-        // it was asked to be.
+        // means closing the window waits for a pass that had no reason to run.
         stopTimer();
         analysis.stop();
         engine.setTunerListening (false);
-    }
-
-    void visibilityChanged() override
-    {
-        if (isVisible())
-        {
-            engine.setTunerListening (true);
-            analysis.start();
-            startTimerHz (30);
-        }
-        else
-        {
-            stopTimer();
-            analysis.stop();
-            engine.setTunerListening (false);
-        }
     }
 
     void resized() override
@@ -333,8 +401,11 @@ private:
     {
         // The source menu is rebuilt only when the device's inputs change,
         // because rebuilding it under the mouse would close it while somebody
-        // was choosing from it.
-        if (engine.getActiveInputChannelNames().size() != lastInputCount)
+        // was choosing from it. Compared by name rather than by count: two
+        // interfaces can both have eight inputs, and a menu still naming the
+        // one that was unplugged is a menu that lies about which socket it
+        // means.
+        if (engine.getActiveInputChannelNames() != lastInputNames)
             refreshSources();
 
         repaint();
@@ -355,7 +426,12 @@ private:
 
     juce::String statusText (const TunerAnalysis::Snapshot& snap) const
     {
-        if (engine.getSampleRate() <= 0.0 || snap.waitingForAudio)
+        // The audio device first, because every other message below would be
+        // a guess about a signal nobody is being handed. There is deliberately
+        // no check on the engine's sample rate here: it holds its last value
+        // when a device closes rather than going to zero, so reading it would
+        // report a device that is working.
+        if (snap.waitingForAudio)
             return "waiting for the audio device";
 
         if (engine.getTunerInputChannel() < 0)
@@ -445,7 +521,7 @@ private:
     void refreshSources()
     {
         const auto names = engine.getActiveInputChannelNames();
-        lastInputCount = names.size();
+        lastInputNames = names;
 
         options = InputSource::options (names.size());
 
@@ -471,6 +547,15 @@ private:
                 if (options[i].first == wanted.choice.first
                     && options[i].stereo == wanted.choice.stereo)
                     selected = firstSourceId + (int) i;
+
+        // A choice the device no longer offers, which is what happens when an
+        // eight input interface is swapped for a two input one, is given up
+        // rather than left selected invisibly. `resolve` would clamp it onto
+        // some other socket and the menu would go on reading "Follow the
+        // mixer", so the engine and the menu have to be put back in step here
+        // rather than one of them quietly meaning something else.
+        if (wanted.assigned && selected == followTheMixerId)
+            engine.setTunerSource ({});
 
         sourceBox.setSelectedId (selected, juce::dontSendNotification);
     }
@@ -503,16 +588,55 @@ private:
     juce::TextButton resetReference;
 
     std::vector<InputSource::Choice> options;
-    int lastInputCount = -1;
+    juce::StringArray lastInputNames;
     juce::Rectangle<int> readout;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TunerComponent)
 };
 
 //==============================================================================
-inline juce::Component::SafePointer<juce::DialogWindow>& tunerWindow()
+inline void closeTunerWindow();
+
+/** The tuner's own window, and deliberately not a dialog.
+
+    `DialogWindow::launchAsync` enters a modal state, which is right for
+    Preferences and wrong here: tuning is something done while a session is
+    live, and a modal tuner takes the transport, the mixer and every input gain
+    with it for as long as it is open. The mixer window is the pattern this
+    follows.
+*/
+class TunerWindow : public juce::DocumentWindow
 {
-    static juce::Component::SafePointer<juce::DialogWindow> open;
+public:
+    TunerWindow (AudioEngine& engine, juce::PropertiesFile& settings)
+        : juce::DocumentWindow ("Tuner  -  ALLHAILPAN Studio", Ahp::black,
+                                juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setContentOwned (new TunerComponent (engine, settings), true);
+        setResizable (true, false);
+        setResizeLimits (320, 240, 1200, 900);
+        centreWithSize (getWidth(), getHeight());
+        Ahp::applyDarkTitleBar (*this);
+        setVisible (true);
+    }
+
+    void closeButtonPressed() override
+    {
+        // Hidden now and deleted on the next message, because this is being
+        // called from inside the window's own callback and destroying it here
+        // would be destroying the object whose method is still running.
+        setVisible (false);
+        juce::MessageManager::callAsync ([] { closeTunerWindow(); });
+    }
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TunerWindow)
+};
+
+inline std::unique_ptr<TunerWindow>& tunerWindow()
+{
+    static std::unique_ptr<TunerWindow> open;
     return open;
 }
 
@@ -527,22 +651,10 @@ inline void showTunerWindow (AudioEngine& engine, juce::PropertiesFile& settings
         return;
     }
 
-    juce::DialogWindow::LaunchOptions o;
-    o.content.setOwned (new TunerComponent (engine, settings));
-    o.dialogTitle                  = "Tuner";
-    o.dialogBackgroundColour       = Ahp::panel;
-    o.escapeKeyTriggersCloseButton = true;
-    o.useNativeTitleBar            = true;
-    o.resizable                    = true;
-
-    if (auto* w = o.launchAsync())
-    {
-        Ahp::applyDarkTitleBar (*w);
-        open = w;
-    }
+    open = std::make_unique<TunerWindow> (engine, settings);
 }
 
 inline void closeTunerWindow()
 {
-    tunerWindow().deleteAndZero();
+    tunerWindow().reset();
 }
