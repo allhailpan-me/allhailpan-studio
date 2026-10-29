@@ -17,6 +17,7 @@
 #include "MixerComponent.h"
 #include "PluginPicker.h"
 #include "PreferencesWindow.h"
+#include "TunerPanel.h"
 #include "Logo.h"
 #include "ProjectIO.h"
 #include "ExportJob.h"
@@ -160,6 +161,7 @@ private:
     void selectChannel (int channel);
     void loadInstrument (const juce::PluginDescription&);
     void unloadInstrument (int channel);
+    void showTuner();
     void showFxMenu (int insert, int slot);
     void showBusRouting (int channel);
     void loadFx (int insert, int slot, const juce::PluginDescription&);

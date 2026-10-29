@@ -386,6 +386,7 @@ MainComponent::~MainComponent()
 
     // Before anything else goes: it holds references to the plugin manager and
     // the device manager, which are members here.
+    closeTunerWindow();
     closePreferencesWindow();
 
     if (recordingAudio || recordingMidi)
@@ -1787,6 +1788,7 @@ bool MainComponent::keyPressed (const juce::KeyPress& key)
     if (is ('o', cmd))                                  { openProjectDialog(); return true; }
     if (is ('n', cmd))                                  { newProject(); return true; }
     if (is (',', cmd))                                  { showPreferences (PreferencesComponent::general); return true; }
+    if (is ('t', cmd))                                  { showTuner(); return true; }
     if (is ('y', cmd) || is ('z', cmd | juce::ModifierKeys::shiftModifier)) { undoRedo (true); return true; }
 
     if (view == View::playlist)
@@ -1900,6 +1902,16 @@ PreferencesActions MainComponent::preferenceActions()
     };
 
     return actions;
+}
+
+void MainComponent::showTuner()
+{
+    // The reference pitch lives in the application's settings rather than in
+    // the project. A tuning reference belongs to the instruments in the room
+    // rather than to one song: somebody who works at 432 works at 432 on
+    // everything they open, and somebody who opens one of their projects
+    // should not find their own tuner moved by it.
+    showTunerWindow (engine, plugins.settings());
 }
 
 void MainComponent::showPreferences (PreferencesComponent::Tab tab)
@@ -2205,6 +2217,7 @@ void MainComponent::showFileMenu()
                         {}, ! missing.isEmpty()));
     menu.addItem (item (7, "Show project in folder", {}, currentFile.existsAsFile()));
     menu.addSeparator();
+    menu.addItem (item (14, "Tuner...", "Ctrl+T"));
     menu.addItem (item (13, "Preferences...", "Ctrl+,"));
 
     juce::Component::SafePointer<MainComponent> safeThis (this);
@@ -2243,6 +2256,7 @@ void MainComponent::showFileMenu()
             case 11: self.exportMidi (false); break;
             case 12: self.exportMidi (true); break;
             case 13: self.showPreferences (PreferencesComponent::general); break;
+            case 14: self.showTuner(); break;
             default: break;
         }
     });

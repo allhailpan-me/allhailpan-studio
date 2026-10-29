@@ -20,6 +20,13 @@ AudioEngine::AudioEngine()
     // opens, which is after this.
     for (auto& g : soloGain)
         g.store (1.0f);
+
+    // Half a second at 192 kHz, which is the longest half second the studio
+    // can be asked for, so the ring never has to be resized once the audio
+    // thread may be writing to it. At 44.1 kHz that is two and a bit seconds,
+    // which only makes the reader's tear check easier to satisfy: the longest
+    // snapshot the estimator asks for is about a tenth of a second.
+    tunerRing.setSize (96000);
 }
 
 AudioEngine::~AudioEngine()
@@ -1338,6 +1345,40 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     inputLevel.store (std::max (inPeak, inputLevel.load() * 0.85f));
+
+    // ---- the tuner's tap ----
+    // Only while the tuner is on screen, and only one channel. The left of the
+    // resolved pick rather than a sum of the pair: a mono choice resolves both
+    // sides to the same channel, so one instrument in one socket is read
+    // exactly, and summing two microphones on one source would comb filter it,
+    // which is the one thing that puts a false dip in a difference function.
+    if (tunerListening.load())
+    {
+        int readChannel = -1;
+
+        if (inputChannelData != nullptr && numInputChannels > 0)
+        {
+            // Which input to read, including the fallbacks, is in
+            // InputSource.h where it can be tested. All that is left here is
+            // reading the atomics it asks for.
+            const auto choice = InputSource::tunerSource (getTunerSource(), kNumInserts,
+                                                          [this] (int i)
+            {
+                return InputSource::assignmentFromStored (insertInput[(size_t) i].load());
+            });
+
+            const auto pick = InputSource::resolve (choice, numInputChannels);
+
+            if (pick.valid)
+                if (auto* in = inputChannelData[pick.left])
+                {
+                    tunerRing.write (in, numSamples);
+                    readChannel = pick.left;
+                }
+        }
+
+        tunerChannel.store (readChannel);
+    }
 
     for (int ch = 0; ch < numOutputChannels; ++ch)
         if (auto* out = outputChannelData[ch])
