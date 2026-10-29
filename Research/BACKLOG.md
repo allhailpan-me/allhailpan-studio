@@ -157,12 +157,31 @@ read past the end of the buffer. This project has already shipped the
 analogous fault once, in a delay line that read one sample past its buffer, so
 the bound is asserted rather than assumed.
 
-The lowest note covered is **B0, 30.8677 Hz**, the low B of a five string bass,
-which is also what Korg's own tuners are designed around: the GA-50 manual
-gives its bass range as B0 to B5 and shows the low end as 23.12 Hz, which is
-B0 taken down the five semitones its flat tuning feature offers
-(B0 = 30.8677, times 2^(-5/12), is 23.1247, matching Korg's printed figure).
-`W = 2 tau_max` gives Boersma's three periods in the buffer, which is 97 ms at
+The range **searched** runs from 23.1247 Hz to C8, and the range the one cent
+tier is **claimed** over runs from B0, 30.8677 Hz, to B6. Those are four
+numbers rather than two, and each of the two gaps is there because of a
+measured failure rather than for headroom.
+
+The floor is five semitones below B0, which is Korg's own design target: the
+GA-50 manual gives its bass range as B0 to B5 and prints the low end as
+23.12 Hz, being B0 taken down the five semitones its flat tuning feature
+offers (30.8677 times 2^(-5/12) is 23.1247, matching Korg's figure). Measured,
+with the floor at B0 exactly, a B0 that is **one cent flat** already cannot be
+read, because its period is already longer than the longest lag computed: the
+reading saturates at the floor and says nearly in tune while the string is
+out. So the floor is what lets the tuner read the lowest note it covers at the
+only moment anybody looks at it.
+
+The ceiling is C8, the top of the detection range Boss print for the TU-3 and
+Korg for the CA-50. It is above B6 because a note above the ceiling has no
+period inside the lags searched, so the first dip that is inside the range is
+the one at twice the period, and the estimator reports an exact octave down
+with the threshold satisfied and nothing to say it is wrong. Measured with the
+ceiling at B6, a 2.5 kHz tone read 1250 Hz as a confident reading, which a
+pinch harmonic or a whistle would produce. Moving the ceiling to C8 does not
+remove that, it moves it above the top note of a piano.
+
+`W = 2 tau_max` gives Boersma's three periods in the buffer, which is 130 ms at
 44.1 kHz. Latency is free in a tuner and every source says a longer window
 means fewer errors.
 
@@ -244,23 +263,46 @@ What the gate is made of, and why each part is there rather than invented:
   fallback. That fallback exists so the estimator always returns something; a
   tuner does not have to show it. Nothing below the threshold is therefore
   reported as "not a note yet" rather than as a number.
-- **A stability requirement across consecutive frames**, which is the tuner's
-  better conditioned substitute for the step 5 the paper adds and this does not.
+- **A rate limit on how fast the pitch is still moving**, which is the tuner's
+  better conditioned substitute for the step the paper adds and this does not.
 - **A level floor**, because an open string ringing down ends in noise. Boersma
   has a silence threshold for the same job, at 0.05 in his worked example, but
   that is a speech analysis constant and is not presented here as a tuner one.
 
-The arithmetic that sets the stability figure is worth keeping, because it says
-something a tuner's manual does not. On the measured glide, the pitch moves by
-`12.5 exp(-t/0.38) (1 - exp(-dt/0.38))` cents between two frames `dt` apart, so
-at 100 ms spacing the movement between adjacent frames is 0.231 of whatever is
-still left to fall. Releasing the display when that movement drops below `c`
-cents therefore leaves about `c/0.231`, call it four and a half times `c`,
-still to come. Getting within one cent of where the string is going to settle
-means waiting for the movement to fall under about a quarter of a cent, which
-on these measured constants is roughly nine tenths of a second after the pluck.
-That is not a defect to be tuned out: it is how long the string takes. It is
-also, for what it is worth, about how long a tuning pedal appears to take.
+The criterion is a **rate**, in cents per second, and that is the single
+biggest thing the audit changed. The first version asked that the last four
+readings lie within a quarter of a cent of their mean, which is the obvious
+thing to write and has no notion of time: the spread across four frames
+depends entirely on how often the display asks. The audit measured what that
+cost by varying nothing but the frame rate, on this very glide:
+
+| frames per second | gate opens at | sharp when it opens |
+|---|---|---|
+| 10 | 1.40 s | +0.37 cents |
+| 15 | 1.23 s | +0.57 cents |
+| 20 | 1.05 s | +0.93 cents |
+| 30 | 0.86 s | +1.50 cents |
+| 60 | 0.56 s | +3.32 cents |
+
+So the whole design, built around the one cent tier, came apart on a choice of
+timer interval that nobody had been told was load bearing, and a readout on an
+ordinary thirty hertz timer would have shipped a tuner reading one and a half
+cents sharp on every plucked note. That is the fault the gate exists to
+prevent, arriving through the gate itself, and the test could not see it
+because it fixed the frame interval at a tenth of a second.
+
+Measuring the rate instead fixes it, and the arithmetic is simpler than what it
+replaced. On an exponential settle `dR/dt = -R/tau`, so releasing once the rate
+falls below `r` cents per second leaves `R = r tau` still to come, and `tau`
+belongs to the string rather than to the display: the frame rate drops out.
+With the measured `tau` of 0.38 s, `r` has to be under about 2.6 to land inside
+a cent, and 1.3 is taken, which now measures between **0.17 and 0.46 cents**
+remaining across every frame rate from 5 to 60 per second.
+
+What it costs is about a second and a half of waiting. That is not a defect to
+be tuned out: it is how long the string takes, and it is about how long a
+tuning pedal appears to take. A tighter figure does not make the tuner faster,
+it makes it read sharp.
 
 ### What was deliberately not sourced, and is marked as such in the header
 
