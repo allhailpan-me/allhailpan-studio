@@ -632,8 +632,14 @@ public:
         setResizable (true, false);
         setResizeLimits (320, 240, 1200, 900);
         centreWithSize (getWidth(), getHeight());
-        Ahp::applyDarkTitleBar (*this);
         setVisible (true);
+
+        // After the window is visible, which is what DarkTitleBar.h asks for:
+        // there is no peer before that, so there is no native handle to set the
+        // attribute on and the title bar would stay in the Windows light theme.
+        // Exactly the shape of the app icon fault, where the thing was present
+        // in the file and absent on screen.
+        Ahp::applyDarkTitleBar (*this);
     }
 
     void closeButtonPressed() override
@@ -660,7 +666,11 @@ inline void showTunerWindow (AudioEngine& engine, juce::PropertiesFile& settings
 {
     auto& open = tunerWindow();
 
-    if (open != nullptr)
+    // Visible as well as present, because a window whose close button has been
+    // pressed is hidden immediately and destroyed on the next message. Asking
+    // for the tuner in that gap would otherwise bring a hidden window to the
+    // front and then delete it, so the tuner would appear not to open.
+    if (open != nullptr && open->isVisible())
     {
         open->toFront (true);
         return;
