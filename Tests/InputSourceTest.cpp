@@ -27,6 +27,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 
@@ -399,6 +400,139 @@ static void autoMapNeverWrapsOrOverlaps()
 }
 
 //==============================================================================
+// Which input the tuner listens to.
+//
+// The property that matters is that there is always an answer. A tuner that
+// reported "nothing wired" to somebody with a guitar in socket 1 and an
+// untouched mixer would be a tuner that does not work on a fresh project,
+// which is exactly when somebody reaches for one.
+//
+// The order of the three cases is the other half of it, and getting it wrong
+// is silent either way round: an explicit choice ignored in favour of the
+// mixer listens to the wrong instrument, and the mixer ignored in favour of
+// the fallback listens to input 1 for somebody whose guitar is on insert 4.
+
+static constexpr int testInserts = 17;      // insert 0 is the master
+
+static std::vector<InputSource::Assignment> emptyMixer()
+{
+    return std::vector<InputSource::Assignment> ((size_t) testInserts);
+}
+
+static InputSource::Choice tunerSourceOver (const InputSource::Assignment& chosen,
+                                            const std::vector<InputSource::Assignment>& mixer)
+{
+    return InputSource::tunerSource (chosen, (int) mixer.size(),
+                                     [&mixer] (int i) { return mixer[(size_t) i]; });
+}
+
+static void anExplicitChoiceWinsOverTheMixer()
+{
+    auto mixer = emptyMixer();
+    mixer[3] = { { 6, false }, true };
+
+    const auto picked = tunerSourceOver ({ { 2, true }, true }, mixer);
+
+    checkEqual (picked.first, 2, "an explicit tuner choice was overridden by the mixer");
+    check (picked.stereo, "an explicit stereo choice lost its pair");
+}
+
+static void nothingChosenFollowsTheLowestWiredInsert()
+{
+    // Every single wired insert, and every one of them read back, because the
+    // fault this guards against is an off by one that only shows up at one
+    // end: taking insert 0, which is the master and never has an input, or
+    // stopping one short of the last insert.
+    for (int wired = 1; wired < testInserts; ++wired)
+    {
+        auto mixer = emptyMixer();
+        mixer[(size_t) wired] = { { wired + 1, false }, true };
+
+        const auto picked = tunerSourceOver ({}, mixer);
+
+        checkEqual (picked.first, wired + 1,
+                    "following the mixer missed the only insert that was wired");
+    }
+
+    // With several wired it is the lowest numbered one, which is the strip
+    // somebody set up first.
+    auto mixer = emptyMixer();
+    mixer[9]  = { { 9, false },  true };
+    mixer[4]  = { { 4, false },  true };
+    mixer[12] = { { 12, false }, true };
+
+    checkEqual (tunerSourceOver ({}, mixer).first, 4,
+                "following the mixer did not take the lowest numbered wired insert");
+}
+
+static void theMasterIsNeverFollowed()
+{
+    // Insert 0 cannot have an input, but a settings file or a future bug could
+    // put one there, and reading it would tune whatever the whole mix sums to.
+    auto mixer = emptyMixer();
+    mixer[0] = { { 7, false }, true };
+
+    checkEqual (tunerSourceOver ({}, mixer).first, InputSource::defaultChoice().first,
+                "the tuner followed an input on the master");
+}
+
+static void anUnwiredMixerStillTunes()
+{
+    const auto picked = tunerSourceOver ({}, emptyMixer());
+
+    checkEqual (picked.first, InputSource::defaultChoice().first,
+                "an unwired mixer did not fall back to the first input");
+    check (picked.stereo == InputSource::defaultChoice().stereo,
+           "the fallback was not the default mono choice");
+
+    // And a mixer with no inserts at all, which is what a caller passing a
+    // count of zero means, must not read anything.
+    std::vector<InputSource::Assignment> none;
+    checkEqual (InputSource::tunerSource ({}, 0, [&none] (int i) { return none[(size_t) i]; }).first,
+                InputSource::defaultChoice().first,
+                "a mixer with no inserts was read anyway");
+}
+
+static void whateverItPicksResolvesOntoARealChannel()
+{
+    // The whole point of the fallback is that the answer is usable. Randomised
+    // over mixers and device sizes, because the pairing of "a choice made for
+    // a big interface" with "a small interface plugged in now" is where an
+    // index past the end would come from.
+    std::mt19937 rng (20261029u);
+
+    for (int trial = 0; trial < 4000; ++trial)
+    {
+        auto mixer = emptyMixer();
+
+        for (int i = 1; i < testInserts; ++i)
+            if (std::uniform_int_distribution<int> (0, 3) (rng) == 0)
+                mixer[(size_t) i] = { { std::uniform_int_distribution<int> (0, 31) (rng),
+                                        std::uniform_int_distribution<int> (0, 1) (rng) != 0 }, true };
+
+        InputSource::Assignment chosen;
+
+        if (std::uniform_int_distribution<int> (0, 1) (rng) != 0)
+            chosen = { { std::uniform_int_distribution<int> (0, 31) (rng),
+                         std::uniform_int_distribution<int> (0, 1) (rng) != 0 }, true };
+
+        const int channels = std::uniform_int_distribution<int> (1, 18) (rng);
+        const auto pick = InputSource::resolve (tunerSourceOver (chosen, mixer), channels);
+
+        check (pick.valid, "the tuner's input did not resolve on a device with inputs");
+        check (pick.left >= 0 && pick.left < channels,
+               "the tuner's input resolved off the end of the device");
+        check (pick.right >= 0 && pick.right < channels,
+               "the tuner's input resolved off the end of the device");
+    }
+
+    // A device with no inputs is the one case with no answer, and it has to
+    // say so rather than hand back channel 0.
+    check (! InputSource::resolve (tunerSourceOver ({}, emptyMixer()), 0).valid,
+           "a device with no inputs claimed the tuner had something to read");
+}
+
+//==============================================================================
 int main()
 {
     std::printf ("input source\n");
@@ -418,6 +552,12 @@ int main()
     autoMapStartsWhereItIsToldTo();
     autoMapInPairsTakesTwoChannelsAtATime();
     autoMapNeverWrapsOrOverlaps();
+
+    anExplicitChoiceWinsOverTheMixer();
+    nothingChosenFollowsTheLowestWiredInsert();
+    theMasterIsNeverFollowed();
+    anUnwiredMixerStillTunes();
+    whateverItPicksResolvesOntoARealChannel();
 
     if (failures != 0)
     {
