@@ -363,12 +363,17 @@ private:
         const double relativeGate = loudnessOf (shortGatedEnergy / shortGatedCount) - 20.0;
         const int    from = binFor (relativeGate);
 
+        // The same tie rule as updateIntegrated, and deliberately without the
+        // exemption that one needs for the top bin. Up there every reading
+        // that survives the gate is in that one bin, so no percentile can
+        // separate them and the answer is zero whether the bin is counted or
+        // not. Both ways were measured and agree. Do not add the exemption
+        // here on the strength of the comment next door: it would be a line
+        // nothing can distinguish from its absence.
         int total = 0;
         for (int bin = from; bin < numBins; ++bin)
         {
-            // As in updateIntegrated: the top bin is a catch all and its
-            // centre is not its contents.
-            if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
+            if (bin == from && loudnessAtBin (bin) <= relativeGate)
                 continue;
             total += shortCount[(size_t) bin];
         }
@@ -387,7 +392,7 @@ private:
 
             for (int bin = from; bin < numBins; ++bin)
             {
-                if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
+                if (bin == from && loudnessAtBin (bin) <= relativeGate)
                     continue;
                 seen += shortCount[(size_t) bin];
                 if (seen >= wanted)

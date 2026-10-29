@@ -224,14 +224,24 @@ static void kWeightingMatchesTheStandard()
         const double want = publishedKWeightingDb (f);
         const double got  = measuredKWeightingDb (f, 48000.0);
 
-        // A thousandth of a decibel, not the thirtieth this once allowed.
-        // Designing from the prototype reproduces the standard's own 48 kHz
-        // table to five decimal places, because the table is that prototype
-        // bilinear transformed at this rate, so the measurement's own floor is
-        // a hundred thousandth of a decibel and a tolerance of 0.03 was
-        // throwing away three orders of magnitude of it. Writing sin where tan
-        // belongs costs 0.017 dB and used to pass.
-        if (std::abs (got - want) > 0.002)
+        // Two hundred thousandths of a decibel, not the thirtieth of one this
+        // once allowed. The table in the standard is this same prototype
+        // bilinear transformed at this same rate, so the only error left is
+        // the float samples and the finite window, and across these thirteen
+        // frequencies that measures 1.6e-07 dB. A tolerance of 0.03 was
+        // therefore discarding five orders of magnitude of resolution, and
+        // every one of them is worth having: the standard prints these
+        // constants to fifteen figures because a loudness figure is a claim
+        // about agreeing with other people's meters, so somebody rounding one
+        // of them is exactly the plausible, invisible change that has to fail.
+        //
+        // What this tolerance is a hundred and twenty times larger than is the
+        // code's own error, and what it catches, measured: writing sin where
+        // tan belongs, 2.4e-02; the shelf's gain exponent as a half, 1.3e-03;
+        // the highpass Q as a half, 5.6e-03; the shelf Q as a Butterworth,
+        // 1.9e-04; its gain as exactly 4 dB, 1.6e-04; its corner rounded to
+        // 1682 Hz, 6.0e-05.
+        if (std::abs (got - want) > 0.00002)
             fail ("at " + std::to_string ((int) f) + " Hz the meter weights by "
                   + std::to_string (got) + " dB, the standard says "
                   + std::to_string (want));
@@ -1029,10 +1039,25 @@ static void resetLeavesNothingBehind()
     // long enough to fill every histogram, the ring and both filters.
     const auto before = sine (1000.0, -2.0, 8.0, sampleRate);
 
-    // Two levels, so the short term histogram and the range have something in
-    // them, at a different frequency so the filter states differ too.
-    const auto afterLoud  = sine (440.0, -30.0, 7.0, sampleRate);
-    const auto afterQuiet = sine (440.0, -40.0, 7.0, sampleRate);
+    // What follows the reset is a staircase down from -20 to -44 LUFS in nine
+    // steps, at another frequency so the filter states differ too. Two steady
+    // levels will not do it, and the reason is worth keeping: what a reset can
+    // get wrong is the relative gate, by carrying the old programme's block
+    // count into the new mean, and that moves the gate by a decibel or two. A
+    // programme of two levels does not notice a gate moving if it stays on the
+    // same side of both of them. A programme spread across the histogram
+    // notices immediately, because the gate is then sitting inside the
+    // distribution and a decibel of it is worth blocks. Measured: carrying the
+    // block count over moves the integrated reading by 0.58 LU on this
+    // staircase and by nothing at all on two levels.
+    const auto staircase = [&] (LoudnessMeter& meter)
+    {
+        for (int step = 0; step < 9; ++step)
+        {
+            const auto piece = sine (440.0, -20.0 - 3.0 * step, 2.0, sampleRate);
+            feedChannels (meter, piece, piece);
+        }
+    };
 
     LoudnessMeter used, brandNew;
     used.prepare (sampleRate);
@@ -1041,11 +1066,8 @@ static void resetLeavesNothingBehind()
     feedChannels (used, before, before);
     used.reset();
 
-    for (auto* meter : { &used, &brandNew })
-    {
-        feedChannels (*meter, afterLoud, afterLoud);
-        feedChannels (*meter, afterQuiet, afterQuiet);
-    }
+    staircase (used);
+    staircase (brandNew);
 
     std::printf ("    reset  M %+8.3f S %+8.3f I %+8.3f LRA %6.3f peak %.6f\n",
                  used.getMomentaryLufs(), used.getShortTermLufs(), used.getIntegratedLufs(),
