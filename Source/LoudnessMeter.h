@@ -39,8 +39,10 @@
     bounded, and are how the reference implementations do it for the same
     reason.
 
-    Verified against EBU Tech 3341 compliance test cases 1 and 2, and cases 15
-    to 19 for the peak reading.
+    Verified in `Tests/LoudnessMeterTest.cpp` against the K-weighting
+    coefficients BS.1770-4 tabulates and against EBU Tech 3341 compliance
+    cases 1, 2, 3 and 9. Cases 15 to 19, which are the peak ones, are run
+    against the detector itself in `Tests/TruePeakTest.cpp`.
 */
 class LoudnessMeter
 {
@@ -236,7 +238,13 @@ private:
     //
     // The range runs from -70, which is the absolute gate and therefore the
     // quietest value that can ever count, to +30, which no mix reaches
-    // because a converter would have clipped forty decibels earlier.
+    // because a converter would have clipped forty decibels earlier. Past
+    // the top the integrated figure is still exact, because a bin holds the
+    // energies rather than its own value, but the range collapses to nothing:
+    // every block is in one bin, so no percentile can separate them. That is
+    // the right trade for a figure nobody can reach without a gain mistake
+    // somewhere upstream, and it is not the same thing as reporting no figure
+    // at all, which is what the tie rule in updateIntegrated used to do.
     static constexpr double binsPerLu = 100.0;
     static constexpr double lowestLufs = -70.0;
     static constexpr double highestLufs = 30.0;
@@ -324,7 +332,15 @@ private:
             // The bin holding the gate is taken as in or out by its centre.
             // At a hundredth of an LU per bin that decides the fate of blocks
             // within five thousandths of the threshold.
-            if (bin == from && loudnessAtBin (bin) <= relativeGate)
+            //
+            // Never the top bin, because that one is not a hundredth of an LU
+            // wide: it is where everything above +30 LUFS is clamped, so its
+            // centre says nothing about what is in it. A programme loud enough
+            // to put the gate up there has every block it owns in that bin, and
+            // dropping it by the rule below reported the loudest possible
+            // programme as the quietest possible number. Measured at +45 LUFS:
+            // -200 before this line, +45.007 after it.
+            if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
                 continue;
             sum   += blockEnergy[(size_t) bin];
             count += blockCount[(size_t) bin];
@@ -350,7 +366,9 @@ private:
         int total = 0;
         for (int bin = from; bin < numBins; ++bin)
         {
-            if (bin == from && loudnessAtBin (bin) <= relativeGate)
+            // As in updateIntegrated: the top bin is a catch all and its
+            // centre is not its contents.
+            if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
                 continue;
             total += shortCount[(size_t) bin];
         }
@@ -369,7 +387,7 @@ private:
 
             for (int bin = from; bin < numBins; ++bin)
             {
-                if (bin == from && loudnessAtBin (bin) <= relativeGate)
+                if (bin == from && bin < numBins - 1 && loudnessAtBin (bin) <= relativeGate)
                     continue;
                 seen += shortCount[(size_t) bin];
                 if (seen >= wanted)
