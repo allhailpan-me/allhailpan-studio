@@ -1560,6 +1560,87 @@ static void testInputRing()
                "is refusing audio that arrived rather than audio that was overwritten");
     }
 
+    // And the other direction, which the check above cannot see: a tear has to
+    // be noticed when there is one. Asking for a snapshot one sample short of
+    // the whole ring means the writer only has to advance a single sample
+    // during the copy for the oldest sample in it to have been overwritten, so
+    // an implementation that detects tears sees one almost at once and an
+    // implementation that returns true unconditionally never will.
+    //
+    // Bounded by the writer's own progress rather than by a number of
+    // attempts, so a machine that schedules these two threads unevenly makes
+    // this slower rather than flaky.
+    {
+        Tuner::InputRing r;
+        const int cap = 8192;
+        r.setSize (cap);
+
+        std::vector<float> block (128, 1.0f);
+
+        for (int i = 0; i < cap; i += 128)
+            r.write (block.data(), 128);
+
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &block, &stop]
+        {
+            while (! stop.load (std::memory_order_relaxed))
+                r.write (block.data(), 128);
+        });
+
+        std::vector<float> dest ((size_t) cap - 1);
+        const std::uint64_t startedAt = r.totalWritten();
+        const std::uint64_t budget    = 200ull * (std::uint64_t) cap;
+
+        int refused = 0;
+        int tried   = 0;
+
+        while (refused == 0 && r.totalWritten() - startedAt < budget)
+        {
+            ++tried;
+
+            if (! r.readLatest (dest))
+                ++refused;
+        }
+
+        const std::uint64_t wrote = r.totalWritten() - startedAt;
+
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+
+        std::printf ("  %d of %d nearly whole ring snapshots refused, writer wrote %llu\n",
+                     refused, tried, (unsigned long long) wrote);
+
+        check (refused > 0,
+               "a snapshot one sample short of the whole ring was accepted while a "
+               "writer ran over it, so a torn buffer would reach the estimator and be "
+               "read as a plausible wrong pitch");
+    }
+
+    // Three breakages of the ring this file deliberately does NOT catch, named
+    // here so nobody hunts for the test that should have caught them.
+    //
+    // Loosening the tear bound by a factor of four, rather than removing it,
+    // survives both checks above. The two of them bracket the bound's effect
+    // from either side and neither can land on it: a nearly whole ring
+    // snapshot refuses at any bound of one capacity or more, and a small
+    // snapshot out of a large ring is accepted at any of them. Hitting the
+    // difference would mean a reader starved for between one and four ring
+    // lengths of audio during a single copy, which on the shipped sizes is
+    // between two and eight seconds of starvation inside a copy of a few tens
+    // of microseconds. No test can arrange that without a seam inside the two
+    // counter reads, and the shipped bound is still the right one: a reader
+    // that really was starved that long must be refused rather than handed a
+    // buffer with a two second old discontinuity in the middle of it.
+    //
+    // And the two memory orders. Making the write counter's store relaxed, or
+    // the load that pairs with it, removes the guarantee that a reader seeing
+    // the counter also sees the samples behind it. Nothing single threaded can
+    // observe that, the threaded checks above pass with either, and x86
+    // supplies the ordering in hardware whatever the source says. Only a
+    // ThreadSanitizer build would flag the missing pair, and run.sh builds with
+    // AddressSanitizer, which cannot be combined with it.
+
     // Clearing resets both the audio and the count.
     {
         ring.clear();
