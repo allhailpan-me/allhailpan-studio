@@ -27,6 +27,161 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-03: quantise, and what a strength percentage is a percentage of
+
+### What was looked at
+
+The lane this night was editing and the data model: the engine and the window
+were both off limits, because pull request #61 (the tuner) has
+`AudioEngine.{h,cpp}`, `MainComponent.{h,cpp}` and `InputSource.h` open, and
+`Source/Fx` is not clear either because #55 has `Svf.h` open. So anything
+whose work is in the audio path waited.
+
+| Candidate | Verdict |
+|---|---|
+| **Destructive note quantise** | **Chosen.** The studio has no way to move a played note onto the grid. `Groove.h` is the opposite job: it swings notes that are already on the grid, at playback, and leaves anything played off the grid where the performance put it. So a part played in live cannot be tidied at all, and that is one keystroke in every other studio. |
+| A time signature | Deferred, and it is the biggest single gap found tonight. The studio is 4/4 everywhere: `SongLength.h` has `kBeatsPerBar = 4.0` as a constant, `MidiFileIO` writes a fixed 4/4 meta event, and the play head handed to plugins is a default-constructed `juce::AudioPlayHead::TimeSignature`. Nothing stores a numerator at all. Fixing it reaches the ruler, the metronome's accent, the loop end, the play head and the file format at once, and two of those files are in #61. It wants a night where the engine is free. |
+| Multi-note selection in the piano roll | Deferred. The roll has draw and erase and no selection, so notes are edited one at a time, and that is worse than it sounds: there is no way to move or transpose eight notes together. But it is almost entirely untestable UI work, and quantise is the thing that needs the selection least, since every studio applies it to the whole clip when nothing is selected. Worth a night, and the quantiser built tonight takes a plain vector so it will slot straight in. |
+| Stem export | Deferred: the render loop is `AudioEngine::renderOffline`, which #61 has open. |
+| Clip gain on audio clips | Deferred for the same reason: it is read in `renderAudioClips`. |
+| Destructive randomise, as part of quantise | **Rejected, deliberately.** Avid publishes a quantified definition and it would have been cheap, but `Groove.h` already humanises at playback, where it can be dialled while listening and turned off without having lost anything. A second, destructive humaniser would be two controls meaning nearly the same thing, and the destructive one is the worse of the two. |
+| Logic's Q-Length and Q-Velocity | **Rejected**, and worth recording as a near miss. They read like "quantise the note end" and "quantise the velocity" and they are neither: both are percentages toward a **template region's** lengths and velocities, which is Logic's groove template feature. Building them under those names would have shipped Apple's name on a different feature. |
+| Logic's Q-Flam | Rejected for tonight: it spreads the notes of a chord into an arpeggio, which is an arrangement idea rather than a timing fix, and Apple publishes no unit or range for it. |
+
+### What was chosen
+
+`Source/Quantise.h`: destructive quantise of stored notes, as an editing
+action on a MIDI clip, with the grid, a strength, swing, a range gate, and a
+choice of what moves. No JUCE, so all of it is tested.
+
+### Where the behaviour came from
+
+The `dsp-researcher` agent went to the manufacturers' own manuals. The single
+most important finding is a negative one: **no manufacturer publishes an
+equation for quantise.** Four publish the behaviour in words, and two open
+source projects publish a numeric definition that agrees with them. So the
+header says in its own comment which parts are quoted and which are this
+project's decision, rather than implying an authority that is not there.
+
+**Strength** is linear interpolation between where the note was played and the
+grid, `new = old + strength * (grid - old)`. Nobody writes that equation, and
+four sources describe exactly it:
+
+- Avid, Pro Tools help, Additional Grid Quantize Options: notes are "moved a
+  percentage toward the Quantize Grid", range 0 to 100%.
+- Apple, Logic Pro User Guide, Quantize parameters (lgcp35029a2b): Q-Strength
+  "determines how far a note or transient marker is shifted toward the nearest
+  grid position", "100% results in full quantization, and 0% leaves the note
+  ... at its recorded position".
+- Steinberg, Cubase Plug-in Reference, Quantizer: Strength "determines how
+  close the notes should be moved to the quantize grid", and at 100% "all
+  notes are forced to the closest grid position".
+- Rosegarden's manual is the most explicit of any source: each note "will only
+  be moved that percentage of the distance toward its nearest grid line".
+  Ardour's says "as a percentage of the nominal distance".
+
+Ableton is the one that does not fit: Live's manual says Amount moves notes
+"only by a percentage of the set quantization value", which read literally is
+a percentage of the **step** rather than of the distance, and would overshoot
+the grid. Taken as loose prose for the same thing, since the literal reading
+is not a quantiser.
+
+Steinberg's iterative quantize page states a property that falls out of
+interpolation for free and is the best single discriminator against a "snap if
+close enough" shortcut: "Repeated use moves them progressively closer to the
+grid." Applying strength `s` twice leaves exactly `(1 - s)^2` of the original
+offset, which is smaller than `(1 - s)` and never zero below 1. The test
+asserts it.
+
+**Swing** is the position of the offbeat within its pair, 0.5 straight,
+0.6667 the third triplet, which is the convention `Groove.h` already uses, so
+an edit and a playback setting cannot disagree about what a swing number
+means. Apple's Q-Swing is on that scale and is quoted for it: it "alters the
+position of every second point in the current quantization grid", "values over
+50% delay the beats; values under 50% pre-delay (advance) them". Apple's own
+named presets give six exact points on the scale, 50, 54, 58, 62, 66 and 71
+per cent, and those six are in the test as fixed cases.
+
+Pro Tools and Rosegarden use the other published scale, 0% straight and 100%
+a triplet feel, with Avid's maximum of 300% putting the offbeat on the next
+grid point. The two convert exactly, `p = 50 + S/6`, pinned at three published
+points rather than one, and the header says so, because somebody reading an
+Avid number into this control would otherwise be four times out. Cubase's
+swing is a percentage whose numeric meaning Steinberg never states, so it
+cannot be matched from the documentation, and the header says that too.
+
+**The range gate** is the one every manual warns about by the way it is built,
+and Avid is the only source that quantifies it. Apple's Q-Range uses a sign:
+"a value of 0 means that every note ... is quantized", and "negative Q-Range
+values move only notes ... that fall outside the set range", leaving the ones
+near the grid alone. Apple documents only the negative case. Avid splits the
+same thing into two separately named options so the sign cannot be misread:
+**Include Within**, "only quantized if located within the specified percentage
+of the Quantize Grid", and **Exclude Within**, "not quantized if located
+within". Cubase has the same pair as Catch Range and Non-Quantize.
+
+This header follows Avid and names the two rather than signing one, because
+the sign is the documented trap: implemented backwards it is a control that
+visibly does something, to the wrong half of the notes. The window's width
+comes from Avid's two worked examples, which are the only quantified
+definition of a quantise gate in any primary source: a quarter note grid with
+Include at 50% gives "an eighth note area around each beat", and at 25% gives
+"a sixteenth note area", so the window is `range * grid` wide, centred, and a
+tolerance of `range * grid / 2` either side. At 100% it is the whole step and
+nothing is excluded.
+
+**What moves** follows Avid's rule, which is the clearest published statement
+of the note length question and the one the other manuals agree with
+structurally. Note On and Note Off are separate choices; "Preserve Note
+Duration" is **unavailable** when both are selected, because the two requests
+contradict each other and Avid removes the option rather than silently picking
+one. Cubase splits the job into three differently named commands, Quantize
+("quantizes audio or MIDI event starts"), Quantize MIDI Event Ends and
+Quantize MIDI Event Lengths, rather than one command with a checkbox. Ableton
+says what end quantise costs: it "will stretch the note". Logic's Smart
+Quantize is described by what it refuses to break, keeping "the relative
+position of note on, note off, and CC events".
+
+So: starts only, length carried along, is the default, and anything else is an
+explicit choice. `preserveLengthApplies` returns false when both ends are
+being quantised, and the test asserts that the request is refused rather than
+quietly ignored, which is Avid's design copied deliberately.
+
+### What is a decision rather than a standard, stated as one
+
+- **Collisions.** No manufacturer documents what happens when two notes of the
+  same pitch land on top of each other, and quantise is the operation that
+  causes it, since two notes a sixteenth apart quantised to a quarter grid
+  become one. This project already has a rule, in `MidiTimebase.h`, written
+  for the MIDI file round trip: the earlier note is shortened to where the
+  later one starts, and of two that begin together the longer is kept and the
+  other is counted as dropped. Quantise follows it, so a quantised pattern
+  exports as itself, which is what the cross-check in the test measures.
+- **The minimum length** is one export tick, 1/960 of a beat, from
+  `MidiTimebase.h`'s existing rule that "a note on and a note off at the same
+  tick is a note that some studios draw and none of them play".
+- **Swing is clamped to 0.25 .. 0.75.** At 0 or 1 the offbeat lands on a
+  downbeat, the grid has half as many distinct points, and "the nearest grid
+  point" becomes a coin toss between two identical positions. The clamp is
+  symmetric about straight and covers Apple's whole preset table and its
+  documented sub-50 pre-delay case.
+- **Pairs are counted from the clip's own origin**, which is what `Groove.h`
+  already does. No manufacturer says whether swing pairs count from the bar,
+  the clip or the project, so the two features here agree with each other
+  instead.
+- **Automation lanes are left alone.** Cubase has a MIDI CC option that moves
+  controllers with their notes, which needs a note-to-controller association
+  this project does not have: its lanes are curves rather than events
+  belonging to a note. Moving a curve under a quantised note would be
+  guesswork.
+
+### Still to do
+
+Build the header and the test, mutation test it, wire the action into the
+piano roll, put it past the auditor, and get CI green.
+
+---
+
 ## 2026-10-29: whether the loudness histogram's ceiling should move
 
 Handed on rather than taken, because it changes a design constant and costs
