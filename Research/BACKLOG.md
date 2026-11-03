@@ -222,8 +222,32 @@ window. That case is kept in the test as a regression.
 The second: **quantise could push a note past its clip's own end**, where the
 engine and the export both skip it, so it sits in the roll looking normal and
 makes no sound. One bar of sixteenths quantised to a beat grid left five notes
-of which one was silent. Every other edit in the roll grows the clip, and this
-one now does too.
+of which one was silent.
+
+The first fix for that grew the clip to cover the note, copying what drawing
+and dragging do, and a second round of the audit showed why that is wrong: a
+clip is a window onto its pattern and is often deliberately shorter than it,
+which is how one bar of a longer pattern gets looped. Growing it expanded a
+one bar clip to eight bars, un-hid every note the trim was hiding and moved
+over whatever was next on the track, on any press, which is far easier to hit
+than the silent note it was fixing. So the window is a quantise option now,
+and a note whose onset is inside it is never moved out of it: it stays where
+it was played, which is visible, instead of becoming silent, which is not. The
+same rule covers the front edge, which the second round also showed is
+reachable in two gestures after a clip's left edge has been dragged, and which
+the growing fix could not have helped with at all.
+
+The second round found one more fault of the same family, and it is the reason
+to run an audit twice. Resolving only self-caused collisions by comparing each
+note with the one before it is not enough: an inherited overlap is left in
+place, so it can sit between two notes the pass has just brought into
+collision, and that pair is then never compared. Half a per cent of passes
+over ordinary material came out with an overlap the pass had created, and an
+overlap of one pitch plays differently from the way it bounces, because the
+engine sends one note off per pitch while the export resolves the pair. Every
+note of a pitch already kept is compared now, not just the last one. The
+missing assertion, which is the one the invariant always needed, is that no
+pair may overlap after a pass that did not overlap before it.
 
 Also fixed from the audit, none of them data loss: the counts reported work
 that had been attempted rather than done, so a pass on a settled pattern

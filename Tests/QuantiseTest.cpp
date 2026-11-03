@@ -1264,15 +1264,17 @@ static void twoOnsetsBroughtInsideOneTickBecomeOneNote()
     // is the finest position it keeps and two strikes half a millisecond apart
     // are one strike. The alternative is a note nobody can see or select.
     //
-    // Built so the gap is small and not zero, which the ordinary case of two
-    // notes landing on one point cannot produce: the first note is already on
-    // the grid, the second is half a tick late, and a half strength pass moves
-    // it a quarter of a tick rather than all the way.
+    // Built so the gap is small and not zero, and so that the two onsets were
+    // more than a tick apart to start with, which is what "brought together"
+    // means: a pair that was already inside a tick is a flam somebody played
+    // and is left alone. The first note sits on the grid, the second is a tick
+    // and a half late, and a half strength pass moves it to three quarters of
+    // a tick away. Both are short enough not to reach each other as played.
     const double tick = Quantise::kMinLengthBeats;
     const double point = 2.0;
 
-    std::vector<TimebaseNote> notes { note (point, tick * 0.2, 60),
-                                      note (point + tick * 0.5, tick * 0.1, 60) };
+    std::vector<TimebaseNote> notes { note (point, tick * 0.5, 60),
+                                      note (point + tick * 1.5, tick * 0.3, 60) };
 
     auto o = straight (0.25, 0.5);
     o.preserveLength = true;
@@ -1374,6 +1376,198 @@ static void notesThatOnlyTouchAreNotReportedAsTrimmed()
         if (notes.size() == 2)
             checkExact (notes[0].length, gap,
                         "a note that only reached the next note's start was shortened anyway");
+    }
+}
+
+static void nothingOverlapsThatDidNotOverlapBefore()
+{
+    // The invariant the whole overlap rule is for, and the one thing nothing
+    // was asserting. Quantise may leave an overlap it inherited, and it may
+    // not create one, because a pattern that holds an overlap of one pitch
+    // plays differently from the way it bounces: the engine sends one note off
+    // per pitch, so the earlier note's note off silences the later note, while
+    // the export resolves the pair and keeps the later note whole. Playback
+    // disagreeing with the bounce is the worst kind of fault this studio can
+    // have.
+    //
+    // Chains of three or more notes on one pitch, with an inherited overlap
+    // among them, because that is what breaks a rule that only ever compares
+    // neighbours: the inherited pair is skipped, and it then stands between
+    // two notes the pass has just brought into collision.
+    std::mt19937 rng (5150);
+    std::uniform_real_distribution<double> step (0.1, 1.4);
+    std::uniform_real_distribution<double> length (0.1, 2.8);
+
+    const double grids[] = { 1.0, 0.5, 0.25, 1.0 / 3.0 };
+
+    auto overlaps = [] (const TimebaseNote& a, const TimebaseNote& b)
+    {
+        return a.note == b.note
+            && a.start < b.start + b.length
+            && b.start < a.start + a.length;
+    };
+
+    for (int round = 0; round < 20000; ++round)
+    {
+        std::vector<TimebaseNote> notes;
+        const int count = 3 + (round % 6);
+        double where = 0.3;
+        for (int i = 0; i < count; ++i)
+        {
+            notes.push_back (note (where, length (rng), 60));
+            where += step (rng);
+        }
+
+        const auto before = notes;
+
+        Quantise::Options o;
+        o.grid = grids[(size_t) (round % 4)];
+        o.swing = (round % 3 == 0) ? 0.58 : 0.5;
+        o.target = (Quantise::Target) (round % 3);
+        o.preserveLength = (round % 2 == 0);
+
+        Quantise::apply (notes, o);
+
+        for (size_t i = 0; i < notes.size(); ++i)
+            for (size_t j = i + 1; j < notes.size(); ++j)
+            {
+                if (! overlaps (notes[i], notes[j]))
+                    continue;
+
+                // It overlaps now, so it has to have overlapped before, which
+                // means finding the pair it came from: same pitch, and no note
+                // of this pitch has moved past another, so matching by their
+                // order within the pitch is sound.
+                bool inherited = false;
+                for (size_t a = 0; a < before.size() && ! inherited; ++a)
+                    for (size_t b = a + 1; b < before.size() && ! inherited; ++b)
+                        if (overlaps (before[a], before[b]))
+                            inherited = true;
+
+                check (inherited, "quantise left an overlap of one pitch that it created itself");
+            }
+
+        // And whatever it leaves, the file holds the same thing, so a bounce
+        // cannot come out as a different pattern.
+        int droppedByExport = 0;
+        midiNotesToTicks (notes, kMidiExportPpq, &droppedByExport);
+        check (droppedByExport == 0, "the export had to throw away a note quantise had left");
+    }
+
+    // The case the audit found, exactly. The first and third notes do not
+    // overlap as played; the pass pushes the first note's end from 2.6 to 3.0,
+    // which reaches into the third; and the second note sits between them in
+    // the sorted order with an inherited overlap of its own, which is what a
+    // neighbours-only rule never looks past.
+    {
+        std::vector<TimebaseNote> found { note (0.0, 2.6, 60),
+                                          note (2.0, 0.3, 60),
+                                          note (2.8, 0.8, 60) };
+
+        auto o = straight (1.0);
+        o.target = Quantise::Target::ends;
+
+        Quantise::apply (found, o);
+
+        for (size_t i = 0; i < found.size(); ++i)
+            for (size_t j = i + 1; j < found.size(); ++j)
+                if (found[i].note == found[j].note
+                    && found[i].start < found[j].start + found[j].length
+                    && found[j].start < found[i].start + found[i].length)
+                {
+                    const bool inherited = (found[i].start <= 2.0 && found[j].start <= 2.0);
+                    check (inherited, "the overlap the audit found is being created again");
+                }
+    }
+}
+
+static void aNoteIsNotQuantisedOutOfItsOwnClip()
+{
+    // A note whose onset is outside the clip's window is in the pattern, drawn
+    // in the roll, and silent: the engine and the export both take only the
+    // notes whose onset is inside it. So the last sixteenth of a bar, pushed
+    // onto the bar line by a quantise to the beat, disappears. It is held
+    // where it was played instead.
+    {
+        // The back edge: one bar of sixteenths in a one bar clip, quantised to
+        // the beat. The sixteenth at 3.75 would land on 4.0, which is the end
+        // of the window.
+        std::vector<TimebaseNote> notes;
+        for (int i = 0; i < 16; ++i)
+            notes.push_back (note (i * 0.25, 0.2, 60 + i));
+
+        auto o = straight (1.0);
+        o.windowStart = 0.0;
+        o.windowEnd = 4.0;
+
+        const auto result = Quantise::apply (notes, o);
+
+        check (result.held == 1, "the note the clip would have silenced was not held back");
+
+        int audible = 0;
+        for (const auto& n : notes)
+            if (n.start >= o.windowStart && n.start < o.windowEnd)
+                ++audible;
+
+        check (audible == (int) notes.size(), "a note was quantised out of the end of its clip");
+
+        for (const auto& n : notes)
+            if (n.note == 75)
+                checkExact (n.start, 3.75, "the held note did not stay where it was played");
+    }
+
+    {
+        // The front edge, which is reachable once the clip's left edge has
+        // been dragged: the window then starts part way into the pattern. The
+        // note at pattern beat 2.0 is exactly between the bar lines at 0 and
+        // 4, and a tie goes to the earlier one, so it would land at 0.0, which
+        // is outside a window that starts at 2.0.
+        std::vector<TimebaseNote> notes { note (2.0, 0.5, 60) };
+
+        auto o = straight (4.0);
+        o.windowStart = 2.0;
+        o.windowEnd = 4.0;
+
+        const auto result = Quantise::apply (notes, o);
+
+        check (result.held == 1, "the note the clip's front edge would have silenced was not held back");
+        checkExact (notes[0].start, 2.0, "a note was quantised out of the front of its clip");
+    }
+
+    {
+        // A note already outside the window is hidden whatever happens to it,
+        // so it is not protected, and a window the caller does not know about
+        // holds nothing back.
+        std::vector<TimebaseNote> notes { note (6.1, 0.5, 60) };
+
+        auto o = straight (1.0);
+        o.windowStart = 0.0;
+        o.windowEnd = 4.0;
+
+        const auto result = Quantise::apply (notes, o);
+        check (result.held == 0, "a note that was already silent was held back");
+        checkClose (notes[0].start, 6.0, 1.0e-12, "a note outside the window was not quantised");
+
+        std::vector<TimebaseNote> unbounded { note (3.9, 0.5, 60) };
+        auto none = straight (1.0);
+        const auto second = Quantise::apply (unbounded, none);
+        check (second.held == 0, "something was held back with no window given");
+        checkClose (unbounded[0].start, 4.0, 1.0e-12, "a note was held back with no window given");
+    }
+}
+
+static void anImpossiblyFineGridIsNotUndefinedBehaviour()
+{
+    // The pair index the grid search counts with overflows on the beat divided
+    // by the pair, not on the beat, so an ordinary position with a small
+    // enough grid reaches it. Nothing in the studio asks for a grid like this,
+    // and the function is public, and on a release build the overflow is an
+    // arbitrary answer rather than a stop.
+    for (double grid : { 1.0e-20, 1.0e-14, 1.0e-9 })
+    {
+        auto o = straight (grid);
+        const double placed = Quantise::place (1000.0, o);
+        check (std::isfinite (placed), "an impossibly fine grid gave back something that is not a number");
     }
 }
 
@@ -1894,6 +2088,9 @@ int main()
     theOverlapPassOnItsOwnKeepsItsContract();
     notesThatOnlyTouchAreNotReportedAsTrimmed();
 
+    nothingOverlapsThatDidNotOverlapBefore();
+    aNoteIsNotQuantisedOutOfItsOwnClip();
+    anImpossiblyFineGridIsNotUndefinedBehaviour();
     aQuantisedPatternExportsAsItself();
     everythingSurvivesAnythingAskedOfIt();
 

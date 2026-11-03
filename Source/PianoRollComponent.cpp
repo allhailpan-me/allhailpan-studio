@@ -229,18 +229,28 @@ void PianoRollComponent::describeQuantise()
 
     if (hasQuantised)
     {
-        what += ".  Last pass moved " + juce::String (lastQuantise.moved);
+        what += ".  Last pass moved " + juce::String (lastQuantise.moved) + " note(s)";
 
-        // A note merged into a neighbour is gone, and saying "merged" on its
-        // own sounds like nothing was lost. It is the one outcome somebody
-        // would want to know about and the easiest to miss on a crowded
-        // pattern, so it says what happened.
+        // The shortened ones are a subset of the moved ones, so they are
+        // written as one rather than as a second group: three numbers in a row
+        // read as three separate sets of notes.
+        if (lastQuantise.trimmed > 0)
+            what += ", " + juce::String (lastQuantise.trimmed)
+                  + " of them cut back to where the next note of the same pitch starts";
+
+        // A note merged into a neighbour is gone, and calling that a merge
+        // sounds like nothing was lost. It is the one outcome somebody would
+        // want to know about and the easiest to miss on a crowded pattern.
         if (lastQuantise.dropped > 0)
             what += ", and lost " + juce::String (lastQuantise.dropped)
-                  + (lastQuantise.dropped == 1 ? " to a note of the same pitch landing on it"
-                                               : " to notes of the same pitch landing on them");
-        if (lastQuantise.trimmed > 0)
-            what += ", shortened " + juce::String (lastQuantise.trimmed);
+                  + (lastQuantise.dropped == 1 ? " to another note of the same pitch landing on it"
+                                               : " to other notes of the same pitch landing on them");
+
+        // Held back is not a failure and does need saying, because the note
+        // visibly did not move and the reason is not on screen.
+        if (lastQuantise.held > 0)
+            what += ".  " + juce::String (lastQuantise.held)
+                  + " left where they were played, because the grid would have put them outside this clip";
     }
 
     quantiseButton.setTooltip (what);
@@ -367,6 +377,16 @@ void PianoRollComponent::applyQuantise()
     auto options = quantiseOptions;
     options.grid = quantiseGrid();
 
+    // Which part of the pattern this clip actually plays. A note quantised
+    // past either edge of that window is still in the pattern and still drawn
+    // in the roll, and silent, so the quantiser holds it where it was played
+    // instead. Growing the clip to cover it was tried and is worse: a clip is
+    // a window onto its pattern and is often deliberately shorter, which is
+    // how one bar of a longer pattern gets looped, so growing it un-hides
+    // everything the trim was hiding and moves what is next on the track.
+    options.windowStart = c->offset;
+    options.windowEnd = c->offset + c->length;
+
     std::vector<TimebaseNote> notes;
     notes.reserve (pat->notes.size());
     for (const auto& n : pat->notes)
@@ -386,7 +406,7 @@ void PianoRollComponent::applyQuantise()
     // Nothing moved, so there is nothing to undo either. An undo step that
     // undoes nothing is a step somebody has to press through twice.
     if (lastQuantise.moved == 0 && lastQuantise.dropped == 0 && lastQuantise.trimmed == 0)
-        return;
+        return;    // held notes change nothing, so they are not an edit either
 
     std::vector<MidiNote> quantised;
     quantised.reserve (notes.size());
@@ -401,19 +421,6 @@ void PianoRollComponent::applyQuantise()
     }
 
     pat->notes = std::move (quantised);
-
-    // A quantise can push a note past the clip's own end, and a note whose
-    // onset is outside the clip window is not played and is not exported: it
-    // sits in the roll looking perfectly normal and makes no sound. Every
-    // other edit in this view grows the clip rather than allowing that, and
-    // this one has to as well. Whole bars, the way drawing and dragging do it.
-    double furthest = c->offset + c->length;
-    for (const auto& n : pat->notes)
-        furthest = std::max (furthest, n.start + n.length);
-
-    if (furthest > c->offset + c->length)
-        c->length = std::ceil ((furthest - c->offset) / 4.0) * 4.0;
-
     changed (true);
 }
 
