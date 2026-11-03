@@ -127,8 +127,13 @@ comes from Avid's two worked examples, which are the only quantified
 definition of a quantise gate in any primary source: a quarter note grid with
 Include at 50% gives "an eighth note area around each beat", and at 25% gives
 "a sixteenth note area", so the window is `range * grid` wide, centred, and a
-tolerance of `range * grid / 2` either side. At 100% it is the whole step and
-nothing is excluded.
+tolerance of `range * grid / 2` either side. At 100% the window is a whole
+step wide, which on a straight grid reaches every note, because nothing there
+is further than half a step from a grid point. Under swing it does not: the
+gap from a downbeat to a swung offbeat is up to one and a half steps, so a note
+in the middle of that gap is three quarters of a step from either end and
+stays outside even a full window. That is what Avid's definition says rather
+than something to correct, and the test pins it.
 
 **What moves** follows Avid's rule, which is the clearest published statement
 of the note length question and the one the other manuals agree with
@@ -149,22 +154,32 @@ quietly ignored, which is Avid's design copied deliberately.
 
 ### What is a decision rather than a standard, stated as one
 
-- **Collisions.** No manufacturer documents what happens when two notes of the
-  same pitch land on top of each other, and quantise is the operation that
-  causes it, since two notes a sixteenth apart quantised to a quarter grid
-  become one. This project already has a rule, in `MidiTimebase.h`, written
-  for the MIDI file round trip: the earlier note is shortened to where the
-  later one starts, and of two that begin together the longer is kept and the
-  other is counted as dropped. Quantise follows it, so a quantised pattern
-  exports as itself, which is what the cross-check in the test measures.
+- **Collisions, and only the ones quantise caused.** No manufacturer documents
+  what happens when two notes of the same pitch land on top of each other, and
+  quantise is the operation that causes it, since two notes a sixteenth apart
+  quantised to a quarter grid become one. This project already has a rule, in
+  `MidiTimebase.h`, written for the MIDI file round trip: the earlier note is
+  shortened to where the later one starts, and of two that begin together the
+  longer is kept and the other is counted as dropped. Quantise follows it, so
+  a quantised pattern exports as itself, which is what the cross-check in the
+  test measures.
+  **A pair that already overlapped is left alone**, and that restriction is
+  the whole of it: a held note re-struck before it is released is ordinary
+  material, and a pass that tidied one would be deleting part of a performance
+  nobody asked it to touch. The first version asked a weaker question, whether
+  either note had moved, and the audit showed what that costs. See the audit
+  section below.
 - **The minimum length** is one export tick, 1/960 of a beat, from
   `MidiTimebase.h`'s existing rule that "a note on and a note off at the same
   tick is a note that some studios draw and none of them play".
-- **Swing is clamped to 0.25 .. 0.75.** At 0 or 1 the offbeat lands on a
-  downbeat, the grid has half as many distinct points, and "the nearest grid
-  point" becomes a coin toss between two identical positions. The clamp is
-  symmetric about straight and covers Apple's whole preset table and its
-  documented sub-50 pre-delay case.
+- **Swing is clamped to 0.25 .. 0.75.** The top of that is Apple's own:
+  "The most practical settings are between 50% and 75%, which give a swing
+  feel to strictly quantized (or tightly played) regions." The bottom is this
+  project's, made symmetric so the pre-delay Apple documents has the same room
+  as the delay. It also keeps the grid usable: at 0 or 1 the offbeat lands on
+  a downbeat, the grid has half as many distinct points, and "the nearest grid
+  point" becomes a coin toss between two identical positions. Apple's whole
+  preset table, 50 to 71, is inside it.
 - **Pairs are counted from the clip's own origin**, which is what `Groove.h`
   already does. No manufacturer says whether swing pairs count from the bar,
   the clip or the project, so the two features here agree with each other
@@ -175,10 +190,67 @@ quietly ignored, which is Avid's design copied deliberately.
   belonging to a note. Moving a curve under a quantised note would be
   guesswork.
 
+### What the mutation pass and the audit found
+
+Both are worth recording, because the two faults that mattered were both the
+same shape: a rule that was *nearly* the right rule, with a comment claiming
+the right one.
+
+**Mutation testing**: 41 deliberate breakages compiled with the sanitizers,
+21 caught by the test as first written, 9 real gaps closed, 6 established as
+no-ops by an equivalence dump rather than by argument. The gaps worth naming
+are the gate's boundary being made strict, which leaves a note sitting exactly
+on the window's edge outside it (against a quarter note grid with Avid's fifty
+per cent window that is every eighth in a programmed part), and swapping the
+drop and trim branches, which deletes the later note instead of shortening the
+earlier one and still leaves a pattern a file can hold.
+
+**The audit** found two faults that would have lost somebody's work.
+
+The first is the one above: **a pre-existing overlap was resolved whenever
+either of its two notes moved at all.** A held eight beat note whose start was
+a thousandth of a beat off the grid lost half its length, and in the worst
+version the note that lost its tail had not moved at all. Sustained piano, a
+re-triggered pad and a roll on one drum all produce exactly that material. The
+fix is to ask whether the pair overlapped before the pass rather than whether
+either note moved, which needs the before picture and so changed
+`resolveOverlaps`'s signature. It also removed a cascade: under the old rule a
+gated pass could take one more pass per note to settle, twenty five for a line
+of twenty four, because each trim brought another end inside the gate's
+window. That case is kept in the test as a regression.
+
+The second: **quantise could push a note past its clip's own end**, where the
+engine and the export both skip it, so it sits in the roll looking normal and
+makes no sound. One bar of sixteenths quantised to a beat grid left five notes
+of which one was silent. Every other edit in the roll grows the clip, and this
+one now does too.
+
+Also fixed from the audit, none of them data loss: the counts reported work
+that had been attempted rather than done, so a pass on a settled pattern
+claimed to have moved notes it had left alone; a position far enough out
+overflowed the signed arithmetic the grid search counts pairs with, which is
+undefined behaviour rather than a wrong answer; the tuplet formula in the
+comment was the reciprocal of the one Avid publishes, in the sentence directly
+after quoting Avid's own worked answer; the claim that a full window reaches
+everything is only true on a straight grid; the tooltip called a note lost to
+a collision "merged", which sounds like nothing was lost; and the last pass's
+report was not cleared when another clip or another project was opened, which
+is the leak `CLAUDE.md` says is the one that survives testing.
+
+Two claims in the header were also wrong rather than the code: the convergence
+figure cited a measurement that was not in the test, and Apple's swing preset
+table was quoted from research the audit could not reach. Both were checked
+again: the measurement is now in the test and prints its own worst case, and
+Apple's table was re-read at two of Apple's own pages, which give 50, 54, 58,
+62, 66 and 71 and no 75.
+
 ### Still to do
 
-Build the header and the test, mutation test it, wire the action into the
-piano roll, put it past the auditor, and get CI green.
+Release notes, and a later night could add a keyboard shortcut for it, which
+needs `MainComponent`'s key handling and so wants a night when that file is
+not open in somebody else's pull request. Quantising a selection rather than
+the whole clip wants a selection to exist in the piano roll first, which is
+its own night's work and is listed above as the next thing worth doing here.
 
 ---
 

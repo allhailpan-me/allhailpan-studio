@@ -109,6 +109,15 @@ AutoLane* PianoRollComponent::currentLane()
 
 void PianoRollComponent::setClip (int newClipId)
 {
+    if (newClipId != clipId)
+    {
+        // What the last pass did belongs to the clip it was done to. Carried
+        // across, the button would report work on a pattern that is not open
+        // any more, including after a different project is loaded.
+        lastQuantise = {};
+        hasQuantised = false;
+    }
+
     clipId = newClipId;
     rebuildLaneBox();
 
@@ -222,10 +231,14 @@ void PianoRollComponent::describeQuantise()
     {
         what += ".  Last pass moved " + juce::String (lastQuantise.moved);
 
-        // A merged note is the one outcome somebody would want to know about,
-        // and on a crowded pattern it is the easiest to miss.
+        // A note merged into a neighbour is gone, and saying "merged" on its
+        // own sounds like nothing was lost. It is the one outcome somebody
+        // would want to know about and the easiest to miss on a crowded
+        // pattern, so it says what happened.
         if (lastQuantise.dropped > 0)
-            what += ", merged " + juce::String (lastQuantise.dropped);
+            what += ", and lost " + juce::String (lastQuantise.dropped)
+                  + (lastQuantise.dropped == 1 ? " to a note of the same pitch landing on it"
+                                               : " to notes of the same pitch landing on them");
         if (lastQuantise.trimmed > 0)
             what += ", shortened " + juce::String (lastQuantise.trimmed);
     }
@@ -346,8 +359,9 @@ void PianoRollComponent::showQuantiseMenu()
 
 void PianoRollComponent::applyQuantise()
 {
+    auto* c = clip();
     auto* pat = pattern();
-    if (pat == nullptr || pat->notes.empty())
+    if (c == nullptr || pat == nullptr || pat->notes.empty())
         return;
 
     auto options = quantiseOptions;
@@ -387,6 +401,19 @@ void PianoRollComponent::applyQuantise()
     }
 
     pat->notes = std::move (quantised);
+
+    // A quantise can push a note past the clip's own end, and a note whose
+    // onset is outside the clip window is not played and is not exported: it
+    // sits in the roll looking perfectly normal and makes no sound. Every
+    // other edit in this view grows the clip rather than allowing that, and
+    // this one has to as well. Whole bars, the way drawing and dragging do it.
+    double furthest = c->offset + c->length;
+    for (const auto& n : pat->notes)
+        furthest = std::max (furthest, n.start + n.length);
+
+    if (furthest > c->offset + c->length)
+        c->length = std::ceil ((furthest - c->offset) / 4.0) * 4.0;
+
     changed (true);
 }
 

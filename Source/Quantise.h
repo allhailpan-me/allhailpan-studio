@@ -97,15 +97,24 @@ inline constexpr double kMinLengthBeats = 1.0 / (double) kMidiExportPpq;
     Cubase's swing is also a percentage and Steinberg never states what any
     value of it means, so it cannot be matched from the documentation at all.
 
-    The clamp is a decision, not a standard. At 0 or 1 the offbeat lands on a
-    downbeat: the grid then has half as many distinct points and "the nearest
-    grid point" is a coin toss between two identical positions. The bound is
-    symmetric about straight and covers Apple's whole preset table as well as
-    the sub-50 pre-delay case Apple documents. */
+    The clamp is partly published and partly a decision. Apple states the top of
+    it: "The most practical settings are between 50% and 75%, which give a
+    swing feel to strictly quantized (or tightly played) regions." The bottom
+    is this project's, made symmetric about straight so that the pre-delay
+    Apple documents has the same room as the delay, and it also keeps the grid
+    usable: at 0 or 1 the offbeat lands on a downbeat, the grid has half as many
+    distinct points, and "the nearest grid point" becomes a coin toss between
+    two identical positions. Apple's whole preset table, 50 to 71, is inside
+    it. */
 inline constexpr double kMinSwing = 0.25;
 inline constexpr double kMaxSwing = 0.75;
 
-/** Converts a Pro Tools or Rosegarden swing percentage to this scale. */
+/** Converts a Pro Tools or Rosegarden swing percentage to this scale.
+
+    Avid's range runs to 300 per cent, which is 1.0 here, so everything above
+    150 per cent lands on `kMaxSwing` once `clampedSwing` has had it. That is
+    not a conversion error: it is the clamp above, and the part of Avid's range
+    it refuses puts the offbeat within a quarter step of a downbeat. */
 inline double swingFromAvidPercent (double percent) noexcept
 {
     return 0.5 + percent / 600.0;
@@ -162,11 +171,14 @@ enum class Gate
 struct Options
 {
     /** The grid, in beats. A quarter is 1.0, a sixteenth is 0.25. Triplets are
-        an ordinary value on this scale rather than a separate mode: Avid
-        publishes the arithmetic for an irregular grouping, "if a sixteenth
+        an ordinary value on this scale rather than a separate mode. Avid
+        publishes the arithmetic for an irregular grouping: "if a sixteenth
         note equals 240 ticks, quintuplet sixteenth notes with 5 in time of 4
-        would yield a Grid size of 192 ticks or (240 ticks/5)*4", which in
-        beats is base * m / n. */
+        would yield a Grid size of 192 ticks or (240 ticks/5)*4". So five in
+        the time of four divides the note value by five and multiplies by four,
+        which for a sixteenth is 0.25 * 4 / 5 = 0.2 beats, and reads the same
+        way round as Avid's own worked answer rather than the reciprocal of
+        it. */
     double grid = 0.25;
 
     /** How much of the distance to the grid is travelled, 0 to 1. */
@@ -193,8 +205,15 @@ struct Options
         note grid with Include Within at 50 per cent gives "an eighth note area
         around each beat", and at 25 per cent gives "a sixteenth note area". So
         the window is range * grid wide, centred on the grid point, and the
-        tolerance either side is half of that. At 1.0 the window is the whole
-        step and nothing is outside it. */
+        tolerance either side is half of that.
+
+        At 1.0 the window is a whole step wide, which on a straight grid
+        reaches every note, because nothing there is more than half a step from
+        a grid point. Under swing it does not: the gap from a downbeat to a
+        swung offbeat is up to one and a half steps, so a note in the middle of
+        that gap is three quarters of a step from either end and stays outside
+        a full window. That is what Avid's definition says rather than
+        something to correct, and the test pins it. */
     double range = 0.5;
 };
 
@@ -264,7 +283,21 @@ inline double gridPoint (long long index, double step, double swing) noexcept
     return pairStart + swing * (step * 2.0);
 }
 
+/** How far from the clip's origin this arithmetic will work.
+
+    A note out there is a fault upstream rather than a position: `ProjectIO`
+    will read whatever a file claims, and `MidiTimebase.h` caps its own tick
+    arithmetic at `kMidiMaxTick` for exactly this reason. The grid search
+    counts pairs in signed integers, and a beat divided by a step can overflow
+    that long before a double runs out of range, which is undefined behaviour
+    rather than a wrong answer. So a note past the end of what a file could
+    hold is left exactly where it is. */
+inline constexpr double kMaxBeats = (double) kMidiMaxTick / (double) kMidiExportPpq;
+
 /** The grid point nearest a beat, with ties going to the earlier point.
+
+    A beat that is not a number, or is past `kMaxBeats`, is returned unchanged,
+    so a caller that is placing notes leaves it where it is.
 
     Only the two pairs either side of the beat can hold the nearest point, so
     the search is six candidates rather than a loop. Doing it by candidate
@@ -273,8 +306,8 @@ inline double gridPoint (long long index, double step, double swing) noexcept
     wrong, and that is the shape of mistake this is written to avoid. */
 inline double nearestGridBeat (double beat, double step, double swing) noexcept
 {
-    if (! std::isfinite (beat))
-        return 0.0;
+    if (! std::isfinite (beat) || std::abs (beat) > kMaxBeats)
+        return beat;
 
     const double pair = step * 2.0;
     const auto pairIndex = (long long) std::floor (beat / pair);
@@ -347,17 +380,40 @@ inline double place (double beat, const Options& o) noexcept
 }
 
 /** What a pass did, so the caller can say so rather than leaving somebody to
-    wonder whether anything happened. */
+    wonder whether anything happened.
+
+    These are what the pass actually did and not what it attempted, which is
+    not the same thing: an end pushed onto the grid and then trimmed straight
+    back to where it already was has not moved a note, and counting the attempt
+    had the piano roll reporting work on a pattern it had left exactly as it
+    found it. So `moved` is the number of notes that came out somewhere other
+    than where they went in, and `trimmed` is the subset of those that were
+    shortened by a collision. */
 struct Result
 {
-    int moved   = 0;   ///< Notes whose start or end changed.
-    int trimmed = 0;   ///< Notes shortened because a later note of the same pitch landed inside them.
+    int moved   = 0;   ///< Notes that came out at a different position or length.
+    int trimmed = 0;   ///< Of those, the ones shortened because a later note of the same pitch landed inside them.
     int dropped = 0;   ///< Notes lost because another of the same pitch landed on the same onset.
 };
 
+/** Whether two notes already overlapped before the pass, by index into the
+    before picture. Half open, so two notes that merely abut did not overlap. */
+inline bool overlappedBefore (const std::vector<TimebaseNote>& before,
+                              size_t a, size_t b) noexcept
+{
+    if (a >= before.size() || b >= before.size())
+        return false;
+
+    const auto& first = before[a];
+    const auto& second = before[b];
+
+    return first.start < second.start + second.length
+        && second.start < first.start + first.length;
+}
+
 /** Puts a quantised set of notes into a shape the studio and a MIDI file can
     both hold, following the rule `MidiTimebase.h` already established for the
-    file round trip.
+    file round trip, and counts what that cost.
 
     Quantise is the operation that causes this: two notes of the same pitch a
     sixteenth apart, quantised to a quarter grid, become one. One MIDI channel
@@ -366,38 +422,51 @@ struct Result
     where the later one starts, while of two beginning together the longer is
     kept and the other is counted as lost.
 
+    `before` is the pattern as it stood before the pass, index aligned with
+    `notes` as they came in, and a pair is resolved **only if it did not
+    already overlap**. That restriction is the whole point and the first
+    version of this got it wrong by asking a weaker question, whether either
+    note had moved at all. A piano roll will happily draw two notes of one
+    pitch on top of each other, and a held note re-struck before it is released
+    is ordinary material: sustained piano, a re-triggered pad, a roll on one
+    drum. Under the weaker rule, nudging either of them by a thousandth of a
+    beat cost the earlier note everything past the later one's onset, and the
+    note that lost its tail had not necessarily moved at all. An overlap that
+    was already there is left alone, and the export's own rule deals with it
+    at the only point where it genuinely cannot be held, which is where it was
+    being dealt with before this feature existed.
+
+    Two onsets that the pass has brought within one export tick of each other
+    count as one onset, and the later note wins. That is a decision rather than
+    a standard, and worth stating as one: a tick is the finest position this
+    project keeps, two strikes of one pitch half a millisecond apart are one
+    strike musically, and the alternative is a note nobody can see or select.
+    It is not a claim about the file, because a pair that straddles a tick
+    boundary would export as two notes. With the restriction above it can only
+    fire on a coincidence the quantise itself created, which is the double
+    triggered pad collapsed onto one grid point.
+
     No manufacturer documents any of this, which the backlog says plainly. The
     reason to follow this project's own rule rather than invent one is that it
-    makes quantise leave a pattern the export does not have to repair: the test
-    measures that by asking `midiNotesToTicks` how many notes it had to throw
-    away afterwards, and the answer has to be none.
-
-    Two onsets count as one when they round to the same export tick, or when
-    trimming the earlier note to the later one would leave it shorter than a
-    tick. Both are the same statement: that is what the pair becomes in a file,
-    and resolving it here rather than at export is what keeps the two agreeing.
-
-    `moved` says which notes this pass actually moved, and a pair is only
-    resolved when one of them is in it. That matters more than it looks: a
-    piano roll will happily draw two notes of one pitch on top of each other,
-    and an overlap somebody drew on purpose is not quantise's business to
-    delete. Quantise cleans up after itself and reaches for nothing else. An
-    empty `moved` means every note, which is what a caller resolving a whole
-    pattern on its own would want. */
+    makes quantise leave a pattern the export does not have to repair, and the
+    test measures exactly that: it starts from material the export was happy
+    with and asks `midiNotesToTicks` how many notes it had to throw away
+    afterwards, and the answer has to be none. */
 inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
-                             const std::vector<char>& moved,
+                             const std::vector<TimebaseNote>& before,
                              Result& result)
 {
     struct Entry
     {
         TimebaseNote note;
-        bool moved = true;
+        size_t index = 0;
+        bool trimmed = false;
     };
 
     std::vector<Entry> entries;
     entries.reserve (notes.size());
     for (size_t i = 0; i < notes.size(); ++i)
-        entries.push_back ({ notes[i], moved.empty() || (i < moved.size() && moved[i] != 0) });
+        entries.push_back ({ notes[i], i, false });
 
     // By pitch, then by start, then longest first, so that of two notes
     // beginning together the one kept is the one that was audible.
@@ -414,14 +483,11 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
     for (const auto& e : entries)
     {
         if (! kept.empty() && kept.back().note.note == e.note.note
-            && (kept.back().moved || e.moved))
+            && ! overlappedBefore (before, kept.back().index, e.index))
         {
             auto& previous = kept.back();
 
-            const bool sameTick = midiTicksFromBeats (e.note.start, kMidiExportPpq)
-                                   == midiTicksFromBeats (previous.note.start, kMidiExportPpq);
-
-            if (sameTick || e.note.start - previous.note.start < kMinLengthBeats)
+            if (e.note.start - previous.note.start < kMinLengthBeats)
             {
                 ++result.dropped;
                 continue;
@@ -430,7 +496,7 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
             if (previous.note.start + previous.note.length > e.note.start)
             {
                 previous.note.length = e.note.start - previous.note.start;
-                ++result.trimmed;
+                previous.trimmed = true;
             }
         }
 
@@ -445,10 +511,27 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
         return a.note.note < b.note.note;
     });
 
+    result.moved = 0;
+    result.trimmed = 0;
+
     notes.clear();
     notes.reserve (kept.size());
+
     for (const auto& e : kept)
+    {
+        const bool differs = e.index >= before.size()
+                          || e.note.start != before[e.index].start
+                          || e.note.length != before[e.index].length;
+
+        if (differs)
+        {
+            ++result.moved;
+            if (e.trimmed)
+                ++result.trimmed;
+        }
+
         notes.push_back (e.note);
+    }
 }
 
 /** Quantises a whole set of notes in place.
@@ -462,22 +545,47 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
     Avid treating a note on and a note off as two separately selectable
     events, and it is what the gate means, but it does surprise people.
 
-    One property worth knowing before relying on it, because it was measured
-    rather than assumed. Quantising starts is idempotent: a second pass at full
-    strength moves nothing, which is what anybody would expect of a tidy up.
-    Quantising **ends** is not quite, and it is not a fault. An end that was
-    put on the grid and then trimmed back to where the next note of its pitch
-    begins is no longer on the grid, because the trim answers to a different
-    constraint: one note on and one note off per pitch. A second pass therefore
-    has something to do to it. Over twenty thousand randomised patterns across
-    five grids and three swings, one further pass always reached a fixed point,
-    and no note ever came out longer than it went in, so the operation settles
-    and settles downward rather than oscillating. Nobody documents this corner;
-    the measurement is in Tests/QuantiseTest.cpp. */
+    Two properties were measured rather than assumed, and the second is the one
+    to know before relying on it.
+
+    Quantising starts is idempotent: a second pass at full strength moves
+    nothing, which is what anybody would expect of a tidy up.
+
+    Quantising **ends** is not, and it is not a fault. An end put on the grid
+    and then trimmed back to where the next note of its pitch begins is no
+    longer on the grid, because the trim answers to a different constraint, so
+    a second pass has something to do to it. One further pass settles it, and
+    that is measured rather than argued: six thousand randomised patterns
+    across six grids, six swings, both length settings, both of the targets
+    that move an end, and with the gate off and on. That matters because
+    somebody who presses Quantise twice to be sure must not get a third
+    pattern.
+
+    It is worth knowing which rule bought that. An earlier version resolved any
+    pair of notes where either had moved, and under it a gated pass could
+    cascade: a trim moved an end closer to the grid, which brought it inside an
+    include window it had been outside of, which trimmed the note before it,
+    one note per pass, and an audit found a line of twenty four notes that took
+    twenty five passes to settle. Resolving only the collisions the pass itself
+    created ended the cascade as well as the deletions it was fixed for. The
+    case the audit found is kept in Tests/QuantiseTest.cpp as a regression.
+
+    Lengths run down rather than up while that settles, except in two cases
+    where growing is the right answer: with both ends moving a note can grow
+    because the note after it moved out of the way, and an inherited overlap is
+    never resolved, so nothing trims an end the grid has pushed outward. Nobody
+    documents any of this corner. */
 inline Result apply (std::vector<TimebaseNote>& notes, const Options& o)
 {
     Result result;
-    std::vector<char> moved (notes.size(), (char) 0);
+
+    if (notes.empty())
+        return result;
+
+    // The pass needs to know what it inherited, so that it only resolves the
+    // collisions it caused and so that the counts are about what changed. One
+    // copy of the notes: this runs on an edit, not in the device callback.
+    const std::vector<TimebaseNote> before = notes;
 
     const bool moveStarts = (o.target != Target::ends);
     const bool moveEnds   = (o.target != Target::starts);
@@ -487,17 +595,25 @@ inline Result apply (std::vector<TimebaseNote>& notes, const Options& o)
     // exactly this case rather than quietly honouring one of the two requests.
     const bool keepLength = o.preserveLength && preserveLengthApplies (o);
 
-    for (size_t i = 0; i < notes.size(); ++i)
-    {
-        auto& n = notes[i];
+    bool anyChanged = false;
 
+    for (auto& n : notes)
+    {
         // A note with a non-finite position is a fault somewhere else, but it
         // must not become one here: the comparisons the overlap pass sorts by
-        // are not an ordering once a NaN is in the vector.
+        // are not an ordering once a NaN is in the vector. Repairing one is a
+        // change like any other and is counted as one.
         if (! std::isfinite (n.start))
+        {
             n.start = 0.0;
+            anyChanged = true;
+        }
+
         if (! std::isfinite (n.length) || n.length <= 0.0)
+        {
             n.length = kMinLengthBeats;
+            anyChanged = true;
+        }
 
         const double oldStart = n.start;
         const double oldEnd = n.start + n.length;
@@ -517,23 +633,29 @@ inline Result apply (std::vector<TimebaseNote>& notes, const Options& o)
         if (newStart == oldStart && newEnd == oldEnd)
             continue;
 
-        // The length is carried across rather than recovered from the two
-        // ends, for the same reason.
+        // A kept length is carried across rather than recovered from the two
+        // ends, so it is exact. The other way round it cannot be: holding the
+        // end still means storing `newEnd - newStart`, and adding that back to
+        // the start does not always land on `newEnd`. Measured over three
+        // million single note cases the end drifts on about one in twelve
+        // hundred, by at most 1.8e-15 of a beat, which is a ten thousandth of
+        // the finest position this project keeps. Said here because Avid's
+        // "note end points are not moved" is quoted above as an exact rule and
+        // it is exact to within an ulp rather than to the bit.
         const double newLength = keepLength ? n.length : newEnd - newStart;
 
         n.start  = newStart;
         n.length = std::max (kMinLengthBeats, newLength);
-        moved[i] = (char) 1;
-        ++result.moved;
+        anyChanged = true;
     }
 
     // Nothing moved, so nothing is resolved and nothing is even reordered. A
     // quantise that did not move a note has to be indistinguishable from not
     // having been asked for.
-    if (result.moved == 0)
+    if (! anyChanged)
         return result;
 
-    resolveOverlaps (notes, moved, result);
+    resolveOverlaps (notes, before, result);
     return result;
 }
 
