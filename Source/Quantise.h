@@ -455,7 +455,12 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
 
     Starts and ends are placed by the same grid, the same strength and the same
     gate, which is what Avid does: the options say which of the two is allowed
-    to move, not which one gets a different treatment.
+    to move, not which one gets a different treatment. One consequence of that
+    is worth stating rather than leaving to be discovered: with both ends
+    moving, the gate is asked about each end separately, so a note can have one
+    end quantised and the other left where it was played. That follows from
+    Avid treating a note on and a note off as two separately selectable
+    events, and it is what the gate means, but it does surprise people.
 
     One property worth knowing before relying on it, because it was measured
     rather than assumed. Quantising starts is idempotent: a second pass at full
