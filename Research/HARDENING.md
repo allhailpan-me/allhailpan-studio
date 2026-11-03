@@ -7,6 +7,38 @@ Newest first.
 
 ---
 
+## 2026-11-03: the envelope, which is also what decides a note has ended
+
+### What is being looked at
+
+`Source/Envelope.h`, 177 lines with no JUCE, and `Tests/EnvelopeTest.cpp`,
+242 lines, which covers it. A priority 2 target in the brief's ordering: a
+test suspected of being weaker than it looks.
+
+Picked on the ratio and on the reach. 177 lines of source to 242 of test is
+the thinnest cover of any arithmetic header here now that the loudness meter
+has been done, and the header is reached by every note the instrument plays:
+`Synth/Voice.h` holds four of them per voice, and `envelopes[0]` is the one
+thing in the whole voice that is soldered rather than routed, because it is
+what tells the allocator a note has finished.
+
+Nothing has merged since the night of 2026-10-29, so there is no recently
+merged work to audit, and the only JUCE-free header in `Source` still without
+a test is `Fx/Unit.h`, which earlier nights set aside as unreferenced
+scaffolding and which still has nothing including it: checked again tonight,
+`grep -rn 'Unit.h'` outside the file itself returns nothing.
+
+Not `Fx/Svf.h` or `Tests/SvfTest.cpp`, which open pull request #55 is
+changing; not `Source/Quantise.h`, `Source/PianoRollComponent.*` or
+`Tests/QuantiseTest.cpp`, which draft pull request #64 is changing; and not
+`AudioEngine.*`, `InputSource.h`, `MainComponent.*`, `Tuner.h`,
+`TunerPanel.h` or `Tests/run.sh`, which open pull request #61 is changing.
+
+### Still to do
+
+Mutation run, then the test, then the writeup.
+
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
