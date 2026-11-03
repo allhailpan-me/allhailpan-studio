@@ -34,9 +34,246 @@ changing; not `Source/Quantise.h`, `Source/PianoRollComponent.*` or
 `AudioEngine.*`, `InputSource.h`, `MainComponent.*`, `Tuner.h`,
 `TunerPanel.h` or `Tests/run.sh`, which open pull request #61 is changing.
 
-### Still to do
+### The test was much weaker than it looked, and one thing was latent
 
-Mutation run, then the test, then the writeup.
+44 mutations of `Envelope.h`, every one built the way `Tests/run.sh` builds
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`). Against the
+file as it stood, **36 tried, 11 caught, 25 survived**. Against the file as it
+is now, **44 tried, 38 caught, 6 survived**, and all six are genuine no-ops
+with the reason written down below.
+
+The 31 per cent is the second worst ratio recorded here, after the loudness
+meter's 59, and it has a single cause. Every check in the file was about
+*arriving*: that the attack reached one, that the decay settled on the sustain
+level, that the release reached zero and the voice freed. Those are the right
+things to check and they are what the file was written for, because a release
+that approaches zero without arriving is the failure nobody hears. But nothing
+asked *when* any of it arrived, or what the shape between the arrivals was, so
+every one of these went straight through:
+
+- the attack at twice the dialled speed, which is the difference between a
+  swell and a click
+- the decay stage not running at all, so the level stepped from full scale to
+  the sustain in one sample
+- the decay snapping on its first sample, which is the same step
+- the decay heading for silence rather than for the sustain level, dipping
+  under it and being snapped back up: a step in the middle of every note
+- the decay driven by the release dial, so the decay knob did nothing
+- the release falling in a straight line rather than exponentially, which also
+  made it eight times too fast
+- the release cut off twenty decibels early, which is a click at the end of
+  every note, and the one that most deserved catching because the snap is
+  only defensible if it happens from somewhere inaudible
+- the release running three times as long as its dial
+
+All of those still arrived in the right place, which was all the file could
+see. The `0.0011` style bound in the old release check was only ever an upper
+one, so anything *faster* than the dial passed, and the one accidental lower
+bound in the file was a precondition inside `retriggerDoesNotClick` rather
+than a check.
+
+### The fault
+
+**A fresh envelope ignored the settings it declares.** Latent rather than
+audible: nothing in the studio reaches it today.
+
+`Settings` declares a 5 ms attack, a 120 ms decay, a sustain of 0.7 and a
+200 ms release, and the coefficients that make those mean anything are derived
+from them in `recalculate`. Nothing called `recalculate` until a setter did.
+So a default constructed `Envelope` ran with `attackStep` at its member
+initialiser of 1.0 and both coefficients at 0.0, which is every stage landing
+on its first sample. Measured: the first sample of a default constructed
+envelope read 1.0000 where its own declared 5 ms attack at 44100 Hz is
+0.0045, and the second read 0.7000.
+
+It cannot be reached through PAN One, because `Voice::setSampleRate` runs in
+`prepareToPlay` and JUCE cannot deliver a note before that, and `Voice` also
+forwards the device rate to all four envelopes and guards it itself. It is
+still the same shape as the unconfigured section that open pull request #55 is
+fixing in `Fx/Svf.h`: an object whose stated defaults and whose actual state
+disagree works perfectly everywhere that configures it and wrongly in the one
+place that forgets. Fixed by deriving the coefficients once in a constructor,
+and `itsOwnDefaultsAreTheOnesItUses` now fails without that line.
+
+### One claim that was loose, and is now measured
+
+The header said "the decay time is how long it takes to arrive within a
+thousandth of the sustain level". The rule has two halves that only agree at a
+sustain of nothing. The per sample multiplier covers a thousandth of the
+distance *still to cover* in the time dialled; the stage ends when that
+distance is a thousandth of *full scale*. A decay into a high sustain has
+little distance to cover, so it reaches the absolute floor before it has used
+its time.
+
+Measured at 48 kHz with a 1.000 s decay dialled, against the closed form
+`1 - ln(1 - sustain) / ln(0.001)`:
+
+| sustain | decay stage lasts | of the dial | closed form |
+|---|---|---|---|
+| 0.000 | 1.0000 s | 1.000 | 1.000 |
+| 0.250 | 0.9583 s | 0.958 | 0.958 |
+| 0.500 | 0.8996 s | 0.900 | 0.900 |
+| 0.700 | 0.8257 s | 0.826 | 0.826 |
+| 0.900 | 0.6667 s | 0.667 | 0.667 |
+| 0.990 | 0.3333 s | 0.333 | 0.333 |
+| 0.999 | 0.0000 s | 0.000 | 0.000 |
+
+This is not a fault and it was not changed. The shortfall is exactly where the
+movement left to make is inaudible: at a sustain of 0.9 the entire decay is
+one decibel, and at 0.999 it is a hundredth of one. An absolute floor is the
+right thing to stop on for that reason, and making the dial exact instead
+would mean deriving the multiplier from the sustain level, so that moving the
+sustain knob changed the decay speed. The header now says what happens, with
+the figures, and `decayTakesTheTimeItsDialSays` holds it to the closed form
+rather than to a table of what the code currently does.
+
+The release's claim was already exact and is now checked: a note released from
+full scale takes exactly its dial, and one released from lower down reaches
+the floor sooner, the way a discharging capacitor does. Measured at 48 kHz
+with a 1.000 s release: from 1.00 it takes 1.0000 s, from 0.70 0.9484 s, from
+0.10 0.6667 s, from 0.01 0.3333 s.
+
+### What the survivors asked for, and what was written
+
+The new file is 1169 lines against 242, and it keeps all five of the old
+checks unchanged, because what they cover is still the worst failure here.
+What was added, in the three groups the mutations fell into:
+
+**When each dial is the time it says.** The attack has to arrive within a
+sample of `attackSeconds * rate` at five sample rates and six lengths from the
+dial's 0.5 ms to its 5 s. The decay stage has to last the closed form fraction
+above, at three rates, four lengths and six sustains. The release from full
+scale has to take exactly its dial, at three rates and five lengths from 1 ms
+to 10 s. Worst errors measured: attack 0.0000 per cent, decay 0.68 per cent
+(at a 10 ms decay into a sustain of 0.99 at 44.1 kHz, where the whole stage is
+147 samples), release 2.27 per cent (at a 1 ms release at 44.1 kHz, which is
+44 samples, so one sample is 2.3 per cent of it).
+
+**What shape it is between the arrivals.** The attack has to sit on a straight
+line from nought to one, worst departure measured 0.000000 of full scale. The
+decay's remaining distance and the release's level each have to fall sixty
+decibels over the dialled time, measured as a straight line in decibels, worst
+departures 0.0001 dB and 0.0000 dB. And the last sample before a release is
+snapped to zero has to be no more than one sample of the release's own travel
+above a thousandth of full scale, which for the shortest release the dial
+offers is -58.8 dB and for anything from 10 ms upward is within a twentieth of
+a decibel of -60. That last one is the check the `closeEnough` mutation needed:
+the snap is only defensible because it happens from somewhere nobody can hear.
+
+**That the decay stage is a stage.** It has to end, which is checked by its
+observable consequence rather than by reading the stage: once a note has
+settled, moving the sustain knob reaches it on the very next sample, because
+the sustain stage assigns the level. An envelope still grinding through a decay
+it never finished would ease toward the new level over its decay time instead,
+so a knob turned during a held chord would lag by up to eight seconds. It also
+has to not go under the sustain level, and never move more than a hundredth of
+full scale in one sample, which is the step that the two "no decay at all"
+mutations produce.
+
+Two of the measurements are pointed at a deliberately wrong curve first and
+have to notice: the straightness measurement at an exponential approach to
+one, and the decibel measurement at a release falling in a straight line.
+Without that, a pass means only that the measurement ran.
+
+The sweep is 10000 randomised settings over six sample rates, drawn uniformly
+in the logarithm of each time rather than in seconds. That is both where the
+awkward settings are, a decay of a sample and a half being a different kind of
+setting from a decay of eight seconds, and what keeps the file at 15 seconds:
+drawn uniformly in seconds the same sweep took two minutes rendering slow
+releases nobody is in any doubt about.
+
+And the parts the studio does not happen to reach today are covered, because
+they are what the guards exist for: the clamps on settings outside their range,
+which stand between a typo in one of the 22 presets that assign the `Patch`
+struct directly and an envelope that runs backwards; the fallback for a sample
+rate of nought; an attack whose step has underflowed to nothing; and `reset`,
+`noteOff` on an idle envelope and `isReleasing`, none of which the old file
+touched at all.
+
+### The six survivors, all genuine no-ops
+
+**`attack-arrival-strict`**: `level >= 1.0` to `level > 1.0`. Costs at most one
+sample, and only where the step is an exact binary fraction so that the sum
+lands exactly on one. Simulated over 12000 combinations of the six device rates
+and 2000 attack times across the dial's range: not one of them landed exactly
+on one, so the cost was zero samples in every case. Constructed deliberately,
+with a step of 1/1024 or 1/4096, it costs exactly one sample, 21 microseconds
+at 48 kHz. The test's tolerance is one sample on purpose: tightening it to
+zero would make it depend on how a sum of N copies of 1/N accumulates, which
+is not a property of the envelope.
+
+**`attack-zero-sentinel-zero`** and **`attack-guard-removed`** are each other's
+backup, so neither can be seen alone. A zero attack is handled twice: the
+sentinel makes `attackStep` 1e9, which overshoots one on the next sample, and
+the `attackStep <= 0.0` guard lands on one directly. Remove either and the
+other still gives the right answer. `attack-guard-removed` is caught now
+because `anEndlessAttackStillArrives` pushes the attack to infinity, where the
+sentinel does not apply; `attack-zero-sentinel-zero` stays a no-op. Both
+removed together is a zero attack that never arrives, which was checked by hand
+and which `zeroTimesDoNotHang` catches on its `first == 1.0f`.
+
+**`decay-zero-guard-removed`** and **`release-zero-guard-removed`**: dropping
+`decayCoefficient <= 0.0` and `releaseCoefficient <= 0.0`. Both are covered by
+the condition beside them. A zero length stage gives a coefficient of 0.0, so
+the level is multiplied to the sustain level or to zero on that same sample,
+and `level - sustain <= closeEnough` or `level <= closeEnough` is then true.
+The guards are belt and braces and the arithmetic reaches the same answer
+without them.
+
+**`sustain-one-takes-decay-branch`**: `settings.sustainLevel >= 1.0` to
+`> 1.0`, so a sustain of exactly one enters a decay stage. It has no distance
+to cover, computes `1.0 + (1.0 - 1.0) * coefficient`, and snaps on that sample.
+One extra sample in a stage with nothing to do.
+
+**`samples-guard-loosened`**: `samples < 1.0` to `samples < 0.0`, so a
+sub sample time computes a coefficient rather than returning 0.0. At exactly
+zero samples the division gives positive infinity and `pow (0.001, inf)` is
+0.0, which is what the guard would have returned; at half a sample it gives
+1e-6, which snaps on the next sample anyway. A no-op that relies on IEEE
+giving an infinity rather than trapping, which is worth keeping the guard for
+even though nothing can currently see it. Not flagged by the undefined
+behaviour sanitizer, because a floating point division by zero is not in
+GCC's `undefined` group.
+
+### Checked and found sound
+
+- The release's definition against the shape of an analogue decay: a note
+  released from a low sustain reaching the floor sooner is correct and is now
+  measured rather than assumed.
+- `noteOn` deliberately not resetting the level, which is what stops a
+  retrigger mid release from clicking. The old file checked this and it still
+  does.
+- `Voice::setSampleRate` forwards the device rate to all four envelopes and
+  guards it itself, so the envelopes cannot be left at the default 44100 while
+  the device runs at 96k. That would have been audible: every envelope time
+  less than half of what its dial says.
+- `Envelope::setSettings` has no early out on an unchanged value, and is called
+  once per block per voice from `Voice::setPatch`, which is two `std::pow`
+  calls per envelope per block, 128 per block for sixteen voices. Looked at
+  because CLAUDE.md records a setter recomputing unmoved values costing a fifth
+  of a core in `Saturator`, but that one was called once a *sample*. Envelope
+  times are not modulation destinations, so this one cannot be. Left alone.
+- The interaction that looked like a fault and is not: `setSettings` with a
+  higher sustain during a decay snaps the level up to the new sustain, because
+  `level - sustain` goes negative. That is a step, but the sustain stage steps
+  too, by design, so the sustain knob is a stepping control either way and
+  this is not a new edge.
+
+### What is now proven that was not
+
+- Every one of the three dials means seconds, in both directions, at every
+  sample rate a device can open at and across the whole range the dial offers.
+- The attack is straight, and the decay and release are exponential, each to
+  better than a fifth of a decibel, with both measurements shown to fail on a
+  curve of the wrong shape.
+- A release is snapped to zero from a level nobody can hear, which is the only
+  thing that makes snapping honest, and the bound is derived rather than
+  copied from what the code does today.
+- The decay is a stage with a duration, not a step, and it ends rather than
+  grinding on through denormals.
+- A fresh envelope behaves like the settings it declares.
+- The guards nothing in the studio reaches are each either checked or recorded
+  above as redundant with the guard beside them.
 
 
 ## 2026-10-29: the loudness meter, which is the one number other people check
