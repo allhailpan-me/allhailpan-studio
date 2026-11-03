@@ -12,10 +12,24 @@
     how notes actually die away on a struck or plucked instrument and how the
     discharge curves in analogue envelope generators behave.
 
-    The times mean something exact here, which they often do not elsewhere:
-    the decay time is how long it takes to arrive within a thousandth of the
-    sustain level, and the release time is how long it takes to fall to a
-    thousandth of full scale, which is sixty decibels down.
+    The times mean something exact here, which they often do not elsewhere.
+    The release time is how long a note released from full scale takes to fall
+    to a thousandth of it, which is sixty decibels down, and a note released
+    from lower down reaches that floor sooner, the way a discharging capacitor
+    does.
+
+    The decay is the same rule with one consequence worth stating, because the
+    two halves of it only agree at a sustain of nothing. The per sample
+    multiplier covers a thousandth of the distance still to cover in the time
+    dialled, and the stage ends when that distance is a thousandth of full
+    scale. A decay into a high sustain has little distance to cover, so it
+    reaches that absolute floor before it has used its time: measured, the
+    stage lasts the whole dial at a sustain of nothing, 0.900 of it at 0.5,
+    0.667 at 0.9 and 0.333 at 0.99. The shortfall is exactly where the
+    movement left to make is inaudible: at a sustain of 0.9 the entire decay
+    is one decibel. An absolute floor is the right one to stop on for that
+    reason, and `EnvelopeTest` pins the figures against the closed form rather
+    than leaving this paragraph to be taken on trust.
 
     The release ends at exactly zero and the envelope then reports itself
     finished. That matters more than it looks. An exponential approaches zero
@@ -38,6 +52,21 @@ public:
         double sustainLevel   = 0.700;
         double releaseSeconds = 0.200;
     };
+
+    /** The coefficients are derived from the settings, so they have to be
+        derived once before anybody asks for a sample. Without this a fresh
+        envelope ran every stage on its first sample whatever `Settings`
+        declared: an object whose stated defaults and whose actual state
+        disagree works everywhere that configures it and wrongly in the one
+        place that forgets, which is how an unconfigured section got into the
+        state variable filter. Nothing in the studio reaches it today, because
+        `Voice::setSampleRate` runs in `prepareToPlay` before any note can
+        arrive, and that is exactly the kind of reason that stops being true
+        later. */
+    Envelope() noexcept
+    {
+        recalculate();
+    }
 
     void setSampleRate (double newRate) noexcept
     {
