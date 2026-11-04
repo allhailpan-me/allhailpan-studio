@@ -29,6 +29,20 @@ blindly. Newest first.
 
 ## 2026-11-03: quantise, and what a strength percentage is a percentage of
 
+### Status: built, tested, mutation tested, audited three times, and waiting on a human to merge it
+
+Pull request **#64**, marked ready for review. The `tests` job, `ubuntu-latest`
+and `windows-latest` are all green on the head; `macos-latest` was still
+building, which is routine here and has not failed. The release notes are on
+the branch rather than written after the merge, so they go in with it.
+
+The session that finished it was **not permitted to merge without review**, so
+the merge is the owner's to make, the same as #59 before it. Nothing is left to
+do on the branch. A later night should not pick quantise up again: if #64 is
+still open it needs a click and not more work, and if it has been merged then
+this entry is the record of it.
+
+
 ### What was looked at
 
 The lane this night was editing and the data model: the engine and the window
