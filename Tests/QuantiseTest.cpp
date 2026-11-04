@@ -114,12 +114,13 @@ static void checkExact (double a, double b, const std::string& what)
         fail (what + "  (" + std::to_string (a) + " vs " + std::to_string (b) + ")");
 }
 
-static TimebaseNote note (double start, double length, int pitch = 60)
+static TimebaseNote note (double start, double length, int pitch = 60, float velocity = 0.8f)
 {
     TimebaseNote n;
-    n.start  = start;
-    n.length = length;
-    n.note   = pitch;
+    n.start    = start;
+    n.length   = length;
+    n.note     = pitch;
+    n.velocity = velocity;
     return n;
 }
 
@@ -1259,40 +1260,146 @@ static void aFlamPlayedInsideOneTickSurvives()
 static void twoOnsetsBroughtInsideOneTickBecomeOneNote()
 {
     // The other half of it: when the pass itself brings two onsets within a
-    // tick of each other, they are one onset and the later one wins. That is
-    // this project's decision rather than anybody's standard, because a tick
-    // is the finest position it keeps and two strikes half a millisecond apart
-    // are one strike. The alternative is a note nobody can see or select.
+    // tick of each other, they are one onset, and of the two the one kept is
+    // the one that was audible. That is this project's decision rather than
+    // anybody's standard, because a tick is the finest position it keeps and
+    // two strikes half a millisecond apart are one strike. The alternative is
+    // a note nobody can see or select.
+    //
+    // Checked in both directions, because which note survives is the whole of
+    // what makes this safe and an audit found the version that got it wrong.
+    // A test where the longer note also happens to be the one sorted first
+    // cannot tell the rule from "whichever came first wins", so the two cases
+    // here differ only in which of the pair is the long one.
     //
     // Built so the gap is small and not zero, and so that the two onsets were
     // more than a tick apart to start with, which is what "brought together"
     // means: a pair that was already inside a tick is a flam somebody played
-    // and is left alone. The first note sits on the grid, the second is a tick
-    // and a half late, and a half strength pass moves it to three quarters of
-    // a tick away. Both are short enough not to reach each other as played.
+    // and is left alone. One note sits on the grid, the other is a tick and a
+    // half late, and a half strength pass moves it to three quarters of a tick
+    // away. Lengths are kept well clear of a tick so that the minimum length
+    // rule is not what decides the comparison: see the sub-tick case below.
     const double tick = Quantise::kMinLengthBeats;
     const double point = 2.0;
+    const double late = point + tick * 1.5;
 
-    std::vector<TimebaseNote> notes { note (point, tick * 0.5, 60),
-                                      note (point + tick * 1.5, tick * 0.3, 60) };
+    struct Case
+    {
+        double earlyLength;
+        double lateLength;
+        double survivor;
+        const char* what;
+    };
 
-    auto o = straight (0.25, 0.5);
-    o.preserveLength = true;
+    // The survivor is the longer of the two, at its own onset as the pass left
+    // it, whichever of the two that is. The note on the grid does not move at
+    // all; the late one is drawn from a tick and a half out to three quarters
+    // of a tick out, which is the gap that makes the two one onset.
+    const double lateAfter = point + tick * 0.75;
+
+    const Case cases[] =
+    {
+        { 0.5,  0.125, point,     "the long note on the grid did not survive a short one brought onto it" },
+        { 0.125, 0.5,  lateAfter, "the long note brought onto the grid lost to a short one already there" },
+    };
+
+    for (const auto& c : cases)
+    {
+        std::vector<TimebaseNote> notes { note (point, c.earlyLength, 60),
+                                          note (late, c.lateLength, 60) };
+
+        auto o = straight (0.25, 0.5);
+        o.preserveLength = true;
+
+        const auto result = Quantise::apply (notes, o);
+
+        check (notes.size() == 1, "two onsets the pass brought inside one tick did not become one note");
+        check (result.dropped == 1, "the onset lost inside a tick was not reported as lost");
+
+        if (notes.size() == 1)
+        {
+            checkExact (notes[0].start, c.survivor, c.what);
+
+            // And it is the whole note that survives, not an onset with the
+            // other note's length on it.
+            checkExact (notes[0].length, std::max (c.earlyLength, c.lateLength),
+                        "the surviving note did not keep its own length");
+        }
+
+        // And whatever the pass leaves, the file holds it: the point of
+        // resolving this here rather than at export is that the export has
+        // nothing left to repair.
+        int droppedByExport = 0;
+        midiNotesToTicks (notes, kMidiExportPpq, &droppedByExport);
+        check (droppedByExport == 0, "the export still had to throw away an onset");
+    }
+
+    // A note the pass did not move keeps exactly the length it was played
+    // with, deliberately, while one that moved has its length brought up to a
+    // tick. So for a pair that was already shorter than a tick, the
+    // comparison is between a clamped length and an unclamped one and the
+    // musically longer note is not necessarily the one kept. Pinned rather
+    // than argued, and harmless: nothing in the studio can make a note that
+    // short. Drawing and recording floor a length at a sixty-fourth of a beat,
+    // which is fifteen ticks, MIDI import at one tick, and the project file at
+    // a two hundred and fifty sixth, which is just under four.
+    {
+        std::vector<TimebaseNote> notes { note (point, tick * 0.5, 60),
+                                          note (late, tick * 0.3, 60) };
+
+        auto o = straight (0.25, 0.5);
+        o.preserveLength = true;
+
+        const auto result = Quantise::apply (notes, o);
+
+        check (notes.size() == 1, "two sub-tick onsets brought inside one tick did not become one note");
+        check (result.dropped == 1, "the sub-tick onset lost was not reported as lost");
+
+        if (notes.size() == 1)
+            checkExact (notes[0].length, tick,
+                        "a surviving sub-tick note was left shorter than a tick");
+    }
+}
+
+static void theAudibleNoteSurvivesAnArtefactStruckJustBeforeIt()
+{
+    // The regression for what the third audit round found, which is the one
+    // fault in this file that would have deleted somebody's performance.
+    //
+    // A sub-tick artefact a tick and a half before a two beat bass note of the
+    // same pitch is ordinary material: a double triggered pad, a noisy input,
+    // a controller that sends a stray note on. At eighty per cent strength,
+    // which is the setting the piano roll's own menu offers as the one that
+    // keeps the feel, the artefact is drawn to within a third of a tick of the
+    // bass note and the two become one onset. The pass used to keep whichever
+    // of the two was sorted later, which here is the bass note's turn to be
+    // dropped: it kept a sixty-fourth of a beat at velocity 0.10 and threw
+    // away two beats at 0.95.
+    //
+    // `MidiTimebase.h` resolves the identical pair by keeping the longer, so
+    // the old rule also left the edit and the bounce disagreeing about which
+    // of the two was the note.
+    std::vector<TimebaseNote> notes { note (1.9984375, 0.015625, 40, 0.10f),
+                                      note (2.0,       2.0,      40, 0.95f) };
+
+    auto o = straight (1.0, 0.8);
 
     const auto result = Quantise::apply (notes, o);
 
-    check (notes.size() == 1, "two onsets the pass brought inside one tick did not become one note");
-    check (result.dropped == 1, "the onset lost inside a tick was not reported as lost");
+    check (notes.size() == 1, "the artefact and the note it sat on did not become one note");
+    check (result.dropped == 1, "the artefact was not reported as lost");
 
     if (notes.size() == 1)
-        checkExact (notes[0].start, point, "the surviving onset moved");
+    {
+        checkExact (notes[0].length, 2.0, "the two beat note was the one thrown away");
+        checkExact (notes[0].start, 2.0, "the surviving note did not keep its own onset");
+        check (std::abs ((double) notes[0].velocity - 0.95) < 1.0e-6,
+               "the surviving note is not the one that was played loud");
+    }
 
-    // And whatever the pass leaves, the file holds it: the point of resolving
-    // this here rather than at export is that the export has nothing left to
-    // repair.
-    int droppedByExport = 0;
-    midiNotesToTicks (notes, kMidiExportPpq, &droppedByExport);
-    check (droppedByExport == 0, "the export still had to throw away an onset");
+    // Nothing was asked of the note that survived, so nothing is reported
+    // against it.
+    check (result.moved == 0, "a note that did not move was counted as moved");
 }
 
 static void theOverlapPassOnItsOwnKeepsItsContract()
@@ -2085,6 +2192,7 @@ int main()
     ofTwoNotesOnOnePointTheAudibleOneSurvives();
     aFlamPlayedInsideOneTickSurvives();
     twoOnsetsBroughtInsideOneTickBecomeOneNote();
+    theAudibleNoteSurvivesAnArtefactStruckJustBeforeIt();
     theOverlapPassOnItsOwnKeepsItsContract();
     notesThatOnlyTouchAreNotReportedAsTrimmed();
 

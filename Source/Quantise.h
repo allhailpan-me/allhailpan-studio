@@ -488,13 +488,25 @@ inline bool struckTogetherBefore (const std::vector<TimebaseNote>& before,
     at the only point where it genuinely cannot be held, which is where it was
     being dealt with before this feature existed.
 
-    Two onsets within one export tick of each other count as one onset, and the
-    later note wins. That is a decision rather than a standard, and worth
-    stating as one: a tick is the finest position this project keeps, two
-    strikes of one pitch half a millisecond apart are one strike musically, and
-    the alternative is a note nobody can see or select. It is not a claim about
-    the file, because a pair that straddles a tick boundary would export as two
-    notes.
+    Two onsets within one export tick of each other count as one onset, and of
+    the two the one kept is the one that was audible, which is the longer, and
+    of two equally long the earlier. That is a decision rather than a standard,
+    and worth stating as one: a tick is the finest position this project keeps,
+    two strikes of one pitch half a millisecond apart are one strike musically,
+    and the alternative is a note nobody can see or select. It is not a claim
+    about the file, because a pair that straddles a tick boundary would export
+    as two notes.
+
+    Keeping the longer rather than whichever happened to be sorted later is the
+    whole of what makes this safe, and an audit found what the other way costs.
+    A sub-tick artefact struck a third of a tick before a two beat bass note is
+    ordinary material from a double triggered pad or a noisy input, and under
+    the earlier rule the bass note was the one deleted: the pass kept a
+    sixty-fourth of a beat at velocity 0.10 and threw away two beats at 0.95.
+    It also put this file at odds with the export, which resolves the identical
+    pair by `MidiTimebase.h`'s rule and keeps the longer, so the edit and the
+    bounce disagreed about which of the two was the note. The rule here is that
+    same rule, which is what the paragraph above promises.
 
     It fires only on onsets this pass brought together, which is the double
     triggered pad collapsed onto one grid point, and it fires there even when
@@ -556,12 +568,37 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
             // Onsets the pass has brought together are one onset, whatever the
             // two notes were doing before. That includes a pair that was
             // already overlapping: two notes of one pitch put on the same
-            // point with the same length are the same note, and leaving both
-            // would hand the export a pair it has to throw one away from,
-            // which is a bounce that is not the pattern that was played.
+            // point are the same note, and leaving both would hand the export
+            // a pair it has to throw one away from, which is a bounce that is
+            // not the pattern that was played.
             if (e.note.start - it->note.start < kMinLengthBeats
                 && ! struckTogetherBefore (before, it->index, e.index))
             {
+                // Which of the two is lost is decided by length and not by
+                // which was sorted later, because the one worth keeping is the
+                // one that was audible. The sort puts the longer first only
+                // where the two starts are exactly equal, and this branch
+                // fires on starts that are unequal and under a tick apart, so
+                // without this the note kept would be whichever was played
+                // first however short it was. `MidiTimebase.h` keeps the
+                // longer, so deciding it any other way would leave the edit
+                // and the export disagreeing about the same pair.
+                if (e.note.length > it->note.length)
+                {
+                    // The later note is the audible one, so it takes the place
+                    // of what is in hand rather than being thrown away. Its
+                    // own onset comes with it: the two are within a tick, so
+                    // the difference is finer than anything downstream keeps,
+                    // and leaving the audible note exactly where the grid put
+                    // it is easier to reason about than moving it back onto an
+                    // onset that belonged to the note being dropped. The trim
+                    // flag goes with the old note, since this length is the
+                    // new note's own and nothing has cut it back.
+                    it->note = e.note;
+                    it->index = e.index;
+                    it->trimmed = false;
+                }
+
                 lost = true;
                 break;
             }
