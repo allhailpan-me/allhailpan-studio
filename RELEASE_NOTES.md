@@ -1,6 +1,53 @@
-Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can tidy a part you played in now: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can tidy a part you played in.** There is a Quantise button on the piano
+roll's toolbar now, and until this there was no way at all to move a played
+note onto the grid. The groove setting swings notes that are already on the
+grid, at playback, and deliberately leaves anything played off it where you put
+it, which is the opposite job. So a part played in live had to be redrawn by
+hand or left as it was.
+
+It is not an all or nothing snap, which is the part worth knowing. The strength
+is how far each note travels toward the grid, so 100% puts everything exactly
+on it and 80% takes most of the slop out and leaves the feel. That is in the
+menu as the setting that keeps the feel, because it is the one you will want on
+a guitar or a vocal line. Press it again at 80% and it moves everything closer
+again, which is deliberate and is how every other studio behaves.
+
+The swing is on the same scale as the groove setting, so 50% is straight and
+66.67% is a triplet shuffle, and the two cannot disagree about what a number
+means. You can also quantise against a swung grid, which is how you tidy a part
+that was played with a shuffle without flattening the shuffle.
+
+Two things you can do that are worth finding. You can tell it to move only the
+notes that are already close, which tidies the nearly-right ones and leaves a
+note you pushed late on purpose alone. Or the exact opposite: leave the close
+ones and only pull in the ones that are badly out. And you can choose whether
+it moves note starts, note ends, or both. Starts, with the length carried
+along, is the default and is what you want nearly always.
+
+Three things it will not do to your part. It will not push a note past the end
+of the clip, where it would still be drawn in the roll and make no sound. If
+quantising lands two notes of the same pitch on top of each other, which
+happens when two notes a sixteenth apart both go to the same beat, it keeps the
+one that was actually audible and tells you it dropped the other, rather than
+keeping whichever came first: a stray blip a fraction of a tick before a long
+note is common on a noisy input, and keeping the blip would have thrown away
+the note. And an overlap you drew yourself is left exactly as you drew it,
+because a held note restruck before you let go is ordinary playing and not
+something to clean up.
+
+It tells you what it did after each press: how many notes moved, how many were
+shortened, how many were dropped, and how many it left alone because moving
+them would have pushed them out of the clip.
+
+Nothing here is invented. The strength, the swing scale, the close-notes gate
+and the choice of which end moves are all taken from what Avid, Apple,
+Steinberg and Ableton publish about their own, and where none of them says
+anything, which is what happens when two notes collide, this follows the rule
+the MIDI export here already used, so a quantised pattern bounces as itself.
 
 **Your faders have a proper scale now, and 0 dB is three quarters of the way
 up.** The number under each fader means something it can be checked against,

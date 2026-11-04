@@ -28,8 +28,10 @@ PianoRollComponent::PianoRollComponent (Project& p, AudioEngine& e)
     for (int i = 0; i < (int) rollSnaps.size(); ++i)
         snapBox.addItem (rollSnaps[(size_t) i].first, i + 1);
     snapBox.setSelectedId (5, juce::dontSendNotification);
-    snapBox.onChange = [this] { repaint(); };
+    snapBox.onChange = [this] { describeQuantise(); repaint(); };
     snapBox.setTooltip ("Hold Alt to ignore the grid");
+
+    quantiseButton.onClick = [this] { showQuantiseMenu(); };
 
     laneBox.onChange = [this] { clearLaneButton.setEnabled (laneBox.getSelectedId() >= 2); repaint(); };
     laneBox.setTooltip ("Velocity, or a parameter you recorded from the plugin");
@@ -54,7 +56,8 @@ PianoRollComponent::PianoRollComponent (Project& p, AudioEngine& e)
     for (auto* c : { static_cast<juce::Component*> (&title), static_cast<juce::Component*> (&laneBox),
                      static_cast<juce::Component*> (&snapBox), static_cast<juce::Component*> (&laneLabel),
                      static_cast<juce::Component*> (&snapLabel), static_cast<juce::Component*> (&drawButton),
-                     static_cast<juce::Component*> (&eraseButton), static_cast<juce::Component*> (&clearLaneButton) })
+                     static_cast<juce::Component*> (&eraseButton), static_cast<juce::Component*> (&clearLaneButton),
+                     static_cast<juce::Component*> (&quantiseButton) })
     {
         c->setWantsKeyboardFocus (false);
         c->setMouseClickGrabsKeyboardFocus (false);
@@ -68,6 +71,8 @@ PianoRollComponent::PianoRollComponent (Project& p, AudioEngine& e)
         sb->setColour (juce::ScrollBar::thumbColourId, Ahp::panel3.brighter (0.15f));
         addAndMakeVisible (sb);
     }
+
+    describeQuantise();
 
     setWantsKeyboardFocus (false);
     setMouseClickGrabsKeyboardFocus (false);
@@ -104,6 +109,15 @@ AutoLane* PianoRollComponent::currentLane()
 
 void PianoRollComponent::setClip (int newClipId)
 {
+    if (newClipId != clipId)
+    {
+        // What the last pass did belongs to the clip it was done to. Carried
+        // across, the button would report work on a pattern that is not open
+        // any more, including after a different project is loaded.
+        lastQuantise = {};
+        hasQuantised = false;
+    }
+
     clipId = newClipId;
     rebuildLaneBox();
 
@@ -155,8 +169,268 @@ void PianoRollComponent::refresh()
         title.setText ("Double-click a MIDI clip in the playlist, or record one, to edit it here.", juce::dontSendNotification);
     }
     clearLaneButton.setEnabled (laneBox.getSelectedId() >= 2);
+
+    auto* pat = pattern();
+    quantiseButton.setEnabled (pat != nullptr && ! pat->notes.empty());
+    describeQuantise();
+
     updateScrollBars();
     repaint();
+}
+
+// ---------------------------------------------------------------------------
+// Quantise
+//
+// The arithmetic is all in Quantise.h, where it is tested without JUCE. What
+// is here is the menu, the conversion to and from the project's own note type,
+// and one undo step per pass.
+//
+// The grid is the Snap box's rather than a second control of its own, so there
+// is one grid on screen and the lines the notes land on are the lines that are
+// drawn. Ableton's quantise does the same thing, offering the current grid as
+// well as a value chosen in the dialog.
+
+double PianoRollComponent::quantiseGrid() const
+{
+    const double fromSnap = rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
+
+    // "None" is a choice about drawing freely, and a quantise has to have a
+    // grid, so it falls back to a step rather than doing nothing silently.
+    return fromSnap > 0.0 ? fromSnap : 0.25;
+}
+
+juce::String PianoRollComponent::quantiseGridName() const
+{
+    const double fromSnap = rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
+    if (fromSnap > 0.0)
+        return rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].first;
+    return "Step";
+}
+
+void PianoRollComponent::describeQuantise()
+{
+    const int strength = (int) std::lround (quantiseOptions.strength * 100.0);
+
+    // Two decimals only where they say something, so the exact triplet reads
+    // back as the 66.67% the menu offered rather than being rounded to 67%
+    // and looking like a setting nothing in the menu can reach.
+    const double swingPercent = quantiseOptions.swing * 100.0;
+    const bool wholePercent = std::abs (swingPercent - std::lround (swingPercent)) < 1.0e-9;
+    const juce::String swing = wholePercent ? juce::String ((int) std::lround (swingPercent))
+                                            : juce::String (swingPercent, 2);
+
+    juce::String what = "Move the notes onto the " + quantiseGridName().toLowerCase() + " grid: "
+                      + juce::String (strength) + "% strength";
+
+    if (std::abs (quantiseOptions.swing - 0.5) > 1.0e-9)
+        what += ", swing " + swing + "%";
+
+    what += quantiseOptions.target == Quantise::Target::starts ? ", note starts"
+          : quantiseOptions.target == Quantise::Target::ends   ? ", note ends"
+                                                               : ", both ends";
+
+    if (quantiseOptions.gate == Quantise::Gate::include)
+        what += ", only the notes already close";
+    else if (quantiseOptions.gate == Quantise::Gate::exclude)
+        what += ", leaving the close ones alone";
+
+    if (hasQuantised)
+    {
+        what += ".  Last pass moved " + juce::String (lastQuantise.moved) + " note(s)";
+
+        // The shortened ones are a subset of the moved ones, so they are
+        // written as one rather than as a second group: three numbers in a row
+        // read as three separate sets of notes.
+        if (lastQuantise.trimmed > 0)
+            what += ", " + juce::String (lastQuantise.trimmed)
+                  + " of them cut back to where the next note of the same pitch starts";
+
+        // A note merged into a neighbour is gone, and calling that a merge
+        // sounds like nothing was lost. It is the one outcome somebody would
+        // want to know about and the easiest to miss on a crowded pattern.
+        if (lastQuantise.dropped > 0)
+            what += ", and lost " + juce::String (lastQuantise.dropped)
+                  + (lastQuantise.dropped == 1 ? " to another note of the same pitch landing on it"
+                                               : " to other notes of the same pitch landing on them");
+
+        // Held back is not a failure and does need saying, because the note
+        // visibly did not move and the reason is not on screen.
+        if (lastQuantise.held > 0)
+            what += ".  " + juce::String (lastQuantise.held)
+                  + " left where they were played, because the grid would have put them outside this clip";
+    }
+
+    quantiseButton.setTooltip (what);
+}
+
+void PianoRollComponent::showQuantiseMenu()
+{
+    const bool lengthsApply = Quantise::preserveLengthApplies (quantiseOptions);
+
+    juce::PopupMenu strengths;
+    {
+        const int percents[] = { 100, 90, 80, 70, 60, 50, 25 };
+        for (int i = 0; i < 7; ++i)
+        {
+            const double value = percents[i] / 100.0;
+            // Avid recommends 70 to 80 per cent for keeping the original feel,
+            // which is worth saying rather than leaving somebody to find.
+            juce::String name = juce::String (percents[i]) + "%";
+            if (percents[i] == 100) name += "  (fully on the grid)";
+            if (percents[i] == 80)  name += "  (keeps the feel)";
+            strengths.addItem (100 + i, name, true,
+                               std::abs (quantiseOptions.strength - value) < 1.0e-9);
+        }
+    }
+
+    juce::PopupMenu swings;
+    {
+        // Apple's own table of named swing presets, plus the exact triplet,
+        // which Apple rounds to 66.
+        const double values[] = { 0.5, 0.54, 0.58, 0.62, 0.66, 2.0 / 3.0, 0.71 };
+        const char* names[] = { "Straight (50%)", "54%", "58%", "62%", "66%",
+                                "66.67%  (triplet shuffle)", "71%" };
+        for (int i = 0; i < 7; ++i)
+            swings.addItem (200 + i, names[i], true,
+                            std::abs (quantiseOptions.swing - values[i]) < 1.0e-9);
+    }
+
+    juce::PopupMenu targets;
+    {
+        targets.addItem (300, "Note starts", true, quantiseOptions.target == Quantise::Target::starts);
+        targets.addItem (301, "Note ends", true, quantiseOptions.target == Quantise::Target::ends);
+        targets.addItem (302, "Both ends", true, quantiseOptions.target == Quantise::Target::both);
+        targets.addSeparator();
+
+        // Greyed out rather than ignored wherever it would decide nothing,
+        // which is both of the other two targets. With both ends going to the
+        // grid a note cannot keep its length and have both ends on the grid,
+        // and Avid makes the same option unavailable in that case rather than
+        // quietly picking one of the two. With ends only the start is held
+        // still anyway, so the length is whatever the end lands on.
+        targets.addItem (303, "Keep note lengths", lengthsApply,
+                         lengthsApply && quantiseOptions.preserveLength);
+    }
+
+    juce::PopupMenu gates;
+    {
+        gates.addItem (400, "Everything", true, quantiseOptions.gate == Quantise::Gate::off);
+        gates.addItem (401, "Only notes within a quarter step of the grid", true,
+                       quantiseOptions.gate == Quantise::Gate::include);
+        gates.addItem (402, "Leave notes within an eighth step alone", true,
+                       quantiseOptions.gate == Quantise::Gate::exclude
+                           && std::abs (quantiseOptions.range - 0.25) < 1.0e-9);
+        gates.addItem (403, "Leave notes within a quarter step alone", true,
+                       quantiseOptions.gate == Quantise::Gate::exclude
+                           && std::abs (quantiseOptions.range - 0.5) < 1.0e-9);
+    }
+
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Quantise");
+    menu.addItem (1, "Quantise to the " + quantiseGridName().toLowerCase() + " grid");
+    menu.addSeparator();
+    menu.addSubMenu ("Strength", strengths);
+    menu.addSubMenu ("Swing", swings);
+    menu.addSubMenu ("What moves", targets);
+    menu.addSubMenu ("Which notes", gates);
+
+    juce::Component::SafePointer<PianoRollComponent> safeThis (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&quantiseButton),
+                        [safeThis] (int result)
+    {
+        if (safeThis == nullptr || result == 0)
+            return;
+
+        auto& o = safeThis->quantiseOptions;
+
+        if (result == 1)
+        {
+            safeThis->applyQuantise();
+            return;
+        }
+
+        if (result >= 100 && result < 107)
+        {
+            const int percents[] = { 100, 90, 80, 70, 60, 50, 25 };
+            o.strength = percents[result - 100] / 100.0;
+        }
+        else if (result >= 200 && result < 207)
+        {
+            const double values[] = { 0.5, 0.54, 0.58, 0.62, 0.66, 2.0 / 3.0, 0.71 };
+            o.swing = values[result - 200];
+        }
+        else if (result == 300) o.target = Quantise::Target::starts;
+        else if (result == 301) o.target = Quantise::Target::ends;
+        else if (result == 302) o.target = Quantise::Target::both;
+        else if (result == 303) o.preserveLength = ! o.preserveLength;
+        else if (result == 400) o.gate = Quantise::Gate::off;
+        else if (result == 401) { o.gate = Quantise::Gate::include; o.range = 0.5; }
+        else if (result == 402) { o.gate = Quantise::Gate::exclude; o.range = 0.25; }
+        else if (result == 403) { o.gate = Quantise::Gate::exclude; o.range = 0.5; }
+
+        safeThis->describeQuantise();
+
+        // Changing a setting opens the menu again, because nobody sets three
+        // of these and then has to find the button once more for each.
+        safeThis->showQuantiseMenu();
+    });
+}
+
+void PianoRollComponent::applyQuantise()
+{
+    auto* c = clip();
+    auto* pat = pattern();
+    if (c == nullptr || pat == nullptr || pat->notes.empty())
+        return;
+
+    auto options = quantiseOptions;
+    options.grid = quantiseGrid();
+
+    // Which part of the pattern this clip actually plays. A note quantised
+    // past either edge of that window is still in the pattern and still drawn
+    // in the roll, and silent, so the quantiser holds it where it was played
+    // instead. Growing the clip to cover it was tried and is worse: a clip is
+    // a window onto its pattern and is often deliberately shorter, which is
+    // how one bar of a longer pattern gets looped, so growing it un-hides
+    // everything the trim was hiding and moves what is next on the track.
+    options.windowStart = c->offset;
+    options.windowEnd = c->offset + c->length;
+
+    std::vector<TimebaseNote> notes;
+    notes.reserve (pat->notes.size());
+    for (const auto& n : pat->notes)
+    {
+        TimebaseNote t;
+        t.start    = n.start;
+        t.length   = n.length;
+        t.note     = n.note;
+        t.velocity = n.velocity;
+        notes.push_back (t);
+    }
+
+    lastQuantise = Quantise::apply (notes, options);
+    hasQuantised = true;
+    describeQuantise();
+
+    // Nothing moved, so there is nothing to undo either. An undo step that
+    // undoes nothing is a step somebody has to press through twice.
+    if (lastQuantise.moved == 0 && lastQuantise.dropped == 0 && lastQuantise.trimmed == 0)
+        return;    // held notes change nothing, so they are not an edit either
+
+    std::vector<MidiNote> quantised;
+    quantised.reserve (notes.size());
+    for (const auto& n : notes)
+    {
+        MidiNote m;
+        m.start    = n.start;
+        m.length   = n.length;
+        m.note     = n.note;
+        m.velocity = n.velocity;
+        quantised.push_back (m);
+    }
+
+    pat->notes = std::move (quantised);
+    changed (true);
 }
 
 void PianoRollComponent::changed (bool final)
@@ -182,6 +456,7 @@ void PianoRollComponent::resized()
     laneLabel  .setBounds (tb.removeFromLeft (40));
     laneBox    .setBounds (tb.removeFromLeft (240)); tb.removeFromLeft (6);
     clearLaneButton.setBounds (tb.removeFromLeft (84)); tb.removeFromLeft (14);
+    quantiseButton.setBounds (tb.removeFromLeft (78)); tb.removeFromLeft (14);
     title      .setBounds (tb);
 
     hbar.setBounds (r.removeFromBottom (barThickness).withTrimmedLeft (keysW).withTrimmedRight (barThickness));

@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Project.h"
 #include "AudioEngine.h"
+#include "Quantise.h"
 
 // Edits the notes and recorded parameter automation of one MIDI clip.
 class PianoRollComponent : public juce::Component,
@@ -49,6 +50,12 @@ private:
     void   zoom (double factor, float anchorX);
     void   changed (bool final);
 
+    void   showQuantiseMenu();
+    void   applyQuantise();
+    double quantiseGrid() const;
+    juce::String quantiseGridName() const;
+    void   describeQuantise();
+
     Project&     project;
     AudioEngine& engine;
     int clipId = 0;
@@ -56,7 +63,8 @@ private:
     juce::Label      title;
     juce::ComboBox   laneBox, snapBox;
     juce::Label      laneLabel { {}, "Lane" }, snapLabel { {}, "Snap" };
-    juce::TextButton drawButton { "Draw" }, eraseButton { "Delete" }, clearLaneButton { "Clear lane" };
+    juce::TextButton drawButton { "Draw" }, eraseButton { "Delete" }, clearLaneButton { "Clear lane" },
+                     quantiseButton { "Quantise" };
     juce::ScrollBar  hbar { false }, vbar { true };
 
     static constexpr int toolbarH = 38, keysW = 64, rulerH = 22, rowH = 14, laneH = 120, barThickness = 12;
@@ -77,6 +85,17 @@ private:
     int      heldPreview = -1;
     float    lastVelocityX = 0.0f;
     AutoPoint draggedPoint;
+
+    // Sticky across clips, the way a quantise dialog's settings are in every
+    // studio: the grid comes from the Snap box, so there is one grid on screen
+    // rather than two that can disagree.
+    Quantise::Options quantiseOptions;
+
+    // What the last pass did, so the button can say so. A note merged into
+    // another is the one outcome somebody would want to know about and the
+    // easiest to miss on a crowded pattern.
+    Quantise::Result lastQuantise;
+    bool hasQuantised = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PianoRollComponent)
 };
