@@ -285,6 +285,17 @@ The nine, with the judgement on each:
   written, because it refuses for the reason that is true rather than for a
   consequence of it.
 
+### This needs a click, not more work
+
+CI is green on the head of `harden/bell-match`: the `tests` job,
+`ubuntu-latest` and `windows-latest` all passed, and `macos-latest` was still
+queued, which is routine here. The session that did the work was **not
+permitted to merge without review**, so pull request #66 is ready for review
+and the merge is the owner's to make. Nothing is left to do on the branch. A
+later night should not pick the matched bell up again: if #66 is still open it
+needs reviewing and merging, and if it has been merged this entry is the
+record of it.
+
 ### Reachability: none of it, today
 
 `Svf::Type::bellMatched` is referenced nowhere outside `Fx/Svf.h`: this is the
