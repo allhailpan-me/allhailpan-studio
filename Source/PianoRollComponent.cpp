@@ -210,13 +210,20 @@ juce::String PianoRollComponent::quantiseGridName() const
 void PianoRollComponent::describeQuantise()
 {
     const int strength = (int) std::lround (quantiseOptions.strength * 100.0);
-    const int swing    = (int) std::lround (quantiseOptions.swing * 100.0);
+
+    // Two decimals only where they say something, so the exact triplet reads
+    // back as the 66.67% the menu offered rather than being rounded to 67%
+    // and looking like a setting nothing in the menu can reach.
+    const double swingPercent = quantiseOptions.swing * 100.0;
+    const bool wholePercent = std::abs (swingPercent - std::lround (swingPercent)) < 1.0e-9;
+    const juce::String swing = wholePercent ? juce::String ((int) std::lround (swingPercent))
+                                            : juce::String (swingPercent, 2);
 
     juce::String what = "Move the notes onto the " + quantiseGridName().toLowerCase() + " grid: "
                       + juce::String (strength) + "% strength";
 
     if (std::abs (quantiseOptions.swing - 0.5) > 1.0e-9)
-        what += ", swing " + juce::String (swing) + "%";
+        what += ", swing " + swing + "%";
 
     what += quantiseOptions.target == Quantise::Target::starts ? ", note starts"
           : quantiseOptions.target == Quantise::Target::ends   ? ", note ends"
@@ -295,10 +302,12 @@ void PianoRollComponent::showQuantiseMenu()
         targets.addItem (302, "Both ends", true, quantiseOptions.target == Quantise::Target::both);
         targets.addSeparator();
 
-        // Greyed out rather than ignored when both ends are going to the grid,
-        // because a note cannot keep its length and have both of its ends on
-        // the grid, and Avid makes the same option unavailable in that case
-        // rather than quietly picking one of the two.
+        // Greyed out rather than ignored wherever it would decide nothing,
+        // which is both of the other two targets. With both ends going to the
+        // grid a note cannot keep its length and have both ends on the grid,
+        // and Avid makes the same option unavailable in that case rather than
+        // quietly picking one of the two. With ends only the start is held
+        // still anyway, so the length is whatever the end lands on.
         targets.addItem (303, "Keep note lengths", lengthsApply,
                          lengthsApply && quantiseOptions.preserveLength);
     }

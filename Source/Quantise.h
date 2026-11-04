@@ -250,7 +250,15 @@ struct Options
     request to keep the length while putting both ends on the grid is a
     contradiction and silently picking one of the two is how a studio ends up
     doing something the dialog did not say. Callers should grey the control out
-    on a false here, and `apply` refuses it either way. */
+    on a false here, and `apply` refuses it either way.
+
+    It is false for two of the three targets and for two different reasons,
+    which is worth saying because Avid's rule as quoted covers only the first.
+    With both ends going to the grid the request contradicts itself, which is
+    Avid's case. With ends only the start is held still by definition, so the
+    length is whatever the end lands on and there is nothing left for the
+    option to decide. Only starts-only leaves a real choice: the end travels
+    with the start, or stays where it was played. */
 inline bool preserveLengthApplies (const Options& o) noexcept
 {
     return o.target == Target::starts;
@@ -521,7 +529,21 @@ inline bool struckTogetherBefore (const std::vector<TimebaseNote>& before,
     makes quantise leave a pattern the export does not have to repair, and the
     test measures exactly that: it starts from material the export was happy
     with and asks `midiNotesToTicks` how many notes it had to throw away
-    afterwards, and the answer has to be none. */
+    afterwards, and the answer has to be none.
+
+    There is one exception, and it is stated rather than implied away. A pair
+    struck within a tick of each other before the pass is deliberately left
+    alone, so if one of the two is itself shorter than a tick the pair can be
+    within a tick without overlapping, nothing here resolves it, and the two
+    can finish on the same onset for the export to throw one away from. It
+    needs a note under a tick long, which is 1/960 of a beat, and nothing in
+    the studio makes one: drawing and MIDI recording floor a length at a
+    sixty-fourth of a beat, which is fifteen ticks, MIDI import at one tick,
+    and the project file at a two hundred and fifty sixth, just under four.
+    That pair was also already one onset to the export before the pass, so
+    this loses nothing a bounce had. It is a hole in the contract this comment
+    states and not a hole in the studio, which is the honest way round to put
+    it. */
 inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
                              const std::vector<TimebaseNote>& before,
                              Result& result)
