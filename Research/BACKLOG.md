@@ -268,9 +268,91 @@ again: the measurement is now in the test and prints its own worst case, and
 Apple's table was re-read at two of Apple's own pages, which give 50, 54, 58,
 62, 66 and 71 and no 75.
 
+### A third audit round, on the night of 2026-11-04
+
+The branch was picked up unfinished and the remaining work was the audit and
+the notes. A third round was run rather than trusting the second, for one
+specific reason: the second round found two faults **in the first round's own
+fixes**, and its own fixes had then never been read by anybody who had not
+just written them. That reasoning paid for itself.
+
+**It found one more data loss fault, and it was in the second round's fix.**
+The sub-tick merge, which turns two onsets closer than an export tick into
+one note, dropped whichever of the pair was sorted later. The sort puts the
+longer note first only where two starts are **exactly** equal, and that
+branch fires on starts that are unequal and under a tick apart, so the
+length had no say in it at all. The second round widened the branch to fire
+on pairs that were already overlapping, which is what made it reachable from
+ordinary material.
+
+What it cost, measured rather than imagined: a sixty-fourth of a beat
+artefact at velocity 0.10 struck a tick and a half before a two beat bass
+note at 0.95, quantised to the beat at the eighty per cent the piano roll
+offers as the setting that keeps the feel. The artefact is drawn to within a
+third of a tick of the bass note, the two become one onset, and the pass
+deleted the bass note and kept the artefact. A double triggered pad, a noisy
+input or a controller sending a stray note on all produce exactly that.
+
+It was also a disagreement between two code paths over the same material,
+which is the fault shape `CLAUDE.md` says is the worst this studio can have.
+`MidiTimebase.h` resolves the identical pair by keeping the longer, so the
+destructive edit and the bounce disagreed about which of the two was the
+note, and the edit was the one throwing the performance away. The header had
+already promised the project's own rule, "of two beginning together the
+longer is kept", in the paragraph directly above the code that did not do
+it: a comment claiming the opposite of the code, for the third time in this
+repository's history.
+
+The rule is now the export's rule, the longer of the two at its own onset,
+and of two equally long the earlier.
+
+**And it found that the assertion the second round credits with catching its
+own fault has almost no power.** The check that no pass may create an
+overlap of one pitch asked whether *any* pair in the before picture
+overlapped, not whether the pair in hand did, while the comment directly
+above it described matching an output pair back to the input pair it came
+from. Measured: 19749 of its 20000 rounds contain some inherited overlap, so
+it passed without looking at the pair in question 98.7 per cent of the time.
+Restoring the neighbours-only scan it was written to catch produced **zero**
+failures from the randomised sweep; only the one hand-picked three note case
+failed. It could not tell the fixed code from the broken code.
+
+Each note now carries a tag in its velocity, which `apply` leaves untouched
+and which compares exactly at powers of two over 128, so an overlapping
+output pair is matched back to the exact pair it came from. The same mutation
+now fails it 1390 times, which is the figure the second round's entry claimed
+and did not have a check for.
+
+Two lessons worth keeping, both about this project's own habits rather than
+about quantise:
+
+- **The entry below claimed two measurements that were not in the test.** The
+  second round removed an earlier pair of unchecked figures for exactly that
+  reason and then introduced another one in the same commit. A figure in a
+  commit message or a backlog entry is not a check, and the only cure that
+  has worked here is putting the measurement in the test and letting it print
+  its own worst case.
+- **An audit round that fixes something needs an audit round after it.** Two
+  rounds in a row found their predecessor's fix wrong, in the same part of
+  the same function. Rounds one and two each found faults that were
+  introduced by the round before, which says the stopping rule should be a
+  clean round and not a fixed number of them. This third round's own fixes
+  were mutation tested, eight mutations with the sanitizers and seven caught,
+  with the survivor established as a true no-op by an ordering argument
+  written into the header rather than by assertion.
+
+Also from this round, none of it behaviour: the claim that quantise leaves a
+pattern the export never has to repair had one uncovered case, a pair struck
+within a tick before the pass where one of the two is itself shorter than a
+tick, which nothing in the studio can make and which the header now states
+and sources instead of implying away; `preserveLengthApplies` is false for
+two targets for two different reasons and the comment gave only Avid's; and
+the tooltip rounded swing to whole per cent, so the menu item labelled
+66.67% reported back as 67%, a setting nothing in the menu can reach.
+
 ### Still to do
 
-Release notes, and a later night could add a keyboard shortcut for it, which
+A keyboard shortcut for it, which
 needs `MainComponent`'s key handling and so wants a night when that file is
 not open in somebody else's pull request. Quantising a selection rather than
 the whole clip wants a selection to exist in the piano roll first, which is
