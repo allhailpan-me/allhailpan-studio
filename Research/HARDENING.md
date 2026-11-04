@@ -32,12 +32,119 @@ Not `Source/Envelope.h`, `Source/Fx/Svf.h`, `Source/AudioEngine.*`,
 #61 are changing, and not `Source/Quantise.h`, which #64 asked later nights to
 leave alone.
 
+### The transcription is right, and now it is right for a stated reason
+
+The provenance was the reason for picking this, so it was settled first and
+independently of the test. The header's defence is that three numbers printed
+in the paper's section 6 reproduce to six decimal places, which is a real
+check and a narrow one: three scalars from one worked example, all at the same
+bandwidth and the same gain.
+
+There is a much stronger statement available, and it needs no access to the
+paper at all. **Five conditions determine a digital biquad**, and the design
+claims all five: the gain at DC is `G0`, the gain at Nyquist is `G1`, the gain
+at the centre is `G`, the gain at both bandedges is `GB`, and the two
+bandedges are `dw` apart. A realisation that satisfies all five is the right
+filter whatever happened to the square roots on the way out of the scan.
+
+Measured over 18989 randomised designs, centre frequencies from 0.002 to 0.95
+of Nyquist, Q from 0.3 to 20, gains from 0.3 to 36 dB, and a third of them
+with a reference gain other than unity:
+
+| condition | worst error |
+|---|---|
+| gain at DC against `G0` | 3.9e-15 dB |
+| gain at Nyquist against `G1` | 1.9e-15 dB |
+| gain at the centre against `G` | 2.8e-11 dB |
+| gain at both bandedges against `GB` | 1.2e-13 dB |
+| bandwidth between the bandedges against `dw` | 6.1e-13 relative |
+
+And equation (21) itself, the prescribed Nyquist gain, was re-derived here
+from the analogue prototype rather than read: the prototype with peak `G` at
+`w0`, reference `G0`, and bandwidth `dw` taken where the gain is `GB`, has
+squared magnitude
+
+    |H(w)|^2 = (G0^2 (w0^2-w^2)^2 + G^2 dw^2 r w^2) / ((w0^2-w^2)^2 + dw^2 r w^2)
+
+with `r = (GB^2-G0^2)/(G^2-GB^2)`, and at `w = pi` that is the header's
+`g1Squared` line character for character. It agrees with the implementation to
+**0.0e+00 dB**, which is to say bit for bit.
+
+The feasibility boundary was derived the same way rather than taken on trust.
+With the bandedge at the half gain point, `GB^2 = G0 G`, the ratio `r` is
+exactly `1/G`, and the condition `G1^2 < GB^2` reduces to `pi^2 - w0^2 > pi
+dw`, which with `dw = w0/Q` is the quadratic the header's closed form solves.
+That is **why** the gain cancels out of a condition on gain, which the header
+states as a surprise and does not explain. One consequence worth having
+written down: since `dw < pi - w0^2/pi` at the boundary, a feasible design
+always has its bandwidth inside the band, so the tangent in equation (19)
+cannot be asked for an angle past a quarter turn. There is no tangent blowup
+to defend against, and that is a property of the boundary rather than luck.
+
+### Round one: the arithmetic is well covered
+
+70 deliberate breakages of `Fx/BellMatch.h`, every one built the way
+`Tests/run.sh` builds (`-fsanitize=address,undefined
+-fno-sanitize-recover=undefined`), aimed at each equation in turn: a sign, an
+inverted ratio, a dropped square, a dropped factor, two gains swapped, a
+tangent unhalved, `A` and `B` exchanged, each of the five numbers handed to
+the filter. **61 caught, 9 survived.**
+
+The whole header is copied into the scratch tree rather than the one file,
+because `Fx/Svf.h` includes `BellMatch.h` by a quoted relative path and the
+test reaches the header both directly and through the filter. A harness that
+mutated only the direct path would have reported four more survivors than
+there are.
+
+Every one of the nine survivors is a **guard**, and none of them is an
+equation. That is a good result for 328 lines of transcribed algebra.
+
+### Round two: and then the regions nobody visits
+
+The worrying thing about round one is the shape of what caught things. Of the
+61, nineteen were caught by the regression vector at one setting and
+twenty-two by five hand picked cases at 44.1 kHz. A test can be strong on
+every equation and still not notice the correction being **switched off**
+somewhere, because a band running the conventional bell is still a bell.
+
+So: 12 more breakages, none of them touching an equation. Seven of them insert
+one line at the top of `matchedBell` declining the correction in one part of
+the space, the others measure the boundary or the centre frequency against a
+fixed sample rate. **7 caught, 5 survived**, and four of the five are the kind
+of fault this project keeps meeting:
+
+- **`off-above-q-10`**, the correction declined for every band with Q above
+  10. Survived. A narrow band is where an equaliser does its surgical work.
+- **`off-below-q-half`**, declined for every band with Q below 0.5. Survived.
+  That is every broad tone shaping move there is.
+- **`off-above-48k`**, declined at 96 and 192 kHz. Survived. The whole studio
+  would run the uncorrected bell at the two rates where there is most band
+  above 20 kHz to get wrong.
+- **`boundary-fixed-44k`**, the feasibility boundary measured against a hard
+  coded 44.1 kHz rather than the rate in hand. Survived. At 96 kHz the
+  boundary would sit at 13.6 kHz where it belongs at 29.7, so every band
+  between the two would drop silently to the conventional design. This is the
+  fault `Fx/Tilt.h`'s entry in `CLAUDE.md` is about, in a file that takes the
+  sample rate as an argument and looked immune to it.
+
+One cause: `theBoundaryIsTheClosedForm` is a good check that only ever runs at
+44.1 kHz, and nothing anywhere asserts that a band which should be matched
+**is** matched, outside five settings. `isMatched()` is read twice in the file,
+once to require it true at those five and once to require it false above the
+boundary.
+
+The fifth survivor, `feasibility-both-dropped`, is a no-op and a deliberate
+one: with both feasibility checks gone an infeasible design still declines,
+because the square root of a negative quantity in equation (19) gives a NaN
+that the final `isfinite` sweep catches. Round one's `finite-guard-dropped`
+survives for the mirror image reason. Three independent backstops, any one of
+which can be removed without a visible change, and no two of which can.
+
 ### Still to do
 
-- Verify the transcription independently of the test, from first principles
-  rather than from the paper's three published numbers alone
-- Mutation testing with the sanitizers, as `Tests/run.sh` has them
-- Close whatever the survivors name
+- Close the four region gaps, and the two design conditions nothing checks
+- Decide what to say about the correction being worse than the conventional
+  bell in one reachable corner, which is measured and not yet written down
 
 ---
 
