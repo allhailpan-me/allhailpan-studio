@@ -39,6 +39,29 @@
     1.140, which is about what two times oversampling would buy, for the cost
     of a handful of square roots when the band is set.
 
+    **It is an improvement at every band a mixer can set above a Q of about
+    0.15, and not quite at every one below that.** Measured against the same
+    prototype over the whole band at every rate a device can open at, a band
+    wider than about seven times its own centre frequency can come out further
+    from the prototype than the conventional bell is, by a worst of 0.58 dB at
+    the Q of 0.025 the mixer clamps to. The cause is the bilinear transform
+    rather than anything in the paper. The analogue prototype is geometrically
+    symmetric about its centre in frequency; the digital filter is
+    geometrically symmetric in `tan(w/2)`, and the tangent stretches the top
+    of the band. So a band whose upper bandedge is near Nyquist has to put its
+    lower bandedge lower than the prototype does, and on a very wide band that
+    drops the lower skirt below where it belongs. The correction trades an
+    upper skirt crushed to nothing for a lower skirt that is slightly too low,
+    which is the better trade everywhere except on the widest bands. Both
+    figures are in `BellMatchTest`, which fails if the exception grows.
+
+    One warning about measuring that, because it cost an audit an hour. Judged
+    over 20 Hz to 20 kHz rather than over the whole band, the same comparison
+    reports the matched design as up to 21 dB **worse**. That figure is real
+    and it is not about the filter: at 192 kHz a band can be centred at 54
+    kHz, and a comparison that stops at 20 kHz is then looking at nothing but
+    the bottom of the skirt. Say which band the figure is about.
+
     **This is not a new filter.** Equation (13) of the paper is a prototype in
     `s`; the direct form of equation (20) is one realisation of it. Dividing
     through by `W` gives
