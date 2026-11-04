@@ -36,11 +36,28 @@ and `windows-latest` are all green on the head; `macos-latest` was still
 building, which is routine here and has not failed. The release notes are on
 the branch rather than written after the merge, so they go in with it.
 
-The session that finished it was **not permitted to merge without review**, so
-the merge is the owner's to make, the same as #59 before it. Nothing is left to
-do on the branch. A later night should not pick quantise up again: if #64 is
-still open it needs a click and not more work, and if it has been merged then
-this entry is the record of it.
+Nothing is left to do on the branch. A later night should not pick quantise up
+again: if #64 is still open it needs a click and not more work, and if it has
+been merged then this entry is the record of it.
+
+**Why it is still open, checked rather than assumed.** An earlier version of
+this entry said the session was not permitted to merge without review, by
+analogy with #59. That is not what is happening, and the difference matters to
+whoever picks this up. `main` has no branch protection and no rulesets, squash
+merging is enabled, and the token has admin on the repository: there is no
+review gate to satisfy. What is wrong is on GitHub's side. The pull request's
+own record is stuck with `mergeable: null` and `mergeable_state: "unknown"`,
+and its recorded head commit lags the branch's actual ref, so every merge
+attempt is refused with a different and self-contradictory reason: "head
+branch is out of date" when the branch is strictly ahead of `main` and `main`
+is the merge base, and "head branch was modified" when the ref has not moved
+for minutes. Polled for three minutes, the state never settled.
+
+So the thing to do with #64 is press Merge in the web interface, which forces
+the recomputation the API will not. Not close and reopen it, and not push an
+empty commit at it: both are listed in this project's own rules as things not
+to do, and neither is needed. If a later session finds it still open, the
+branch is finished and the only question is the click.
 
 
 ### What was looked at
