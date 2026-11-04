@@ -1301,6 +1301,13 @@ static void twoOnsetsBroughtInsideOneTickBecomeOneNote()
     {
         { 0.5,  0.125, point,     "the long note on the grid did not survive a short one brought onto it" },
         { 0.125, 0.5,  lateAfter, "the long note brought onto the grid lost to a short one already there" },
+
+        // Of two equally long notes the earlier is the one kept, which is the
+        // tie `MidiTimebase.h` breaks the same way: it sorts longest first and
+        // keeps the first of equals. Worth a case of its own because a
+        // comparison written as >= rather than > passes everything else in
+        // this file and quietly moves the survivor by a fraction of a tick.
+        { 0.5,  0.5,   point,     "of two equally long notes brought together the later one was kept" },
     };
 
     for (const auto& c : cases)
@@ -1514,6 +1521,41 @@ static void nothingOverlapsThatDidNotOverlapBefore()
             && b.start < a.start + a.length;
     };
 
+    // An overlap has to be matched back to the exact pair of notes it came
+    // from, and the only way to do that is to tag each note going in. The
+    // velocity is the tag: `apply` carries it across untouched, and powers of
+    // two over 128 compare exactly, so a note coming out can be identified
+    // with certainty rather than by assuming nothing reordered.
+    //
+    // The first version of this check asked instead whether *any* pair in the
+    // before picture overlapped, which is a different and far weaker
+    // statement. An audit measured what that cost: 19749 of these 20000 rounds
+    // contain some inherited overlap, so the assertion passed without looking
+    // at the pair in question 98.7 per cent of the time, and restoring the
+    // neighbours-only scan the invariant was written to catch produced zero
+    // failures here. It could not tell the fixed code from the broken code.
+    auto tagOf = [] (const TimebaseNote& n) { return (size_t) std::lround ((double) n.velocity * 128.0) - 1; };
+
+    // An overlap shallower than this is floating point noise rather than a
+    // pattern that plays differently from the way it bounces. A trim writes
+    // `length = laterStart - earlierStart` and the test then evaluates
+    // `start + length`, which is not guaranteed to land back on the later
+    // start: measured, 232 of 200000 rounds finish a few ulp over, worst case
+    // 4.4e-16 beats. A nanobeat is half a nanosecond at 120 bpm, which is
+    // eleven orders of magnitude under one export tick, so nothing this
+    // shallow can reach a file, a sample or an ear. Stated as a tolerance
+    // rather than left as an exact comparison that would be either flaky or
+    // quietly vacuous.
+    const double shallowest = 1.0e-9;
+
+    auto overlapDepth = [] (const TimebaseNote& a, const TimebaseNote& b)
+    {
+        if (a.note != b.note)
+            return 0.0;
+
+        return std::min (a.start + a.length, b.start + b.length) - std::max (a.start, b.start);
+    };
+
     for (int round = 0; round < 20000; ++round)
     {
         std::vector<TimebaseNote> notes;
@@ -1521,7 +1563,7 @@ static void nothingOverlapsThatDidNotOverlapBefore()
         double where = 0.3;
         for (int i = 0; i < count; ++i)
         {
-            notes.push_back (note (where, length (rng), 60));
+            notes.push_back (note (where, length (rng), 60, (float) (i + 1) / 128.0f));
             where += step (rng);
         }
 
@@ -1538,20 +1580,24 @@ static void nothingOverlapsThatDidNotOverlapBefore()
         for (size_t i = 0; i < notes.size(); ++i)
             for (size_t j = i + 1; j < notes.size(); ++j)
             {
-                if (! overlaps (notes[i], notes[j]))
+                if (overlapDepth (notes[i], notes[j]) <= shallowest)
                     continue;
 
-                // It overlaps now, so it has to have overlapped before, which
-                // means finding the pair it came from: same pitch, and no note
-                // of this pitch has moved past another, so matching by their
-                // order within the pitch is sound.
-                bool inherited = false;
-                for (size_t a = 0; a < before.size() && ! inherited; ++a)
-                    for (size_t b = a + 1; b < before.size() && ! inherited; ++b)
-                        if (overlaps (before[a], before[b]))
-                            inherited = true;
+                // It overlaps now, so these two notes have to have overlapped
+                // before. Which two they are comes off their tags, so this
+                // asks about the pair in hand and not about the pattern in
+                // general.
+                const size_t a = tagOf (notes[i]);
+                const size_t b = tagOf (notes[j]);
 
-                check (inherited, "quantise left an overlap of one pitch that it created itself");
+                const bool known = a < before.size() && b < before.size();
+                check (known, "a note came out carrying a tag that did not go in");
+
+                if (! known)
+                    continue;
+
+                check (overlaps (before[a], before[b]),
+                       "quantise left an overlap of one pitch that it created itself");
             }
 
         // And whatever it leaves, the file holds the same thing, so a bounce

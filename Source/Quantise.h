@@ -583,6 +583,11 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
                 // first however short it was. `MidiTimebase.h` keeps the
                 // longer, so deciding it any other way would leave the edit
                 // and the export disagreeing about the same pair.
+                //
+                // Strictly greater, so that of two equally long notes the one
+                // kept is the earlier. That is the same tie `MidiTimebase.h`
+                // breaks the same way, by sorting longest first and keeping
+                // the first of equals.
                 if (e.note.length > it->note.length)
                 {
                     // The later note is the audible one, so it takes the place
@@ -591,9 +596,17 @@ inline void resolveOverlaps (std::vector<TimebaseNote>& notes,
                     // the difference is finer than anything downstream keeps,
                     // and leaving the audible note exactly where the grid put
                     // it is easier to reason about than moving it back onto an
-                    // onset that belonged to the note being dropped. The trim
-                    // flag goes with the old note, since this length is the
-                    // new note's own and nothing has cut it back.
+                    // onset that belonged to the note being dropped.
+                    //
+                    // Clearing the trim flag cannot currently change an
+                    // answer, and is kept because it would be true of the
+                    // note being put in hand if it ever could. A trim of the
+                    // note being replaced needs another note at least a tick
+                    // after it and processed before this one, and the entries
+                    // are in ascending order of start: that note would have to
+                    // start no later than this one, which is under a tick
+                    // after. So nothing reaching here has been trimmed, which
+                    // is why a mutation that drops this line survives.
                     it->note = e.note;
                     it->index = e.index;
                     it->trimmed = false;
