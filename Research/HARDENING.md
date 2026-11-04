@@ -7,6 +7,40 @@ Newest first.
 
 ---
 
+## 2026-11-04: the matched bell, where the equations came from a scan
+
+### What is being looked at
+
+`Source/Fx/BellMatch.h`, 328 lines, and `Tests/BellMatchTest.cpp`, 493 lines,
+which covers it. A priority 2 target: a test suspected of being weaker than it
+looks.
+
+Picked for three reasons. It is live: `Fx/Svf.h` calls `matchedBell` for the
+equaliser's `bellMatched` response, so this is what an equaliser band runs.
+Its cover is among the thinnest of any real arithmetic header here, 1.50 lines
+of test to one of source. And its equations were **transcribed from a third
+party scan of a paywalled paper**, by a tool that admitted restoring dropped
+square root signs, which is a provenance nothing else in this repository has.
+A faithful implementation of a mistranscribed equation is a filter that is
+confidently wrong, and an equaliser's gain is the number a studio is judged by.
+
+No previous night has touched it: it appears nowhere in this log before today.
+
+Not `Source/Envelope.h`, `Source/Fx/Svf.h`, `Source/AudioEngine.*`,
+`Source/InputSource.h`, `Source/MainComponent.*`, `Source/Tuner.h`,
+`Source/TunerPanel.h` or `Tests/run.sh`, which open pull requests #65, #55 and
+#61 are changing, and not `Source/Quantise.h`, which #64 asked later nights to
+leave alone.
+
+### Still to do
+
+- Verify the transcription independently of the test, from first principles
+  rather than from the paper's three published numbers alone
+- Mutation testing with the sanitizers, as `Tests/run.sh` has them
+- Close whatever the survivors name
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
