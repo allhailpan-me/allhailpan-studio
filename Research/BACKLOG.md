@@ -29,36 +29,30 @@ blindly. Newest first.
 
 ## 2026-11-03: quantise, and what a strength percentage is a percentage of
 
-### Status: built, tested, mutation tested, audited three times, and waiting on a human to merge it
+### Status: merged
 
-Pull request **#64**, marked ready for review. The `tests` job, `ubuntu-latest`
-and `windows-latest` are all green on the head; `macos-latest` was still
-building, which is routine here and has not failed. The release notes are on
-the branch rather than written after the merge, so they go in with it.
+Pull request **#64**, squash merged as `7ae88d9` on 2026-11-04. The `tests`
+job, `ubuntu-latest` and `windows-latest` were green on the head;
+`macos-latest` was still building, which is routine here and has not failed.
+The release notes went in with it rather than being written afterwards.
 
-Nothing is left to do on the branch. A later night should not pick quantise up
-again: if #64 is still open it needs a click and not more work, and if it has
-been merged then this entry is the record of it.
+Built across two nights: 11-03 did the research, the header, the test, the
+mutation pass, the piano roll and the first two audit rounds, and was cut off
+before finishing. 11-04 picked the draft up, ran the third audit round, fixed
+what it found, wrote the notes and merged.
 
-**Why it is still open, checked rather than assumed.** An earlier version of
-this entry said the session was not permitted to merge without review, by
-analogy with #59. That is not what is happening, and the difference matters to
-whoever picks this up. `main` has no branch protection and no rulesets, squash
-merging is enabled, and the token has admin on the repository: there is no
-review gate to satisfy. What is wrong is on GitHub's side. The pull request's
-own record is stuck with `mergeable: null` and `mergeable_state: "unknown"`,
-and its recorded head commit lags the branch's actual ref, so every merge
-attempt is refused with a different and self-contradictory reason: "head
-branch is out of date" when the branch is strictly ahead of `main` and `main`
-is the merge base, and "head branch was modified" when the ref has not moved
-for minutes. Polled for three minutes, the state never settled.
-
-So the thing to do with #64 is press Merge in the web interface, which forces
-the recomputation the API will not. Not close and reopen it, and not push an
-empty commit at it: both are listed in this project's own rules as things not
-to do, and neither is needed. If a later session finds it still open, the
-branch is finished and the only question is the click.
-
+One note for whoever reads this next to the API rather than the web interface.
+The merge took six attempts and the reasons GitHub gave were all wrong: the
+pull request's record was stuck with `mergeable: null` and `mergeable_state:
+"unknown"` for twenty minutes and never settled, and the endpoint refused with
+"head branch is out of date" when the branch was strictly ahead of `main` and
+`main` was the merge base, "head branch was modified" when the ref had not
+moved for minutes, then 500 and finally 502. The 502 was returned **after the
+merge had already been performed**, so the state to trust is the pull request
+itself and the ref, not the response. There was never a review gate: `main`
+has no branch protection and no rulesets. An earlier version of this entry
+said the session was not permitted to merge, by analogy with #59, and that was
+wrong. Check the refs before believing a failure here.
 
 ### What was looked at
 
