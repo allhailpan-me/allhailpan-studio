@@ -51,10 +51,14 @@ static void fail (const std::string& what)
     ++failures;
 }
 
-static void check (bool ok, const std::string& what)
+/** Returns what it was given, so that a check standing in front of something
+    that would read out of bounds if it failed can be written as a guard. */
+static bool check (bool ok, const std::string& what)
 {
     if (! ok)
         fail (what);
+
+    return ok;
 }
 
 static constexpr double pi = 3.14159265358979323846;
@@ -407,52 +411,119 @@ static void anEditInOneFrameComesOutShapedLikeTheWindow()
     // exponent, the envelope, and where the frame sits, all against arithmetic
     // written out independently above.
     const int fftSize = 512, hop = 128, length = 8192;
-    const int editedFrame = 20, editedBin = 64;
+    const int editedBin = 64;
     const double amplitude = 50.0;
 
     Spectrogram spectrogram;
-    check (spectrogram.prepare (fftSize, hop, 48000.0), "prepare was refused");
 
-    std::vector<float> silence ((size_t) length, 0.0f), output ((size_t) length, 0.0f);
+    if (! check (spectrogram.prepare (fftSize, hop, 48000.0), "prepare was refused"))
+        return;
+
+    std::vector<float> silence ((size_t) length, 0.0f);
     spectrogram.analyse (silence.data(), length);
 
-    check (editedFrame < spectrogram.getNumFrames(), "the frame being edited does not exist");
-    spectrogram.frame (editedFrame)[editedBin] = { amplitude, 0.0 };
+    // The first frame, one in the middle, and the last. The middle one is the
+    // edit the arithmetic is simplest for, and it is also the one where the
+    // envelope is its flat interior constant of 1.5, so on its own it says
+    // nothing about the envelope: hard coding 1.5 would give the same answer.
+    // The first and last frames are where the overlap is incomplete and the
+    // envelope is 1.25 and climbing, which is also where a repair at the start
+    // or end of a clip lands.
+    const int frames[] = { 0, 20, spectrogram.getNumFrames() - 1 };
 
-    spectrogram.synthesise (output.data(), length);
+    double worstOverall = 0.0;
 
-    const auto envelope = envelopeFromTheDefinition (spectrogram, length);
-    const int start = editedFrame * hop - fftSize / 2;
-
-    double worst = 0.0, peak = 0.0;
-
-    for (int i = 0; i < length; ++i)
-        peak = std::max (peak, std::fabs ((double) output[(size_t) i]));
-
-    for (int n = 0; n < length; ++n)
+    for (int editedFrame : frames)
     {
-        double expected = 0.0;
+        if (! check (editedFrame >= 0 && editedFrame < spectrogram.getNumFrames(),
+                     "the frame being edited does not exist"))
+            return;
 
-        if (n >= start && n < start + fftSize)
+        std::vector<float> output ((size_t) length, 0.0f);
+
+        spectrogram.analyse (silence.data(), length);
+        spectrogram.frame (editedFrame)[editedBin] = { amplitude, 0.0 };
+        spectrogram.synthesise (output.data(), length);
+
+        const auto envelope = envelopeFromTheDefinition (spectrogram, length);
+        const int start = editedFrame * hop - fftSize / 2;
+
+        double worst = 0.0, peak = 0.0;
+
+        for (int i = 0; i < length; ++i)
+            peak = std::max (peak, std::fabs ((double) output[(size_t) i]));
+
+        check (peak > 1.0e-3, "the edit produced nothing to measure");
+
+        for (int n = 0; n < length; ++n)
         {
-            const int i = n - start;
-            const double block = 2.0 * amplitude
-                               * std::cos (2.0 * pi * (double) editedBin * (double) i / (double) fftSize)
-                               / (double) fftSize;
+            double expected = 0.0;
 
-            expected = block * hann (i, fftSize) / envelope[(size_t) n];
+            if (n >= start && n < start + fftSize)
+            {
+                const int i = n - start;
+                const double block = 2.0 * amplitude
+                                   * std::cos (2.0 * pi * (double) editedBin * (double) i / (double) fftSize)
+                                   / (double) fftSize;
+
+                expected = block * hann (i, fftSize) / envelope[(size_t) n];
+            }
+
+            worst = std::max (worst, std::fabs ((double) output[(size_t) n] - expected));
         }
 
-        worst = std::max (worst, std::fabs ((double) output[(size_t) n] - expected));
+        check (worst < 1.0e-6 * peak,
+               "an edit in frame " + std::to_string (editedFrame) + " did not come out as the window "
+               "shaped burst the arithmetic says it should: worst departure " + std::to_string (worst)
+               + " against a peak of " + std::to_string (peak));
+
+        worstOverall = std::max (worstOverall, worst);
     }
 
-    check (worst < 1.0e-6 * peak,
-           "an edit in one frame did not come out as the window shaped burst the arithmetic says "
-           "it should: worst departure " + std::to_string (worst) + " against a peak of "
-           + std::to_string (peak));
+    std::printf ("    a one frame edit matches the closed form to %.2e, at the head, the middle and the tail\n",
+                 worstOverall);
+}
 
-    std::printf ("    a one frame edit matches the closed form to %.2e of its %.4f peak\n",
-                 worst, peak);
+static void theEnvelopeTheTestsMeasureIsTheOneSynthesiseDividesBy()
+{
+    // `overlapEnvelope` exists so the tests can measure the overlap-add
+    // constant, and it is a second copy of the accumulation loop inside
+    // `synthesise`. That is the shape CLAUDE.md warns about in the playback
+    // against export rule: two loops over the same thing, where editing one
+    // and not the other is silent. Adding two to the frame count inside
+    // `overlapEnvelope` alone passed every other check in this file, and made
+    // the edge figure this file prints look better than the truth, which is
+    // the diagnostic a reader would trust.
+    //
+    // So both are tied to one window accumulated from the definition above.
+    for (int hop : { 64, 128, 256 })
+    {
+        Spectrogram spectrogram;
+
+        if (! check (spectrogram.prepare (512, hop, 48000.0), "prepare was refused"))
+            return;
+
+        for (int length : { 1, 129, 257, 600, 2048 })
+        {
+            std::vector<float> silence ((size_t) length, 0.0f);
+            spectrogram.analyse (silence.data(), length);
+
+            std::vector<double> measured;
+            spectrogram.overlapEnvelope (length, measured);
+
+            const auto expected = envelopeFromTheDefinition (spectrogram, length);
+
+            double worst = 0.0;
+
+            for (int i = 0; i < length; ++i)
+                worst = std::max (worst, std::fabs (measured[(size_t) i] - expected[(size_t) i]));
+
+            check (worst < 1.0e-12, "the envelope overlapEnvelope reports and the one accumulated "
+                                    "from the window differ by " + std::to_string (worst)
+                                    + " at a hop of " + std::to_string (hop) + " over "
+                                    + std::to_string (length) + " samples");
+        }
+    }
 }
 
 static void anEditIsTaperedRatherThanDroppedIn()
@@ -463,16 +534,24 @@ static void anEditIsTaperedRatherThanDroppedIn()
     // silence. Dropped in unwindowed it is a rectangle: it arrives at full
     // amplitude on its first sample and stops dead on its last, which is a
     // click at each end of every repair. Measured against a build with the
-    // synthesis window taken out, the burst went from swelling to 0.4 per cent
-    // of its peak at the edges of its window to sitting at the full hundred.
+    // synthesis window taken out, the loudest the burst gets in the outer
+    // eighth of its window went from 14.6 per cent of what it reaches in the
+    // middle to the full hundred.
     const int fftSize = 512, hop = 128, length = 8192;
     const int editedFrame = 20, editedBin = 64;
 
     Spectrogram spectrogram;
-    spectrogram.prepare (fftSize, hop, 48000.0);
+
+    if (! check (spectrogram.prepare (fftSize, hop, 48000.0), "prepare was refused"))
+        return;
 
     std::vector<float> silence ((size_t) length, 0.0f), output ((size_t) length, 0.0f);
     spectrogram.analyse (silence.data(), length);
+
+    if (! check (editedFrame < spectrogram.getNumFrames() && editedBin < spectrogram.getNumBins(),
+                 "the frame being edited does not exist"))
+        return;
+
     spectrogram.frame (editedFrame)[editedBin] = { 50.0, 0.0 };
     spectrogram.synthesise (output.data(), length);
 
@@ -504,10 +583,21 @@ static void anEditIsTaperedRatherThanDroppedIn()
     const double atTheEdge = std::max (loudestOverAnEighth (0), loudestOverAnEighth (7));
     const double inTheMiddle = std::max (loudestOverAnEighth (3), loudestOverAnEighth (4));
 
-    check (atTheEdge < 0.3 * inTheMiddle,
-           "the edit is as loud at the edges of its frame as in the middle, "
-           + std::to_string (atTheEdge) + " against " + std::to_string (inTheMiddle)
-           + ": it is being dropped in rather than tapered");
+    // A band and not just a ceiling. A ceiling alone says "tapered somehow",
+    // and the taper has to be this window's and not another: a triangular
+    // synthesis window measures 27.7 per cent and the window applied twice
+    // measures 2.1, and both leave an untouched round trip exact, so neither
+    // is visible anywhere else in this file except through the closed form
+    // above. A Hann reaches 14.6, so the band has about a third either side.
+    check (atTheEdge < 0.22 * inTheMiddle,
+           "the edit is too loud at the edges of its frame, " + std::to_string (atTheEdge)
+           + " against " + std::to_string (inTheMiddle)
+           + ": it is being dropped in rather than tapered with this window");
+
+    check (atTheEdge > 0.08 * inTheMiddle,
+           "the edit is too quiet at the edges of its frame, " + std::to_string (atTheEdge)
+           + " against " + std::to_string (inTheMiddle)
+           + ": the taper is steeper than the window it is supposed to be");
 
     // And the first and last samples it reaches are the ends of a window, so
     // they are nearly nothing.
@@ -555,13 +645,21 @@ static void theFrameCountIsOnePastTheLastFrameInsideTheClip()
             const std::string where = "a hop of " + std::to_string (hop) + " over "
                                     + std::to_string (length) + " samples";
 
-            // The last frame is centred at or past the last sample, so the
-            // tail is under a window that is still opening.
-            check ((long long) (count - 1) * hop >= (long long) (length - 1),
-                   where + " leaves the last sample past the final frame's centre");
+            // The last frame's centre is strictly past the last sample, so
+            // the tail is under a window that is still opening. Strictly, and
+            // this is the whole of the check: write length - 1 as q hops and a
+            // remainder r. The right count is q + 2, and a count of q + 1
+            // satisfies "at or past" whenever r is nothing, which is every
+            // length the hop divides into: every clip at a hop of one, every
+            // other one at a hop of two. Taking one off the divisor, which is
+            // short by a frame at exactly those lengths, passed this check
+            // while it read >= and passed every other check in the file.
+            check ((long long) (count - 1) * hop > (long long) (length - 1),
+                   where + " leaves the last sample at or past the final frame's centre");
 
             // And it is the first frame of which that is true, so none is
-            // wasted.
+            // wasted. These two together admit one count and no other, for
+            // every hop and length below.
             check ((long long) (count - 2) * hop <= (long long) (length - 1),
                    where + " counts a frame whose centre is already past the end of the clip");
         }
@@ -576,12 +674,22 @@ static void theEnvelopeFloorIsNeverReachedInsideTheClip()
     // `synthesise` guards its division with a floor of 1e-9, and the comment
     // above it claims the floor only ever bites where no frame reached at all.
     // Nothing produced that number, so here it is: the thinnest the sum gets
-    // anywhere inside a clip analysed at its own length, over every hop the
-    // class accepts. A hop of half the window is the worst case, at a half,
-    // which is nine orders of magnitude clear of the floor. That is the
-    // difference between a guard and a thing that fires.
+    // anywhere inside a clip analysed at its own length.
+    //
+    // The cases are the ones that can reach the minimum, which is not every
+    // hop the class accepts. The envelope only grows as frames are added, so
+    // for a given sample the thinnest configuration is the shortest clip that
+    // contains it, and the fewer frames overlap the thinner it gets: the
+    // minimum therefore lives at the largest hop allowed, half the window.
+    // Swept exhaustively that way, over every power of two window from 8 to
+    // 4096 and every hop from 1 to half the window, the global minimum is
+    // exactly 0.5 and it is reached only at a hop of half the window. So these
+    // are the hops of a half, at three window sizes, plus two smaller hops to
+    // show the figure climbing. A hop of two was measured as well and is left
+    // out: it reads 1.9988 and cost a third of this file's whole running time.
     struct Case { int fftSize; int hop; };
-    const Case cases[] = { { 512, 256 }, { 512, 128 }, { 512, 64 }, { 2048, 512 }, { 256, 2 } };
+    const Case cases[] = { { 512, 256 }, { 256, 128 }, { 2048, 1024 },
+                           { 512, 128 }, { 2048, 512 } };
 
     double thinnest = 1.0e30;
 
@@ -727,6 +835,14 @@ static void preparingAgainForgetsTheLastClip()
 
     check (worst < 1.0e-5, "a clip analysed after preparing again came back wrong by "
                            + std::to_string (worst));
+
+    // And a refused one. "Unprepared" has to mean the same thing whichever way
+    // it was arrived at: reporting the previous clip's frame count while
+    // isPrepared says no is a state no caller should have to know about.
+    check (! spectrogram.prepare (500, 125, 48000.0), "a window that is not a power of two was accepted");
+    check (! spectrogram.isPrepared(), "a refused setting left this looking usable");
+    check (spectrogram.getNumFrames() == 0, "a refused setting left the last clip's frame count behind");
+    check (spectrogram.getAnalysedLength() == 0, "a refused setting left the last clip's length behind");
 }
 
 static void aNegativeLengthIsNothingRatherThanNonsense()
@@ -794,6 +910,7 @@ int main()
     anEditIsTaperedRatherThanDroppedIn();
     theFrameCountIsOnePastTheLastFrameInsideTheClip();
     theEnvelopeFloorIsNeverReachedInsideTheClip();
+    theEnvelopeTheTestsMeasureIsTheOneSynthesiseDividesBy();
     everyHopThatIsAcceptedReconstructs();
     preparingAgainForgetsTheLastClip();
     aNegativeLengthIsNothingRatherThanNonsense();
