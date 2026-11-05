@@ -151,7 +151,13 @@ void testMarqueeIsIntersection()
     {
         Note n;
         n.start  = rng.between (0.0, 8.0);
-        n.length = rng.between (0.05, 2.0);
+        // A zero length note cannot come from any edit in the header, which
+        // floors every length at a tick, but it can come from a file. Without
+        // one in the generator the branch that handles it is never evaluated
+        // and deleting it goes unnoticed, which would leave such a note
+        // catchable by no marquee at all and so impossible to select or
+        // delete.
+        n.length = rng.unit() < 0.08 ? 0.0 : rng.between (0.05, 2.0);
         n.note   = rng.intBetween (0, 127);
 
         const double noteEnd = n.start + n.length;
@@ -167,7 +173,9 @@ void testMarqueeIsIntersection()
         const auto r = NoteSelection::Rect::between (a, b, p, q);
 
         const bool pitchIn = n.note >= r.lowNote && n.note <= r.highNote;
-        const bool timeIn  = n.start < r.endBeat && noteEnd > r.startBeat;
+        const bool timeIn  = n.length > 0.0
+                               ? (n.start < r.endBeat && noteEnd > r.startBeat)
+                               : (n.start >= r.startBeat && n.start <= r.endBeat);
         const bool want    = pitchIn && timeIn;
 
         check (NoteSelection::caught (n, r) == want, "caught() is overlap, not containment");
@@ -411,9 +419,10 @@ void testGroupMovePreservesShape()
         request.beats     = rng.between (-40.0, 40.0);
         request.semitones = rng.intBetween (-200, 200);
         request.grid      = rng.unit() < 0.5 ? 0.25 : 1.0 / 3.0;
+        // Absolute is what the roll ships with, so it gets the most of this.
         const double snapRoll = rng.unit();
-        request.snap = snapRoll < 0.6 ? NoteSelection::Snap::relative
-                     : snapRoll < 0.85 ? NoteSelection::Snap::absolute
+        request.snap = snapRoll < 0.5 ? NoteSelection::Snap::absolute
+                     : snapRoll < 0.85 ? NoteSelection::Snap::relative
                                        : NoteSelection::Snap::off;
         request.anchorStart = sel.empty() ? 0.0 : notes[sel.front()].start;
 
@@ -438,12 +447,47 @@ void testGroupMovePreservesShape()
                             "a moved group keeps its rhythm");
             }
 
+        // A move moves. It does not stretch, and it does not touch velocity.
+        // Without this, making applyMove add the delta to the length as well
+        // passes everything else here: the starts and the pitches are all
+        // still right and the intervals are all still preserved.
+        for (const auto index : sel)
+        {
+            checkClose (notes[index].length, before[index].length, 0.0,
+                        "a moved note keeps its length");
+            check (notes[index].velocity == before[index].velocity,
+                   "a moved note keeps its velocity");
+        }
+
         // Nothing outside the selection moved at all.
         for (size_t i = 0; i < count; ++i)
             if (! NoteSelection::contains (sel, i))
                 check (notes[i].start == before[i].start && notes[i].note == before[i].note
-                       && notes[i].length == before[i].length,
+                       && notes[i].length == before[i].length
+                       && notes[i].velocity == before[i].velocity,
                        "an unselected note is not moved");
+
+        // The flags mean "the limits cut this", which is not the same as "this
+        // is not what was asked": snapping changes the delta too. So they are
+        // checked against what the same request does with the limits taken
+        // away, which is the only thing that tells the two apart. The first
+        // version of the time flag compared against the request instead and
+        // was wrong on nearly half of all clamped moves, with nothing to say
+        // so.
+        {
+            NoteSelection::Limits none;
+            none.minStart = -1e9;
+            none.lowNote  = -100000;
+            none.highNote = 100000;
+
+            auto freeCopy = before;
+            const auto freeMove = NoteSelection::planMove (freeCopy, sel, request, none);
+
+            check (move.pitchLimited == (move.semitones != freeMove.semitones),
+                   "pitchLimited says exactly whether the pitch limits cut the move");
+            check (move.beatsLimited == (std::abs (move.beats - freeMove.beats) > 1e-12),
+                   "beatsLimited says exactly whether the time limits cut the move");
+        }
 
         // And the limits hold, stated as the honest invariant rather than the
         // tidy one. A limit stops a move and never forces one, so the claim
@@ -612,6 +656,33 @@ void testSnapModes()
                             "and everything else keeps its distance from it");
         }
 
+        // The nearest feasible step, not merely a feasible one. Nothing above
+        // pins this: with rounding replaced by flooring, every delta is still
+        // on the progression, still in range, still preserves each note's
+        // offset and still never reverses, and the only thing wrong is that a
+        // group drag lags the pointer by up to a whole grid step and never
+        // snaps forward until the pointer crosses the next line, which is the
+        // most visible thing snapping does.
+        for (const auto mode : { NoteSelection::Snap::relative, NoteSelection::Snap::absolute })
+        {
+            request.snap = mode;
+            auto copy = notes;
+            const auto move = NoteSelection::planMove (copy, sel, request, limits);
+
+            double lowestStart = std::numeric_limits<double>::infinity();
+            for (const auto index : sel)
+                lowestStart = std::min (lowestStart, notes[index].start);
+            const double lo = std::min (0.0, limits.minStart - lowestStart);
+
+            // The neighbouring steps either side. Whichever of them is still
+            // allowed must not be closer to what was asked for.
+            for (const double neighbour : { move.beats - grid, move.beats + grid })
+                if (neighbour >= lo - 1e-12)
+                    check (std::abs (neighbour - request.beats)
+                           >= std::abs (move.beats - request.beats) - 1e-12,
+                           "a snapped move takes the nearest step that fits, not just one that fits");
+        }
+
         // Off: the delta arrives untouched, which is what a snap defeat
         // modifier is for.
         request.snap = NoteSelection::Snap::off;
@@ -678,12 +749,16 @@ void testVelocityOnAGroup()
         const size_t count = (size_t) rng.intBetween (1, 10);
         auto notes = randomNotes (rng, count, 8.0);
 
-        // Plant notes at the rails, or the group-stops branch is never taken.
+        // Plant notes at the rails, or the group-stops branch is never taken,
+        // and below them, or the half of the invariant that says a limit
+        // never FORCES an edit is never exercised. A velocity under the floor
+        // cannot come from any edit here, only from a file.
         for (auto& n : notes)
         {
             const double which = rng.unit();
             if (which < 0.15) n.velocity = NoteSelection::kMaxVelocity;
             else if (which < 0.30) n.velocity = NoteSelection::kMinVelocity;
+            else if (which < 0.36) n.velocity = NoteSelection::kMinVelocity * 0.25f;
         }
 
         const auto sel = randomSelection (rng, count);
@@ -706,8 +781,21 @@ void testVelocityOnAGroup()
 
         for (const auto index : sel)
         {
-            check (grouped[index].velocity >= NoteSelection::kMinVelocity - 1e-7,
-                   "no velocity goes under the floor a file can hold");
+            const bool wasAboveFloor = before[index].velocity >= NoteSelection::kMinVelocity;
+
+            // The floor is checked by what a MIDI file can carry rather than
+            // against the constant itself, so that setting the constant to
+            // zero fails here. A velocity of zero is a note off, which is the
+            // whole reason the floor is not zero, and a check written as
+            // "at least kMinVelocity" passes happily when kMinVelocity is
+            // nothing.
+            if (wasAboveFloor)
+                check (midiVelocityToByte (grouped[index].velocity) >= 1,
+                       "no velocity is driven to what a file reads as a note off");
+            else
+                check (grouped[index].velocity >= before[index].velocity - 1e-7,
+                       "a velocity already under the floor is not pushed further down");
+
             check (grouped[index].velocity <= NoteSelection::kMaxVelocity + 1e-7,
                    "no velocity goes over the top");
         }
@@ -744,6 +832,23 @@ void testVelocityOnAGroup()
     check (flattened[0].velocity == flattened[1].velocity, "absolute sets one value for all");
     checkClose (flattened[0].velocity, 0.42, 1e-6, "and it is the value asked for");
 
+    // And absolute is clamped too. It is the one mode where the value comes
+    // straight from a caller rather than from a note that was already in
+    // range, so it is the most likely of the three to be handed something
+    // impossible.
+    for (const double asked : { -4.0, 0.0, 1.0, 9.0 })
+    {
+        auto pinned = notes;
+        NoteSelection::applyVelocity (pinned, sel, asked, NoteSelection::VelocityMode::absolute);
+        for (const auto& n : pinned)
+        {
+            check (n.velocity >= NoteSelection::kMinVelocity && n.velocity <= NoteSelection::kMaxVelocity,
+                   "an absolute velocity outside the range is brought into it");
+            check (midiVelocityToByte (n.velocity) >= 1,
+                   "and never to what a file reads as a note off");
+        }
+    }
+
     // The floor is the one a file can carry, not zero: a velocity of zero is a
     // note off, so an edit must not be able to write one.
     auto floored = notes;
@@ -768,8 +873,15 @@ void testLengthOnAGroup()
         const size_t count = (size_t) rng.intBetween (1, 10);
         auto notes = randomNotes (rng, count, 8.0);
 
-        if (rng.unit() < 0.3)
+        // At the floor, so the group-stops branch is taken, and under it, so
+        // the half of the invariant that says a limit never FORCES an edit is
+        // exercised. A length under a tick cannot come from any edit here,
+        // only from a file.
+        const double plant = rng.unit();
+        if (plant < 0.3)
             notes[(size_t) rng.intBetween (0, (int) count - 1)].length = NoteSelection::kMinLengthBeats;
+        else if (plant < 0.4)
+            notes[(size_t) rng.intBetween (0, (int) count - 1)].length = NoteSelection::kMinLengthBeats * 0.1;
 
         const auto sel = randomSelection (rng, count);
         const auto before = notes;
@@ -788,8 +900,24 @@ void testLengthOnAGroup()
             }
 
         for (const auto index : sel)
-            check (grouped[index].length >= NoteSelection::kMinLengthBeats - 1e-12,
-                   "no note is shortened past a tick");
+        {
+            if (before[index].length >= NoteSelection::kMinLengthBeats)
+                check (grouped[index].length >= NoteSelection::kMinLengthBeats - 1e-12,
+                       "a note that was long enough is not shortened past a tick");
+            else
+                check (grouped[index].length >= before[index].length - 1e-12,
+                       "a note already shorter than a tick is not shortened further");
+        }
+
+        // And the limit never forces the group the other way. A note arriving
+        // from a file shorter than a tick must not make a request to SHORTEN
+        // the group lengthen it, which is what the first version did: at the
+        // first instant of a resize drag, where the requested change is
+        // nothing, every selected note grew before the mouse had moved.
+        if (amount <= 0.0)
+            for (const auto index : sel)
+                check (grouped[index].length <= before[index].length + 1e-12,
+                       "a request to shorten never lengthens anything");
 
         for (size_t i = 0; i < count; ++i)
             if (! NoteSelection::contains (sel, i))
@@ -813,6 +941,24 @@ void testLengthOnAGroup()
     checkClose (sameEnd[1].start + sameEnd[1].length, 4.0, 1e-12, "same end gives both notes that end");
     check (std::abs (sameEnd[0].length - sameEnd[1].length) > 1e-9,
            "so same end and same length are genuinely different operations");
+
+    // Both absolute modes have the floor, not just same end. Asked for
+    // nothing, or for less than nothing, they give a note rather than an
+    // event a file cannot hold.
+    for (const double asked : { -1.0, 0.0, NoteSelection::kMinLengthBeats * 0.1 })
+    {
+        auto tiny = notes;
+        NoteSelection::applyLength (tiny, sel, asked, NoteSelection::LengthMode::sameLength);
+        for (const auto& n : tiny)
+            check (n.length >= NoteSelection::kMinLengthBeats,
+                   "same length never writes a note shorter than a tick");
+
+        auto tinyEnd = notes;
+        NoteSelection::applyLength (tinyEnd, sel, asked, NoteSelection::LengthMode::sameEnd);
+        for (const auto& n : tinyEnd)
+            check (n.length >= NoteSelection::kMinLengthBeats,
+                   "same end never writes a note shorter than a tick");
+    }
 
     // A note that would be left behind by a same-end edit still gets a note,
     // not a zero.
@@ -873,6 +1019,19 @@ void testDuplicate()
     Set none;
     const auto nothing = NoteSelection::duplicate (untouched, none);
     check (nothing.empty() && untouched.size() == 1, "duplicating nothing does nothing");
+
+    // A stale index must not come alive as the list grows. The loop appends
+    // as it goes, so testing an index against the list's CURRENT size would
+    // let an index past the end become valid the moment the first copy
+    // landed, and the copies would start being copied.
+    {
+        std::vector<Note> three { { 0.0, 1.0, 60, 0.8f }, { 1.0, 1.0, 62, 0.8f },
+                                  { 2.0, 1.0, 64, 0.8f } };
+        Set stale { 0, 1, 2, 3, 4 };
+        const auto copies = NoteSelection::duplicate (three, stale);
+        check (three.size() == 6, "only the notes that existed are duplicated");
+        check (copies.size() == 3, "and only those are handed back");
+    }
 
     // A chord, where every note starts together: the extent is the longest
     // note, not the sum of them.
@@ -984,10 +1143,26 @@ void testOverlapResolution()
             check (notes[sel[0]].velocity == 0.9f, "which is still the mover, not whatever slid into the gap");
     }
 
+    // Two selected notes starting inside one unselected note: the earliest of
+    // them decides the cut, because a later one is already inside the part
+    // being taken away. Trimming to the later one instead leaves the note
+    // still overlapping the earlier one, which is the state the whole rule
+    // exists to remove, and every other check in this file passes while it
+    // does.
+    {
+        std::vector<Note> notes { { 1.0, 0.5, 60, 0.8f },     // selected
+                                  { 2.0, 0.5, 60, 0.8f },     // selected, later
+                                  { 0.0, 4.0, 60, 0.4f } };   // the victim
+        Set sel { 0, 1 };
+        const auto report = NoteSelection::resolveOverlaps (notes, sel);
+        check (report.trimmed == 1 && report.deleted == 0, "the victim is trimmed once");
+        checkClose (notes[2].length, 1.0, 1e-12, "and cut at the earliest mover, not the latest");
+    }
+
     // Randomised: resolution only ever touches unselected notes at a pitch
     // some selected note is on, and never lengthens anything.
     Rng rng (0x5eed000aull);
-    int sawDeletion = 0, sawTrim = 0;
+    int sawDeletion = 0, sawTrim = 0, sawCoincident = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -998,6 +1173,21 @@ void testOverlapResolution()
         // happen and the test quietly checks nothing.
         for (auto& n : notes)
             n.note = rng.intBetween (60, 63);
+
+        // And notes that start together, which a generator drawing starts
+        // from a continuous range never produces. Two notes at one pitch
+        // sharing a start is precisely the case MidiTimebase.h calls a drop,
+        // so it is the one the rule most needs to catch, and relaxing the
+        // covered-start test from "at or after" to "after" goes unnoticed
+        // without it.
+        if (rng.unit() < 0.5)
+        {
+            const size_t a = (size_t) rng.intBetween (0, (int) count - 1);
+            const size_t b = (size_t) rng.intBetween (0, (int) count - 1);
+            notes[b].start = notes[a].start;
+            notes[b].note  = notes[a].note;
+            ++sawCoincident;
+        }
 
         const auto sel = randomSelection (rng, count);
         auto working = notes;
@@ -1026,10 +1216,38 @@ void testOverlapResolution()
         for (const auto& n : working)
             check (n.length >= NoteSelection::kMinLengthBeats - 1e-12,
                    "resolution never leaves a note shorter than a tick");
+
+        // The post-condition, which is the thing this function exists to
+        // produce and which nothing above actually asserted: afterwards, no
+        // unselected note overlaps a selected one at the same pitch. Counting
+        // the deletions and checking the selection survived says the function
+        // did something; this says it did the right thing, and it is what
+        // catches a covered start going unresolved or a trim stopping at the
+        // wrong mover.
+        for (size_t u = 0; u < working.size(); ++u)
+        {
+            if (NoteSelection::contains (workingSel, u))
+                continue;
+
+            const auto& victim = working[u];
+            const double victimEnd = victim.start + victim.length;
+
+            for (const auto m : workingSel)
+            {
+                const auto& mover = working[m];
+                if (mover.note != victim.note)
+                    continue;
+
+                const double moverEnd = mover.start + mover.length;
+                check (! (mover.start < victimEnd && victim.start < moverEnd),
+                       "no unselected note is left overlapping a selected one at the same pitch");
+            }
+        }
     }
 
-    check (sawDeletion > 500, "the generator produced deletions");
-    check (sawTrim     > 500, "the generator produced trims");
+    check (sawDeletion   > 500, "the generator produced deletions");
+    check (sawTrim       > 500, "the generator produced trims");
+    check (sawCoincident > 500, "the generator produced notes that start together");
 }
 
 //===========================================================================

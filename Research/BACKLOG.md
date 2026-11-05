@@ -29,9 +29,9 @@ blindly. Newest first.
 
 ## 2026-11-05: selecting more than one note, and what a group drag must not deform
 
-### Status: in progress
+### Status: built, tested, mutation tested and audited
 
-Branch `feature/note-selection`. Pull request to follow.
+Branch `feature/note-selection`, pull request **#67**.
 
 ### What was looked at
 
@@ -154,13 +154,37 @@ Not published anywhere, so chosen here and said so:
   grabbed.
 - **Whether a group drag snaps absolutely or relatively.** Both are named,
   first class modes, and there is no majority: Apple's "Snap Regions to
-  Absolute Value" against "Snap Regions to Relative Value", Steinberg's "Grid"
-  against "Grid Relative". Absolute is Apple's and Steinberg's default;
-  relative is Ableton's: "Note movements also snap to an 'offset,' based on
-  each note's original placement relative to the grid." Relative is the
-  default here, because it is the only one of the two that leaves a group that
-  was deliberately off the grid intact, and moving a played riff a sixteenth
-  later should not also quantise it. Absolute is available on the same path.
+  Absolute Value", "When you move or edit an item, it snaps exactly to the
+  nearest grid position", against "Snap Regions to Relative Value", which
+  keeps "the same relative distance from their original grid positions";
+  Steinberg's "Grid" against "Grid Relative", where "a moved event keeps its
+  original position relative to the grid". Absolute is Apple's and
+  Steinberg's default; relative is Ableton's: "Note movements also snap to an
+  'offset,' based on each note's original placement relative to the grid."
+
+  **Absolute is the default here**, and the reasoning is worth recording
+  because this entry first said the opposite and said it for a reason that
+  does not survive reading what absolute actually does to a group. Neither
+  mode quantises a performance. In both, one delta moves every note and the
+  group keeps its internal timing exactly; the modes differ only in where the
+  GRABBED note ends up. Absolute puts it on a grid line and carries the rest
+  along by the same amount, relative moves the whole group by a whole number
+  of steps and leaves every note at its own distance from the grid. So the
+  choice is between placing a group precisely and nudging it without touching
+  its relationship to the bar, not between keeping a feel and destroying one.
+
+  Absolute wins the default on two counts relative does not answer: it is
+  what dragging a single note in this roll has always done, so no existing
+  gesture changes under somebody's hands, and it is what Apple and Steinberg
+  both ship. Relative is offered rather than dropped because it is the right
+  answer for moving something played and left off the grid on purpose, which
+  is the case absolute handles least well. It is on the Selection menu.
+
+  The first version of this entry claimed relative was the default and
+  justified it with "moving a played riff a sixteenth later should not also
+  quantise it", which is true of both modes. The audit caught the entry still
+  saying it after the code had been changed, which is exactly what these
+  entries are for.
 - **What a group at a pitch limit does on a drag.** Published for velocity by
   Apple, not for pitch by anybody. The same rule is used for both, which is
   the answer the velocity text and Ardour's command names both point at.
@@ -218,13 +242,118 @@ Not published anywhere, so chosen here and said so:
   That is a real limitation and it is written into the pull request rather
   than left for somebody to discover.
 
-### What is being built
+### What was built
 
 `Source/NoteSelection.h`, no JUCE, holding the arithmetic: the marquee test,
 the selection algebra, and every group edit as a transform over a note list
 and a set of selected indices. `Tests/NoteSelectionTest.cpp` over it. Then the
-piano roll grows a marquee, a group drag, a group resize, a group velocity
-drag and a menu of the operations that are not gestures.
+piano roll grew a Select tool, a marquee, a group drag, a group resize, a
+group velocity drag, and a Selection menu for the operations that are not
+gestures.
+
+### One rule runs through all of it
+
+Every limit in the header is turned into a limit on the DELTA, once, over the
+whole selection, and then one delta moves every note. Pitch, time, velocity
+and length all work that way, and all four take their bounds against zero, so
+a limit stops an edit and never forces one.
+
+That phrasing was arrived at twice, both times by something failing. Writing
+the test found that bounds taken from the group alone make a selection whose
+top note sits above the ceiling come out transposed down by however far it is
+over, as the answer to a request to move it sideways. Then the audit found the
+same shape again in two places that had been left clamping each note on the
+way out: a note arriving from a file shorter than a tick made a request to
+shorten the group lengthen it, and a velocity arriving below the floor was
+lifted on its own while the rest of the group stood still, which breaks the
+one thing those modes exist to keep. The invariant is now the same sentence in
+four places: a note that was inside its limits stays inside them, a note that
+was already outside is never pushed further out, and nothing is clamped per
+note on the way out.
+
+### What the audit found
+
+Nine findings, all fixed or recorded. The one that mattered:
+
+**A single click on a note destroyed notes.** A press on a note begins a group
+move from the moment the button goes down, and a bare click sends a mouse up
+with no drag in between, so overlap resolution ran on a gesture in which
+nothing had moved. Clicking a long note deleted a short one underneath it;
+clicking the short one cut the long one back to meet it; with eight notes
+selected, one click could delete unselected notes at eight pitches. Reachable
+in two ordinary Draw gestures, because drawing a note over another deliberately
+leaves the overlap. It was undoable, which was the only mercy. Resolution is
+now gated on the pattern actually having changed, read off the notes rather
+than off the pointer, so a two pixel drag that snaps to no change is a click
+as far as the pattern is concerned.
+
+**A selection survived an undo and pointed at different notes.** The first
+`validateSelection` only truncated out of range indices, which is a range
+check wearing an identity check's comment: an undo rebuilds the clips from
+deep copies, so every index can still be in range and every one of them point
+at a different note. Transpose then moved notes nobody had picked. The
+selected notes themselves are remembered now and anything that does not match
+drops the selection, because guessing which note somebody meant is worse than
+losing a selection. The channel rack reaches a shared pattern the same way.
+
+**`Move::beatsLimited` was wrong in 42 per cent of clamped moves**, measured.
+It tested whether the answer landed near a bound, but a snapped answer sits up
+to a whole grid step inside the bound, so real clamps went unreported and
+plain snapping was reported as a clamp. It is computed against what the same
+request does with the limits removed now, which is the only thing that tells
+snapping and clamping apart, and the test pins it both ways.
+
+The rest: the Selection menu captured a raw `this` where the quantise menu
+beside it uses a `SafePointer`; `duplicate` tested indices against a list it
+was appending to, so a stale index could come alive and the copies start being
+copied; duplicating no longer resolves overlaps, because a duplicate is a
+create rather than a move and resolving let it shorten one of the notes it had
+just copied; the Select tooltip said Command on two platforms that have Ctrl;
+and the snap submenu is named for moving, because a group resize snaps its end
+absolutely the way the single note resize always did and does not read the
+choice.
+
+### Mutation testing
+
+61 mutations in the first pass, 51 caught. Of the ten survivors, three are
+genuine no-ops and seven were real gaps in the test, every one of them a
+branch the generators could not reach:
+
+- Clamping each note inside `applyMove` is a no-op, which is worth writing
+  down because it is the headline fault the header exists to prevent. The
+  delta is already guaranteed to keep every in-range member in range, so the
+  per note clamp cannot bite. The meaningful versions of that mutation live in
+  `planMove` and are killed hard: dropping the pitch ceiling's bound against
+  zero fails over twenty thousand checks.
+- `lower_bound` to `upper_bound` in `remapAfter` is a no-op, because indices
+  present in the erased set are skipped one line above and the two bounds
+  agree for every index that reaches it.
+- Dropping the correction on the quotient's rounding in `snappedDeltaWithin`
+  is very nearly a no-op: measured, it fires zero times in three million
+  realistic cases and seven times in five million adversarial ones, with the
+  phase pushed to a billion and the grid to two to the minus twenty. It is a
+  real guard that nothing reachable from the roll can trip, and it stays
+  rather than being deleted because the arithmetic that would have to be
+  trusted instead is a rounded quotient.
+
+The seven gaps, all now closed, are the more useful list, because each one is
+a property the test claimed and did not have: that a move does not change a
+note's length or velocity; that snapping takes the NEAREST step rather than
+merely a feasible one; that absolute velocity clamps a value handed in from
+outside; that the velocity floor is the one a file can carry, checked through
+`midiVelocityToByte` rather than against the constant itself, so setting the
+constant to zero now fails; that the two absolute length modes floor what they
+are given; that no unselected note is left overlapping a selected one at the
+same pitch, which is the post-condition the whole of `resolveOverlaps` exists
+to produce and which nothing had asserted; and the two cases its generator
+could never produce, two notes sharing a start and two movers inside one
+victim.
+
+The generators now plant what they could not reach: zero length notes, lengths
+and velocities below their floors, and notes that start together. Each one of
+those was a surviving mutation before it was planted.
+
+Second pass after the fixes: see the pull request.
 
 ---
 

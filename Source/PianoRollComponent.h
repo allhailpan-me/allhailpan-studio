@@ -66,6 +66,7 @@ private:
     void   beginGroupDrag (const juce::MouseEvent&, int grabbedIndex, bool resizing);
     void   dragGroup (const juce::MouseEvent&);
     void   commitSelectionEdit();
+    void   rememberSelection();
     bool   marqueeWanted (const juce::MouseEvent&, int noteUnderPointer) const;
     void   writeBackSelectionEdit (const std::vector<NoteSelection::Note>&);
     void   growClipToFitSelection();
@@ -116,7 +117,15 @@ private:
     // every few milliseconds, and the group would creep away from the
     // pointer by an amount that depends on how fast the mouse was moved.
     NoteSelection::Set    selection;
+
+    // The selected notes themselves, remembered so that an index can be
+    // checked rather than trusted. See validateSelection: an undo rebuilds
+    // the note list from a deep copy, so every index can still be in range
+    // and every one of them point at a different note.
+    std::vector<MidiNote> selectionNotes;
+
     std::vector<MidiNote> dragStartNotes;
+    bool   groupDragMoved = false;
     double dragStartBeat  = 0.0;
     int    dragStartPitch = 0;
     double dragAnchorStart = 0.0;

@@ -370,10 +370,21 @@ struct Request
     double anchorStart = 0.0;    ///< the grabbed note's start, for absolute snapping
 };
 
-/** What will actually be applied. The two flags are what a component uses to
-    say so on screen: a drag that has stopped moving because one note is
-    against the top of the keyboard looks identical to a drag that has stopped
-    for no reason. */
+/** What will actually be applied.
+
+    The two flags mean "the limits cut this", not "this is not what was
+    asked": snapping also changes the delta, and reporting that as a limit
+    would make the flags fire on almost every drag. So the time flag is
+    computed by working out what the delta would have been with no limits at
+    all and comparing, which is the only way to tell the two apart.
+
+    Nothing in the studio reads them yet. They are here because a drag that
+    has stopped moving because one note is against the top of the keyboard
+    looks identical to a drag that has stopped for no reason, and whoever puts
+    that on screen should not have to work the condition out again. Said
+    plainly rather than implied, because a flag whose comment claims a use it
+    does not have is how a wrong flag survives: the first version of the time
+    one was wrong in 42 per cent of clamped moves and nothing noticed. */
 struct Move
 {
     double beats        = 0.0;
@@ -506,6 +517,7 @@ inline Move planMove (const std::vector<Note>& notes, const Set& sel,
         if (request.snap == Snap::off || ! (request.grid > 0.0))
         {
             move.beats = std::clamp (wanted, lo, hi);
+            move.beatsLimited = std::abs (move.beats - wanted) > 1e-12;
         }
         else
         {
@@ -513,10 +525,17 @@ inline Move planMove (const std::vector<Note>& notes, const Set& sel,
                                    ? -request.anchorStart / request.grid
                                    : 0.0;
             move.beats = snappedDeltaWithin (wanted, request.grid, phase, lo, hi);
-        }
 
-        move.beatsLimited = std::abs (move.beats - wanted) > 1e-12
-                            && (move.beats <= lo + 1e-12 || move.beats >= hi - 1e-12);
+            // Against what the same request would have done with no limits,
+            // so that snapping is not mistaken for a limit. Comparing with
+            // the request itself instead reported a limit on nearly every
+            // drag and missed the real ones: the answer is the clamped end of
+            // the grid progression, which can sit most of a grid step inside
+            // the bound and so does not look clamped at all.
+            constexpr double unbounded = 1e300;
+            const double free = snappedDeltaWithin (wanted, request.grid, phase, -unbounded, unbounded);
+            move.beatsLimited = std::abs (move.beats - free) > 1e-12;
+        }
     }
 
     return move;
@@ -623,10 +642,17 @@ inline void applyVelocity (std::vector<Note>& notes, const Set& sel,
     const double hi = std::max (0.0, (double) kMaxVelocity - highest);
     const double delta = std::clamp (amount, lo, hi);
 
+    // And nothing is clamped per note on the way out. The clamp above already
+    // keeps every note that was in range in range, and clamping the write as
+    // well would lift a note that arrived from a file below the floor while
+    // leaving the others alone, which is the one thing this mode must not do:
+    // its whole job is to keep the differences. A note that was already out
+    // of range stays as it is. This header did not put it there and does not
+    // make it worse, which is the same rule `planMove` and `applyLength`
+    // follow.
     for (const auto index : sel)
         if (index < notes.size())
-            notes[index].velocity = std::clamp ((float) ((double) notes[index].velocity + delta),
-                                                kMinVelocity, kMaxVelocity);
+            notes[index].velocity = (float) ((double) notes[index].velocity + delta);
 }
 
 //===========================================================================
@@ -700,17 +726,25 @@ inline void applyLength (std::vector<Note>& notes, const Set& sel,
     if (! any)
         return;
 
-    // The shortest note decides how far the group can shrink, which is the
-    // same rule as everywhere else here. A note that arrives already shorter
-    // than a tick is below where the rule allows, so the rule lifts it to the
-    // floor and the group keeps its differences across that: no edit in this
-    // header can produce such a note, so the only way to get one is a file
-    // that already had it.
-    const double delta = std::max (amount, floorLength - shortest);
+    // The shortest note decides how far the group can shrink, and the bound is
+    // taken against zero for the same reason `planMove` does it: a limit
+    // stops an edit and never forces one. Without that, a note arriving from
+    // a file already shorter than a tick would make a request to SHORTEN the
+    // group lengthen it instead, and at the first instant of a resize drag,
+    // where the requested change is nothing, every selected note would grow
+    // before the mouse had moved. That is the same fault `planMove`'s comment
+    // records having tried and rejected, in another parameter.
+    //
+    // So nothing here is floored per note either. The group clamp already
+    // guarantees the floor for every note that was above it, and flooring the
+    // write as well would lift a note that arrived below it and break the
+    // differences this mode exists to keep. A note that was already too short
+    // stays as it is: this header did not make it and does not make it worse.
+    const double delta = std::max (amount, std::min (0.0, floorLength - shortest));
 
     for (const auto index : sel)
         if (index < notes.size())
-            notes[index].length = std::max (floorLength, notes[index].length + delta);
+            notes[index].length += delta;
 }
 
 //===========================================================================
@@ -797,9 +831,15 @@ inline Set duplicate (std::vector<Note>& notes, const Set& sel)
     Set copies;
     copies.reserve (sel.size());
 
+    // The size before anything is appended, because the list grows inside the
+    // loop. Testing against `notes.size()` as it goes would let a stale index
+    // past the end become valid as soon as the first copy landed, and the
+    // copies would start being copied.
+    const size_t original = notes.size();
+
     for (const auto index : sel)
     {
-        if (index >= notes.size())
+        if (index >= original)
             continue;
 
         Note copy = notes[index];

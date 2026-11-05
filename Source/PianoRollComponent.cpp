@@ -67,7 +67,7 @@ PianoRollComponent::PianoRollComponent (Project& p, AudioEngine& e)
     selectButton.onClick = [chooseTool] { chooseTool (2); };
     drawButton.setToggleState (true, juce::dontSendNotification);
 
-    selectButton.setTooltip ("Drag a rectangle to select notes. Hold Command to do it from the Draw tool");
+    selectButton.setTooltip ("Drag a rectangle to select notes. Hold Ctrl, or Command on a Mac, to do it from the Draw tool");
     selectionButton.setTooltip ("What to do with the selected notes");
     selectionButton.onClick = [this] { showSelectionMenu(); };
 
@@ -235,6 +235,7 @@ void PianoRollComponent::clearSelection()
         selection.clear();
         repaint();
     }
+    selectionNotes.clear();
 }
 
 void PianoRollComponent::selectOnly (int index)
@@ -242,20 +243,68 @@ void PianoRollComponent::selectOnly (int index)
     selection.clear();
     if (index >= 0)
         selection.push_back ((size_t) index);
+    rememberSelection();
     repaint();
+}
+
+void PianoRollComponent::rememberSelection()
+{
+    auto* pat = pattern();
+    selectionNotes.clear();
+
+    if (pat == nullptr)
+        return;
+
+    selectionNotes.reserve (selection.size());
+    for (const auto index : selection)
+        if (index < pat->notes.size())
+            selectionNotes.push_back (pat->notes[index]);
 }
 
 void PianoRollComponent::validateSelection()
 {
     auto* pat = pattern();
-    const size_t count = pat != nullptr ? pat->notes.size() : 0;
 
-    const auto before = selection.size();
-    while (! selection.empty() && selection.back() >= count)
-        selection.pop_back();                 // the set is sorted, so the tail is what can be stale
+    if (pat == nullptr)
+    {
+        selection.clear();
+        selectionNotes.clear();
+        return;
+    }
 
-    if (selection.size() != before)
+    // Mid gesture the pattern is being changed on purpose and the stamp is
+    // refreshed as it goes, so there is nothing to check.
+    if (dragMode != DragMode::none)
+        return;
+
+    if (selection.empty())
+    {
+        selectionNotes.clear();
+        return;
+    }
+
+    // An index only means anything against the note list it was taken from,
+    // and checking that the indices are still in range is not the same
+    // check at all: an undo rebuilds `clips` from deep copies, so every index
+    // can still be in range and every one of them point at a different note.
+    // The channel rack does the same thing from the other direction, erasing
+    // from the middle of a pattern this roll may have open.
+    //
+    // So the notes themselves are what is remembered, and anything that does
+    // not match drops the selection. Guessing which note the user had picked
+    // is how a group edit comes to move something nobody chose, and that is
+    // worse than losing a selection.
+    bool stillOurs = selectionNotes.size() == selection.size();
+    for (size_t i = 0; stillOurs && i < selection.size(); ++i)
+        stillOurs = selection[i] < pat->notes.size()
+                    && pat->notes[selection[i]] == selectionNotes[i];
+
+    if (! stillOurs)
+    {
+        selection.clear();
+        selectionNotes.clear();
         repaint();
+    }
 }
 
 NoteSelection::Limits PianoRollComponent::selectionLimits() const
@@ -343,6 +392,7 @@ void PianoRollComponent::beginGroupDrag (const juce::MouseEvent& e, int grabbedI
     dragStartPitch  = yToNote (e.position.y);
     dragAnchorStart = n.start;
     dragAnchorEnd   = n.start + n.length;
+    groupDragMoved  = false;
     dragMode        = resizing ? DragMode::resizeGroup : DragMode::moveGroup;
 }
 
@@ -411,6 +461,13 @@ void PianoRollComponent::dragGroup (const juce::MouseEvent& e)
             preview (pat->notes[(size_t) dragNote].note);
     }
 
+    // Whether this gesture has done anything yet, read off the notes rather
+    // than off the pointer. A drag of two pixels inside one grid step snaps
+    // to no change at all, and that is a click as far as the pattern is
+    // concerned: it must not resolve overlaps and must not push an undo step.
+    if (pat->notes != dragStartNotes)
+        groupDragMoved = true;
+
     changed (false);
 }
 
@@ -476,34 +533,51 @@ void PianoRollComponent::showSelectionMenu()
     juce::PopupMenu snapModes;
     snapModes.addItem (50, "Grid", true, snapMode == NoteSelection::Snap::absolute);
     snapModes.addItem (51, "Grid relative", true, snapMode == NoteSelection::Snap::relative);
-    m.addSubMenu ("Dragging snaps to", snapModes);
+    // Named for moving rather than for dragging, because a group resize snaps
+    // its end to the grid the way the single note resize always did and does
+    // not read this choice.
+    m.addSubMenu ("Moving a group snaps to", snapModes);
+
+    // The same guard showQuantiseMenu below uses, and for the same reason: if
+    // the window is torn down while the menu is open, JUCE dismisses it and
+    // calls this back on a component that is gone.
+    juce::Component::SafePointer<PianoRollComponent> safeThis (this);
 
     m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&selectionButton),
-                     [this] (int result)
+                     [safeThis] (int result)
     {
-        if (result == 0)
+        if (safeThis == nullptr || result == 0)
             return;
 
-        auto* p = pattern();
+        auto* p = safeThis->pattern();
         if (p == nullptr)
             return;
 
-        if (result == 50) { snapMode = NoteSelection::Snap::absolute; return; }
-        if (result == 51) { snapMode = NoteSelection::Snap::relative; return; }
+        auto& sel = safeThis->selection;
 
-        if (result == 10) { selection = NoteSelection::all (p->notes.size()); repaint(); return; }
-        if (result == 11) { clearSelection(); return; }
+        if (result == 50) { safeThis->snapMode = NoteSelection::Snap::absolute; return; }
+        if (result == 51) { safeThis->snapMode = NoteSelection::Snap::relative; return; }
+
+        if (result == 10)
+        {
+            sel = NoteSelection::all (p->notes.size());
+            safeThis->rememberSelection();
+            safeThis->repaint();
+            return;
+        }
+        if (result == 11) { safeThis->clearSelection(); return; }
         if (result == 12)
         {
             auto inverted = NoteSelection::all (p->notes.size());
-            for (const auto index : selection)
+            for (const auto index : sel)
                 NoteSelection::remove (inverted, index);
-            selection = std::move (inverted);
-            repaint();
+            sel = std::move (inverted);
+            safeThis->rememberSelection();
+            safeThis->repaint();
             return;
         }
 
-        if (selection.empty())
+        if (sel.empty())
             return;
 
         auto notes = toNotes (p->notes);
@@ -513,47 +587,56 @@ void PianoRollComponent::showSelectionMenu()
             case 20: case 21: case 22: case 23:
             {
                 const int semitones = result == 20 ? 1 : result == 21 ? -1 : result == 22 ? 12 : -12;
-                const auto move = NoteSelection::transpose (notes, selection, semitones, selectionLimits());
+                const auto move = NoteSelection::transpose (notes, sel, semitones,
+                                                            safeThis->selectionLimits());
                 if (move.semitones == 0)
                     return;                   // the group is against a limit, so there is nothing to undo
-                NoteSelection::applyMove (notes, selection, move);
-                writeBackSelectionEdit (notes);
-                commitSelectionEdit();
+                NoteSelection::applyMove (notes, sel, move);
+                safeThis->writeBackSelectionEdit (notes);
+                // A transpose is a move, so what it lands on is resolved the
+                // same way a drag's landing is.
+                safeThis->commitSelectionEdit();
                 break;
             }
 
             case 30: case 31:
             {
+                // Ten of 127 is Ableton's published step for a velocity nudge.
                 const double step = 10.0 / 127.0;
-                NoteSelection::applyVelocity (notes, selection, result == 30 ? step : -step,
+                NoteSelection::applyVelocity (notes, sel, result == 30 ? step : -step,
                                               NoteSelection::VelocityMode::group);
-                writeBackSelectionEdit (notes);
+                safeThis->writeBackSelectionEdit (notes);
                 break;
             }
 
             case 40:
             {
-                selection = NoteSelection::duplicate (notes, selection);
-                writeBackSelectionEdit (notes);
+                sel = NoteSelection::duplicate (notes, sel);
+                safeThis->writeBackSelectionEdit (notes);
                 // A copy landing past the clip's end would be invisible, so
                 // the clip grows to show it, the way drawing a note past the
                 // end already does. Moving notes still does not grow it.
-                growClipToFitSelection();
-                commitSelectionEdit();
+                safeThis->growClipToFitSelection();
+                // Deliberately no overlap resolution. Ableton's rule is about
+                // a note being MOVED onto another one, and nothing was moved
+                // here: drawing a note on top of another does not resolve
+                // either. Resolving would also let a duplicate shorten one of
+                // the notes it had just copied, because the copies become the
+                // selection and the originals stop being in it.
                 break;
             }
 
             case 41:
-                NoteSelection::eraseSelected (notes, selection);
-                writeBackSelectionEdit (notes);
+                NoteSelection::eraseSelected (notes, sel);
+                safeThis->writeBackSelectionEdit (notes);
                 break;
 
             default:
                 return;
         }
 
-        changed (true);
-        refresh();
+        safeThis->changed (true);
+        safeThis->refresh();
     });
 }
 
@@ -819,6 +902,13 @@ void PianoRollComponent::applyQuantise()
 void PianoRollComponent::changed (bool final)
 {
     juce::ignoreUnused (final);
+
+    // Before the broadcast, not after. project.changed() can come straight
+    // back here as refresh(), and a validateSelection that ran against a
+    // stamp from before this edit would drop the selection in the middle of
+    // the gesture that was editing it.
+    rememberSelection();
+
     project.changed();
     repaint();
 }
@@ -838,10 +928,10 @@ void PianoRollComponent::resized()
     snapLabel  .setBounds (tb.removeFromLeft (42));
     snapBox    .setBounds (tb.removeFromLeft (100)); tb.removeFromLeft (14);
     laneLabel  .setBounds (tb.removeFromLeft (40));
-    laneBox    .setBounds (tb.removeFromLeft (240)); tb.removeFromLeft (6);
+    laneBox    .setBounds (tb.removeFromLeft (210)); tb.removeFromLeft (6);
     clearLaneButton.setBounds (tb.removeFromLeft (84)); tb.removeFromLeft (14);
-    quantiseButton.setBounds (tb.removeFromLeft (78)); tb.removeFromLeft (6);
-    selectionButton.setBounds (tb.removeFromLeft (86)); tb.removeFromLeft (14);
+    quantiseButton.setBounds (tb.removeFromLeft (72)); tb.removeFromLeft (6);
+    selectionButton.setBounds (tb.removeFromLeft (78)); tb.removeFromLeft (10);
     title      .setBounds (tb);
 
     hbar.setBounds (r.removeFromBottom (barThickness).withTrimmedLeft (keysW).withTrimmedRight (barThickness));
@@ -1338,6 +1428,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
         if (e.mods.isShiftDown())
         {
             NoteSelection::toggle (selection, (size_t) idx);
+            rememberSelection();
             if (NoteSelection::contains (selection, (size_t) idx))
                 preview (pat->notes[(size_t) idx].note);
             repaint();
@@ -1415,6 +1506,7 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             const auto notes = toNotes (pat->notes);
             selection = marqueeReverses ? NoteSelection::reverseInRect (marqueeBefore, notes, r)
                                         : NoteSelection::inRect (notes, r);
+            rememberSelection();
             // Choosing notes is not editing them, so this deliberately does
             // not reach changed(): a marquee must not land in the undo
             // history, and an undo history full of selections is one nobody
@@ -1506,19 +1598,36 @@ void PianoRollComponent::mouseUp (const juce::MouseEvent&)
     // destroy every note the group passed over on its way, and an undo of the
     // move would not bring them back, because they were already gone when it
     // finished.
-    if (dragMode == DragMode::moveGroup || dragMode == DragMode::resizeGroup)
+    //
+    // And only if the gesture actually moved something. A press on a note is
+    // a moveGroup from the moment the button goes down, and a bare click
+    // sends a mouseUp with no mouseDrag in between, so without this a single
+    // click on a note resolved it against the whole pattern: clicking a long
+    // note deleted a short one underneath it, and clicking the short one cut
+    // the long one back to meet it. With eight notes selected, one click
+    // could delete unselected notes at eight pitches. A gesture that produced
+    // no movement has nothing to commit, and a click to audition a note has
+    // to stay a click.
+    const bool movedSomething = groupDragMoved
+                                && (dragMode == DragMode::moveGroup || dragMode == DragMode::resizeGroup);
+
+    if (movedSomething)
         commitSelectionEdit();
 
     preview (-1);
 
-    // A marquee is not an edit, so it must not push an undo step. Everything
-    // else that got this far changed the pattern.
+    // A marquee is not an edit, so it must not push an undo step, and neither
+    // is a click that moved nothing. Everything else that got this far
+    // changed the pattern.
     const bool wasEditing = dragMode != DragMode::none && dragMode != DragMode::keys
-                            && dragMode != DragMode::marquee;
+                            && dragMode != DragMode::marquee
+                            && (movedSomething
+                                || (dragMode != DragMode::moveGroup && dragMode != DragMode::resizeGroup));
     const bool wasMarquee = dragMode == DragMode::marquee;
     dragMode = DragMode::none;
     dragNote = -1;
     dragStartNotes.clear();
+    groupDragMoved = false;
     marqueeOnScreen = {};
     if (wasEditing)
         changed (true);
