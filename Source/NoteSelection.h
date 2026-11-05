@@ -128,11 +128,25 @@
 // "Grid" against "Grid Relative", where "a moved event keeps its original
 // position relative to the grid". Absolute is Apple's and Steinberg's
 // default. Relative is Ableton's: "Note movements also snap to an 'offset,'
-// based on each note's original placement relative to the grid." Relative is
-// the default here, because it is the only one of the two that leaves a group
-// that was deliberately off the grid intact: moving a played riff a sixteenth
-// later should not also quantise it, and there is a quantiser for when that
-// is what was wanted. Absolute is on the same path for anyone who wants it.
+// based on each note's original placement relative to the grid."
+//
+// Absolute is the default here, and worth being clear about why, because the
+// obvious argument for relative does not survive reading what absolute
+// actually does to a group. Neither mode quantises a performance: in both,
+// one delta moves every note and the group keeps its internal timing exactly.
+// The modes differ only in where the GRABBED note ends up. Absolute puts it
+// on a grid line and carries everything else along by the same amount;
+// relative moves the whole group by a whole number of grid steps and leaves
+// every note, the grabbed one included, at its own distance from the grid.
+// So the choice is between placing a group precisely and nudging it without
+// touching its relationship to the bar.
+//
+// Absolute wins the default on two counts that relative does not answer: it
+// is what dragging a single note in this roll has always done, so no existing
+// gesture changes under somebody's hands, and it is what Apple and Steinberg
+// both ship. Relative is offered rather than dropped because it is the right
+// answer for moving something played and left off the grid on purpose, which
+// is the case absolute handles least well.
 //
 // What a group at a PITCH limit does. Published for velocity by Apple, not
 // for pitch by anybody. The same rule is used, which is where both Apple's
@@ -352,7 +366,7 @@ struct Request
     double beats       = 0.0;    ///< how far the pointer has moved, in beats
     int    semitones   = 0;      ///< how far it has moved in pitch
     double grid        = 0.25;   ///< beats per snap step
-    Snap   snap        = Snap::relative;
+    Snap   snap        = Snap::absolute;
     double anchorStart = 0.0;    ///< the grabbed note's start, for absolute snapping
 };
 
