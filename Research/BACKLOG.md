@@ -29,9 +29,26 @@ blindly. Newest first.
 
 ## 2026-11-05: selecting more than one note, and what a group drag must not deform
 
-### Status: built, tested, mutation tested and audited
+### Status: merged
 
-Branch `feature/note-selection`, pull request **#67**.
+Pull request **#67**, squash merged as `6ec29af` on 2026-11-05. All four CI
+jobs green on the merged head: `tests`, `ubuntu-latest`, `windows-latest` and
+`macos-latest`. The release notes went in with it rather than being written
+afterwards.
+
+The merge went through the API first time, which is worth recording next to
+the 11-03 entry's warning that it took six attempts and gave six wrong
+reasons. Nothing was done differently: `main` still has no branch protection
+and no rulesets, so that entry's advice stands, which is to check the refs
+before believing a failure.
+
+One note for whoever picks the next piece of this up. The platform builds only
+start after the `tests` job finishes, and a new push cancels the whole run, so
+pushing again while the builds are in flight leaves the component code
+uncompiled on all three platforms with the run still showing green for
+`tests`. That happened twice tonight and both times the cancelled jobs read as
+"cancelled" rather than as failures, which is easy to mistake for a pass. The
+builds that matter are the ones on the head that is being merged.
 
 ### What was looked at
 
@@ -353,7 +370,24 @@ The generators now plant what they could not reach: zero length notes, lengths
 and velocities below their floors, and notes that start together. Each one of
 those was a surviving mutation before it was planted.
 
-Second pass after the fixes: see the pull request.
+Second pass after the fixes: 70 mutations, 63 caught. Five of those seven
+survivors were real gaps and are closed, and the recheck confirms them caught,
+so **68 of 70**. The five were: planting zero length notes did not pin the
+branch that handles them, because inside a rectangle the span test and the
+point test agree and come apart only at an exact edge, which random doubles
+never land on, so the distinguishing cases are written out by hand instead;
+the claim that nothing is clamped per note on the way out was untested for
+time and pitch, because a per note clamp can only be seen through a note
+already outside the clamp's own range and every note the generator made was
+inside it; the velocity floor was checked through `midiVelocityToByte`, which
+clamps, so the check could never fail and setting the floor to zero passed;
+and a group velocity edit was not required to be monotonic, so a bound not
+taken against zero went unnoticed.
+
+The last of those is the lesson worth carrying: a check written against the
+header's own constant cannot catch the constant being wrong. The floor is
+checked against `midiVelocityFromByte (1)` now, which is `MidiTimebase.h`'s
+own figure computed without reference to this header at all.
 
 ---
 
