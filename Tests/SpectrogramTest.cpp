@@ -625,6 +625,125 @@ static void theEnvelopeFloorIsNeverReachedInsideTheClip()
                + std::to_string (i));
 }
 
+static void everyHopThatIsAcceptedReconstructs()
+{
+    // The round trip above runs at one hop, a quarter of the window, and
+    // `prepare` accepts anything from one sample up to half the window. A hop
+    // of half is the one with the least overlap, and it is where the window
+    // sum thins to a half, the closest anything inside a clip comes to the
+    // floor `synthesise` divides against. Raising that floor to six tenths,
+    // which turns those samples into silence, passed every other check in this
+    // file because nothing reconstructed at that hop.
+    //
+    // Hops that do not divide into the window are in here too. They are not
+    // valid overlap-add hops and the envelope they produce is not flat, but
+    // dividing by what was actually accumulated means an untouched clip still
+    // has to come back exactly, and a caller is free to ask for one.
+    std::mt19937 rng (31337);
+    std::uniform_real_distribution<float> noise (-0.9f, 0.9f);
+
+    double worstOverall = 0.0;
+    int worstHop = 0;
+
+    for (int hop : { 1, 3, 64, 128, 171, 192, 256 })
+    {
+        Spectrogram spectrogram;
+        check (spectrogram.prepare (512, hop, 48000.0),
+               "a hop of " + std::to_string (hop) + " was refused");
+
+        for (int length : { 1, 2, 31, 129, 255, 256, 257, 300, 1000, 4096 })
+        {
+            std::vector<float> input ((size_t) length), output ((size_t) length, 0.0f);
+
+            for (auto& sample : input)
+                sample = noise (rng);
+
+            spectrogram.analyse (input.data(), length);
+            spectrogram.synthesise (output.data(), length);
+
+            double worst = 0.0;
+            int worstAt = 0;
+
+            for (int i = 0; i < length; ++i)
+            {
+                const double error = std::fabs ((double) output[(size_t) i]
+                                                - (double) input[(size_t) i]);
+
+                if (error > worst)
+                {
+                    worst = error;
+                    worstAt = i;
+                }
+            }
+
+            check (worst < 1.0e-5, "a " + std::to_string (length) + " sample clip at a hop of "
+                                   + std::to_string (hop) + " came back wrong by "
+                                   + std::to_string (worst) + " at sample "
+                                   + std::to_string (worstAt));
+
+            if (worst > worstOverall)
+            {
+                worstOverall = worst;
+                worstHop = hop;
+            }
+        }
+    }
+
+    std::printf ("    worst round trip across every accepted hop: %.2e, at a hop of %d\n",
+                 worstOverall, worstHop);
+}
+
+static void preparingAgainForgetsTheLastClip()
+{
+    // The window size is a setting somebody changes while looking at a clip,
+    // so this is an ordinary sequence and not a contrived one. Clearing the
+    // frames and leaving the count behind reports frames that are not there,
+    // and the next caller to walk them reads past the end of an empty vector.
+    // It survived every other check in this file because nothing prepared
+    // twice.
+    Spectrogram spectrogram;
+    check (spectrogram.prepare (512, 128, 48000.0), "prepare was refused");
+
+    std::vector<float> input (4000, 0.25f);
+    spectrogram.analyse (input.data(), 4000);
+    check (spectrogram.getNumFrames() > 0, "a clip produced no frames");
+
+    check (spectrogram.prepare (256, 64, 44100.0), "preparing again was refused");
+    check (spectrogram.getNumFrames() == 0, "preparing again left the last clip's frame count behind");
+    check (spectrogram.getAnalysedLength() == 0, "preparing again left the last clip's length behind");
+    check (spectrogram.getFftSize() == 256, "preparing again did not take the new window size");
+    check (spectrogram.getHop() == 64, "preparing again did not take the new hop");
+    check (spectrogram.getNumBins() == 129, "preparing again did not take the new bin count");
+
+    // And it is usable at the new size, which is the point of allowing it.
+    spectrogram.analyse (input.data(), 4000);
+    std::vector<float> output (4000, 0.0f);
+    spectrogram.synthesise (output.data(), 4000);
+
+    double worst = 0.0;
+
+    for (int i = 0; i < 4000; ++i)
+        worst = std::max (worst, std::fabs ((double) output[(size_t) i] - 0.25));
+
+    check (worst < 1.0e-5, "a clip analysed after preparing again came back wrong by "
+                           + std::to_string (worst));
+}
+
+static void aNegativeLengthIsNothingRatherThanNonsense()
+{
+    // A length arrives from a clip somewhere else, so it is worth being sure
+    // that a nonsense one reads back as nothing rather than as itself. The
+    // accessor is what a caller sizes a buffer from.
+    Spectrogram spectrogram;
+    spectrogram.prepare (256, 64, 48000.0);
+
+    std::vector<float> input (64, 1.0f);
+    spectrogram.analyse (input.data(), -17);
+
+    check (spectrogram.getAnalysedLength() == 0, "a negative length was reported back as itself");
+    check (spectrogram.getNumFrames() == 0, "a negative length produced frames");
+}
+
 static void impossibleSettingsAreRefused()
 {
     Spectrogram spectrogram;
@@ -675,6 +794,9 @@ int main()
     anEditIsTaperedRatherThanDroppedIn();
     theFrameCountIsOnePastTheLastFrameInsideTheClip();
     theEnvelopeFloorIsNeverReachedInsideTheClip();
+    everyHopThatIsAcceptedReconstructs();
+    preparingAgainForgetsTheLastClip();
+    aNegativeLengthIsNothingRatherThanNonsense();
     impossibleSettingsAreRefused();
     nothingIsAnalysedFromNothing();
 
