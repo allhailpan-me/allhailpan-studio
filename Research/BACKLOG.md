@@ -27,6 +27,207 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-05: selecting more than one note, and what a group drag must not deform
+
+### Status: in progress
+
+Branch `feature/note-selection`. Pull request to follow.
+
+### What was looked at
+
+The lane this night was the piano roll and the data model. Off limits by open
+pull request: `Source/AudioEngine.{h,cpp}`, `Source/MainComponent.{h,cpp}`,
+`Source/InputSource.h`, `Source/Tuner.h`, `Source/TunerPanel.h` and
+`Tests/run.sh` (#61, the tuner), `Source/Fx/Svf.h` (#55),
+`Source/Fx/BellMatch.h` (#66) and `Source/Envelope.h` (#65). `Source/Synth/`
+and `Source/Fx/` are being built by hand and were left alone.
+
+That ruled out most of what the backlog has been deferring. A time signature,
+the biggest single gap in the studio, wants the engine for the play head and
+the metronome accent and so is still waiting for a night when #61 has landed.
+Stem export, clip gain and the render bounds question all live in
+`renderOffline` or `renderAudioClips`. Punch recording reaches the engine too.
+
+What was left is the thing the 11-03 entry already named as "the next thing
+worth doing here": the piano roll edits exactly one note at a time. There is
+`dragNote`, singular, and drag modes for moving, resizing and erasing one
+note. There is no way to pick up a chord, no way to transpose a riff, no way
+to move eight notes a sixteenth later, and no way to quantise part of a
+pattern rather than all of it. A musician who builds patterns does those
+things constantly, and every studio checked has done them for twenty years.
+So this is the third of the three kinds of candidate the brief asks for at
+once: missing, standard everywhere else, and a workflow step that takes more
+actions here than anywhere else. Eight notes transposed an octave is eight
+drags here and one gesture in every other studio.
+
+The 11-03 entry deferred it as "almost entirely untestable UI work". That
+turns out to be wrong, and it is worth saying why, because it is the reason
+this was buildable tonight. The hit testing and the mouse plumbing are
+untestable UI. The part that will be silently wrong is not: it is the
+arithmetic of moving a set of notes as a set, and it has exactly the shape
+this project keeps getting bitten by. A group drag that clamps each note
+individually at the top of the keyboard does not error, does not crash and
+does not look broken. It flattens the top of a chord into a unison, and the
+person who did it finds out later, by ear, with no idea which gesture did it.
+That belongs in a header with no JUCE in it and a randomised test over
+thousands of generated selections, and then the component is thin.
+
+### What the research found
+
+Full report from `dsp-researcher`, from the manufacturers' own manuals. Ten
+questions were asked. Six have a published answer, four do not, and the four
+are recorded below as this project's own choices rather than borrowed
+authority, which is what `CLAUDE.md` asks for.
+
+Published, with quotes:
+
+- **A marquee selects by touching, not by containing.** Apple's own general
+  selection chapter, Logic Pro 9 User Manual chapter 8: "All elements touched,
+  or enclosed, by the selection rectangle (shaded area) are selected." Avid
+  says the same of the Grabber tool: "if any portion of the rectangle touches
+  a note (either its start or end point), the note is included in the
+  selection." No manual anywhere says a note must be fully contained. Two more
+  require one point inside: Avid's Selector tool wants the start point, and
+  Steinberg's Score editor wants the notehead. Intersection is the only
+  convention with explicit support.
+- **Shift adds, and the same Shift removes.** Unanimous but for one studio.
+  Live 12: "You can add the Shift modifier to add more notes to your current
+  selection", and "You can also remove a single note from your selection by
+  holding down Shift and clicking on it." Logic 9 for the marquee case: with
+  Shift held, "the active selection status of the elements is reversed", which
+  is a toggle over the rectangle rather than an add. Nobody documents a second
+  modifier for toggling, so none was invented. FL Studio is the exception and
+  uses Ctrl+Shift.
+- **A group keeps its relative positions.** Steinberg, Moving and Transposing
+  Note Events: "All selected note events are moved, maintaining their relative
+  positions. Snap is taken into account."
+- **At a limit the whole group stops, and breaking the shape is opt in.**
+  Apple documents this exactly, for velocity: "If the velocity value of any of
+  the selected notes reaches the minimum or maximum value (0 or 127), none of
+  the notes can be adjusted further. You can override this behavior by
+  pressing and holding Option while dragging", and then, naming the
+  consequence rather than hiding it, "By overriding, the velocity relationship
+  of this note to the other notes is altered." Ardour corroborates it from the
+  other side: its shortcut list carries a separate "(allow mush)" variant of
+  every transpose and velocity command, so the plain command does not mush.
+- **Velocity on a group is additive, not scaling.** Apple: "When you edit the
+  velocity of multiple notes, the relative differences in their velocity
+  values are retained." Nobody documents multiplicative scaling as the default
+  drag behaviour anywhere. Absolute, every note to one value, is a separate
+  documented gesture: Apple's Option-Shift, FL's Shift and drag, Studio One's
+  inspector.
+- **Length on a group is relative too, with two distinct absolute variants.**
+  Apple: "The relative differences between the lengths of the selected notes
+  are maintained", then Shift for "the same end point for the selected notes"
+  and Option-Shift to "make them all the same length". Those two diverge the
+  moment the notes have different starts, and both are useful, so both are
+  here. Studio One publishes the same three with different keys.
+- **A duplicate lands immediately after the selection and becomes the
+  selection.** Studio One: "The duplicated Event is always placed after the
+  original Event, and it is automatically selected once duplicated", and
+  explicitly not at the playhead. FL Studio's Ctrl+B: "The selection, or all
+  notes if nothing is selected, will be duplicated to the right of the
+  original selection." The second half matters: the copy becoming the
+  selection is what makes three duplicates in a row build a chain rather than
+  a pile.
+- **A moved note wins over what it lands on.** Live 12: "If the new note
+  overlaps with the beginning of the original note, the original note will be
+  overwritten. If the new note overlaps with the end of the original, the
+  original note will be shortened." The asymmetry is the rule: it turns on
+  whether the covered note's start survives.
+
+Not published anywhere, so chosen here and said so:
+
+- **Whether clicking a note that is already selected keeps the selection.**
+  Not one of the eight manuals states it, and it is the behaviour a group drag
+  depends on entirely. It is forced by documented procedures that are
+  otherwise impossible (Apple: "Select the notes, then drag either edge of one
+  selected note", with the relative lengths maintained, which needs the other
+  notes still to be there), so the selection is preserved. It is also not
+  collapsed on mouse up, because a click to audition a note should not destroy
+  a selection somebody spent a minute building.
+- **Which note anchors the snap on a group drag.** Nobody publishes it. The
+  grabbed note, because it is the only choice that puts the snap under the
+  mouse, and because the clicked note is the documented reference in every
+  other group operation. Earliest-in-selection is published by nobody and
+  would make the same drag behave differently depending on which note was
+  grabbed.
+- **Whether a group drag snaps absolutely or relatively.** Both are named,
+  first class modes, and there is no majority: Apple's "Snap Regions to
+  Absolute Value" against "Snap Regions to Relative Value", Steinberg's "Grid"
+  against "Grid Relative". Absolute is Apple's and Steinberg's default;
+  relative is Ableton's: "Note movements also snap to an 'offset,' based on
+  each note's original placement relative to the grid." Relative is the
+  default here, because it is the only one of the two that leaves a group that
+  was deliberately off the grid intact, and moving a played riff a sixteenth
+  later should not also quantise it. Absolute is available on the same path.
+- **What a group at a pitch limit does on a drag.** Published for velocity by
+  Apple, not for pitch by anybody. The same rule is used for both, which is
+  the answer the velocity text and Ardour's command names both point at.
+
+### What was rejected, and why
+
+- **Ableton's one dimensional timespan selection model.** Live's structural
+  selection is a time range: "Clicking and dragging in the MIDI Note Editor
+  selects a timespan", and notes inside it come along. It is a real divergence
+  and it is deliberately not followed: every other studio checked selects with
+  a two dimensional rectangle, and a pitch axis is half of what a piano roll
+  is for. Picking three notes out of a chord is impossible in a timespan.
+- **A second modifier for toggling, separate from adding.** Documented by
+  nobody. One modifier that does both is the published convention and
+  inventing a second would be a key nobody coming from another studio would
+  guess.
+- **Ardour's select the range between two notes.** The only studio with it,
+  and the modifier is not published in any readable form: the Ardour manual
+  renders with its modifier key macros empty and the source is behind a
+  sign in. Implementing it would mean choosing the key myself and implying
+  Ardour's authority for it. Left out rather than half sourced.
+- **Multiplicative velocity scaling, and compressing a selection toward the
+  drag.** Nobody documents either as a drag behaviour. Scaling also fails to
+  round trip through integers, so +20 then -20 would not return a pattern to
+  where it started, which is the kind of quiet damage this project is supposed
+  to refuse.
+- **Steinberg's offline Transpose Setup and its "Keep Notes in Range".** It
+  octave folds notes that would leave the range rather than clamping, which is
+  worth knowing and is not support for a clamp. It is a dialog over a
+  selection, not a drag, so it is a different feature and should not be cited
+  for this one.
+- **Reaper's behaviour, in all of it.** Deliberately absent. The Reaper user
+  guide PDFs truncate before the MIDI editor chapter through the fetch tool
+  and the wiki serves a stub, so nothing here is sourced from Reaper. Worth
+  flagging for later nights: Reaper is the one studio where marquee and
+  selection behaviour is configurable in preferences, so anything remembered
+  about it is likely to be somebody's remembered configuration rather than a
+  default.
+- **Legato, deferred rather than rejected.** It is well specified and cheap
+  once this lands: Live 12 extends or shortens each note to the next and "The
+  last note gets extended to the end of the loop", and Bitwig's Make Legato
+  treats a chord as a unit, which is the detail that stops a chord being
+  chained into a scale. It is a named command in its own right rather than
+  part of selecting, and Steinberg's own Legato topic could not be retrieved,
+  so it wants its own entry. The group length arithmetic built tonight is what
+  it will sit on.
+- **Keyboard shortcuts, deferred by file lock.** Select all, arrow key nudge,
+  arrow key transpose (Up and Down for a semitone, Shift for an octave, which
+  is the strongest consensus in the whole research: Steinberg, Bitwig, Live
+  and Ardour all publish it and agree) and Delete all need key handling, and
+  the roll sets `setWantsKeyboardFocus (false)` so that typing plays notes.
+  Routing keys to the focused view is `MainComponent`'s job and that file is
+  open in #61. Everything tonight is therefore reachable by mouse, and the
+  transpose and nudge amounts are in the header ready for the keys to call.
+  That is a real limitation and it is written into the pull request rather
+  than left for somebody to discover.
+
+### What is being built
+
+`Source/NoteSelection.h`, no JUCE, holding the arithmetic: the marquee test,
+the selection algebra, and every group edit as a transform over a note list
+and a set of selected indices. `Tests/NoteSelectionTest.cpp` over it. Then the
+piano roll grows a marquee, a group drag, a group resize, a group velocity
+drag and a menu of the operations that are not gestures.
+
+---
+
 ## 2026-11-03: quantise, and what a strength percentage is a percentage of
 
 ### Status: merged
