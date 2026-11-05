@@ -30,6 +30,33 @@
 // 1/1.2 comes back to within float epsilon, so a round trip proves nothing
 // here; a difference between two velocities survives an offset and does not
 // survive a scale.
+//
+// --- Two deliberate breakages survive on purpose -------------------------
+//
+// Written down so nobody goes looking for the test that should have caught
+// them. Both were checked rather than assumed.
+//
+// Clamping each note inside `applyMove` produces identical output, which is
+// worth saying out loud because it is the headline fault this whole header
+// exists to prevent. `planMove` has already cut the delta to one that keeps
+// every member in range, so a clamp afterwards cannot bite. The meaningful
+// versions of that mutation live in `planMove` itself and are killed hard:
+// dropping the bound against zero on the pitch ceiling fails over twenty
+// thousand checks here. The per note clamps that CAN bite, the ones on the
+// way out of a velocity or a length edit, are caught, because a note arriving
+// from a file outside the range is planted for exactly that.
+//
+// Swapping `lower_bound` for `upper_bound` in `remapAfter` is a no-op. Any
+// index present in the erased set is skipped by the `contains` guard one line
+// above, and for every index that reaches the count the two bounds agree.
+//
+// Deleting the correction on the quotient's rounding inside
+// `snappedDeltaWithin` is very nearly a no-op. Measured, it fires zero times
+// in three million realistic cases and seven times in five million
+// adversarial ones, with the phase pushed out to a billion and the grid down
+// to two to the minus twenty. It stays rather than being deleted because what
+// would have to be trusted instead is `ceil` of a rounded quotient, and a
+// delta a fraction past a limit still breaks the invariant the limit states.
 // ---------------------------------------------------------------------------
 
 #include "NoteSelection.h"
@@ -208,6 +235,24 @@ void testMarqueeIsIntersection()
            "a rectangle starting exactly at a note's end catches nothing");
     check (NoteSelection::caught (n, NoteSelection::Rect::between (2.0, 4.001, 0, 127)),
            "a rectangle reaching just past a note's start catches it");
+
+    // A zero length note. Planting them in the generator is not enough on its
+    // own: inside a rectangle, the span test and the point test agree, so
+    // they only come apart at an exact edge, and random doubles never land on
+    // one. These are the cases that distinguish them, and without the branch
+    // a zero length note loaded from a file could be caught by no rectangle
+    // at all and so could never be selected or deleted.
+    Note zero;
+    zero.start = 4.0; zero.length = 0.0; zero.note = 60;
+
+    check (NoteSelection::caught (zero, NoteSelection::Rect::between (4.0, 4.0, 60, 60)),
+           "a click exactly on a zero length note catches it");
+    check (NoteSelection::caught (zero, NoteSelection::Rect::between (4.0, 6.0, 0, 127)),
+           "a rectangle starting exactly on a zero length note catches it");
+    check (NoteSelection::caught (zero, NoteSelection::Rect::between (2.0, 4.0, 0, 127)),
+           "a rectangle ending exactly on a zero length note catches it");
+    check (! NoteSelection::caught (zero, NoteSelection::Rect::between (4.5, 6.0, 0, 127)),
+           "and a rectangle past it catches nothing");
 
     // A pitch is a row rather than a span, so a one row rectangle has to work.
     check (NoteSelection::caught (n, NoteSelection::Rect::between (4.5, 4.5, 60, 60)),
@@ -399,7 +444,19 @@ void testGroupMovePreservesShape()
             if (which < 0.15) n.note = 127;
             else if (which < 0.30) n.note = 0;
             else if (which < 0.40) n.note = rng.intBetween (120, 127);
-            if (rng.unit() < 0.2) n.start = 0.0;
+            // Outside the range a file is supposed to hold, and before the
+            // pattern's origin. Neither can come from an edit here, and both
+            // can come from a file, and without them the claim that nothing
+            // is clamped per note on the way out is untested: a per note
+            // clamp can only be seen through a note that is outside the
+            // clamp's own range, and every note the generator made was
+            // inside it.
+            else if (which < 0.44) n.note = rng.intBetween (128, 140);
+            else if (which < 0.48) n.note = rng.intBetween (-12, -1);
+
+            const double where = rng.unit();
+            if (where < 0.2) n.start = 0.0;
+            else if (where < 0.26) n.start = -rng.between (0.1, 3.0);
         }
 
         const auto sel = randomSelection (rng, count);
@@ -789,9 +846,15 @@ void testVelocityOnAGroup()
             // whole reason the floor is not zero, and a check written as
             // "at least kMinVelocity" passes happily when kMinVelocity is
             // nothing.
+            // Against MidiTimebase's own floor rather than against this
+            // header's constant, so that setting the constant to zero fails
+            // here. Written the other way, "at least kMinVelocity" passes
+            // happily when kMinVelocity is nothing, and then an edit could
+            // write a velocity of zero, which every studio reads as a note
+            // off: the note would vanish on the way through a file.
             if (wasAboveFloor)
-                check (midiVelocityToByte (grouped[index].velocity) >= 1,
-                       "no velocity is driven to what a file reads as a note off");
+                check (grouped[index].velocity >= midiVelocityFromByte (1) - 1e-7,
+                       "no velocity is driven below the lowest a file can carry");
             else
                 check (grouped[index].velocity >= before[index].velocity - 1e-7,
                        "a velocity already under the floor is not pushed further down");
@@ -799,6 +862,18 @@ void testVelocityOnAGroup()
             check (grouped[index].velocity <= NoteSelection::kMaxVelocity + 1e-7,
                    "no velocity goes over the top");
         }
+
+        // A limit stops an edit and never forces one, here as everywhere else.
+        // A note arriving from a file below the floor must not turn a request
+        // to quieten the group into one that makes it louder.
+        if (amount <= 0.0)
+            for (const auto index : sel)
+                check (grouped[index].velocity <= before[index].velocity + 1e-7,
+                       "a request to quieten never makes anything louder");
+        if (amount >= 0.0)
+            for (const auto index : sel)
+                check (grouped[index].velocity >= before[index].velocity - 1e-7,
+                       "and a request to lift never makes anything quieter");
 
         for (size_t i = 0; i < count; ++i)
             if (! NoteSelection::contains (sel, i))
