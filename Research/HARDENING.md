@@ -7,6 +7,31 @@ Newest first.
 
 ---
 
+## 2026-11-05: the resynthesis after a spectral repair
+
+### What is being audited
+
+`Source/Spectrogram.h`: the short time analysis and the weighted overlap-add
+that puts a clip back together after an edit. It is the floor under the
+spectral editor, and the half of it that fails quietly is the resynthesis:
+a chain with the wrong window or the wrong hop returns audio that is a little
+scalloped, and the person using it blames the repair they just made.
+
+The suspicion going in is that `Tests/SpectrogramTest.cpp` is weaker than it
+looks in one specific way: every reconstruction check it makes runs over
+frames that nothing touched. With untouched frames the analysis window and the
+accumulated envelope cancel exactly, so the round trip is exact whatever the
+synthesis stage multiplies by, as long as it is consistent with what it
+divides by. If that is right, then the one thing the header exists to get
+right, the shape of the taper on the way out, is not pinned by the round trip
+at all, and the only check on the window is `overlapEnvelope`, which is a
+second copy of the accumulation loop rather than the one `synthesise` runs.
+
+To do: mutate, count, decide which survivors are gaps and which are no-ops,
+then write what the survivors ask for.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
