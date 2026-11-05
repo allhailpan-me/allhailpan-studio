@@ -1,6 +1,68 @@
-You can tidy a part you played in now: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can pick up more than one note at a time.** Until now the piano roll
+edited exactly one note per gesture. There was no way to grab a chord, move a
+riff a sixteenth later, or transpose eight notes together: you did it one note
+at a time, eight times, and hoped you had not nudged one of them sideways on
+the way.
+
+There is a Select tool next to Draw and Delete. Drag a rectangle round the
+notes you want, or hold Ctrl (Command on a Mac) and drag to do the same thing
+without leaving the Draw tool. The rectangle catches anything it touches
+rather than only what it surrounds, which is what every studio that says
+anything about it does, so you do not have to lasso a long note from end to
+end. Shift and a click adds a note to the selection or takes it out again,
+Shift over a rectangle flips whatever it catches, and clicking a note that is
+already selected picks up the whole group rather than throwing the rest away.
+
+Drag the group and it moves as a group. That is the part that took the most
+care, and it is worth knowing what it protects you from. If a chord is near
+the top of the keyboard and you drag it up too far, every note stops together
+and the chord stays a chord. The obvious way to write it lets the top note
+stop while the others carry on, which turns a chord into a unison, makes no
+sound you would notice at the time, and leaves you finding it later by ear
+with no idea which gesture did it. The same rule runs through transposing, the
+velocity and the lengths: nothing in a group ever moves without the rest of
+it.
+
+A Selection button holds everything that is not a gesture: select all, none or
+invert, transpose by a semitone or an octave, nudge the velocity up or down,
+duplicate, and delete. Duplicate puts the copy immediately after what you
+selected and then selects the copy, so pressing it three times lays three
+copies end to end instead of piling them in one place.
+
+Drag a velocity marker belonging to a selected note and the whole selection
+moves together, keeping the differences between them, so a ramp you played
+stays a ramp instead of flattening the moment the loudest note hits the top.
+Painting a row of velocities flat still works exactly as it did, because that
+is still the quickest way to do that. Drag the right edge of a selected note
+and they all resize together keeping their relative lengths; hold Shift while
+you drag and they all end at the same point instead; hold Ctrl or Command and
+they all get the same length.
+
+Dragging a group snaps the note you grabbed to the grid, which is what
+dragging one note has always done here, so nothing you already do changes.
+There is a second mode on the Selection menu, under "Moving a group snaps to",
+that moves the group by whole steps and leaves every note exactly as far off
+the grid as you played it. Neither mode quantises anything: the group always
+keeps its own internal timing, and the two differ only in where the note you
+grabbed lands. Alt still ignores the grid entirely.
+
+One thing it now does that it did not before: if you move a note on top of
+another note at the same pitch, the one you moved wins, and the one underneath
+is shortened to meet it or removed if it was covered completely. That is
+Ableton's rule and it is there because two notes at one pitch overlapping is a
+thing that will or will not sound depending on the synth receiving it, which
+is the worst kind of problem to have in a file. It only happens when you
+actually move something: clicking a note to hear it leaves everything alone.
+
+What is missing, and is the next thing to do here: none of this is on the
+keyboard yet. No Ctrl+A, no arrow keys to nudge or transpose, no Delete key.
+That needs the main window to hand key presses to whichever view you are in,
+and that part of the code is being changed for something else at the moment.
+Everything is reachable with the mouse in the meantime.
 
 **You can tidy a part you played in.** There is a Quantise button on the piano
 roll's toolbar now, and until this there was no way at all to move a played
