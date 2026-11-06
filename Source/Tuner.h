@@ -478,14 +478,22 @@ public:
         // The longest lag that is SEARCHED, which is the period of the lowest
         // note, and then two more lags that are only ever COMPUTED.
         //
-        // Those two are not slack. A dip is recognised by comparing a lag
-        // against both its neighbours, and interpolated from both of them, so
-        // the dip belonging to the lowest note in the range needs a lag beyond
-        // it to exist. Without them the lowest note is the one note the
+        // One of those two is needed and the other is slack, and it is worth
+        // saying which rather than calling both of them necessary. A dip is
+        // recognised by comparing a lag against both its neighbours, and
+        // interpolated from both of them, so the dip belonging to the lowest
+        // note in the range needs the lag above it to exist: the highest index
+        // any reader touches is `searchMaxLag + 1`, which is
+        // `tauMaxSamples - 1`. Without it the lowest note is the one note the
         // estimator cannot see as a dip at all: it falls through to the global
         // minimum fallback, and a tuner that does not display its fallback
         // then shows nothing on the open B of a five string bass. Measured
         // before it was fixed, which is the only reason it is written down.
+        //
+        // The second lag is computed every call and read by nothing. It is one
+        // lag of arithmetic and it is kept, because two is the figure the
+        // measurement above was taken with, but an audit asked and the honest
+        // answer is slack rather than requirement.
         searchMaxLag  = (int) std::ceil (s.sampleRate / s.lowestHz);
         tauMaxSamples = searchMaxLag + 2;
 
@@ -922,6 +930,30 @@ private:
     a pedal appears to be, and the trade is deliberate: the alternative is a
     display that opens earlier on a string that is still falling. A tighter
     figure does not make the tuner faster, it makes it read sharp.
+
+    WHY THE SPREAD IS NOT ENOUGH ON ITS OWN, AND WHAT SAMPLES IT
+
+    The spread is taken across the window rather than the first to last
+    difference, so that a pitch wandering up and down is not read as settled
+    because it happened to come back to where it started. That is the right
+    rule and it is not sufficient, because the readings are a sampling of the
+    pitch and the rule can only see what the sampling catches.
+
+    Sample a vibrato at exactly its own rate and every reading lands at the
+    same phase. The four of them then agree to a hundredth of a cent, the
+    spread is nothing, and the display opens, bright and settled, on a note
+    moving by tens of cents. Measured on this gate with a fixed interval: a
+    220.000 Hz note with a 20 cent vibrato at the reading rate reads 19.1
+    cents sharp. A player would flatten a correctly tuned string by a fifth of
+    a semitone on the strength of it.
+
+    This is not a remote case at the rates where a reading costs more than the
+    interval, because the reading rate then falls to 5.2 a second at 96 kHz
+    and 1.3 at 192, and 5.2 Hz is the middle of what a singer's vibrato and a
+    guitarist's hand both do. The defence is not in here: it is that the
+    interval between readings is dithered, so that no modulation rate can sit
+    at one phase. See `Pacing` below, which is where that lives and where the
+    measurement of how well it works is described.
 */
 struct GateSettings
 {
@@ -945,19 +977,44 @@ struct GateSettings
         0.38 s is half a cent. */
     double settleCentsPerSecond = 1.3;
 
-    /** The interval between calls to `Analyser::process`, in seconds.
+    /** Roughly how often the caller intends to call `Analyser::process`, in
+        seconds.
 
-        This is the one figure in here the caller has to get right, because a
-        rate cannot be measured without it, and it is a parameter rather than
-        an assumption so that it is the caller's own number rather than a
-        constant in two places that have to agree. Passing a figure that does
-        not match how often `process` is really called scales the measured rate
-        by exactly the ratio of the two.
+        This used to be the one figure in here the caller had to get right,
+        because the span the rate is divided by was this figure times the frame
+        count. It is not any more, and the reason is worth recording, because
+        the old arrangement was audited twice and passed both times.
 
-        A tenth of a second, which is ten readings a second: fast enough that a
-        player sees the needle respond, and slow enough that the analysis,
-        which is a few milliseconds of work, costs a few per cent of one core. */
+        A readout's real interval is not a constant. It is whatever is left of
+        the nominal after the reading has been taken, and above 48 kHz a
+        reading costs more than the whole interval, so the interval becomes a
+        multiple of the reading's own cost instead: measured, 100 ms at 44.1
+        and 48 kHz, 192 ms at 96 and 788 ms at 192. The readout that shipped
+        passed this constant anyway, so at 96 kHz the gate was told 0.1 when
+        the truth was 0.192 and reported every rate 1.92 times too fast, and at
+        192 kHz 7.88 times too fast. The direction happened to be the safe one,
+        which is exactly why nobody saw it: the gate was stricter than
+        specified rather than looser, and the only cost was waiting.
+
+        So `process` now takes the real interval per call and sums the ones in
+        its window. This figure is what is assumed when a caller does not
+        supply one, and the scale `stallFrames` is expressed in. Nothing in the
+        measurement depends on it any more. */
     double frameSeconds = 0.1;
+
+    /** How many nominal intervals a gap between readings may reach before the
+        window is thrown away rather than measured across.
+
+        A slow frame is ordinary and must not cost the window: a loaded machine
+        delivers them regularly, and clearing the history for each one would
+        mean the display never opens. A gap of several intervals is a different
+        thing, a descheduled thread or a window being reopened, and readings
+        either side of one are not a measurement of how fast the string is
+        moving now. Measured across one, a real pitch movement divided by a
+        real stall reads as settled. Four, which is slow enough that the
+        ordinary case survives it and fast enough that a stall of half a second
+        at 44.1 kHz does not. */
+    double stallFrames = 4.0;
 };
 
 /** The estimator, the gate and the reference pitch together: what a readout
@@ -1006,9 +1063,29 @@ public:
         // A rate of zero asks for a pitch that has stopped moving to the last
         // bit, which never happens, so the display would never open.
         g.settleCentsPerSecond = std::max (1.0e-4, g.settleCentsPerSecond);
-        g.frameSeconds         = std::min (1.0, std::max (1.0e-3, g.frameSeconds));
+        g.frameSeconds         = clampFrameSeconds (g.frameSeconds);
+
+        // Two, because a window has to survive one slow frame: a loaded
+        // machine delivers those regularly, and a bound that cleared the
+        // history for each one would mean the gate never filled its window.
+        g.stallFrames = std::max (2.0, g.stallFrames);
         reset();
     }
+
+    /** Update the caller's nominal pacing without disturbing a window that is
+        already filling.
+
+        Separate from `configure` on purpose, which calls `reset`. A readout's
+        pacing drifts with load, every readout's does, and throwing the window
+        away each time it drifted would mean the display reopened every time
+        the machine got busy. Nothing in the measurement depends on this
+        figure: the span is summed from the intervals handed to `process`. */
+    void setFrameSeconds (double seconds) noexcept
+    {
+        g.frameSeconds = clampFrameSeconds (seconds);
+    }
+
+    double getFrameSeconds() const noexcept { return g.frameSeconds; }
 
     void setReferenceHz (double hz) noexcept
     {
@@ -1034,7 +1111,19 @@ public:
     int requiredSampleCount() const noexcept { return detector.requiredSampleCount(); }
     const Detector& getDetector() const noexcept { return detector; }
 
+    /** With no interval supplied, the nominal one is assumed. Convenient for a
+        caller whose pacing really is fixed, and for a test. */
     Reading process (const float* x, int n) noexcept
+    {
+        return process (x, n, g.frameSeconds);
+    }
+
+    /** `elapsedSeconds` is the real time since the previous call, which is the
+        only thing that can measure a rate. A caller that has a clock should
+        pass what the clock said rather than what it meant to do, because the
+        two differ by the cost of the reading and above 48 kHz that cost is
+        larger than the interval. */
+    Reading process (const float* x, int n, double elapsedSeconds) noexcept
     {
         const auto e = detector.estimate (x, n);
 
@@ -1070,7 +1159,19 @@ public:
         // of a guitar, where a quarter of a hertz does not.
         const double absoluteCents = 1200.0 * std::log2 (e.hz);
 
-        history.push_back (absoluteCents);
+        // Clamped rather than trusted, and the direction of each clamp is the
+        // whole point of having them. A figure near zero would divide by
+        // nearly nothing and report an enormous rate, which only ever holds
+        // the display shut. The upper bound is generous because a legitimate
+        // interval really is most of a second at 192 kHz, and truncating a
+        // long one understates the span, which overstates the rate, which is
+        // the safe direction too. Neither clamp can open the gate early.
+        const double sincePrevious = std::min (10.0, std::max (1.0e-4, elapsedSeconds));
+
+        if (sincePrevious > g.stallFrames * g.frameSeconds)
+            history.clear();     // see GateSettings::stallFrames
+
+        history.push_back ({ absoluteCents, sincePrevious });
 
         if ((int) history.size() > g.stabilityFrames)
             history.erase (history.begin());
@@ -1080,19 +1181,26 @@ public:
         if ((int) history.size() >= g.stabilityFrames)
         {
             // How far the pitch travelled across the window, over how long
-            // the window is. The spread of the readings rather than the first
-            // to last difference, so that a pitch wandering up and down is not
-            // read as settled because it happened to come back to where it
-            // started.
-            double lowest = history.front(), highest = history.front();
+            // the window really was. The spread of the readings rather than
+            // the first to last difference, so that a pitch wandering up and
+            // down is not read as settled because it happened to come back to
+            // where it started.
+            double lowest = history.front().cents, highest = lowest;
 
-            for (auto c : history)
+            for (const auto& f : history)
             {
-                lowest  = std::min (lowest, c);
-                highest = std::max (highest, c);
+                lowest  = std::min (lowest, f.cents);
+                highest = std::max (highest, f.cents);
             }
 
-            const double span = (double) (history.size() - 1) * g.frameSeconds;
+            // Summed from the intervals that were actually measured, rather
+            // than the nominal one multiplied by the frame count. The oldest
+            // frame's interval belongs to the hop before this window, so it is
+            // not in the sum: four readings span three hops.
+            double span = 0.0;
+
+            for (std::size_t i = 1; i < history.size(); ++i)
+                span += history[i].sincePrevious;
 
             r.movingCentsPerSecond = (highest - lowest) / std::max (1.0e-9, span);
 
@@ -1120,12 +1228,185 @@ public:
     }
 
 private:
+    /** One reading, with how long it was after the one before it. The interval
+        is stored per frame rather than assumed, because that is the only way
+        the span can be the real one when the pacing varies. */
+    struct Frame
+    {
+        double cents         = 0.0;
+        double sincePrevious = 0.0;
+    };
+
+    /** The upper bound is ten seconds rather than one, because a legitimate
+        interval at 192 kHz is already most of a second and a device faster
+        than the studio's range would be slower still. */
+    static double clampFrameSeconds (double seconds) noexcept
+    {
+        return std::min (10.0, std::max (1.0e-3, seconds));
+    }
+
     Detector     detector;
     GateSettings g;
     double       referenceHz = Scale::standardReferenceHz;
 
-    std::vector<double> history;
-    Reading             last;
+    std::vector<Frame> history;
+    Reading            last;
+};
+
+//==============================================================================
+/** How long to wait before the next reading, and why that is not the same
+    length every time.
+
+    This is arithmetic, not plumbing, so it lives here where a test can drive
+    tens of thousands of passes through it in a second. `TunerPanel.h` keeps
+    only the clock and the sleep. `CLAUDE.md` records twice what happens when a
+    figure this load bearing lives in the window instead, which is that nothing
+    tests it until somebody is reading a bug report.
+
+    IT HAS TWO JOBS.
+
+    The first is holding the analysis thread to a fraction of a core. A reading
+    costs work proportional to the square of the sample rate, because the
+    window is a fixed duration and the difference function is quadratic in it.
+    Measured, release build:
+
+    | sample rate | buffer         | one reading |
+    |---|---|---|
+    |  44100 | 5734  (130 ms) |   9 ms |
+    |  48000 | 6239  (130 ms) |  11 ms |
+    |  96000 | 12473 (130 ms) |  48 ms |
+    | 192000 | 24939 (130 ms) | 197 ms |
+
+    So a tenth of a second between readings is not for sale at the top of that
+    range at any price, and asking for it anyway would spin a core for as long
+    as the tuner is open, in a process that is also running a device callback.
+    The wait is therefore the longer of what is left of the nominal interval
+    and `dutyMultiple` times what the reading itself cost.
+
+    The second job is the one that was nearly shipped wrong, so it gets the
+    space. The gate decides a string has settled from the spread of the last
+    few readings, and those readings are a sampling of the pitch at whatever
+    rate this returns. A sampling at a fixed interval is blind to any
+    modulation whose period divides it: every reading lands at the same phase,
+    the four of them agree to a hundredth of a cent, and the display opens
+    bright and settled on a note moving by tens of cents. Measured on the
+    shipped gate at a fixed interval, a 220.000 Hz note with a 20 cent vibrato
+    at the reading rate reads 19.1 cents sharp.
+
+    And the rates it happens at are not remote, because of the first job. Where
+    the duty cycle takes over the reading rate is 5.2 a second at 96 kHz and
+    1.3 at 192, and 5.2 Hz is the middle of what a singer's vibrato and a
+    guitarist's hand both do. At 44.1 and 48 kHz the reading rate is 10 a
+    second, which is above the band, which is why every measurement taken while
+    this was written missed it.
+
+    So the interval is dithered: each wait is multiplied by a factor drawn from
+    `[1, 1 + jitter]`, which scatters the phase the pitch is sampled at and
+    leaves no modulation rate able to hide behind the reading rate. The draw is
+    splitmix64 with the caller's own seed, for the reason `PanOneBreed.h`
+    carries its own generator rather than using `<random>`: the standard
+    distributions are not specified exactly, so the same seed gives a different
+    sequence on MSVC, and a measurement of how well a dither works has to be a
+    measurement of the sequence that ships.
+
+    What it costs is responsiveness and nothing else. The mean interval is
+    `1 + jitter/2` times the nominal, so at 44.1 kHz the needle responds every
+    120 ms rather than every 100. It cannot cost accuracy, because the gate's
+    criterion is a rate and the real interval is handed to it per reading.
+
+    WHAT IT DOES NOT DO. Dithering makes a coherent modulation unlikely to pass
+    rather than impossible, because the gate is re-evaluated every reading and
+    four of them could land at nearly one phase by luck. That residual is
+    measured rather than asserted: `Tests/TunerTest.cpp` sweeps the vibrato
+    band at several depths and holds the worst reading that gets through to the
+    same one cent the rest of the design is built around.
+
+    The real fix for the whole business is to decimate the tap to a fixed
+    analysis rate, so the reading rate stops depending on what the interface
+    happens to be set to. That is a filter design job with a specification
+    behind it rather than a constant to change, and it is written up as the
+    next step in `Research/BACKLOG.md`.
+*/
+class Pacing
+{
+public:
+    struct Settings
+    {
+        /** What the interval would be if a reading were free. A tenth of a
+            second: fast enough that a player sees the needle move, slow enough
+            that the analysis costs a few per cent of one core. */
+        double nominalSeconds = 0.1;
+
+        /** The multiple of a reading's own cost that the wait must be at
+            least, which is what caps this thread's share of a core. Three
+            holds it under a quarter. */
+        double dutyMultiple = 3.0;
+
+        /** How far an interval may be stretched, as a fraction of itself.
+
+            A quarter of a cycle of phase scatter is enough to stop a
+            modulation sitting still against the reading rate. Four tenths is
+            taken because the only thing it costs is responsiveness, and the
+            thing it is defending against is a confidently wrong number. */
+        double jitter = 0.4;
+    };
+
+    void configure (const Settings& s, std::uint64_t seed) noexcept
+    {
+        cfg = s;
+        cfg.nominalSeconds = std::max (1.0e-3, cfg.nominalSeconds);
+        cfg.dutyMultiple   = std::max (0.0, cfg.dutyMultiple);
+        cfg.jitter         = std::min (4.0, std::max (0.0, cfg.jitter));
+
+        // Taken as given, zero included, so that a caller can reproduce a
+        // sequence. Zero is not a fixed point of this generator: its state
+        // advance is an addition.
+        state = seed;
+    }
+
+    const Settings& settings() const noexcept { return cfg; }
+
+    /** How long to wait before taking the next reading, in seconds, given what
+        the last one cost in seconds. */
+    double nextWait (double spentSeconds) noexcept
+    {
+        const double spent = std::max (0.0, spentSeconds);
+        const double base  = std::max (cfg.nominalSeconds - spent, spent * cfg.dutyMultiple);
+
+        // Never zero. A wait of nothing, on a machine where the reading came
+        // back in no measurable time at all, is a spin.
+        return std::max (1.0e-4, base) * (1.0 + cfg.jitter * nextUnit());
+    }
+
+    /** The whole interval one pass occupies: the reading and then the wait.
+        What a caller hands the gate when it has no clock of its own. */
+    double expectedHop (double spentSeconds) noexcept
+    {
+        return std::max (0.0, spentSeconds) + nextWait (spentSeconds);
+    }
+
+private:
+    /** splitmix64, from Steele, Lea and Flood, "Fast splittable pseudorandom
+        number generators", OOPSLA 2014. The same generator `PanOneBreed.h`
+        uses, and for the same reason. */
+    std::uint64_t nextBits() noexcept
+    {
+        state += 0x9e3779b97f4a7c15ull;
+        std::uint64_t z = state;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+        return z ^ (z >> 31);
+    }
+
+    /** Uniform on [0, 1). The top 53 bits over a power of two, so the division
+        is exact and every representable value in the interval is reachable. */
+    double nextUnit() noexcept
+    {
+        return (double) (nextBits() >> 11) * (1.0 / 9007199254740992.0);
+    }
+
+    Settings      cfg;
+    std::uint64_t state = 0;
 };
 
 //==============================================================================
@@ -1269,5 +1550,75 @@ private:
     std::vector<float>         buffer;
     std::atomic<std::uint64_t> written { 0 };
 };
+
+//==============================================================================
+/** The highest sample rate the studio will open a device at.
+
+    Here rather than in the engine because the ring's capacity is derived from
+    it, and the derivation has to be somewhere a test can compile. Changing
+    this alone is not enough to support a faster device: see
+    `studioRingCapacity` for what else the figure decides, and note that one
+    reading's cost grows as the square of this.
+*/
+inline constexpr double highestStudioSampleRate = 192000.0;
+
+/** The largest block the device callback will be handed in one call.
+
+    Drivers offer powers of two up to 2048 commonly and 4096 or 8192 on a few
+    ASIO devices, and nothing in the studio refuses a large one, so the bound
+    is the generous end of that rather than the common end. It is a bound and
+    not a measurement: a block larger than this does not break the ring's
+    write, which keeps only the newest `capacity` samples, it breaks the
+    reader's tear check, which is why it has to be bounded here rather than
+    discovered at runtime.
+*/
+inline constexpr int largestStudioBlockSamples = 8192;
+
+/** The smallest ring that can serve an estimator at this rate without the tear
+    check being optimistic, given the largest block the callback will deliver.
+
+    This is `InputRing`'s stated requirement, `capacity >= snapshot + 2 * block`,
+    as arithmetic instead of prose. It was prose, and the two numbers it relates
+    met in `AudioEngine.cpp`, which no test can compile: an audit pointed out
+    that halving the engine's constant to a figure that still looked generous
+    would have silently started accepting torn snapshots, with nothing to
+    error, assert or fail.
+*/
+inline int requiredRingCapacity (double sampleRate, int maxBlockSamples, const Spec& base = {})
+{
+    Spec s = base;
+    s.sampleRate = sampleRate;
+
+    Detector d;
+    d.configure (s);
+
+    return d.requiredSampleCount() + 2 * std::max (0, maxBlockSamples);
+}
+
+/** What the studio's own ring is sized to, once, at construction.
+
+    Sized for the worst case the studio can be asked for rather than for the
+    device that happens to be open, because resizing it would allocate while
+    the audio thread may be writing into it.
+*/
+inline int studioRingCapacity()
+{
+    const int required = requiredRingCapacity (highestStudioSampleRate, largestStudioBlockSamples);
+
+    Spec s;
+    s.sampleRate = highestStudioSampleRate;
+
+    Detector d;
+    d.configure (s);
+
+    // The requirement is what makes the tear check sound. Four times the
+    // snapshot is what the measurement in `InputRing`'s comment found tears
+    // nothing at all: none in 412710 against 29 in 147572 at one snapshot plus
+    // a block. So take the larger of the two, which is correctness first and
+    // then the margin a measurement says is worth paying for. At 192 kHz the
+    // margin wins; at a hypothetical rate where blocks dominate the
+    // requirement would.
+    return std::max (required, 4 * d.requiredSampleCount());
+}
 
 } // namespace Tuner
