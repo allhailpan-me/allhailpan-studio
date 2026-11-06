@@ -118,7 +118,16 @@ namespace LatencyGraph
 
         /** Per insert: clipDelay plus its own effects. Part of the result
             rather than a local so that reusing a Result reuses this too, and
-            because the test needs it to say when a send leaves its source. */
+            because the test needs it to say when a send leaves its source.
+
+            Index 0 is left at zero rather than filled in, and that is worth
+            writing down because the sentence above would otherwise promise
+            something it does not deliver. The master's own effects run after
+            every insert has been summed into it, so they sit downstream of
+            the point all of this is measured to: they belong to
+            `totalLatency` and to nobody's alignment. A figure here would be a
+            second name for that one number, and two names for one number is
+            how they come to disagree. */
         std::vector<int> outLat;
 
         int masterIn      = 0;   /**< where everything lines up */

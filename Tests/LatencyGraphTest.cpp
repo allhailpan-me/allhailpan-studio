@@ -16,6 +16,7 @@
 //   channel main    own + channelDelay + fxLatency[insert] + insertDelay[insert]
 //   channel bus     own + busDelay[b]  + fxLatency[to]     + insertDelay[to]
 //   send i -> t     outLat[i] + sendDelay[i][s] + fxLatency[t] + insertDelay[t]
+//   playlist clip   clipDelay[i] + fxLatency[i] + insertDelay[i]
 //
 // All of those must equal masterIn. That one equality is the whole purpose of
 // the compensation, and it is checked over thousands of generated mixers
@@ -28,11 +29,55 @@
 // treatment: assert that it is early, assert by exactly how much, and assert
 // that the send copy of it is not quietly put back.
 //
+// --- What that equality cannot see, learned by trying to break it ---------
+//
+// Eighty four mutations of the header; the first sixty two caught forty one.
+// Four things the arrival property is blind to, each now checked some other
+// way, because every one of them was a mutation that survived.
+//
+// It cannot see a figure that leaves the mixer rather than reaching a delay
+// line. `totalLatency` is the only one, and nothing here touched it: the
+// engine hands it to RecordAlign as engineLatency, so an error in it does not
+// smear the mix at all, it writes the take somebody has just played down in
+// the wrong place. Three breakages of it survived everything else.
+//
+// It cannot see an index that both the implementation and this file resolve
+// the same wrong way. The walk below calls clampDestination and clampInsert
+// itself, so a mutant clamp moves both sides of the equality together and it
+// still balances. Three of those survived, one reading past the end of the
+// graph. The two clamps are asserted directly as well now, which is the only
+// thing that can see them.
+//
+// It cannot see a defence against an input nothing generates. Four guards
+// against a negative reported latency, and two reads past the end of a short
+// bus list, all survived a generator that only ever produced sensible
+// mixers. The generator is deliberately hostile now: a latency is sometimes
+// negative, an index sometimes off either end, and the two bus lists
+// sometimes disagree in length, rarely rather than often so the bulk of the
+// trials stay realistic.
+//
+// It cannot see a route it does not walk. A playlist clip was covered only
+// where a channel happened to share the insert, so an insert carrying a clip
+// and no instrument was unchecked, and so was insert 0, which can carry one
+// and has nothing after it to catch it up. And a send that may not legally go
+// where it points is skipped by the walk, since it carries no audio either,
+// so the delay it is given was looked at by nothing: the one check on it
+// built a mixer with nothing loaded anywhere else and so compared zero
+// against zero.
+//
+// Nine mutations survive on purpose and are written up in
+// Research/HARDENING.md with the measurement that says so: four dead clamps
+// whose inputs cannot go negative, four defensive assigns on rows written in
+// full in any case, and one guard an outer maximum already absorbs. Each was
+// compiled beside the real header and driven with a million identical
+// randomised mixers without changing one field of the answer.
+//
 //   ./Tests/run.sh
 // ---------------------------------------------------------------------------
 
 #include "LatencyGraph.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -206,6 +251,19 @@ namespace walk
                                        || isMonitored (setup, to) });
             }
         }
+
+        // Playlist audio, which is a source in its own right and was not
+        // walked here before. A clip is not held back through a delay line at
+        // all: the engine reads it that much further back in the arrangement,
+        // which costs nothing, so clipDelay is the whole of its head start and
+        // everything downstream of the insert's input still applies. It needs
+        // its own entry because an insert carrying a clip and no instrument
+        // was unchecked, and because insert 0 can carry one: a clip dropped on
+        // the master has nothing after it to catch it up.
+        for (int i = 0; i < numInserts; ++i)
+            out.push_back ({ result.clipDelay[(size_t) i] + fx (setup, i) + hold (i),
+                             "a playlist clip on insert " + std::to_string (i),
+                             i, isMonitored (setup, i) });
 
         return out;
     }
@@ -527,14 +585,34 @@ static void sendsMayOnlyGoForwards()
     checkEqual (LatencyGraph::isLegalSendTarget (5, 0, 17) ? 1 : 0, 0, "into the master is not");
     checkEqual (LatencyGraph::isLegalSendTarget (5, 17, 17) ? 1 : 0, 0, "past the end is not");
 
+    // Insert 5 is deliberately made a late destination before anything sends
+    // backwards into it. Without that, the delay a backwards send would
+    // wrongly be given is zero anyway and the check below passes while
+    // proving nothing: it was exactly that vacuous, and a breakage that gave
+    // every backwards send its destination's whole hold back walked straight
+    // through it.
     auto setup = mixer (17, 2);
+    setup.inserts[1].fxLatency = 2048;
+    setup.inserts[1].sendTo[0] = 5;          // forwards: this one is real
     setup.inserts[9].fxLatency = 128;
     setup.inserts[9].sendTo[0] = 5;          // backwards, must be ignored
+    setup.inserts[9].sendTo[1] = 9;          // onto itself, must be ignored
+
     const auto result = LatencyGraph::compute (setup);
 
-    checkEqual (result.clipDelay[5], 0,
-                "a backwards send was acted on, which is a feedback loop");
+    checkEqual (result.clipDelay[5], 2048,
+                "insert 5 should be waiting for the forward send and nothing else");
     checkEqual (result.sendDelay[9][0], 0, "a backwards send should carry no delay");
+    checkEqual (result.sendDelay[9][1], 0, "a send onto its own insert should carry no delay");
+
+    // And the other half of the rule: a backwards send must not raise its
+    // destination either, which would be the feedback loop itself.
+    auto loop = mixer (17, 2);
+    loop.inserts[9].fxLatency = 128;
+    loop.inserts[9].sendTo[0] = 5;
+
+    checkEqual (LatencyGraph::compute (loop).clipDelay[5], 0,
+                "a backwards send was acted on, which is a feedback loop");
 }
 
 //==============================================================================
@@ -635,6 +713,299 @@ static void reusingAResultCannotLeaveAnythingBehind()
 }
 
 //==============================================================================
+/** How far behind the playhead the finished mix leaves the studio.
+
+    `totalLatency` is the one figure in here that goes somewhere other than a
+    delay line, and nothing in this file checked it. The engine stores it, and
+    `AudioEngine::getPluginLatencySamples` hands it to `RecordAlign.h` as
+    `engineLatency`, which is how far back every recorded take is written down.
+
+    So an error in it does not smear the mix at all. It puts the performance
+    somebody has just played in the wrong place on the timeline, which is the
+    exact fault `RecordAlign.h` exists to fix, and being a figure with nothing
+    over it is exactly how the first three versions of that fault survived
+    several releases.
+
+    It is `masterIn` plus the master's own effects, and both halves have to be
+    there. The master's chain runs after every insert has been summed into it,
+    so it is downstream of the point all the alignment is measured to: it adds
+    to nobody's delay line and to this one figure.
+*/
+static void theMixerSaysHowFarBehindItRuns()
+{
+    // A lookahead limiter on the master, which is where one usually is, and
+    // another on an insert, so the two halves of the figure are different
+    // numbers and cannot be confused for each other.
+    auto setup = mixer (17, 4);
+    setup.inserts[0].fxLatency = 2048;
+    setup.inserts[4].fxLatency = 300;
+    setup.channels[0].insert   = 4;
+    setup.channels[0].latency  = 50;
+
+    const auto result = LatencyGraph::compute (setup);
+
+    checkEqual (result.masterIn, 350, "the mix should meet behind the instrument and the insert");
+    checkEqual (result.totalLatency, 350 + 2048,
+                "a take would be written down without the master's own chain");
+
+    // The master's chain must move this figure and nothing else whatsoever.
+    auto bare = setup;
+    bare.inserts[0].fxLatency = 0;
+
+    const auto without = LatencyGraph::compute (bare);
+
+    checkEqual (without.totalLatency, 350, "the master's chain is the only difference");
+    checkEqual (without.masterIn, result.masterIn, "the master's chain moved where everything meets");
+
+    check (without.insertDelay  == result.insertDelay
+        && without.sendDelay    == result.sendDelay
+        && without.channelDelay == result.channelDelay
+        && without.busDelay     == result.busDelay
+        && without.clipDelay    == result.clipDelay
+        && without.outLat       == result.outLat
+        && without.widest       == result.widest,
+           "the master's own effects changed somebody else's alignment");
+
+    // A master chain alone, with nothing else loaded at all. The figure is
+    // then entirely the master's, and a sign error in it is the difference
+    // between a take landing right and landing two chains early.
+    auto masterOnly = mixer (17, 1);
+    masterOnly.inserts[0].fxLatency = 1024;
+
+    const auto justTheMaster = LatencyGraph::compute (masterOnly);
+
+    checkEqual (justTheMaster.masterIn, 0, "nothing was loaded to meet behind");
+    checkEqual (justTheMaster.totalLatency, 1024, "the master's own chain is the whole figure");
+}
+
+/** A reported latency below zero is taken as none.
+
+    The engine's own `latencyOf` already clamps what a plugin reports, so this
+    is the second line of defence rather than the first, and it is checked
+    because the clamps are part of what this header publishes: its `Channel`
+    says a latency is "never negative" and its arithmetic says so four times
+    over, in `slowestInstrument`, in `outLat`, in a channel's own figure and in
+    `totalLatency`. All four survived being deleted before this check existed,
+    which means the field comment was the only thing asserting them.
+
+    What one would do if it got through is worth stating. An insert whose
+    output left before its input arrived puts a send out of it at a negative
+    delay, which the engine clamps to nothing when it reaches the delay line:
+    the copy is then early by however far the plugin lied, and nothing reports
+    it.
+*/
+static void aNegativeReportedLatencyIsTakenAsNone()
+{
+    auto setup = mixer (17, 4);
+    setup.inserts[2].fxLatency = -512;
+    setup.inserts[3].fxLatency = 256;
+    setup.inserts[2].sendTo[0] = 3;
+    setup.channels[0].insert   = 2;
+    setup.channels[0].latency  = -64;
+    setup.channels[1].latency  = 128;
+
+    const auto result = LatencyGraph::compute (setup);
+
+    checkEqual (result.masterIn, 128 + 256, "a negative latency should count as none");
+    checkEqual (result.clipDelay[2], 128, "a negative insert latency reached an insert's input");
+    checkEqual (result.outLat[2], 128, "a negative insert latency reached an insert's output");
+    checkEqual (result.channelDelay[0], 128, "a negative instrument latency was given back as credit");
+
+    for (const auto& arrival : walk::arrivals (setup, result))
+        if (! arrival.exempt)
+            checkEqual (arrival.when, result.masterIn,
+                        arrival.what + " does not land with everything else");
+
+    // And on the master, where it would be subtracted from where every take
+    // is written down rather than from an alignment.
+    auto master = mixer (17, 1);
+    master.inserts[0].fxLatency = -4096;
+    master.inserts[5].fxLatency = 64;
+
+    checkEqual (LatencyGraph::compute (master).totalLatency, 64,
+                "a negative master chain was taken off the record alignment");
+}
+
+/** Insert indices arrive from saved projects and from atomics, so they are
+    checked rather than trusted. That is the header's own sentence, and these
+    are the two rules it means.
+
+    Asserted directly rather than only through `compute`, for a reason worth
+    writing down: the walk in this file resolves a channel's destination with
+    these same two functions, so an index that both of them mis-resolve the
+    same way still lands together with everything else and the property check
+    cannot see it. Three mutations of the two clamps survived the whole of the
+    rest of this file for exactly that reason, one of which read past the end
+    of the graph.
+
+    `AudioEngine::mixChannelOutput` resolves the same two indices with the same
+    two rules when it actually routes the audio, so a divergence between them
+    is a channel whose signal lands on one insert while its compensation was
+    computed for another.
+*/
+static void routingIndicesAreCheckedRatherThanTrusted()
+{
+    // A destination: 0 is the master and a real place to go.
+    checkEqual (LatencyGraph::clampDestination (0, 17), 0, "the master is a real destination");
+    checkEqual (LatencyGraph::clampDestination (9, 17), 9, "an ordinary destination is kept");
+    checkEqual (LatencyGraph::clampDestination (16, 17), 16, "the top insert is kept");
+    checkEqual (LatencyGraph::clampDestination (-1, 17), 0, "a negative destination is the master");
+    checkEqual (LatencyGraph::clampDestination (-9999, 17), 0, "a very negative destination is the master");
+    checkEqual (LatencyGraph::clampDestination (17, 17), 16, "one past the end is the top insert");
+    checkEqual (LatencyGraph::clampDestination (9999, 17), 16, "far past the end is the top insert");
+    checkEqual (LatencyGraph::clampDestination (4, 1), 0, "with only a master there is nowhere else");
+    checkEqual (LatencyGraph::clampDestination (4, 0), 0, "a mixer with no inserts has no index to give");
+    checkEqual (LatencyGraph::clampDestination (-4, 0), 0, "nor for a negative one");
+
+    // A bus: 0 means "wherever the channel goes", so it is never an answer.
+    checkEqual (LatencyGraph::clampInsert (1, 17), 1, "the first insert is kept");
+    checkEqual (LatencyGraph::clampInsert (16, 17), 16, "the top insert is kept");
+    checkEqual (LatencyGraph::clampInsert (0, 17), 1, "a bus never resolves to the master");
+    checkEqual (LatencyGraph::clampInsert (-6, 17), 1, "nor for a negative index");
+    checkEqual (LatencyGraph::clampInsert (17, 17), 16, "one past the end is the top insert");
+    checkEqual (LatencyGraph::clampInsert (9999, 17), 16, "far past the end is the top insert");
+    checkEqual (LatencyGraph::clampInsert (4, 1), 0, "with only a master a bus has nowhere of its own");
+    checkEqual (LatencyGraph::clampInsert (0, 1), 0, "and that holds for an index below the floor");
+    checkEqual (LatencyGraph::clampInsert (-4, 1), 0, "and for a negative one");
+    checkEqual (LatencyGraph::clampInsert (4, 0), 0, "a mixer with no inserts has no index to give");
+
+    // And through compute, where an index from a corrupt project has to land
+    // on a real insert and be aligned there.
+    auto setup = mixer (17, 4);
+    setup.inserts[16].fxLatency = 900;
+    setup.channels[0].insert = -1;      // the master
+    setup.channels[1].insert = 64;      // the top insert
+    setup.channels[2].insert = 0;
+    setup.channels[3].insert = 16;
+
+    const auto result = LatencyGraph::compute (setup);
+
+    checkEqual (result.channelDelay[0], result.clipDelay[0],
+                "a channel with a negative destination was not aligned to the master");
+    checkEqual (result.channelDelay[1], result.clipDelay[16],
+                "a channel past the end was not aligned to the top insert");
+
+    for (const auto& arrival : walk::arrivals (setup, result))
+        if (! arrival.exempt)
+            checkEqual (arrival.when, result.masterIn,
+                        arrival.what + " does not land with everything else");
+
+    // A bus pointed off the end of a mixer that has only a master. There is
+    // nowhere for it to go but the master, and the index it would otherwise
+    // be given is one past the end of the graph.
+    LatencyGraph::Setup tiny;
+    tiny.inserts.resize (1);
+    tiny.channels.resize (1);
+    tiny.channels[0].latency     = 256;
+    tiny.channels[0].splitBuses  = true;
+    tiny.channels[0].busInsert   = { 9, 0, -3 };
+    tiny.channels[0].busChannels = { 2, 2, 2 };
+
+    const auto bare = LatencyGraph::compute (tiny);
+
+    checkEqual ((int) bare.busDelay[0].size(), 3, "every bus needs a row");
+
+    for (int b = 0; b < 3; ++b)
+        checkEqual (bare.busDelay[0][(size_t) b], 0,
+                    "bus " + std::to_string (b) + " on a mixer with only a master");
+}
+
+/** `busChannels` may be shorter than `busInsert`.
+
+    Both come from the plugin's own bus layout by way of a saved project and
+    nothing makes them the same length. A bus with no entry saying how many
+    channels it has is a bus nothing is known about, so it is skipped the way
+    an empty one is, and the read that asks must not go past the end: that is
+    an out of bounds read which the sanitizers catch here and which a release
+    build would simply believe.
+*/
+static void busChannelsMayBeShorterThanBusInsert()
+{
+    auto setup = mixer (17, 2);
+    setup.inserts[2].fxLatency = 480;
+    setup.inserts[2].sendTo[0] = 6;
+    setup.channels[0].latency     = 96;
+    setup.channels[0].splitBuses  = true;
+    setup.channels[0].busInsert   = { 6, 6, 6, 6 };
+    setup.channels[0].busChannels = { 2 };              // shorter on purpose
+
+    const auto result = LatencyGraph::compute (setup);
+
+    checkEqual ((int) result.busDelay[0].size(), 4, "every routed bus needs a row");
+    checkEqual (result.busDelay[0][0], 480, "the one known bus was not aligned");
+
+    for (int b = 1; b < 4; ++b)
+        checkEqual (result.busDelay[0][(size_t) b], 0,
+                    "a bus nothing is known about should be left alone");
+
+    for (const auto& arrival : walk::arrivals (setup, result))
+        if (! arrival.exempt)
+            checkEqual (arrival.when, result.masterIn,
+                        arrival.what + " does not land with everything else");
+
+    // The other direction, which is just as plausible and which the loop over
+    // the buses must not follow: busChannels is the longer list here, so a
+    // loop sized by it reads past the end of busInsert and writes past the end
+    // of the row it is filling. Both are out of bounds and both are silent
+    // without a sanitizer.
+    auto other = mixer (17, 2);
+    other.inserts[2].fxLatency = 480;
+    other.inserts[2].sendTo[0] = 6;
+    other.channels[0].latency     = 96;
+    other.channels[0].splitBuses  = true;
+    other.channels[0].busInsert   = { 6 };
+    other.channels[0].busChannels = { 2, 2, 2, 2 };     // longer on purpose
+
+    const auto wide = LatencyGraph::compute (other);
+
+    checkEqual ((int) wide.busDelay[0].size(), 1, "a row is as long as the routing, not the channel counts");
+    checkEqual (wide.busDelay[0][0], 480, "the one routed bus was not aligned");
+
+    for (const auto& arrival : walk::arrivals (other, wide))
+        if (! arrival.exempt)
+            checkEqual (arrival.when, wide.masterIn,
+                        arrival.what + " does not land with everything else");
+}
+
+/** The master has no hold back of its own and no sends to resolve.
+
+    Both are enforced by two loops starting at 1 rather than by a condition,
+    which is the kind of guarantee that disappears the day somebody changes a
+    loop bound. The flags are set here precisely because the engine will never
+    set them: `monitored` on insert 0 and a send row on insert 0 both have to
+    be things this file does not care about. Starting either loop at 0 instead
+    survived everything else in this file.
+*/
+static void theMasterIsNeverHeldBackAndNeverSends()
+{
+    auto setup = mixer (17, 4);
+    setup.inserts[0].fxLatency = 128;
+    setup.inserts[0].monitored = true;          // the engine never does this
+    setup.inserts[0].sendTo    = { 3, 9 };      // nor this
+    setup.inserts[7].fxLatency = 700;
+    setup.channels[0].insert   = 7;
+    setup.channels[0].latency  = 64;
+
+    const auto result = LatencyGraph::compute (setup);
+
+    checkEqual (result.insertDelay[0], 0, "the master was given a delay line of its own");
+    check (result.sendDelay[0].empty(), "the master was given sends to resolve");
+
+    // outLat[0] is the third of the three rows the master does not take part
+    // in, and the only one whose own comment did not say so. It is checked
+    // because it is published: a value in there is a second name for
+    // totalLatency, and two names for one number is how they come to differ.
+    checkEqual (result.outLat[0], 0, "the master was given an output latency of its own");
+
+    auto plain = setup;
+    plain.inserts[0].monitored = false;
+    plain.inserts[0].sendTo.clear();
+
+    check (same (result, LatencyGraph::compute (plain)),
+           "a monitored flag or a send row on the master changed the answer");
+}
+
+//==============================================================================
 static void randomised()
 {
     std::mt19937 rng (20260206);
@@ -646,10 +1017,25 @@ static void randomised()
     std::bernoulli_distribution sometimes (0.25);
     std::bernoulli_distribution often (0.6);
 
+    // The generator used to be entirely well behaved, and three breakages of
+    // the index clamps and four of the negative guards survived it for that
+    // reason alone. A latency below zero is a plugin that lied, an index off
+    // either end of the mixer is a saved project or an atomic that was not
+    // what it should have been, and both are what the clamps in there are for.
+    // Rarely rather than often, so the bulk of the trials stay realistic.
+    std::uniform_int_distribution<int> aBadLatency (-4096, -1);
+    std::uniform_int_distribution<int> aBadIndex (-8, 24);
+    std::bernoulli_distribution rarely (0.08);
+
+    const auto someLatency = [&] { return rarely (rng) ? aBadLatency (rng) : aLatency (rng); };
+
     int disagreements = 0;
     int negatives = 0;
     int monitorNotEarly = 0;
     int monitorDoubled = 0;
+    int wrongRecordOffset = 0;
+    int masterHeldBack = 0;
+    int illegalSendDelayed = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -658,7 +1044,7 @@ static void randomised()
         for (int i = 0; i < 17; ++i)
         {
             if (sometimes (rng))
-                setup.inserts[(size_t) i].fxLatency = aLatency (rng);
+                setup.inserts[(size_t) i].fxLatency = someLatency();
 
             for (auto& to : setup.inserts[(size_t) i].sendTo)
                 if (sometimes (rng))
@@ -668,9 +1054,9 @@ static void randomised()
         for (auto& channel : setup.channels)
         {
             if (sometimes (rng))
-                channel.latency = aLatency (rng);
+                channel.latency = someLatency();
 
-            channel.insert = aDestination (rng);
+            channel.insert = rarely (rng) ? aBadIndex (rng) : aDestination (rng);
 
             if (! sometimes (rng))
                 continue;
@@ -682,9 +1068,19 @@ static void randomised()
 
             for (int b = 0; b < buses; ++b)
             {
-                channel.busInsert[(size_t) b]  = often (rng) ? anInsert (rng) : 0;
+                channel.busInsert[(size_t) b]  = often (rng)
+                                                   ? (rarely (rng) ? aBadIndex (rng) : anInsert (rng))
+                                                   : 0;
                 channel.busChannels[(size_t) b] = often (rng) ? 2 : 0;
             }
+
+            // The two lists come from a plugin's bus layout by way of a saved
+            // project, so nothing makes them the same length. A bus with no
+            // entry saying what is on it is a bus nothing is known about.
+            if (rarely (rng) && buses > 1)
+                channel.busChannels.resize ((size_t) (buses - 1));
+            else if (rarely (rng))
+                channel.busChannels.resize ((size_t) (buses + 2), 2);
         }
 
         // Several at once, since a band is several microphones into several
@@ -714,6 +1110,32 @@ static void randomised()
         for (int d : result.channelDelay) if (d > result.widest) ++negatives;
         for (const auto& row : result.sendDelay) for (int d : row) if (d > result.widest) ++negatives;
         for (const auto& row : result.busDelay)  for (int d : row) if (d > result.widest) ++negatives;
+
+        for (int d : result.clipDelay) if (d < 0 || d > result.widest) ++negatives;
+        for (int d : result.outLat)    if (d < 0 || d > result.widest) ++negatives;
+
+        // The figure the engine hands to RecordAlign as engineLatency, which
+        // decides where a recorded take is written down rather than how
+        // anything is aligned. Nothing here checked it, and three breakages of
+        // it survived everything else in this file.
+        if (result.totalLatency != result.masterIn
+                                   + std::max (0, setup.inserts[0].fxLatency))
+            ++wrongRecordOffset;
+
+        // A send that may not legally go where it points carries no delay at
+        // all. The walk skips those sends, since they carry no audio either,
+        // so without this nothing looked at the figure they were given.
+        for (int i = 1; i < 17; ++i)
+            for (size_t s = 0; s < setup.inserts[(size_t) i].sendTo.size(); ++s)
+                if (! LatencyGraph::isLegalSendTarget (i, setup.inserts[(size_t) i].sendTo[s], 17)
+                      && result.sendDelay[(size_t) i][s] != 0)
+                    ++illegalSendDelayed;
+
+        // The master is where everything else is lined up to, so it has
+        // nothing to be held back by and no send of its own to resolve.
+        if (result.insertDelay[0] != 0 || ! result.sendDelay[0].empty()
+                                       || result.outLat[0] != 0)
+            ++masterHeldBack;
 
         // The headline property, for everything that is not the exception.
         for (const auto& arrival : walk::arrivals (setup, result))
@@ -759,6 +1181,12 @@ static void randomised()
     checkEqual (monitorDoubled, 0,
                 "randomised mixers where the monitored send carried more delay than "
                 "what is genuinely downstream of it");
+    checkEqual (wrongRecordOffset, 0,
+                "randomised mixers that would write a recorded take down in the wrong place");
+    checkEqual (masterHeldBack, 0,
+                "randomised mixers where the master was held back or given sends");
+    checkEqual (illegalSendDelayed, 0,
+                "randomised mixers where a send that may not go where it points was given a delay");
 }
 
 //==============================================================================
@@ -768,6 +1196,11 @@ int main()
 
     anEmptyMixerDelaysNothing();
     everythingLandsTogether();
+    theMixerSaysHowFarBehindItRuns();
+    aNegativeReportedLatencyIsTakenAsNone();
+    routingIndicesAreCheckedRatherThanTrusted();
+    busChannelsMayBeShorterThanBusInsert();
+    theMasterIsNeverHeldBackAndNeverSends();
     sendsChainForward();
     splitBusesEachWaitForTheirOwnDestination();
     theMonitoredInsertIsNotHeldBack();

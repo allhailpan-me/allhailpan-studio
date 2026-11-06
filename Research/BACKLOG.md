@@ -40,6 +40,59 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-06: the insert clamping rule is written twice, and only one copy is tested
+
+Found while auditing `LatencyGraph.h`. Not a fault: a note so the next person
+does not have to work it out again.
+
+Two rules decide where a channel's audio goes. A main destination is clamped
+into `[0, numInserts - 1]`, where 0 is the master and a real place to go. An
+output bus is clamped into `[1, numInserts - 1]`, because for a bus 0 means
+"wherever the channel goes" rather than an insert number of its own.
+
+`LatencyGraph::clampDestination` and `LatencyGraph::clampInsert` are those two
+rules, and they decide which insert a channel's **compensation** is computed
+for. `AudioEngine::mixChannelOutput` decides which insert the channel's
+**audio** is actually added to, and writes the same two rules out again:
+
+```
+const int main = juce::jlimit (0, kNumInserts - 1, c.insert.load());
+const int to   = routed > 0 ? juce::jlimit (1, kNumInserts - 1, routed) : main;
+```
+
+They agree. `jlimit (0, n - 1, i)` is `clampDestination (i, n)` for any
+`n >= 1`, and `jlimit (1, n - 1, r)` is `clampInsert (r, n)` for any `n >= 2`,
+and `kNumInserts` is 17. So nothing is wrong and nothing is misaligned.
+
+What is worth recording is the asymmetry that now exists. The header's half of
+each rule is pinned by `LatencyGraphTest`, at both ends of both ranges and in
+the degenerate mixers, because three mutations of those clamps survived the
+whole of that file before tonight. The engine's half is in a file that cannot
+be compiled here and has no test over it at all. A divergence between the two
+is a channel whose signal lands on one insert while its compensation was
+computed for another: nothing errors, nothing crackles, one track sits a few
+milliseconds off, which is the shape of fault this project keeps meeting.
+
+Two ways to close it, for whoever decides:
+
+- Have `mixChannelOutput` call `LatencyGraph::clampDestination` and
+  `LatencyGraph::clampInsert`. It already includes the header. Two lines, pure
+  substitution, and the agreement becomes structural rather than coincidental.
+  This is what CLAUDE.md asks for where a rule is shared ("factor it into one
+  function both call"), and it is why `mixChannelOutput` exists in the first
+  place.
+- Or leave it, on the grounds that `jlimit (0, kNumInserts - 1, x)` is the
+  prevailing idiom for sanitising an insert index and is written out in twelve
+  places across `AudioEngine`, `ProjectIO`, `PlaylistComponent` and
+  `MixerComponent`. Changing two of the twelve makes the codebase less
+  consistent, not more, and the honest version of this change is all twelve.
+
+Deliberately not done tonight: a hardening run that has found no fault should
+not be reaching into the signal path for tidiness, and the second option is a
+sweep across four files that would collide with whatever else is open.
+
+---
+
 ## 2026-11-06, later the same day: the question nine days of audits had not asked the tuner
 
 The entry below records the tuner merging, and that its audits "cost more than
