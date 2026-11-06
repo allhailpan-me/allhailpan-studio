@@ -931,29 +931,58 @@ private:
     display that opens earlier on a string that is still falling. A tighter
     figure does not make the tuner faster, it makes it read sharp.
 
-    WHY THE SPREAD IS NOT ENOUGH ON ITS OWN, AND WHAT SAMPLES IT
+    WHAT THIS GATE CANNOT DO, MEASURED RATHER THAN HOPED
 
     The spread is taken across the window rather than the first to last
     difference, so that a pitch wandering up and down is not read as settled
     because it happened to come back to where it started. That is the right
-    rule and it is not sufficient, because the readings are a sampling of the
+    rule, and it is not sufficient, because the readings are a sampling of the
     pitch and the rule can only see what the sampling catches.
 
-    Sample a vibrato at exactly its own rate and every reading lands at the
-    same phase. The four of them then agree to a hundredth of a cent, the
-    spread is nothing, and the display opens, bright and settled, on a note
-    moving by tens of cents. Measured on this gate with a fixed interval: a
-    220.000 Hz note with a 20 cent vibrato at the reading rate reads 19.1
-    cents sharp. A player would flatten a correctly tuned string by a fifth of
-    a semitone on the strength of it.
+    Sample a vibrato at its own rate, or at a multiple of it, and the readings
+    land at the same phase every time. They then agree to a hundredth of a
+    cent, the spread is nothing, and the display opens bright and settled on a
+    note moving by tens of cents. Measured, a 220.000 Hz note with a 20 cent
+    vibrato at the reading rate: **19.6 cents sharp**, with every appearance of
+    having settled. A singer would flatten a correct note by a fifth of a
+    semitone on the strength of it. The turning points of a vibrato are a
+    second way in, because the pitch really is momentarily still there.
 
-    This is not a remote case at the rates where a reading costs more than the
-    interval, because the reading rate then falls to 5.2 a second at 96 kHz
-    and 1.3 at 192, and 5.2 Hz is the middle of what a singer's vibrato and a
-    guitarist's hand both do. The defence is not in here: it is that the
-    interval between readings is dithered, so that no modulation rate can sit
-    at one phase. See `Pacing` below, which is where that lives and where the
-    measurement of how well it works is described.
+    Two things reduce it and neither removes it, and both are measured in
+    `Tests/TunerTest.cpp` rather than argued for here:
+
+    - The interval between readings is dithered, so no modulation rate can sit
+      at one phase for long. See `Pacing`.
+    - The rate has to be satisfied on `holdFrames` consecutive readings rather
+      than on one, so a coincidence has to repeat. On a settling pluck the rate
+      falls monotonically, so this costs exactly the extra readings and nothing
+      else.
+
+    Together, at 44.1 and 48 kHz, where a reading costs 9 to 11 ms and the
+    reading rate is around 8.5 a second: the worst wrong reading over a sweep
+    of the vibrato band at depths of 2, 5 and 20 cents falls from 19.6 cents to
+    4.9, and the number of readings shown at all over that sweep falls from
+    1749 to 92. The glide gets better at the same time, from 0.284 cents sharp
+    to 0.106, because a longer wait is a more settled string. The cost is 0.38 s
+    of extra waiting.
+
+    **At 96 and 192 kHz it is not fixed, and that is the honest statement.** A
+    reading costs 48 and 197 ms there, so the duty cycle in `Pacing` drops the
+    reading rate to 4.5 and 1.1 a second, the window spans several vibrato
+    cycles, and the worst wrong reading stays at 19.9 cents. No choice of
+    dither or hold count tried moved it: the measurements are in the backlog.
+
+    The fix is not a constant in here. It is to decimate the tap to a fixed
+    analysis rate well above the vibrato band, so that the reading rate stops
+    depending on what the interface happens to be set to, which is the one
+    thing that makes the sampling unable to alias with a vibrato at all. That
+    is a filter design job with a specification behind it and it is written up
+    as the next step in `Research/BACKLOG.md`.
+
+    What is shipped is a tuner that is accurate to a fraction of a cent on a
+    plucked or sung note held steady, which is how a tuner is used, and that
+    can be fooled by a deliberate vibrato at a particular rate, more easily the
+    higher the sample rate is set. That is worth having and it is worth saying.
 */
 struct GateSettings
 {
@@ -1001,6 +1030,24 @@ struct GateSettings
         supply one, and the scale `stallFrames` is expressed in. Nothing in the
         measurement depends on it any more. */
     double frameSeconds = 0.1;
+
+    /** How many consecutive readings must satisfy the rate before a number is
+        shown.
+
+        One is the obvious choice and it is too few. The rate is measured from
+        a sparse sampling of the pitch, so a modulation close to the reading
+        rate can satisfy it by coincidence; asking for the coincidence to
+        repeat is what makes that unlikely rather than ordinary. Measured at
+        44.1 kHz over a sweep of the vibrato band, three in a row takes the
+        worst wrong reading from 19.6 cents to 4.9 and the number of readings
+        shown at all from 1749 to 92.
+
+        It is nearly free on what the gate is actually for. On a settling pluck
+        the rate falls monotonically, so once it is satisfied it stays
+        satisfied and this costs exactly two more readings: 1.40 s to 1.78 s
+        before the display opens, and the reading when it does open is closer
+        rather than further, 0.284 cents sharp to 0.106. */
+    int holdFrames = 3;
 
     /** How many nominal intervals a gap between readings may reach before the
         window is thrown away rather than measured across.
@@ -1065,6 +1112,11 @@ public:
         g.settleCentsPerSecond = std::max (1.0e-4, g.settleCentsPerSecond);
         g.frameSeconds         = clampFrameSeconds (g.frameSeconds);
 
+        // One is "show it as soon as the rate is satisfied", which is what
+        // this did before it was measured. Allowed, because a caller that
+        // wants the fastest possible needle should be able to ask for it.
+        g.holdFrames = std::max (1, g.holdFrames);
+
         // Two, because a window has to survive one slow frame: a loaded
         // machine delivers those regularly, and a bound that cleared the
         // history for each one would mean the gate never filled its window.
@@ -1105,6 +1157,7 @@ public:
     void reset() noexcept
     {
         history.clear();
+        satisfiedInARow = 0;
         last = {};
     }
 
@@ -1149,6 +1202,7 @@ public:
             // frame against the last note's would release the display
             // immediately on a pitch that has not settled.
             history.clear();
+            satisfiedInARow = 0;
             last = r;
             return r;
         }
@@ -1169,7 +1223,13 @@ public:
         const double sincePrevious = std::min (10.0, std::max (1.0e-4, elapsedSeconds));
 
         if (sincePrevious > g.stallFrames * g.frameSeconds)
-            history.clear();     // see GateSettings::stallFrames
+        {
+            // See GateSettings::stallFrames. The hold count goes with the
+            // window: readings from before a stall cannot count towards an
+            // agreement about what the string is doing now.
+            history.clear();
+            satisfiedInARow = 0;
+        }
 
         history.push_back ({ absoluteCents, sincePrevious });
 
@@ -1177,6 +1237,9 @@ public:
             history.erase (history.begin());
 
         r.settling = true;
+
+        if ((int) history.size() < g.stabilityFrames)
+            satisfiedInARow = 0;    // no rate to satisfy yet, so nothing is agreed
 
         if ((int) history.size() >= g.stabilityFrames)
         {
@@ -1204,7 +1267,14 @@ public:
 
             r.movingCentsPerSecond = (highest - lowest) / std::max (1.0e-9, span);
 
-            if (r.movingCentsPerSecond <= g.settleCentsPerSecond)
+            const bool rateSatisfied = r.movingCentsPerSecond <= g.settleCentsPerSecond;
+
+            // Counted up rather than latched, and reset the moment the rate
+            // fails, so a pitch that keeps crossing the threshold has to start
+            // again. See GateSettings::holdFrames for what that is worth.
+            satisfiedInARow = rateSatisfied ? satisfiedInARow + 1 : 0;
+
+            if (rateSatisfied && satisfiedInARow >= g.holdFrames)
             {
                 // The newest frame rather than the mean. The gate has already
                 // established that the pitch is barely moving across the
@@ -1250,7 +1320,13 @@ private:
     double       referenceHz = Scale::standardReferenceHz;
 
     std::vector<Frame> history;
-    Reading            last;
+
+    /** How many consecutive readings have satisfied the rate. Part of the
+        window rather than of the reading, so it is cleared wherever the
+        history is. */
+    int satisfiedInARow = 0;
+
+    Reading last;
 };
 
 //==============================================================================
@@ -1301,31 +1377,36 @@ private:
     this was written missed it.
 
     So the interval is dithered: each wait is multiplied by a factor drawn from
-    `[1, 1 + jitter]`, which scatters the phase the pitch is sampled at and
-    leaves no modulation rate able to hide behind the reading rate. The draw is
-    splitmix64 with the caller's own seed, for the reason `PanOneBreed.h`
-    carries its own generator rather than using `<random>`: the standard
-    distributions are not specified exactly, so the same seed gives a different
-    sequence on MSVC, and a measurement of how well a dither works has to be a
-    measurement of the sequence that ships.
+    `[1, 1 + jitter]`, which scatters the phase the pitch is sampled at so that
+    a modulation cannot sit at one phase for long. The draw is splitmix64 with
+    the caller's own seed, for the reason `PanOneBreed.h` carries its own
+    generator rather than using `<random>`: the standard distributions are not
+    specified exactly, so the same seed gives a different sequence on MSVC, and
+    a measurement of how well a dither works has to be a measurement of the
+    sequence that ships.
 
     What it costs is responsiveness and nothing else. The mean interval is
-    `1 + jitter/2` times the nominal, so at 44.1 kHz the needle responds every
-    120 ms rather than every 100. It cannot cost accuracy, because the gate's
-    criterion is a rate and the real interval is handed to it per reading.
+    `1 + jitter/2` times the nominal, so at 44.1 kHz the needle responds about
+    every 118 ms rather than every 100. It cannot cost accuracy, because the
+    gate's criterion is a rate and the real interval is handed to it per
+    reading.
 
-    WHAT IT DOES NOT DO. Dithering makes a coherent modulation unlikely to pass
-    rather than impossible, because the gate is re-evaluated every reading and
-    four of them could land at nearly one phase by luck. That residual is
-    measured rather than asserted: `Tests/TunerTest.cpp` sweeps the vibrato
-    band at several depths and holds the worst reading that gets through to the
-    same one cent the rest of the design is built around.
+    HOW MUCH IT IS WORTH, AND WHAT IS LEFT. On its own, not much: dithering
+    alone took the worst wrong reading over a sweep of the vibrato band from
+    19.6 cents to 19.6, because the gate is re-evaluated on every reading and
+    only has to be fooled once. It is worth having together with
+    `GateSettings::holdFrames`, which makes a coincidence have to repeat:
+    measured at 44.1 kHz the pair take the worst wrong reading to 4.9 cents and
+    the number of readings shown at all over that sweep from 1749 to 92. At 96
+    and 192 kHz, where the duty cycle drops the reading rate into the middle of
+    the vibrato band, nothing tried moved it off 19.9 cents.
 
-    The real fix for the whole business is to decimate the tap to a fixed
-    analysis rate, so the reading rate stops depending on what the interface
-    happens to be set to. That is a filter design job with a specification
-    behind it rather than a constant to change, and it is written up as the
-    next step in `Research/BACKLOG.md`.
+    So this is a mitigation with a measured size and not a fix. The fix is to
+    decimate the tap to a fixed analysis rate well above that band, so the
+    reading rate stops depending on what the interface happens to be set to,
+    which is a filter design job with a specification behind it rather than a
+    constant to change. It is written up as the next step in
+    `Research/BACKLOG.md`, with these measurements.
 */
 class Pacing
 {

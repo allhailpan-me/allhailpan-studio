@@ -1301,15 +1301,27 @@ static void testGate()
 
     // A steady note is not shown until the stability requirement is met, and
     // then it is shown.
+    //
+    // Two requirements, not one, and the arithmetic is written out rather than
+    // pinned to a number so that changing either setting moves this check with
+    // it. The window has to fill, which takes `stabilityFrames` readings, and
+    // then the rate has to be satisfied on `holdFrames` consecutive readings,
+    // of which the reading that filled the window is the first. A steady note
+    // satisfies it from that reading onward, so the display opens at
+    // `stabilityFrames + holdFrames - 1`.
     {
         an.reset();
         const auto v = synth (series (220.0, 6, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
 
-        for (int frame = 1; frame <= gate.stabilityFrames + 2; ++frame)
+        const int opensAt = gate.stabilityFrames + gate.holdFrames - 1;
+        check (opensAt > gate.stabilityFrames,
+               "the hold is doing nothing, so this check cannot tell it from the window filling");
+
+        for (int frame = 1; frame <= opensAt + 2; ++frame)
         {
             const auto r = an.process (v.data(), n);
 
-            if (frame < gate.stabilityFrames)
+            if (frame < opensAt)
             {
                 check (! r.hasNote, "a note was shown before the frames required agreed");
                 check (r.settling, "a steady note in progress was not reported as settling");
@@ -2218,6 +2230,494 @@ static void testHighSampleRates()
 }
 
 //==============================================================================
+// 17. The pacing: the duty cycle, and the dither that is there so a vibrato
+//     cannot sit still against the reading rate.
+//
+//     This is in Tuner.h rather than in the window for exactly the reason
+//     CLAUDE.md gives twice: a figure this load bearing in a component is a
+//     figure nothing tests. These are the checks that could not have existed
+//     while it was two lines in TunerPanel.h.
+//==============================================================================
+static void testPacing()
+{
+    std::printf ("Pacing: the duty cycle and the dither\n");
+
+    // The reading costs measured in a release build, which are what the duty
+    // cycle exists to cope with.
+    struct Cost { double rate; double seconds; };
+    const Cost costs[] = { { 44100.0, 0.009 }, { 48000.0, 0.011 },
+                           { 96000.0, 0.048 }, { 192000.0, 0.197 } };
+
+    Tuner::Pacing::Settings s;
+
+    for (const auto& c : costs)
+    {
+        Tuner::Pacing p;
+        p.configure (s, 1234u);
+
+        double shortest = 1.0e9, longest = 0.0, sum = 0.0;
+        const int draws = 20000;
+
+        for (int i = 0; i < draws; ++i)
+        {
+            const double wait = p.nextWait (c.seconds);
+
+            // The two bounds that matter, and they are asserted as properties
+            // rather than against a table of expected numbers. A wait shorter
+            // than the duty multiple times the reading is this thread taking
+            // more of a core than it is allowed; a wait longer than the
+            // jittered bound is a needle slower than the design says.
+            check (wait >= c.seconds * s.dutyMultiple - 1.0e-12,
+                   "a wait was shorter than the duty cycle allows");
+
+            const double base = std::max (s.nominalSeconds - c.seconds, c.seconds * s.dutyMultiple);
+            check (wait >= base - 1.0e-12, "a wait was shorter than its own base");
+            check (wait <= base * (1.0 + s.jitter) + 1.0e-12, "a wait was longer than the jitter allows");
+
+            shortest = std::min (shortest, wait);
+            longest  = std::max (longest, wait);
+            sum     += wait;
+        }
+
+        const double base = std::max (s.nominalSeconds - c.seconds, c.seconds * s.dutyMultiple);
+        const double hop  = c.seconds + sum / (double) draws;
+
+        // The share of a core this thread takes, which is the whole point of
+        // the duty cycle. A quarter is what the header claims.
+        const double share = c.seconds / hop;
+
+        std::printf ("  %7.0f Hz: reading %5.1f ms, hop %6.1f ms mean, %5.2f readings a second, %4.1f%% of a core\n",
+                     c.rate, c.seconds * 1000.0, hop * 1000.0, 1.0 / hop, share * 100.0);
+
+        check (share <= 0.25 + 1.0e-9, "the analysis thread took more than a quarter of a core");
+
+        // The dither has to actually spread, or it is a cost with no benefit.
+        // Measured against the base rather than against a constant, because
+        // the base is different at every rate.
+        check (longest - shortest > 0.5 * s.jitter * base,
+               "the dither did not spread the interval");
+        checkNear (sum / (double) draws, base * (1.0 + 0.5 * s.jitter), 0.02 * base,
+                   "the mean interval was not the middle of the jitter range");
+    }
+
+    // The same seed gives the same sequence, which is the reason this carries
+    // its own generator instead of using <random>: the standard distributions
+    // are not specified exactly, so the same seed gives different numbers on
+    // MSVC, and a measurement of a dither has to be a measurement of the
+    // sequence that ships.
+    {
+        Tuner::Pacing a, b, c;
+        a.configure (s, 99u);
+        b.configure (s, 99u);
+        c.configure (s, 100u);
+
+        bool sameAsItself = true, differsFromOther = false;
+
+        for (int i = 0; i < 500; ++i)
+        {
+            const double x = a.nextWait (0.009), y = b.nextWait (0.009), z = c.nextWait (0.009);
+            sameAsItself    = sameAsItself && x == y;
+            differsFromOther = differsFromOther || x != z;
+        }
+
+        check (sameAsItself, "the same seed gave a different sequence");
+        check (differsFromOther, "two different seeds gave the same sequence");
+    }
+
+    // A seed of zero is a legitimate thing to be handed, and splitmix64's
+    // state advance is an addition rather than a multiplication, so it is not
+    // a fixed point. Worth a check, because the one generator where zero is
+    // fatal is the one everybody remembers.
+    {
+        Tuner::Pacing p;
+        p.configure (s, 0u);
+
+        double shortest = 1.0e9, longest = 0.0;
+
+        for (int i = 0; i < 2000; ++i)
+        {
+            const double w = p.nextWait (0.009);
+            shortest = std::min (shortest, w);
+            longest  = std::max (longest, w);
+        }
+
+        check (longest - shortest > 0.01 * s.nominalSeconds, "a seed of zero produced a constant interval");
+    }
+
+    // A reading that costs nothing must not produce a wait of nothing, which
+    // would be a spin on a machine faster than any this was measured on.
+    {
+        Tuner::Pacing p;
+        Tuner::Pacing::Settings z = s;
+        z.dutyMultiple = 0.0;
+        z.nominalSeconds = 1.0e-9;    // clamped on the way in
+        p.configure (z, 5u);
+
+        for (int i = 0; i < 100; ++i)
+            check (p.nextWait (0.0) > 0.0, "a free reading produced a wait of nothing");
+    }
+}
+
+//==============================================================================
+// 18. The gate divides by the interval it is handed, not by the one it was
+//     configured with.
+//
+//     This is the fault an audit found in the readout: it passed the nominal
+//     tenth of a second at every sample rate, and above 48 kHz the real
+//     interval is a multiple of what a reading costs, so the gate was told
+//     0.1 when the truth was 0.192 and then 0.788. Every rate it reported was
+//     1.92 and then 7.88 times too large.
+//
+//     The old test could not see it, and the reason is worth keeping: it set
+//     `frameSeconds = 1 / fps` and then advanced the signal by
+//     `frameSeconds * sampleRate`, so the two figures agreed by construction
+//     in every case it swept. These check them disagreeing.
+//==============================================================================
+static void testMeasuredInterval()
+{
+    std::printf ("Analyser: the span is summed from the intervals, not assumed\n");
+
+    const double sampleRate = 44100.0;
+    const auto spec = fastSpec (sampleRate);
+
+    Tuner::Detector sizer;
+    sizer.configure (spec);
+    const int n = sizer.requiredSampleCount();
+
+    // A pitch moving at a known number of cents a second, read at a known
+    // interval. The rate the gate reports has to be the real one whatever it
+    // was configured with.
+    const double trueCentsPerSecond = 6.0;
+
+    for (double hop : { 0.05, 0.1, 0.192, 0.788 })
+    {
+        for (double nominal : { 0.1, 0.5 })
+        {
+            Tuner::GateSettings g;
+            g.frameSeconds = nominal;
+
+            // Out of the way: this section is about the rate it reports, and a
+            // stall bound expressed in a nominal that is deliberately wrong
+            // would throw the window away before the rate could be read.
+            g.stallFrames = 1000.0;
+            g.settleCentsPerSecond = 1.0e9;   // never hold the display shut
+
+            Tuner::Analyser a;
+            a.configure (spec, g);
+
+            double worst = 0.0;
+            const double startHz = 220.0;
+
+            for (int frame = 0; frame < 12; ++frame)
+            {
+                const double t  = (double) frame * hop;
+                const double hz = startHz * std::pow (2.0, trueCentsPerSecond * t / 1200.0);
+
+                std::mt19937 rng (7u + (unsigned) frame);
+                const auto v = synth (series (hz, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+
+                const auto r = a.process (v.data(), n, hop);
+
+                if (frame >= g.stabilityFrames)
+                    worst = std::max (worst, std::fabs (r.movingCentsPerSecond - trueCentsPerSecond));
+            }
+
+            // Generous, because the estimator's own error is in here too and
+            // the point of the check is a factor of two to eight, not a
+            // fraction of a cent.
+            check (worst < 1.0,
+                   "the reported rate did not match the real one at hop " + std::to_string (hop)
+                       + " with nominal " + std::to_string (nominal));
+        }
+    }
+
+    std::printf ("  a pitch moving %.1f cents a second reads as that at every interval,\n"
+                 "  including when the nominal is five times out\n", trueCentsPerSecond);
+
+    // A gap far longer than the caller's pacing throws the window away rather
+    // than being measured across. Without this, a real pitch movement divided
+    // by a real stall reads as settled: here, 20 cents of movement over an
+    // eleven second gap is 1.8 cents a second, which would pass a threshold
+    // of 1.3 if the gap were believed.
+    {
+        Tuner::GateSettings g;
+        g.frameSeconds = 0.1;
+
+        Tuner::Analyser a;
+        a.configure (spec, g);
+
+        std::mt19937 rng (11u);
+        const auto low  = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        const auto high = synth (series (220.0 * std::pow (2.0, 20.0 / 1200.0), 5, 1.0, 0.0, 0.25, rng, false),
+                                 sampleRate, n);
+
+        // Fill the window on a steady note, so there is something to throw.
+        for (int i = 0; i < g.stabilityFrames + g.holdFrames; ++i)
+            a.process (low.data(), n, 0.1);
+
+        // Then a long gap, and a note 20 cents away.
+        const auto after = a.process (high.data(), n, 11.0);
+
+        check (! after.hasNote, "a reading across a stall was shown as settled");
+        check (after.movingCentsPerSecond == 0.0,
+               "a window that spanned a stall still reported a rate");
+
+        std::printf ("  and a window that spans an eleven second gap is thrown away rather than divided by it\n");
+    }
+}
+
+//==============================================================================
+// 19. A vibrato, which is the one signal that can fool this gate, and how far
+//     it gets.
+//
+//     The gate reads the spread of the last few readings, and those readings
+//     are a sampling of the pitch. Sample a vibrato at its own rate and every
+//     reading lands at the same phase: they agree to a hundredth of a cent and
+//     the display opens, bright and settled, on a note moving by tens of them.
+//
+//     This section is a measurement and not a pass or fail on a formula. It
+//     runs the shipped pacing and the shipped gate against a sweep of the
+//     vibrato band, and it runs the version that was nearly shipped beside it,
+//     because the only way to know a mitigation is worth its cost is to
+//     measure what happens without it. The control is also what makes the
+//     sweep trustworthy: a sweep that found nothing wrong with the old gate
+//     would be a sweep that was not reaching the fault.
+//==============================================================================
+static std::vector<float> vibratoNote (double f0, double depthCents, double rateHz,
+                                       double phase0, double sampleRate, int n)
+{
+    std::vector<float> v ((size_t) n);
+    double phase = 0.0;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double t     = (double) i / sampleRate;
+        const double cents = depthCents * std::sin (2.0 * 3.14159265358979323846 * rateHz * t + phase0);
+        const double f     = f0 * std::pow (2.0, cents / 1200.0);
+
+        double sample = 0.0;
+        for (int h = 1; h <= 6; ++h)
+            sample += 0.3 / (double) h * std::sin ((double) h * phase);
+
+        v[(size_t) i] = (float) sample;
+        phase += 2.0 * 3.14159265358979323846 * f / sampleRate;
+    }
+
+    return v;
+}
+
+struct VibratoResult
+{
+    double worstCents = 0.0;    // how far the displayed pitch was from the note being played
+    int    shown      = 0;      // how many readings were shown at all
+};
+
+static VibratoResult sweepVibrato (double readingCostSeconds, double jitter, int holdFrames)
+{
+    const double sampleRate = 44100.0;
+    const double f0 = 220.0;
+    const auto spec = fastSpec (sampleRate);
+
+    Tuner::Detector sizer;
+    sizer.configure (spec);
+    const int n = sizer.requiredSampleCount();
+
+    Tuner::Pacing::Settings ps;
+    ps.jitter = jitter;
+
+    // What the reading rate comes out at, which is what the vibrato sweep has
+    // to be centred on: the fault is a vibrato near that rate, and at 44.1 kHz
+    // it is not the nominal ten a second because of the dither.
+    double meanHop = 0.0;
+    {
+        Tuner::Pacing p;
+        p.configure (ps, 1u);
+        for (int i = 0; i < 4000; ++i)
+            meanHop += readingCostSeconds + p.nextWait (readingCostSeconds);
+        meanHop /= 4000.0;
+    }
+
+    VibratoResult out;
+    const double seconds = 3.0;
+
+    for (double depth : { 2.0, 5.0, 20.0 })
+    {
+        // From a third of the reading rate to one and a half times it. The
+        // bottom of that range matters as much as the middle: at a third, the
+        // two ends of a four reading window land on the same phase, which is
+        // what the spread rule exists to catch and what a first to last
+        // difference would miss.
+        for (int k = 0; k <= 12; ++k)
+        {
+            const double rateHz = (1.0 / meanHop) * (0.3 + 1.2 * (double) k / 12.0);
+
+            for (std::uint64_t seed : { 1ull, 12345ull })
+                for (double phase0 : { 0.0, 1.7 })
+                {
+                    Tuner::Pacing pacing;
+                    pacing.configure (ps, seed);
+
+                    Tuner::GateSettings g;
+                    g.frameSeconds = ps.nominalSeconds;
+                    g.holdFrames   = holdFrames;
+
+                    Tuner::Analyser a;
+                    a.configure (spec, g);
+
+                    const int total = (int) (seconds * sampleRate) + n + 16;
+                    const auto v = vibratoNote (f0, depth, rateHz, phase0, sampleRate, total);
+
+                    const double centre = 1200.0 * std::log2 (f0);
+                    double at = 0.0, previous = -1.0;
+
+                    for (;;)
+                    {
+                        const int start = (int) (at * sampleRate);
+
+                        if (start + n > total)
+                            break;
+
+                        const double hop = previous < 0.0 ? ps.nominalSeconds : at - previous;
+                        a.setFrameSeconds (hop);
+                        const auto r = a.process (v.data() + start, n, hop);
+                        previous = at;
+
+                        if (r.hasNote && r.hz > 0.0)
+                        {
+                            ++out.shown;
+                            out.worstCents = std::max (out.worstCents,
+                                                       std::fabs (1200.0 * std::log2 (r.hz) - centre));
+                        }
+
+                        at += readingCostSeconds + pacing.nextWait (readingCostSeconds);
+                    }
+                }
+        }
+    }
+
+    return out;
+}
+
+static void testVibrato()
+{
+    std::printf ("Analyser: a vibrato, which is what can fool the gate\n");
+
+    // 9 ms is the measured cost of a reading at 44.1 kHz, so this is the
+    // pacing the owner's own interface produces.
+    const double cost = 0.009;
+
+    const auto shipped = sweepVibrato (cost, Tuner::Pacing::Settings{}.jitter,
+                                       Tuner::GateSettings{}.holdFrames);
+    const auto control = sweepVibrato (cost, 0.0, 1);
+
+    std::printf ("  %-34s %-14s %s\n", "", "worst shown", "readings shown");
+    std::printf ("  %-34s %10.3f c %12d\n", "fixed interval, one reading", control.worstCents, control.shown);
+    std::printf ("  %-34s %10.3f c %12d\n", "dithered, three in a row", shipped.worstCents, shipped.shown);
+
+    // The control has to reach the fault, or this sweep is measuring nothing.
+    // It is the same check as the one that says a test waveform has to
+    // exercise the join: a sweep that cannot see a known fault cannot see an
+    // unknown one either.
+    check (control.worstCents > 15.0,
+           "the sweep did not reproduce the known fault, so it is not testing the mitigation");
+    check (control.shown > 200, "the control showed too few readings for the comparison to mean anything");
+
+    // And the shipped settings have to be a long way better. Measured at
+    // 4.9 cents and 92 readings against 19.6 and 1749; the bounds are loose
+    // around those so that an estimator change does not fail this, and tight
+    // enough that removing either the dither or the hold does. Both were tried
+    // and both fail here.
+    check (shipped.worstCents < 8.0, "the mitigation did not hold the worst reading down");
+    check (shipped.shown * 4 < control.shown, "the mitigation did not reduce how often a moving note is shown");
+
+    // And the same at the reading cost 96 kHz produces, which is where the
+    // duty cycle drops the reading rate into the middle of the vibrato band.
+    //
+    // Reported and not asserted, deliberately, and the reason is a limit of
+    // this check rather than a judgement about the fault. A wider sweep, in
+    // `Research/BACKLOG.md`, reaches 19.9 cents there: three seeds, three
+    // phases, twenty one rates and six seconds a run. This one is short
+    // enough to belong in a suite that runs on every push, and at a hop of
+    // 220 ms three seconds is only about ten windows, so whether it happens
+    // to land on a coincidence is luck. Asserting a figure that is luck would
+    // produce a test that fails on an unrelated change, and asserting that
+    // 96 kHz is broken would produce one that fails on the day somebody fixes
+    // it. So the number is printed, where a person reading the output can see
+    // that the higher rate is not the better one.
+    const auto at96 = sweepVibrato (0.048, Tuner::Pacing::Settings{}.jitter,
+                                    Tuner::GateSettings{}.holdFrames);
+
+    std::printf ("  %-34s %10.3f c %12d\n", "the same at a 48 ms reading", at96.worstCents, at96.shown);
+}
+
+//==============================================================================
+// 20. The ring is big enough, derived rather than asserted in prose.
+//
+//     InputRing's requirement is `capacity >= snapshot + 2 * largest block`,
+//     and it is a correctness requirement: below it the tear check starts
+//     accepting snapshots the writer has run over, which an estimator reads as
+//     a perfectly plausible and completely wrong pitch. The two numbers it
+//     relates used to meet in AudioEngine.cpp, where nothing can compile them
+//     together, so halving the constant to a figure that still looked generous
+//     would have broken it silently. This is that meeting, somewhere it can be
+//     checked.
+//==============================================================================
+static void testRingCapacity()
+{
+    std::printf ("InputRing: the capacity the studio gives it, against the requirement\n");
+
+    const int given = Tuner::studioRingCapacity();
+
+    // Every rate the studio can open a device at, and every block size a
+    // driver is likely to offer, against the requirement at that combination.
+    for (double rate : { 8000.0, 22050.0, 32000.0, 44100.0, 48000.0, 88200.0,
+                         96000.0, 176400.0, Tuner::highestStudioSampleRate })
+    {
+        for (int block : { 16, 32, 64, 128, 256, 480, 512, 1024, 2048, 4096,
+                           Tuner::largestStudioBlockSamples })
+        {
+            const int required = Tuner::requiredRingCapacity (rate, block);
+
+            Tuner::Spec spec;
+            spec.sampleRate = rate;
+            Tuner::Detector d;
+            d.configure (spec);
+
+            check (required == d.requiredSampleCount() + 2 * block,
+                   "the requirement is not the snapshot plus two blocks");
+            check (given >= required,
+                   "the studio's ring is smaller than the requirement at "
+                       + std::to_string ((int) rate) + " Hz with blocks of "
+                       + std::to_string (block));
+
+            // And the snapshot has to fit at all, or `readLatest` returns
+            // false for ever and the display says "play a note" with audio
+            // arriving: a silent dead tuner with no diagnostic.
+            check (given > d.requiredSampleCount(),
+                   "the snapshot does not fit in the ring at " + std::to_string ((int) rate) + " Hz");
+        }
+    }
+
+    Tuner::Spec top;
+    top.sampleRate = Tuner::highestStudioSampleRate;
+    Tuner::Detector d;
+    d.configure (top);
+
+    std::printf ("  %d samples given; %d required at %.0f Hz with blocks of %d, which is %.1f snapshots\n",
+                 given, Tuner::requiredRingCapacity (Tuner::highestStudioSampleRate,
+                                                     Tuner::largestStudioBlockSamples),
+                 Tuner::highestStudioSampleRate, Tuner::largestStudioBlockSamples,
+                 (double) given / (double) d.requiredSampleCount());
+
+    // The margin the measurement in InputRing's comment says is worth having:
+    // four times the snapshot tore nothing in 412710 reads, against 29 in
+    // 147572 at one snapshot plus a block. Pinned so that deriving the figure
+    // cannot quietly drop the margin the measurement bought.
+    check (given >= 4 * d.requiredSampleCount(),
+           "the ring no longer carries the margin the tear measurement justified");
+}
+
+//==============================================================================
 int main()
 {
     testScale();
@@ -2237,6 +2737,10 @@ int main()
     testClarity();
     testCumulativeMeanAgainstClosedForm();
     testHighSampleRates();
+    testPacing();
+    testMeasuredInterval();
+    testVibrato();
+    testRingCapacity();
 
     if (failures != 0)
     {
