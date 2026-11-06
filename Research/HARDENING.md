@@ -7,6 +7,37 @@ Newest first.
 
 ---
 
+## 2026-11-06: the latency graph, which is the calculation that cannot tell you it is wrong
+
+### What is being looked at
+
+`Source/LatencyGraph.h`, 220 lines of code, and `Tests/LatencyGraphTest.cpp`,
+765 lines, which covers it. A priority 2 target: a test that has never been
+mutation tested, over the arithmetic CLAUDE.md names as the one here least able
+to announce that it is wrong.
+
+Picked on stake rather than on the ratio. Its cover looks healthy at 2.44 lines
+of test to one of code, and the headline property it asserts, that everything
+arrives at the master together, is the right property. But no night has ever
+tried to break it, two real bugs have already lived in this file, and both of
+them had a comment above them claiming the opposite of what the code did. The
+failure mode is a record that sounds slightly smeared and a person who has no
+reason to suspect the compensation.
+
+One thing in the test is worth suspecting before a single mutation is built:
+`walk::inLatencies` recomputes the forward pass the same way the implementation
+does, so the walk is not as independent of the thing it checks as its own
+comment claims. Whether that matters is what the mutations are for.
+
+Not `Fx/Svf.h`, `Fx/BellMatch.h`, `Envelope.h` or `Spectrogram.h`, or any of
+their tests, which open pull requests #55, #66, #65 and #68 are changing.
+
+### Still to do
+
+Everything. This note exists so the branch is not lost.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
