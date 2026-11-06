@@ -28,9 +28,14 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 CXX="${CXX:-g++}"
+# -pthread because one check cannot be written without a second thread. The
+# tear check in Tuner.h's ring compares the write counter before and after a
+# copy, and single threaded those two reads are the same read: three separate
+# breakages of that line, including removing it entirely, passed the whole
+# suite until a real writer was put behind it.
 flags=(-std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
        -fsanitize=address,undefined -fno-omit-frame-pointer
-       -fno-sanitize-recover=undefined)
+       -fno-sanitize-recover=undefined -pthread)
 
 # Halting on the first undefined behaviour rather than carrying on means the
 # exit code is trustworthy. Leak detection stays on; these are small programs

@@ -14,6 +14,7 @@
 #include "PanLaw.h"
 #include "FaderLaw.h"
 #include "SoloGraph.h"
+#include "Tuner.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -502,6 +503,55 @@ public:
         return armed;
     }
 
+    //=========================================================================
+    // The tuner's tap on the input.
+    //
+    // One channel copied into a ring while the tuner is open, and nothing at
+    // all while it is closed. The estimator itself costs about nine
+    // milliseconds a reading, so it runs on whatever thread drives the tuner's
+    // display and never here: all the audio thread does is hand the samples
+    // over.
+
+    /** Starts and stops the copy. Off whenever the tuner is not on screen,
+        because a ring nobody reads is work for nothing. */
+    void setTunerListening (bool shouldListen) noexcept { tunerListening.store (shouldListen); }
+    bool isTunerListening() const noexcept              { return tunerListening.load(); }
+
+    /** Which input the tuner reads.
+
+        Unassigned is the default and does not mean input 1: it means follow
+        the mixer, reading whatever the lowest numbered insert has wired. So
+        somebody who has already put a guitar on a strip opens the tuner and it
+        is listening to the guitar without being told. An explicit assignment
+        overrides that, for the case where the thing being tuned is not the
+        thing on the lowest strip.
+
+        Stored by the same packing the inserts use, so nothing wired reads as
+        zero. */
+    void setTunerSource (InputSource::Assignment assignment) noexcept
+    {
+        tunerSource.store (InputSource::assignmentToStored (assignment));
+    }
+
+    InputSource::Assignment getTunerSource() const noexcept
+    {
+        return InputSource::assignmentFromStored (tunerSource.load());
+    }
+
+    /** Which device input channel the last block actually read, or -1 for
+        none.
+
+        The display needs this rather than the assignment above: following the
+        mixer means the answer depends on how the mixer is wired, and a choice
+        that points past the end of a smaller device resolves to something
+        else. Showing what was resolved is what stops the readout quietly
+        meaning a different socket from the one it names. */
+    int getTunerInputChannel() const noexcept { return tunerChannel.load(); }
+
+    /** Where the tap puts the samples. Written by the audio thread, read by
+        the tuner's analysis. */
+    Tuner::InputRing& tunerInput() noexcept { return tunerRing; }
+
     /** The names the device gives its active inputs, in the order the audio
         callback hands them over.
 
@@ -856,8 +906,19 @@ private:
     std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0e9 }, songEnd { 0.0 };
     std::atomic<double> loopRangeStart { 0.0 }, loopRangeEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
+    std::atomic<bool>   tunerListening { false };
+    std::atomic<int>    tunerSource { 0 };     // 0 is "follow the mixer", not "input 1"
+    std::atomic<int>    tunerChannel { -1 };   // what the last block resolved to
     std::atomic<int>    selectedChannel { 0 }, recordSource { -1 };
     std::atomic<PanLaw::Law> panLaw { PanLaw::defaultLaw };
+
+    // Sized once, in the constructor, rather than when a device opens. Half a
+    // second at the highest rate the studio runs at is a third of a megabyte,
+    // and resizing it would mean reallocating a buffer the audio thread writes
+    // through: the ring is the one place here where the handover under the
+    // graph lock does not help, because the tap runs before that lock is
+    // taken. A fixed ring removes the question instead of answering it.
+    Tuner::InputRing    tunerRing;
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;

@@ -175,6 +175,45 @@ namespace InputSource
         return { fromStored (stored - 1), true };
     }
 
+    /** Which input the tuner listens to, given what it was told and how the
+        mixer happens to be wired.
+
+        Three cases, and the order of them is the whole decision. An explicit
+        choice wins, because somebody who picked an input meant it. Nothing
+        chosen follows the mixer, taking the lowest numbered insert that has an
+        input wired to it, which is what makes opening the tuner with a guitar
+        already on a strip a no-op rather than a setup step. And a mixer with
+        nothing wired anywhere falls back to the first input, which is the same
+        fallback the input meter makes, so somebody who has plugged a guitar in
+        and not got as far as the mixer yet can still tune it.
+
+        The fallback is why this returns a `Choice` rather than an
+        `Assignment`: there is always an answer, and "nothing" is not one of
+        them. Whether that answer exists on the device is `resolve`'s job.
+
+        `at(i)` hands back insert `i`'s assignment. A callable rather than an
+        array because the engine keeps those in atomics and reads this from the
+        device callback, where copying them into a buffer first would be an
+        allocation. Insert 0 is skipped: the master never takes an input, for
+        the same reason it is never the monitored insert.
+    */
+    template <typename AssignmentAt>
+    inline Choice tunerSource (const Assignment& chosen, int numInserts, AssignmentAt&& at)
+    {
+        if (chosen.assigned)
+            return chosen.choice;
+
+        for (int i = 1; i < numInserts; ++i)
+        {
+            const Assignment wired = at (i);
+
+            if (wired.assigned)
+                return wired.choice;
+        }
+
+        return defaultChoice();
+    }
+
     /** Gives every input on the device an insert of its own, starting at
         `firstInsert` and working upward.
 
