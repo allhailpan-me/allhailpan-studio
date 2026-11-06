@@ -1,6 +1,19 @@
 # Research backlog
 
-## Standing question: nineteen commits of user visible work are unreleased
+## Standing question: the unreleased work keeps growing, and now includes a tuner
+
+The last tag is still **v0.7.1**, cut on 2026-10-13. Since the figure below was
+written, quantise, multiple note selection and the tuner have all merged, and
+the tuner is the first of them somebody would notice the absence of: it is on a
+keyboard shortcut and in a menu, and a musician who records guitar has no
+reason to know it exists until a build carries it.
+
+So the question has a sharper edge than it had. Everything still applies:
+the notes are written and staged rather than missing, a release spans several
+nights' work by several sessions, and whoever cuts it should run the
+`release-manager` agent over the whole span rather than over one change.
+
+What was written when the count was nineteen:
 
 The last tag is **v0.7.1**, cut on 2026-10-13, and `main` is nineteen commits
 past it. Everything since has gone into the `## Since v0.7.0` section of
@@ -24,6 +37,47 @@ one change, which is what that agent is for.
 A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
+
+---
+
+## 2026-11-06: the tuner merged
+
+Pull request **#61** is squash merged as `2745fcd`, and the release notes are in
+behind it as **#69**. All four checks were green on a head that was up to date
+with `main`: the tests job and all three platform builds.
+
+Two things about how it got there are worth keeping.
+
+**It took two sessions and a week of wall clock, because one of them was cut
+off twice.** The first was cut off after the arithmetic landed, and the branch
+sat as a draft overnight; the second finished the wiring and then stopped
+against a spend limit with the audit of its own fixes still running, and
+resumed a week later to find later nights had carried the branch forward,
+merged `main` into it, and run a second audit over it. Nothing was lost,
+because every milestone was pushed. That is the whole reason the "save as you
+go" rule is in the prompt, and this is the clearest case of it paying so far.
+
+**The audits cost more than the building did, and were worth it.** Between
+them they found an estimator that reported a confident octave down above its
+search ceiling, a gate whose accuracy depended on how often the display asked
+it for a reading, a constant naming B6 that was below B6 so no sweep ever
+tested that note, a display that would hold a dead note for ever after an
+interface was unplugged, a modal window that would have taken the transport and
+the mixer with it, a thread that would have spun a core at 192 kHz, and a
+dozen comments that said more than the code did. Eighty eight deliberate
+breakages were run against the test, eleven of which it did not catch at first.
+None of the faults was in the arithmetic of the paper. Almost all of them were
+in the half nobody had thought to doubt.
+
+### Not released
+
+A release was not cut. The change is user visible and all three platforms
+built, so it could have been, but what is waiting is now three nights of
+features and several hardening passes, and the standing question at the top of
+this file asks for the `release-manager` agent over the whole span rather than
+over one change. A session resuming into a spend limit is not the session to
+do that. It is the next obvious piece of work on this repository and it is
+worth more than another feature.
 
 ---
 
