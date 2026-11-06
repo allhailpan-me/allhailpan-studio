@@ -1,6 +1,56 @@
-You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+There is a tuner now, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**There is a tuner.** Ctrl+T, or File > Tuner. Play one note and it tells you
+which note it is and how many cents sharp or flat, with a needle that fills its
+centre when you are in tune.
+
+It listens to whatever your lowest mixer strip has an input wired to, so if your
+guitar is already on a strip there is nothing to set up. If you want it on a
+different socket, pick one from the menu at the top. If you have not got as far
+as the mixer yet it listens to input 1, so it works on a brand new project,
+which is when you are most likely to want it. There is an A4 reference too, from
+410 to 480 Hz in tenths of a hertz, for anybody working away from 440; it stays
+where you put it and belongs to the studio rather than to one song, because a
+tuning reference is about the instruments in the room.
+
+**It waits about a second and a half before it shows you a number, and that is
+the whole point of it.** A plucked steel string is sharp when you hit it. Not
+slightly: it falls 12.5 cents while it rings, with most of that gone in the
+first half second, and it was measured on an acoustic guitar's open low E at a
+conference paper rather than guessed at here. Twelve and a half cents is twelve
+times the accuracy every tuner on the market claims. So a tuner that answers you
+straight away answers you with the attack, reads sharp on every string, and
+disagrees with the pedal on your floor.
+
+What this does instead is watch the pitch stop moving. It shows you nothing
+until the note has settled, and then it is inside a cent of where the string is
+actually going to sit. That wait is not the software being slow: it is how long
+your string takes. It is also, for what it is worth, about how long a tuning
+pedal appears to take before it makes up its mind.
+
+A couple of consequences of that worth knowing. Pluck gently, with a thumb
+rather than a pick, and it settles sooner. And it will say nothing at all rather
+than show you a wrong number: if it is reading dashes it has not heard a note it
+can trust yet, and the line underneath says whether that is silence, no input,
+or a note still settling.
+
+**What it covers.** Everything from a five string bass tuned down to drop A, up
+past the top of a guitar's range. The low end is the same figure Korg design
+their own tuners around rather than a round number picked for headroom, and the
+range deliberately goes below the lowest note it names, because a tuner that
+cannot tell you your low B is flat is no use for the one thing you are looking
+at it for. Above the range it says nothing, which took finding: it used to read
+a pinch harmonic or a whistle as an exact octave down, confidently.
+
+It reads the note you are playing rather than the loudest thing in the sound,
+which matters more than it sounds. On the bottom four strings of a guitar and
+everywhere on a bass, the strongest partial is often not the fundamental, and
+the fundamental can be missing altogether. Pick the loudest peak out of the
+sound and you get an octave up. This finds the repeat in the waveform instead,
+which is where the pitch is whether or not there is any energy at that
+frequency.
 
 **You can pick up more than one note at a time.** Until now the piano roll
 edited exactly one note per gesture. There was no way to grab a chord, move a
