@@ -9,32 +9,182 @@ Newest first.
 
 ## 2026-11-06: the latency graph, which is the calculation that cannot tell you it is wrong
 
-### What is being looked at
+### What was looked at
 
 `Source/LatencyGraph.h`, 220 lines of code, and `Tests/LatencyGraphTest.cpp`,
-765 lines, which covers it. A priority 2 target: a test that has never been
-mutation tested, over the arithmetic CLAUDE.md names as the one here least able
-to announce that it is wrong.
+which covers it. A priority 2 target: a test that had never been mutation
+tested, over the arithmetic CLAUDE.md names as the one here least able to
+announce that it is wrong.
 
-Picked on stake rather than on the ratio. Its cover looks healthy at 2.44 lines
-of test to one of code, and the headline property it asserts, that everything
-arrives at the master together, is the right property. But no night has ever
-tried to break it, two real bugs have already lived in this file, and both of
-them had a comment above them claiming the opposite of what the code did. The
-failure mode is a record that sounds slightly smeared and a person who has no
-reason to suspect the compensation.
-
-One thing in the test is worth suspecting before a single mutation is built:
-`walk::inLatencies` recomputes the forward pass the same way the implementation
-does, so the walk is not as independent of the thing it checks as its own
-comment claims. Whether that matters is what the mutations are for.
+Picked on stake rather than on the ratio. Its cover looked healthy at 2.44
+lines of test to one of code, and the headline property it asserts, that
+everything arrives at the master together, is the right property and is
+asserted over twenty thousand generated mixers. But no night had ever tried to
+break it, two real bugs have already lived in this file, and both of them had
+a comment above them claiming the opposite of what the code did.
 
 Not `Fx/Svf.h`, `Fx/BellMatch.h`, `Envelope.h` or `Spectrogram.h`, or any of
 their tests, which open pull requests #55, #66, #65 and #68 are changing.
 
-### Still to do
+### Nothing was wrong, and five things were unchecked
 
-Everything. This note exists so the branch is not lost.
+**No fault was found in the arithmetic.** Eighty four mutations, every one
+built the way `Tests/run.sh` builds the suite
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`), and the
+answer the header computes is right in every case the mutations could reach.
+That is the result, and it is a real one: the property this file exists to
+produce holds.
+
+What was not true is the strength the test reported. **41 of the first 62
+mutations were caught and 21 survived.** The test is now at **75 of 84**, and
+the nine that remain are proved no-ops rather than argued ones.
+
+The survivors fell into five groups.
+
+**The figure a recorded take is written down by had nothing over it at all.**
+`totalLatency` is the one number in here that does not go to a delay line. The
+engine stores it, and `AudioEngine::getPluginLatencySamples` hands it to
+`RecordAlign.h` as `engineLatency`, which is how far back a capture is written
+against the arrangement. Three breakages of it survived the whole file:
+dropping the master's own chain, subtracting it instead of adding it, and
+trusting a negative one. Dropping the chain is the interesting one, because it
+is not a smeared mix at all: it puts the performance somebody has just played
+late by the whole of a lookahead limiter, which is precisely the fault
+`RecordAlign.h` was written to fix. That fault got in three times, and
+`RecordAlign.h`'s own comment says why: "it sat in the window with no test over
+it, which is how the first three survived". The figure it is fed had the same
+problem one file along.
+
+**The two index clamps, three breakages, one of them an out of bounds read.**
+`clampDestination` and `clampInsert` sanitise indices that "arrive from saved
+projects and from atomics", and the reason they survived is worth keeping: the
+walk in the test resolves a channel's destination through the same two
+functions, so an index that both the implementation and the walk mis-resolve
+the same way still lands together with everything else and the property check
+cannot see it. The walk's own comment claimed it "cannot share a mistake with
+the thing it is checking", and for the clamps that was not true. They are
+asserted directly now, both ends of both ranges, plus the degenerate mixers
+with one insert and with none.
+
+**Four guards against a reported latency below zero.** The generator only ever
+produced sensible figures, so none of the four was doing anything a test could
+see. The engine's `latencyOf` clamps what a plugin reports before this is
+reached, so these are the second line of defence and the new check says so
+rather than implying the first. Worth keeping all the same, because the
+`Channel` field comment asserts "never negative" and a comment was the only
+thing asserting it.
+
+**Reading `busChannels` past its end, in both directions.** The two lists come
+from a plugin's bus layout by way of a saved project and nothing makes them the
+same length. Shorter means a bus nothing is known about, which must be skipped;
+longer means a loop sized by the wrong list reads past the end of the routing
+and writes past the end of the row it is filling. Both are now cases and the
+randomised generator makes both.
+
+**Starting either of the final two loops at insert 0 rather than 1.** The
+master is what everything else is lined up to, so it takes no hold back of its
+own and resolves no sends, and both were guaranteed only by a loop bound.
+`insertDelay[0]`, `sendDelay[0]` and `outLat[0]` are now pinned, and the master
+is given a monitored flag and a send row in the test precisely because the
+engine will never give it either.
+
+And one check was quietly vacuous. The existing "a backwards send should carry
+no delay" built a mixer with nothing loaded anywhere but the sending insert, so
+the delay a backwards send would wrongly have been given was zero in any case.
+A breakage that handed every illegal send its destination's whole hold back
+walked straight through it. That is the failure the generators in
+`NoteSelectionTest` were written to avoid, in another file: a test that is
+secretly vacuous reports a strength it does not have.
+
+### What is now checked that was not
+
+- `totalLatency`, in a named case and on every one of the twenty thousand
+  randomised mixers, with the master's chain set and cleared to prove it moves
+  that figure and nobody's alignment.
+- Playlist audio as a route in its own right in the walk. It was covered only
+  where a channel happened to share the insert, and an insert carrying a clip
+  and no instrument was not checked at all. Insert 0 can carry one, and a clip
+  dropped on the master has nothing after it to catch it up.
+- Both clamps directly, at both ends, including `numInserts` of 1 and 0.
+- Negative reported latencies from an instrument, from an insert and from the
+  master.
+- `busChannels` shorter and longer than `busInsert`, as cases and in the
+  generator.
+- Every send that may not legally go where it points carries exactly zero.
+- `clipDelay` and `outLat` inside `widest`, which the bound checks had left out.
+- The master's three unused rows.
+
+The randomised generator is no longer well behaved: a latency is sometimes
+negative, an index is sometimes off either end of the mixer, and the two bus
+lists sometimes disagree in length. Rarely rather than often, so the bulk of
+the trials stay realistic.
+
+### The nine survivors, and why each is a no-op rather than a gap
+
+Judged by measurement, not by argument. Each surviving mutant was compiled
+beside the real header under a second namespace name and both were driven with
+the same randomised mixers, through a reused `Result` as well as a fresh one,
+one million mixers each, comparing every field of the answer. **None of the
+nine changes a single field.** The method is worth repeating: rename the
+namespace with a macro around each include, generate one `Setup` per version
+from the same seeded stream, and compare the whole `Result`.
+
+Four are dead clamps, whose inputs provably cannot go negative:
+
+- `channel-delay-unclamped`, `insert-hold-unclamped`, `send-delay-unclamped`
+  and the `std::max (0, ...)` around a channel's own figure. `inLat` starts at
+  the slowest instrument and only ever rises, `masterIn` is the maximum of
+  every `outLat`, and the forward pass guarantees a legal send's destination is
+  never earlier than its source. So each of those three subtractions is
+  non-negative by construction.
+
+Four are defensive `assign` calls on rows that are written in full anyway:
+
+- `insert-rows-resized-not-zeroed`, `channel-rows-resized-not-zeroed`,
+  `send-rows-resized-not-emptied` and `send-row-resized-not-zeroed`. Every
+  entry of those rows is written on every call, and index 0 of the two
+  per-insert ones is never written either way, so it stays at the zero a fresh
+  vector had.
+- `bus-row-resized-not-zeroed` is the interesting one of the four, because the
+  row it fills does skip unused buses. It is a no-op only because
+  `result.busDelay.assign (numChannels, {})` empties every row first, and
+  **that** mutation is caught. The pair is what the header's comment is about,
+  that busDelay "needs assign rather than resize, and it is the only one that
+  does": the outer one is load bearing and the inner one is belt over braces.
+
+One is a guard an outer maximum already absorbs:
+
+- `slowest-keeps-negatives`. `slowestInstrument` starts at zero and is only
+  ever raised, so a negative latency cannot lower it whether it is clamped or
+  not.
+
+One mutation was invalid rather than surviving, and is excluded from the count:
+an attempt to set the master's input before the sum that feeds it, written as
+an added line rather than a moved one, which maxed against a `masterIn` still
+holding zero and so changed nothing by construction. The ordering property it
+was aiming at is covered: running the forward pass backwards is caught.
+
+### One thing the header's own comment was promising and not delivering
+
+`outLat[0]` is left at zero while the field's comment said "per insert:
+clipDelay plus its own effects", which for insert 0 would be `masterIn` plus
+the master's chain. Nothing reads it, so this is a comment that was wrong
+rather than a fault, which is the thing CLAUDE.md keeps warning about from the
+other direction. Filling it in would have been worse: it would be a second
+name for `totalLatency`, and two names for one number is how two numbers come
+to disagree. So the comment now says it is not filled in and why, and the test
+pins it at zero.
+
+### Noted rather than changed
+
+`AudioEngine::mixChannelOutput` resolves the same two indices with the same two
+rules, written out again as `juce::jlimit` rather than by calling the header.
+The two agree today and the equivalence is easy to see, so this is not a fault.
+It is written up in `Research/BACKLOG.md` because a divergence between them
+would be a channel whose audio lands on one insert while its compensation was
+computed for another, which is this project's favourite shape of fault, and
+because the header's half is now pinned by a test while the engine's half is
+not.
 
 ---
 

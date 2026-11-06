@@ -16,6 +16,7 @@
 //   channel main    own + channelDelay + fxLatency[insert] + insertDelay[insert]
 //   channel bus     own + busDelay[b]  + fxLatency[to]     + insertDelay[to]
 //   send i -> t     outLat[i] + sendDelay[i][s] + fxLatency[t] + insertDelay[t]
+//   playlist clip   clipDelay[i] + fxLatency[i] + insertDelay[i]
 //
 // All of those must equal masterIn. That one equality is the whole purpose of
 // the compensation, and it is checked over thousands of generated mixers
@@ -27,6 +28,49 @@
 // The monitored insert is the deliberate exception, and it gets the opposite
 // treatment: assert that it is early, assert by exactly how much, and assert
 // that the send copy of it is not quietly put back.
+//
+// --- What that equality cannot see, learned by trying to break it ---------
+//
+// Eighty four mutations of the header; the first sixty two caught forty one.
+// Four things the arrival property is blind to, each now checked some other
+// way, because every one of them was a mutation that survived.
+//
+// It cannot see a figure that leaves the mixer rather than reaching a delay
+// line. `totalLatency` is the only one, and nothing here touched it: the
+// engine hands it to RecordAlign as engineLatency, so an error in it does not
+// smear the mix at all, it writes the take somebody has just played down in
+// the wrong place. Three breakages of it survived everything else.
+//
+// It cannot see an index that both the implementation and this file resolve
+// the same wrong way. The walk below calls clampDestination and clampInsert
+// itself, so a mutant clamp moves both sides of the equality together and it
+// still balances. Three of those survived, one reading past the end of the
+// graph. The two clamps are asserted directly as well now, which is the only
+// thing that can see them.
+//
+// It cannot see a defence against an input nothing generates. Four guards
+// against a negative reported latency, and two reads past the end of a short
+// bus list, all survived a generator that only ever produced sensible
+// mixers. The generator is deliberately hostile now: a latency is sometimes
+// negative, an index sometimes off either end, and the two bus lists
+// sometimes disagree in length, rarely rather than often so the bulk of the
+// trials stay realistic.
+//
+// It cannot see a route it does not walk. A playlist clip was covered only
+// where a channel happened to share the insert, so an insert carrying a clip
+// and no instrument was unchecked, and so was insert 0, which can carry one
+// and has nothing after it to catch it up. And a send that may not legally go
+// where it points is skipped by the walk, since it carries no audio either,
+// so the delay it is given was looked at by nothing: the one check on it
+// built a mixer with nothing loaded anywhere else and so compared zero
+// against zero.
+//
+// Nine mutations survive on purpose and are written up in
+// Research/HARDENING.md with the measurement that says so: four dead clamps
+// whose inputs cannot go negative, four defensive assigns on rows written in
+// full in any case, and one guard an outer maximum already absorbs. Each was
+// compiled beside the real header and driven with a million identical
+// randomised mixers without changing one field of the answer.
 //
 //   ./Tests/run.sh
 // ---------------------------------------------------------------------------
