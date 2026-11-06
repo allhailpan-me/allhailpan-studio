@@ -541,14 +541,34 @@ static void sendsMayOnlyGoForwards()
     checkEqual (LatencyGraph::isLegalSendTarget (5, 0, 17) ? 1 : 0, 0, "into the master is not");
     checkEqual (LatencyGraph::isLegalSendTarget (5, 17, 17) ? 1 : 0, 0, "past the end is not");
 
+    // Insert 5 is deliberately made a late destination before anything sends
+    // backwards into it. Without that, the delay a backwards send would
+    // wrongly be given is zero anyway and the check below passes while
+    // proving nothing: it was exactly that vacuous, and a breakage that gave
+    // every backwards send its destination's whole hold back walked straight
+    // through it.
     auto setup = mixer (17, 2);
+    setup.inserts[1].fxLatency = 2048;
+    setup.inserts[1].sendTo[0] = 5;          // forwards: this one is real
     setup.inserts[9].fxLatency = 128;
     setup.inserts[9].sendTo[0] = 5;          // backwards, must be ignored
+    setup.inserts[9].sendTo[1] = 9;          // onto itself, must be ignored
+
     const auto result = LatencyGraph::compute (setup);
 
-    checkEqual (result.clipDelay[5], 0,
-                "a backwards send was acted on, which is a feedback loop");
+    checkEqual (result.clipDelay[5], 2048,
+                "insert 5 should be waiting for the forward send and nothing else");
     checkEqual (result.sendDelay[9][0], 0, "a backwards send should carry no delay");
+    checkEqual (result.sendDelay[9][1], 0, "a send onto its own insert should carry no delay");
+
+    // And the other half of the rule: a backwards send must not raise its
+    // destination either, which would be the feedback loop itself.
+    auto loop = mixer (17, 2);
+    loop.inserts[9].fxLatency = 128;
+    loop.inserts[9].sendTo[0] = 5;
+
+    checkEqual (LatencyGraph::compute (loop).clipDelay[5], 0,
+                "a backwards send was acted on, which is a feedback loop");
 }
 
 //==============================================================================
@@ -878,6 +898,29 @@ static void busChannelsMayBeShorterThanBusInsert()
         if (! arrival.exempt)
             checkEqual (arrival.when, result.masterIn,
                         arrival.what + " does not land with everything else");
+
+    // The other direction, which is just as plausible and which the loop over
+    // the buses must not follow: busChannels is the longer list here, so a
+    // loop sized by it reads past the end of busInsert and writes past the end
+    // of the row it is filling. Both are out of bounds and both are silent
+    // without a sanitizer.
+    auto other = mixer (17, 2);
+    other.inserts[2].fxLatency = 480;
+    other.inserts[2].sendTo[0] = 6;
+    other.channels[0].latency     = 96;
+    other.channels[0].splitBuses  = true;
+    other.channels[0].busInsert   = { 6 };
+    other.channels[0].busChannels = { 2, 2, 2, 2 };     // longer on purpose
+
+    const auto wide = LatencyGraph::compute (other);
+
+    checkEqual ((int) wide.busDelay[0].size(), 1, "a row is as long as the routing, not the channel counts");
+    checkEqual (wide.busDelay[0][0], 480, "the one routed bus was not aligned");
+
+    for (const auto& arrival : walk::arrivals (other, wide))
+        if (! arrival.exempt)
+            checkEqual (arrival.when, wide.masterIn,
+                        arrival.what + " does not land with everything else");
 }
 
 /** The master has no hold back of its own and no sends to resolve.
@@ -948,6 +991,7 @@ static void randomised()
     int monitorDoubled = 0;
     int wrongRecordOffset = 0;
     int masterHeldBack = 0;
+    int illegalSendDelayed = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -991,6 +1035,8 @@ static void randomised()
             // entry saying what is on it is a bus nothing is known about.
             if (rarely (rng) && buses > 1)
                 channel.busChannels.resize ((size_t) (buses - 1));
+            else if (rarely (rng))
+                channel.busChannels.resize ((size_t) (buses + 2), 2);
         }
 
         // Several at once, since a band is several microphones into several
@@ -1031,6 +1077,15 @@ static void randomised()
         if (result.totalLatency != result.masterIn
                                    + std::max (0, setup.inserts[0].fxLatency))
             ++wrongRecordOffset;
+
+        // A send that may not legally go where it points carries no delay at
+        // all. The walk skips those sends, since they carry no audio either,
+        // so without this nothing looked at the figure they were given.
+        for (int i = 1; i < 17; ++i)
+            for (size_t s = 0; s < setup.inserts[(size_t) i].sendTo.size(); ++s)
+                if (! LatencyGraph::isLegalSendTarget (i, setup.inserts[(size_t) i].sendTo[s], 17)
+                      && result.sendDelay[(size_t) i][s] != 0)
+                    ++illegalSendDelayed;
 
         // The master is where everything else is lined up to, so it has
         // nothing to be held back by and no send of its own to resolve.
@@ -1086,6 +1141,8 @@ static void randomised()
                 "randomised mixers that would write a recorded take down in the wrong place");
     checkEqual (masterHeldBack, 0,
                 "randomised mixers where the master was held back or given sends");
+    checkEqual (illegalSendDelayed, 0,
+                "randomised mixers where a send that may not go where it points was given a delay");
 }
 
 //==============================================================================
