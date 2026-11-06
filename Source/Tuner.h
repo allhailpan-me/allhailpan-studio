@@ -926,10 +926,19 @@ private:
     taken, and it measures between 0.17 and 0.46 cents remaining across every
     frame rate from 5 to 60 per second.
 
-    What it costs is about a second and a half of waiting, which is slower than
-    a pedal appears to be, and the trade is deliberate: the alternative is a
-    display that opens earlier on a string that is still falling. A tighter
-    figure does not make the tuner faster, it makes it read sharp.
+    What it costs is about one and three quarter seconds of waiting at ten
+    readings a second, which is slower than a pedal appears to be, and the
+    trade is deliberate: the alternative is a display that opens earlier on a
+    string that is still falling. A tighter figure does not make the tuner
+    faster, it makes it read sharp.
+
+    That figure is a count of readings, so it is a duration only at a given
+    reading rate, and the rate is not the same at every sample rate: see
+    `Pacing`. The display needs `stabilityFrames + holdFrames - 1` readings,
+    which is six, and six readings is 0.7 s at 44.1 and 48 kHz, 1.3 s at
+    96 kHz and 5.4 s at 192 kHz, on top of whatever the string takes to
+    settle. Somebody tuning through a 192 kHz device waits five seconds for a
+    number, and the reason is the reading cost rather than this gate.
 
     WHAT THIS GATE CANNOT DO, MEASURED RATHER THAN HOPED
 
@@ -943,10 +952,10 @@ private:
     land at the same phase every time. They then agree to a hundredth of a
     cent, the spread is nothing, and the display opens bright and settled on a
     note moving by tens of cents. Measured, a 220.000 Hz note with a 20 cent
-    vibrato at the reading rate: **19.6 cents sharp**, with every appearance of
-    having settled. A singer would flatten a correct note by a fifth of a
-    semitone on the strength of it. The turning points of a vibrato are a
-    second way in, because the pitch really is momentarily still there.
+    vibrato at exactly a fixed reading rate: **19.6 cents sharp**, with every
+    appearance of having settled. A singer would flatten a correct note by a
+    fifth of a semitone on the strength of it. The turning points of a vibrato
+    are a second way in, because the pitch really is momentarily still there.
 
     Two things reduce it and neither removes it, and both are measured in
     `Tests/TunerTest.cpp` rather than argued for here:
@@ -958,26 +967,43 @@ private:
       falls monotonically, so this costs exactly the extra readings and nothing
       else.
 
-    Together, at 44.1 and 48 kHz, where a reading costs 9 to 11 ms and the
-    reading rate is around 8.5 a second: the worst wrong reading over a sweep
-    of the vibrato band at depths of 2, 5 and 20 cents falls from 19.6 cents to
-    4.9, and the number of readings shown at all over that sweep falls from
-    1749 to 92. The glide gets better at the same time, from 0.284 cents sharp
-    to 0.106, because a longer wait is a more settled string. The cost is 0.38 s
-    of extra waiting.
+    Neither is worth anything without the other, which is the part that had to
+    be measured rather than reasoned about. The sweep in `testVibrato` runs the
+    vibrato band at depths of 2, 5 and 20 cents and reports the worst displayed
+    error and how many readings were shown at all:
 
-    **At 96 and 192 kHz it is not fixed, and that is the honest statement.** A
-    reading costs 48 and 197 ms there, so the duty cycle in `Pacing` drops the
-    reading rate to 4.5 and 1.1 a second, the window spans several vibrato
-    cycles, and the worst wrong reading stays at 19.9 cents. No choice of
-    dither or hold count tried moved it: the measurements are in the backlog.
+    | | worst shown | readings shown |
+    |---|---|---|
+    | fixed interval, one agreement | 15.7 cents | 336 |
+    | dithered, one agreement | 19.4 cents | 49 |
+    | fixed interval, three agreements | 15.7 cents | 312 |
+    | **dithered, three agreements** | **4.9 cents** | **14** |
+
+    So the dither alone makes the worst reading **worse**, by showing fewer
+    readings but still eventually finding a coincidence, and the hold alone
+    does nothing at a fixed interval because the same coincidence repeats by
+    construction. The pair is worth a factor of three on the worst reading and
+    twenty four on how often a moving note is shown.
+
+    The glide gets better at the same time rather than worse, because a longer
+    wait is a more settled string: at ten readings a second the display opens
+    at 1.70 s instead of 1.50 and reads 0.168 cents sharp instead of 0.284. The
+    cost is 0.20 s.
+
+    **It is not fixed, and it gets worse as the sample rate rises.** The whole
+    mechanism is a sampling of the pitch, so what matters is the reading rate,
+    and `Pacing`'s duty cycle ties that to what a reading costs: 8.5 a second
+    at 44.1 and 48 kHz, 4.5 at 96 and 1.1 at 192. Over the wider sweep recorded
+    in the backlog the worst displayed error is 4.9 cents at a 9 ms reading,
+    5.0 at a 48 ms reading and **18.5 at a 197 ms reading**, which is a
+    192 kHz device. No choice of dither or hold count tried moved the last one.
 
     The fix is not a constant in here. It is to decimate the tap to a fixed
     analysis rate well above the vibrato band, so that the reading rate stops
     depending on what the interface happens to be set to, which is the one
     thing that makes the sampling unable to alias with a vibrato at all. That
     is a filter design job with a specification behind it and it is written up
-    as the next step in `Research/BACKLOG.md`.
+    as the next step in `Research/BACKLOG.md`, with these measurements.
 
     What is shipped is a tuner that is accurate to a fraction of a cent on a
     plucked or sung note held steady, which is how a tuner is used, and that
@@ -1038,15 +1064,20 @@ struct GateSettings
         a sparse sampling of the pitch, so a modulation close to the reading
         rate can satisfy it by coincidence; asking for the coincidence to
         repeat is what makes that unlikely rather than ordinary. Measured at
-        44.1 kHz over a sweep of the vibrato band, three in a row takes the
-        worst wrong reading from 19.6 cents to 4.9 and the number of readings
-        shown at all from 1749 to 92.
+        44.1 kHz over a sweep of the vibrato band, and only in company with the
+        dither in `Pacing`, three in a row takes the worst wrong reading from
+        15.7 cents to 4.9 and the number of readings shown at all from 336 to
+        14. The table in the comment above `GateSettings` has each of the four
+        combinations, because three of them are no better than one.
 
         It is nearly free on what the gate is actually for. On a settling pluck
         the rate falls monotonically, so once it is satisfied it stays
-        satisfied and this costs exactly two more readings: 1.40 s to 1.78 s
-        before the display opens, and the reading when it does open is closer
-        rather than further, 0.284 cents sharp to 0.106. */
+        satisfied and this costs exactly two more readings: at ten readings a
+        second the display opens at 1.70 s instead of 1.50, and the reading
+        when it does open is closer rather than further, 0.168 cents sharp
+        instead of 0.284. What it is not free on is a slow reading rate, where
+        two more readings is two more of whatever a reading costs: see the
+        bottom of the comment above `GateSettings`. */
     int holdFrames = 3;
 
     /** How many nominal intervals a gap between readings may reach before the
@@ -1376,14 +1407,13 @@ private:
     the four of them agree to a hundredth of a cent, and the display opens
     bright and settled on a note moving by tens of cents. Measured on the
     shipped gate at a fixed interval, a 220.000 Hz note with a 20 cent vibrato
-    at the reading rate reads 19.1 cents sharp.
+    at the reading rate reads 19.6 cents sharp.
 
     And the rates it happens at are not remote, because of the first job. Where
-    the duty cycle takes over the reading rate is 5.2 a second at 96 kHz and
-    1.3 at 192, and 5.2 Hz is the middle of what a singer's vibrato and a
-    guitarist's hand both do. At 44.1 and 48 kHz the reading rate is 10 a
-    second, which is above the band, which is why every measurement taken while
-    this was written missed it.
+    the duty cycle takes over, the reading rate is 4.5 a second at 96 kHz and
+    1.1 at 192, which is the middle of what a singer's vibrato and a
+    guitarist's hand both do and then below it. At 44.1 and 48 kHz it is 8.5 a
+    second, which is at the top of that band rather than clear of it.
 
     So the interval is dithered: each wait is multiplied by a factor drawn from
     `[1, 1 + jitter]`, which scatters the phase the pitch is sampled at so that
@@ -1395,27 +1425,35 @@ private:
     sequence that ships.
 
     What it costs is responsiveness and nothing else. The mean interval is
-    `1 + jitter/2` times the nominal, so at 44.1 kHz the needle responds about
-    every 118 ms rather than every 100. It cannot cost accuracy, because the
-    gate's criterion is a rate and the real interval is handed to it per
-    reading.
+    `1 + jitter/2` times the BASE, and the base is the nominal only while the
+    duty cycle is not binding, which is the distinction that matters above
+    48 kHz: at 44.1 kHz the needle responds about every 118 ms rather than
+    every 100, and at 96 kHz the mean hop is 221 ms rather than 120. It cannot
+    cost accuracy, because the gate's criterion is a rate and the real interval
+    is handed to it per reading.
 
-    HOW MUCH IT IS WORTH, AND WHAT IS LEFT. On its own, not much: dithering
-    alone took the worst wrong reading over a sweep of the vibrato band from
-    19.6 cents to 19.6, because the gate is re-evaluated on every reading and
-    only has to be fooled once. It is worth having together with
-    `GateSettings::holdFrames`, which makes a coincidence have to repeat:
-    measured at 44.1 kHz the pair take the worst wrong reading to 4.9 cents and
-    the number of readings shown at all over that sweep from 1749 to 92. At 96
-    and 192 kHz, where the duty cycle drops the reading rate into the middle of
-    the vibrato band, nothing tried moved it off 19.9 cents.
+    HOW MUCH IT IS WORTH, AND WHAT IS LEFT. On its own it makes things worse,
+    which is worth stating plainly because the opposite was assumed until it
+    was measured: over the vibrato sweep in `Tests/TunerTest.cpp` the worst
+    wrong reading went from 15.7 cents at a fixed interval to 19.4 with the
+    dither. It shows far fewer readings, 49 against 336, and the one it does
+    eventually find is a worse one. The gate is re-evaluated on every reading,
+    so it only has to be fooled once, and over a held note there are plenty of
+    chances.
 
-    So this is a mitigation with a measured size and not a fix. The fix is to
-    decimate the tap to a fixed analysis rate well above that band, so the
-    reading rate stops depending on what the interface happens to be set to,
-    which is a filter design job with a specification behind it rather than a
-    constant to change. It is written up as the next step in
-    `Research/BACKLOG.md`, with these measurements.
+    It earns its place only together with `GateSettings::holdFrames`, which
+    makes a coincidence have to repeat several times: the pair measure 4.9
+    cents and 14 readings. The four combinations are tabulated in the comment
+    above `GateSettings`, and three of them are no better than doing nothing.
+
+    So this is a mitigation with a measured size and not a fix, and the size
+    shrinks as the sample rate rises: 18.5 cents still gets through at the
+    197 ms reading a 192 kHz device produces. The fix is to decimate the tap to
+    a fixed analysis rate well above the vibrato band, so the reading rate
+    stops depending on what the interface happens to be set to, which is a
+    filter design job with a specification behind it rather than a constant to
+    change. It is written up as the next step in `Research/BACKLOG.md`, with
+    these measurements.
 */
 class Pacing
 {
@@ -1521,11 +1559,14 @@ private:
     the snapshot plus 512 it was 29 out of 147572, and at four times the
     snapshot it was none out of 412710.
 
-    The engine's ring is 96000 samples, which is half a second at the highest
-    rate the studio runs at and two and a sixth seconds at 44.1 kHz, against a
-    snapshot of 130 ms at every rate. So it clears the requirement by a wide
-    margin, and the reader has between a third of a second and two seconds to
-    copy it, for a copy that is a few tens of microseconds.
+    The engine's ring is `studioRingCapacity()`, which works out at 99756
+    samples: half a second at the highest rate the studio runs at and 2.26
+    seconds at 44.1 kHz, against a snapshot of 130 ms at every rate. It is
+    derived from the requirement rather than written down beside it, because
+    the two numbers used to meet in `AudioEngine.cpp` where nothing could
+    compile them together. So it clears the requirement by a wide margin, and
+    the reader has between half a second and two seconds to copy it, for a copy
+    that is a few tens of microseconds.
 
     The counter is also monotonic and is never reset, which a reader has to know
     rather than discover: "enough has arrived" latches true the first time it

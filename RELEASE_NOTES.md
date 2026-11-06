@@ -1,6 +1,54 @@
-You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+There is a tuner at last, so tuning up no longer means reaching for a pedal or a phone: File > Tuner, or Ctrl+T, and it reads straight off the socket and waits for the string to settle before it commits to a number. You can pick up more than one note in the piano roll too: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**There is a tuner.** Until now, tuning the guitar before a take meant
+reaching for something that is not this studio: a pedal, a phone, a clip on
+the headstock. Every studio and every multi effects box has one, and it was
+the most ordinary thing still missing here.
+
+File > Tuner, or Ctrl+T, and it listens to whatever the strip you are
+recording on is listening to: straight off the socket, before the fader, the
+plugins, the pan and the mute, which is the same signal the pedal on the floor
+sees. So nothing you do in the mixer can change what it reads. It follows the
+mixer by default and you can point it at any input on the interface by hand,
+which matters when you have a guitar in one socket and a microphone in
+another. The reference pitch moves from 410 to 480 Hz in tenths if you are
+tuning to something that is not at 440.
+
+The part worth knowing about is what it does *before* it shows you a number.
+A plucked steel string does not have one pitch. It starts sharp and falls
+about twelve and a half cents over the first second, which has been measured
+and published, and twelve cents is twelve times the error a tuner claiming
+plus or minus one cent is allowed. So a tuner that shows you a number the
+moment it hears a note shows you a sharp one, and disagrees with the pedal on
+the floor for a reason nothing on screen explains. This one waits until the
+pitch has stopped moving: about one and three quarter seconds, which is
+slightly slower than a pedal feels, and the trade is deliberate, because the
+alternative is a number that is wrong in a way you cannot see. While it is
+waiting it says so rather than showing you nothing.
+
+Two things I want to be straight about.
+
+The estimator is YIN, built from the paper it was published in rather than
+from anybody's code, and it is accurate to a fraction of a cent on a note held
+steady: the worst reading anywhere over the guitar and bass range is a tenth
+of a cent, and it reads the right octave on a note with no fundamental at all,
+which is where a simpler detector gets it wrong. But **it can be fooled by a
+deliberate vibrato.** If you sing or bend a note wobbling at about the rate it
+takes readings, the readings can all land at the same point of the wobble,
+agree with each other, and show you a confident number up to about five cents
+out. It is measured and written down rather than discovered later, and the
+real fix is a piece of work that has not been done yet. Hold the note steady
+and it is accurate; wobble it and do not trust the last digit.
+
+And **it is noticeably slower at 96 and 192 kHz**, because the analysis costs
+four times as much work every time you double the sample rate. At 44.1 and
+48 kHz it takes about eight readings a second and settles in under two. At
+192 kHz it takes about one a second and wants five before it will commit to a
+number, and the vibrato problem above is worse there too. If you are tuning,
+44.1 or 48 is the setting to be in, which is where most people record anyway.
+
 
 **You can pick up more than one note at a time.** Until now the piano roll
 edited exactly one note per gesture. There was no way to grab a chord, move a

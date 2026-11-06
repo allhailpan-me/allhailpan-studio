@@ -2758,16 +2758,29 @@ static void testVibrato()
     // The control has to reach the fault, or this sweep is measuring nothing.
     // It is the same check as the one that says a test waveform has to
     // exercise the join: a sweep that cannot see a known fault cannot see an
-    // unknown one either.
-    check (control.worstCents > 15.0,
+    // unknown one either. Twelve against a measured 15.7, which is room for an
+    // estimator change: an audit pointed out that the first version of this
+    // bound sat four per cent from the figure it was testing, which makes the
+    // one check that validates the whole sweep the most fragile line in the
+    // file.
+    check (control.worstCents > 12.0,
            "the sweep did not reproduce the known fault, so it is not testing the mitigation");
     check (control.shown > 200, "the control showed too few readings for the comparison to mean anything");
 
     // And the shipped settings have to be a long way better. Measured at
-    // 4.9 cents and 92 readings against 19.6 and 1749; the bounds are loose
-    // around those so that an estimator change does not fail this, and tight
-    // enough that removing either the dither or the hold does. Both were tried
-    // and both fail here.
+    // 4.860 cents and 14 readings against 15.693 and 336, so the bounds are
+    // loose around those: an estimator change should not fail this and
+    // removing either half of the mitigation should. Both were tried. The
+    // dither alone gives 19.447 and 49, which fails the worst reading bound;
+    // the hold alone gives 15.693 and 312, which fails both; and replacing the
+    // real draw with a fixed `1 + jitter/2` multiplier gives 16.485 and 252,
+    // which fails both, so the generator is load bearing rather than
+    // decoration.
+    //
+    // What these two cannot see, said plainly rather than left to be
+    // discovered: a hold of two measures 4.860 and 23, so this sweep cannot
+    // tell two agreements from three. Three is taken from the wider sweep in
+    // the backlog, not from here.
     check (shipped.worstCents < 8.0, "the mitigation did not hold the worst reading down");
     check (shipped.shown * 4 < control.shown, "the mitigation did not reduce how often a moving note is shown");
 
@@ -2857,16 +2870,17 @@ static void testVibrato()
     // duty cycle drops the reading rate into the middle of the vibrato band.
     //
     // Reported and not asserted, deliberately, and the reason is a limit of
-    // this check rather than a judgement about the fault. A wider sweep, in
-    // `Research/BACKLOG.md`, reaches 19.9 cents there: three seeds, three
-    // phases, twenty one rates and six seconds a run. This one is short
-    // enough to belong in a suite that runs on every push, and at a hop of
-    // 220 ms three seconds is only about ten windows, so whether it happens
-    // to land on a coincidence is luck. Asserting a figure that is luck would
-    // produce a test that fails on an unrelated change, and asserting that
-    // 96 kHz is broken would produce one that fails on the day somebody fixes
-    // it. So the number is printed, where a person reading the output can see
-    // that the higher rate is not the better one.
+    // this check rather than a judgement about the fault. At a hop of 221 ms
+    // three seconds is only about ten windows, so whether it lands on a
+    // coincidence at all is luck, and this sweep prints a figure BETTER than
+    // the 44.1 kHz one for that reason alone. The wider sweep recorded in
+    // `Research/BACKLOG.md`, which is three seeds, three phases, twenty one
+    // rates and six seconds a run, reads 5.0 cents at this reading cost and
+    // 18.5 at the 197 ms one a 192 kHz device produces. That is where the
+    // claim about high rates comes from, and it is too slow to run on every
+    // push. Asserting a figure that is luck would produce a test that fails
+    // on an unrelated change, so the number is printed and the comment says
+    // what it is and is not evidence of.
     const auto at96 = sweepVibrato (0.048, Tuner::Pacing::Settings{}.jitter,
                                     Tuner::GateSettings{}.holdFrames);
 

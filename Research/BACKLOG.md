@@ -27,6 +27,253 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-06: finishing the tuner, and the two things nine days of audits had not asked
+
+### What was looked at
+
+Nothing new. Five pull requests were open: four `harden/` branches belonging to
+the other session, and **#61, the tuner**, which had been sitting for nine days
+with all four CI jobs green, two audits behind it and a single conflict in this
+file. No source file it touches had moved on `main` since it was cut, so the
+conflict was about where its own entry sits in a file that is ordered newest
+first, and three nights had added theirs above it.
+
+A feature that is finished and not merged is worth nothing to the person who
+asked for it, and this one is a tuner for a guitarist. So tonight was finishing
+it rather than starting anything.
+
+The conflict took one commit. The rest of the night was the audit that comes
+before a merge, and it found two faults that nine days of previous audits had
+not, because they are faults you only see if you ask a question nobody had
+asked: what is the real interval between readings, and what happens if the
+pitch is moving periodically rather than monotonically.
+
+### Fault one: the gate's criterion is a rate, and it divided by a constant
+
+`Analyser` decides a string has settled when the pitch is moving slower than
+1.3 cents a second. The span it divided by was `(frames - 1) * frameSeconds`,
+where `frameSeconds` is configured by the caller, and the header was emphatic
+about it: "this is the one figure in here the caller has to get right".
+
+The caller was getting it wrong. `TunerPanel` passed the nominal tenth of a
+second at every sample rate, and the real interval is
+
+    spent + max (nominal - spent, 3 * spent)
+
+because above 48 kHz a reading costs more than the whole nominal interval and
+the duty cycle takes over. Measured against the reading costs already recorded
+in this entry, the real interval is 100 ms at 44.1 and 48 kHz, **192 ms at
+96 kHz** and **788 ms at 192 kHz**. So the gate was told 0.1 when the truth was
+0.192 and then 0.788, and every rate it reported, including the
+`movingCentsPerSecond` it hands the display, was 1.92 and then 7.88 times too
+large.
+
+Three things are worth keeping about it:
+
+- **The direction was the safe one**, which is why two audits passed it. An
+  overstated rate makes the gate stricter, not looser, so the only cost was a
+  player waiting 0.4 s longer at 96 kHz and 0.8 s at 192. Nothing read wrong.
+  It is still a fault, because the sign is all that was protecting it: anything
+  that ever made the real interval shorter than the nominal, a more responsive
+  needle or a faster machine, would have opened the gate early and read sharp,
+  which is the exact failure the gate exists to prevent.
+- **The test could not see it.** It set `frameSeconds = 1 / fps` and then
+  advanced the signal by `frameSeconds * sampleRate`, so the configured figure
+  and the real one agreed by construction in every case it swept. A test that
+  sweeps a parameter it also derives the input from is sweeping nothing.
+- **`CLAUDE.md` already has this shape written down twice**, for the record
+  alignment that lived in `MainComponent` where nothing tested it. The fix is
+  the same: `process` now takes the elapsed seconds per call and sums the
+  intervals in its window, so the span is measured instead of assumed.
+
+### Fault two: a sampling of the pitch cannot see a modulation at its own rate
+
+The gate reads the spread of the last four readings. Those readings are a
+sampling of the pitch, and a sampling at a fixed interval is blind to any
+modulation whose period divides that interval: every reading lands at the same
+phase, the four agree to a hundredth of a cent, and the display opens bright
+and settled on a note moving by tens of them.
+
+Measured on the shipped gate, a 220.000 Hz note with a 20 cent vibrato at the
+reading rate: **19.6 cents sharp**. A singer would flatten a correct note by a
+fifth of a semitone on the strength of it. The turning points of a vibrato are
+a second way in, because there the pitch really is momentarily still.
+
+And the reading rate is exactly where it should not be, because of the duty
+cycle above: 8.5 a second at 44.1 and 48 kHz, which is the top of the vibrato
+band, 4.5 at 96 kHz, which is the middle of it, and 1.1 at 192 kHz.
+
+**What was tried, with the measurements, so nobody re-derives it.** The sweep
+is the vibrato band at depths of 2, 5 and 20 cents, worst displayed error and
+how many readings were shown at all:
+
+| | worst shown | readings shown |
+|---|---|---|
+| fixed interval, one agreement (as it was) | 15.7 cents | 336 |
+| dithered interval, one agreement | 19.4 cents | 49 |
+| fixed interval, three agreements | 15.7 cents | 312 |
+| dithered, three agreements (what shipped) | 4.9 cents | 14 |
+| dithered, two agreements | 4.9 cents | 23 |
+| a fixed `1 + jitter/2` multiplier instead of a draw | 16.5 cents | 252 |
+| a twelve times weaker dither, three agreements | 4.8 cents | 86 |
+
+The lesson is the first two rows. **Dithering alone makes the worst reading
+worse**, which was not the expectation: it shows far fewer readings and the one
+it eventually finds is a worse one, because the gate is re-evaluated on every
+reading and only has to be fooled once. And the hold alone does nothing at a
+fixed interval, because the coincidence that fools it repeats by construction.
+Neither half is worth anything without the other, and that could only be known
+by measuring all four corners rather than two.
+
+The wider sweep, three seeds, three phases, twenty one rates and six seconds a
+run, which is too slow for a suite that runs on every push:
+
+| reading cost | device it corresponds to | worst shown |
+|---|---|---|
+| 9 ms | 44.1 kHz | 4.9 cents |
+| 48 ms | 96 kHz | 5.0 cents |
+| 197 ms | 192 kHz | **18.5 cents** |
+
+**So it is not fixed, and the headers now say so in those words.** What ships
+is a tuner accurate to a fraction of a cent on a note held steady, which is how
+a tuner is used, and foolable by a deliberate vibrato, more easily the higher
+the sample rate is set.
+
+The real fix is the decimation already wanted in the 10-28 entry below, for a
+different reason. This is a second and larger reason for it: a fixed analysis
+rate well above the vibrato band is the one thing that makes the sampling
+unable to alias with a vibrato at all, at any device setting. The filter
+specification is still the first piece of work, as that entry says.
+
+### What was built
+
+- **`Tuner::Pacing`**, which owns the duty cycle, the dither and the cost table
+  they were measured from. That logic was two lines in `TunerPanel.h`, where
+  nothing could test it, which is the arrangement that produced fault one.
+- **`GateSettings::holdFrames`**, three, and the measurement above is the whole
+  argument for it. On a settling pluck the rate falls monotonically, so once it
+  is satisfied it stays satisfied and the cost is two more readings: the
+  display opens at 1.70 s instead of 1.50 at ten readings a second, and the
+  reading when it opens is better rather than worse, 0.168 cents sharp instead
+  of 0.284.
+- **`GateSettings::stallFrames`**, which throws a window away rather than
+  measuring across a gap far longer than the caller's pacing.
+- **`Tuner::requiredRingCapacity` and `studioRingCapacity`**, so the ring's
+  capacity requirement is arithmetic rather than prose.
+- Four new test sections, three of which could not have existed while the
+  pacing was in the window.
+
+### What the audit found, in the work done tonight
+
+A fresh auditor over tonight's own commits, which is the rule in `CLAUDE.md`
+about the auditor not being the author, and it was worth every minute: it found
+that the bound added for the stall case **did nothing at all**.
+
+The panel computed one interval and handed it to both sides of the comparison:
+`setFrameSeconds (hop)` and then `process (..., hop)`, against a bound of
+`gap > stallFrames * frameSeconds`. With both equal to `h` and `stallFrames`
+clamped at two or more, the test is `h > 4h`, false for every positive `h`. One
+line meant to protect a window was the line disabling it, and the comment above
+it claimed the opposite. Measured by the auditor: four readings on a steady
+note, a ten second gap, and two readings later the display opens settled on a
+string being turned at five cents a second and reports the movement as one.
+`setFrameSeconds` is called after `process` now, so the bound is scaled by the
+previous hop.
+
+Three more from the same audit:
+
+- **The bound was tested against the clamped gap.** The clamp caps a gap at ten
+  seconds, so once the bound passed ten, which four times a three second
+  nominal does and a loaded 192 kHz machine reaches, no gap of any length could
+  cross it. It reads the raw figure now, written `! (gap <= bound)` so a gap of
+  NaN counts as a stall rather than as no time at all.
+- **`Pacing::expectedHop` was dead code and a trap.** A caller using it and then
+  sleeping for `nextWait` takes two draws from the generator and tells the gate
+  an interval it never waited. Removed rather than documented.
+- **A pass with no new audio re-analysed the buffer it had already analysed**,
+  so two of the three agreements the hold asks for could be re-reads of one
+  buffer rather than new evidence. Those passes hold the previous reading now,
+  and the interval handed to the gate is time since it was last fed rather than
+  time since the last pass.
+
+And **eleven quoted figures in the new headers were not figures the repository
+produced.** Most were from the wider sweep rather than the one the test runs,
+one was a 192 kHz measurement labelled as a 96 kHz one, one comment claimed the
+printed output showed the opposite of what it showed, and the ring comment
+still named the constant the same commit had replaced. All corrected against
+the test's own output, which is now what every figure in those headers comes
+from, with the wider sweep cited as the wider sweep. `CLAUDE.md` is right that
+this is a real fault and not a tidiness matter: a header with a plausible wrong
+number in it is how somebody spends a night tuning the wrong parameter.
+
+### Mutation testing
+
+**Fifty two deliberate breakages across two runs**, each compiled with the
+sanitizers `Tests/run.sh` uses.
+
+First run: 34 tried, 25 killed, 9 survived. Of the survivors, four were real
+gaps and are now closed, and each closure was checked by re-running the
+mutation:
+
+- Replacing the spread across the window with the difference between its ends
+  survived, which the branch's first audit had also found. It needed a check of
+  its own and could not be left to the vibrato sweep: the two criteria are
+  identical on any pitch that only goes one way, and every other signal in the
+  file is monotone or steady. A vibrato whose period divides the window puts
+  both ends on the same phase while the readings between them are twenty cents
+  away, which reaches it deterministically. Killed.
+- Removing the floor that keeps a wait positive survived, because nothing fed
+  it the one combination that can drive the base negative: no duty multiple and
+  a reading costing more than the nominal. Killed.
+- Tightening the nominal's clamp from ten seconds to one survived, because
+  nothing tested a nominal above a second, which is the 192 kHz case. Killed.
+- Lowering the largest-block bound survived, because the requirement is
+  recomputed from the same constant, so the check stayed self-consistently
+  satisfied. The two hardware bounds are pinned with their reasons now, which
+  is the only thing a test can do about a constant that describes the world.
+  Killed.
+
+Second run, 18 mutations including the four above and the two faults the audit
+found, as mutations: all killed except the ones below.
+
+**The survivors that remain, each accounted for:**
+
+- Removing the hold counter's clear in the silence branch, or in the stall
+  branch, or while the window is filling, each survives **alone** and each is a
+  genuine no-op: the window is below `stabilityFrames` after any of them, and
+  the clear while filling zeroes the counter again. Removing **two** of the
+  three is not a no-op, and survived the first run: it reverts the hold to one
+  agreement for every note after the first. Nothing in the file had ever
+  cleared a window and then reopened it. There is a check for it now, a vibrato
+  arriving after a previous note and a silence, and the pair dies.
+- `stallFrames = 1` survives and is provably a no-op: `configure` clamps it to
+  two.
+- `holdFrames` clamped to zero instead of one survives and is a no-op:
+  `satisfiedInARow >= 0` is true for every reading, so zero and one are the
+  same behaviour. The clamp documents intent rather than changing it.
+
+### Deliberately left for later
+
+- **Decimating the tap to a fixed analysis rate.** Now wanted for two reasons
+  rather than one, and it is the single thing that would most improve this
+  tuner. The filter specification is the first piece of work.
+- **The reading cost table and the tear rate figures are still not
+  reproducible from anything checked in.** `CLAUDE.md` names `*Probe.cpp` as
+  the mechanism for exactly this and there is no `TunerProbe.cpp`. The figures
+  are load bearing: the duty cycle, and therefore the reading rate, and
+  therefore the whole vibrato result, rest on them.
+- **A hold of two against a hold of three.** The sweep in the suite cannot tell
+  them apart, 4.9 cents and 23 readings against 4.9 and 14. Three comes from
+  the wider sweep. If the waiting ever matters more than the 9 extra readings
+  shown, two is defensible and the measurement is above.
+- **Six readings before anything is displayed is 5.4 s at 192 kHz.** That is
+  `stabilityFrames + holdFrames - 1` readings at 1.1 a second, and it is the
+  reading cost rather than the gate. Decimation fixes this too.
+- **`AudioEngine::sampleRate` as a plain `double`** read by the analysis
+  thread, which the 10-29 entry already recorded and which is still true.
+
+---
+
 ## 2026-11-05: selecting more than one note, and what a group drag must not deform
 
 ### Status: merged
@@ -1313,10 +1560,13 @@ would land in the band the estimator is reading. A night should go to the
 filter, with a stated stopband and a measurement, rather than to dropping
 samples and hoping.
 
-Note that the frame spacing is no longer part of this: the gate's criterion is
-a rate in cents per second and the readout hands it its own pacing figure, so
-how often the analysis runs does not change how close to settled a displayed
-reading is. That was not true when this paragraph was first written.
+**That paragraph used to end by saying the frame spacing was no longer part of
+this, on the grounds that the gate's criterion is a rate and the readout hands
+it its own pacing figure. Both halves of that were wrong, and 11-06 found out
+why.** The readout handed it a constant rather than its own figure, and the
+spacing turned out to decide something the rate criterion cannot see at all.
+See the 2026-11-06 entry at the top of this file: the decimation is now wanted
+for a second and larger reason than the one above.
 
 Two smaller things, recorded rather than done:
 
