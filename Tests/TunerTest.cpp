@@ -2845,6 +2845,104 @@ static void testVibrato()
                "a vibrato whose ends coincide across the window was shown as settled");
     }
 
+    // The agreements the hold asks for have to be counted again from scratch
+    // after a window is thrown away, and the cheapest way to see that is to
+    // count the readings a second note needs rather than to sweep anything.
+    //
+    // The counter lives with the window and the window is cleared in three
+    // places, each of which covers the others, so removing any one of them
+    // survives every check in this file and is a genuine no-op. Removing TWO
+    // is not: the counter then carries its old value across the clear, the
+    // first full window after any silence or stall already satisfies the hold,
+    // and the hold quietly becomes one agreement for every note after the
+    // first. That survived a sweep, because a sweep measures how often
+    // something wrong is displayed and this changes how SOON something right
+    // is. Counting is the check it needs.
+    {
+        const double sampleRate = 44100.0;
+        const auto spec = fastSpec (sampleRate);
+
+        Tuner::Detector sizer;
+        sizer.configure (spec);
+        const int n = sizer.requiredSampleCount();
+
+        Tuner::GateSettings g;
+        const double hop = 0.1;
+        const int expected = g.stabilityFrames + g.holdFrames - 1;
+
+        std::mt19937 rng (41u);
+        const auto a220 = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        const auto g196 = synth (series (196.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+        const std::vector<float> silence ((std::size_t) n, 0.0f);
+
+        // What throws the window away: a reading of silence, and a gap longer
+        // than the stall bound. Both have to cost the full count afterwards.
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            Tuner::Analyser an;
+            an.configure (spec, g);
+
+            int first = 0;
+
+            for (int frame = 1; frame <= expected + 4; ++frame)
+            {
+                const auto r = an.process (g196.data(), n, hop);
+                an.setFrameSeconds (hop);
+
+                if (r.hasNote && first == 0)
+                    first = frame;
+            }
+
+            check (first == expected,
+                   "the first note of a session did not take the readings the settings ask for");
+
+            // The two clears differ by one reading, and the difference is
+            // real rather than an accident worth hiding. A reading of silence
+            // throws the window away and contributes nothing, because it
+            // returns before anything is pushed. A reading after a stall
+            // throws the window away and is then itself the first frame of the
+            // new one, since the gap is noticed inside a reading that is
+            // otherwise a perfectly good one. So the stall costs one reading
+            // less, and saying so here is cheaper than somebody later deciding
+            // the off by one is a fault.
+            int afterwards = expected;
+
+            if (kind == 0)
+            {
+                an.process (silence.data(), n, hop);
+                an.setFrameSeconds (hop);
+            }
+            else
+            {
+                // A gap past the stall bound, on a note that is still there.
+                an.process (a220.data(), n, g.stallFrames * hop * 4.0);
+                an.setFrameSeconds (hop);
+                afterwards = expected - 1;
+            }
+
+            int second = 0;
+
+            for (int frame = 1; frame <= expected + 4; ++frame)
+            {
+                const auto r = an.process (a220.data(), n, hop);
+                an.setFrameSeconds (hop);
+
+                if (r.hasNote && second == 0)
+                    second = frame;
+            }
+
+            check (second == afterwards,
+                   std::string ("a note after a cleared window was shown after ")
+                       + std::to_string (second) + " readings rather than "
+                       + std::to_string (afterwards)
+                       + (kind == 0 ? ", so the hold did not survive a silence"
+                                    : ", so the hold did not survive a stall"));
+        }
+
+        std::printf ("  a note after a cleared window still takes %d readings, and %d after a stall\n",
+                     expected, expected - 1);
+    }
+
     // The agreements the hold asks for have to be fresh ones, including on the
     // second note of a session. The counter lives with the window and the
     // window is cleared in three places; removing any one of them is covered

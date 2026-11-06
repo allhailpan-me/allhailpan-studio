@@ -1278,8 +1278,23 @@ public:
 
         r.settling = true;
 
+        // No rate to satisfy yet, so nothing is agreed.
+        //
+        // This is the load bearing one of the four places the hold counter is
+        // zeroed, and it is worth saying which, because a mutation run showed
+        // the four are not four independent guards. The others are in `reset`,
+        // in the branch that handles silence and an unpitched attack, and in
+        // the stall branch, and every one of them is followed by a push onto
+        // an empty history, so this line zeroes the counter again on the next
+        // reading. Remove any single one and nothing changes. Remove this one
+        // together with either of the other two and the counter survives the
+        // clear, so the first full window after any silence or stall already
+        // satisfies the hold and the hold silently becomes one agreement for
+        // every note after the first. The check that tells these apart counts
+        // the readings a second note needs rather than sweeping anything, in
+        // `testVibrato`.
         if ((int) history.size() < g.stabilityFrames)
-            satisfiedInARow = 0;    // no rate to satisfy yet, so nothing is agreed
+            satisfiedInARow = 0;
 
         if ((int) history.size() >= g.stabilityFrames)
         {
