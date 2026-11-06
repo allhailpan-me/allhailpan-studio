@@ -48,11 +48,11 @@ namespace
     // Both go through gain, never through the fraction of the travel. Going
     // through the travel fraction looks right and is a silent disaster: old
     // unity is 0.640 of the travel and new unity is 0.75, so a fader saved at
-    // 0 dB would come back at position 0.640, which is -4 dB. Every track of
-    // every existing project would come back quieter, by an amount depending
-    // on where its fader happened to be, and it would present as "my old
-    // mixes all sound wrong and the balance has moved" with nothing anywhere
-    // in the audio path to blame for it. FaderLaw::legacyToPosition and
+    // 0 dB would come back at position 0.640, which is -4.40 dB. Every
+    // track of every existing project would come back quieter, by an amount
+    // depending on where its fader happened to be, and it would present as
+    // "my old mixes all sound wrong and the balance has moved" with nothing
+    // anywhere in the audio path to blame for it. FaderLaw::legacyToPosition and
     // FaderLaw::legacyCurveValueToPosition are that translation, and they are
     // tested without JUCE because this loader is not.
     //
@@ -63,9 +63,17 @@ namespace
     //
     // The bump is unconditional, as 2 to 6 were, and here it has to be: an
     // older loader reading a file saved by this build would read every fader
-    // position as though it were still the old range, so a mix left at unity
-    // would come back at 0.75 of 1.25 under the old law, which is +3.5 dB on
-    // every strip at once. Refusing to open it is the only honest answer.
+    // position through the old law, and the damage that does is a balance
+    // change rather than a level change, which is the worse of the two. A
+    // strip left at unity comes back 1.12 dB quieter, one at the top of the
+    // travel 6.12 dB quieter, and one down at -60 dB 15.71 dB louder, so
+    // every fader moves by a different amount and no move of the master puts
+    // the mix back. Refusing to open it is the only honest answer.
+    //
+    // Those three figures are asserted in FaderLawTest so this paragraph
+    // cannot drift, which it already had: it used to say "+3.5 dB on every
+    // strip at once", a figure nothing in the repository produced and which
+    // was wrong in size, in sign and in being uniform at all.
     constexpr int formatVersion = 7;
 
     juce::String num (double v) { return juce::String (v, 9); }
@@ -815,8 +823,13 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
             // Said this way round because the inner clamp is what is doing the
             // work. A reader who takes this comment to mean the jlimit handles
             // it would be free to delete the inner clamp, and then a stored 9
-            // would reach the new law as position 0.943820 of its own travel
-            // rather than through the old law, which is a different number.
+            // would go through the old law unclamped to a gain of 126.5625 and
+            // come back saturated at the top of the new travel, +10 dB rather
+            // than the +7.75 dB the old loader gave. The jlimit cannot catch
+            // that, because 1.0 is inside its own range. An earlier version of
+            // this warning quoted 0.943820 as the consequence of the deletion,
+            // which is the answer the clamp already gives, so checking the
+            // comment against the code argued for removing the clamp.
             const double storedVolume = e->getDoubleAttribute ("volume",
                                             fileVersion < 7 ? FaderLaw::legacyUnityPosition
                                                             : FaderLaw::unityPosition);
@@ -1087,9 +1100,9 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                     // point in an older one is translated. Translating the
                     // fader and leaving the curves would leave every drawn
                     // fade pointing somewhere else: a curve sitting at unity
-                    // would play back at -4 dB, which is the same fault as an
-                    // untranslated fader and harder to notice, because it is
-                    // only audible where the automation is.
+                    // would play back at -4.40 dB, which is the same fault
+                    // as an untranslated fader and harder to notice, because
+                    // it is only audible where the automation is.
                     //
                     // What this preserves is each point, not the line between
                     // two of them. The two laws interpolate differently, so a

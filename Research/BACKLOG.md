@@ -27,6 +27,780 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-05: selecting more than one note, and what a group drag must not deform
+
+### Status: merged
+
+Pull request **#67**, squash merged as `6ec29af` on 2026-11-05. All four CI
+jobs green on the merged head: `tests`, `ubuntu-latest`, `windows-latest` and
+`macos-latest`. The release notes went in with it rather than being written
+afterwards.
+
+The merge went through the API first time, which is worth recording next to
+the 11-03 entry's warning that it took six attempts and gave six wrong
+reasons. Nothing was done differently: `main` still has no branch protection
+and no rulesets, so that entry's advice stands, which is to check the refs
+before believing a failure.
+
+One note for whoever picks the next piece of this up. The platform builds only
+start after the `tests` job finishes, and a new push cancels the whole run, so
+pushing again while the builds are in flight leaves the component code
+uncompiled on all three platforms with the run still showing green for
+`tests`. That happened twice tonight and both times the cancelled jobs read as
+"cancelled" rather than as failures, which is easy to mistake for a pass. The
+builds that matter are the ones on the head that is being merged.
+
+### What was looked at
+
+The lane this night was the piano roll and the data model. Off limits by open
+pull request: `Source/AudioEngine.{h,cpp}`, `Source/MainComponent.{h,cpp}`,
+`Source/InputSource.h`, `Source/Tuner.h`, `Source/TunerPanel.h` and
+`Tests/run.sh` (#61, the tuner), `Source/Fx/Svf.h` (#55),
+`Source/Fx/BellMatch.h` (#66) and `Source/Envelope.h` (#65). `Source/Synth/`
+and `Source/Fx/` are being built by hand and were left alone.
+
+That ruled out most of what the backlog has been deferring. A time signature,
+the biggest single gap in the studio, wants the engine for the play head and
+the metronome accent and so is still waiting for a night when #61 has landed.
+Stem export, clip gain and the render bounds question all live in
+`renderOffline` or `renderAudioClips`. Punch recording reaches the engine too.
+
+What was left is the thing the 11-03 entry already named as "the next thing
+worth doing here": the piano roll edits exactly one note at a time. There is
+`dragNote`, singular, and drag modes for moving, resizing and erasing one
+note. There is no way to pick up a chord, no way to transpose a riff, no way
+to move eight notes a sixteenth later, and no way to quantise part of a
+pattern rather than all of it. A musician who builds patterns does those
+things constantly, and every studio checked has done them for twenty years.
+So this is the third of the three kinds of candidate the brief asks for at
+once: missing, standard everywhere else, and a workflow step that takes more
+actions here than anywhere else. Eight notes transposed an octave is eight
+drags here and one gesture in every other studio.
+
+The 11-03 entry deferred it as "almost entirely untestable UI work". That
+turns out to be wrong, and it is worth saying why, because it is the reason
+this was buildable tonight. The hit testing and the mouse plumbing are
+untestable UI. The part that will be silently wrong is not: it is the
+arithmetic of moving a set of notes as a set, and it has exactly the shape
+this project keeps getting bitten by. A group drag that clamps each note
+individually at the top of the keyboard does not error, does not crash and
+does not look broken. It flattens the top of a chord into a unison, and the
+person who did it finds out later, by ear, with no idea which gesture did it.
+That belongs in a header with no JUCE in it and a randomised test over
+thousands of generated selections, and then the component is thin.
+
+### What the research found
+
+Full report from `dsp-researcher`, from the manufacturers' own manuals. Ten
+questions were asked. Six have a published answer, four do not, and the four
+are recorded below as this project's own choices rather than borrowed
+authority, which is what `CLAUDE.md` asks for.
+
+Published, with quotes:
+
+- **A marquee selects by touching, not by containing.** Apple's own general
+  selection chapter, Logic Pro 9 User Manual chapter 8: "All elements touched,
+  or enclosed, by the selection rectangle (shaded area) are selected." Avid
+  says the same of the Grabber tool: "if any portion of the rectangle touches
+  a note (either its start or end point), the note is included in the
+  selection." No manual anywhere says a note must be fully contained. Two more
+  require one point inside: Avid's Selector tool wants the start point, and
+  Steinberg's Score editor wants the notehead. Intersection is the only
+  convention with explicit support.
+- **Shift adds, and the same Shift removes.** Unanimous but for one studio.
+  Live 12: "You can add the Shift modifier to add more notes to your current
+  selection", and "You can also remove a single note from your selection by
+  holding down Shift and clicking on it." Logic 9 for the marquee case: with
+  Shift held, "the active selection status of the elements is reversed", which
+  is a toggle over the rectangle rather than an add. Nobody documents a second
+  modifier for toggling, so none was invented. FL Studio is the exception and
+  uses Ctrl+Shift.
+- **A group keeps its relative positions.** Steinberg, Moving and Transposing
+  Note Events: "All selected note events are moved, maintaining their relative
+  positions. Snap is taken into account."
+- **At a limit the whole group stops, and breaking the shape is opt in.**
+  Apple documents this exactly, for velocity: "If the velocity value of any of
+  the selected notes reaches the minimum or maximum value (0 or 127), none of
+  the notes can be adjusted further. You can override this behavior by
+  pressing and holding Option while dragging", and then, naming the
+  consequence rather than hiding it, "By overriding, the velocity relationship
+  of this note to the other notes is altered." Ardour corroborates it from the
+  other side: its shortcut list carries a separate "(allow mush)" variant of
+  every transpose and velocity command, so the plain command does not mush.
+- **Velocity on a group is additive, not scaling.** Apple: "When you edit the
+  velocity of multiple notes, the relative differences in their velocity
+  values are retained." Nobody documents multiplicative scaling as the default
+  drag behaviour anywhere. Absolute, every note to one value, is a separate
+  documented gesture: Apple's Option-Shift, FL's Shift and drag, Studio One's
+  inspector.
+- **Length on a group is relative too, with two distinct absolute variants.**
+  Apple: "The relative differences between the lengths of the selected notes
+  are maintained", then Shift for "the same end point for the selected notes"
+  and Option-Shift to "make them all the same length". Those two diverge the
+  moment the notes have different starts, and both are useful, so both are
+  here. Studio One publishes the same three with different keys.
+- **A duplicate lands immediately after the selection and becomes the
+  selection.** Studio One: "The duplicated Event is always placed after the
+  original Event, and it is automatically selected once duplicated", and
+  explicitly not at the playhead. FL Studio's Ctrl+B: "The selection, or all
+  notes if nothing is selected, will be duplicated to the right of the
+  original selection." The second half matters: the copy becoming the
+  selection is what makes three duplicates in a row build a chain rather than
+  a pile.
+- **A moved note wins over what it lands on.** Live 12: "If the new note
+  overlaps with the beginning of the original note, the original note will be
+  overwritten. If the new note overlaps with the end of the original, the
+  original note will be shortened." The asymmetry is the rule: it turns on
+  whether the covered note's start survives.
+
+Not published anywhere, so chosen here and said so:
+
+- **Whether clicking a note that is already selected keeps the selection.**
+  Not one of the eight manuals states it, and it is the behaviour a group drag
+  depends on entirely. It is forced by documented procedures that are
+  otherwise impossible (Apple: "Select the notes, then drag either edge of one
+  selected note", with the relative lengths maintained, which needs the other
+  notes still to be there), so the selection is preserved. It is also not
+  collapsed on mouse up, because a click to audition a note should not destroy
+  a selection somebody spent a minute building.
+- **Which note anchors the snap on a group drag.** Nobody publishes it. The
+  grabbed note, because it is the only choice that puts the snap under the
+  mouse, and because the clicked note is the documented reference in every
+  other group operation. Earliest-in-selection is published by nobody and
+  would make the same drag behave differently depending on which note was
+  grabbed.
+- **Whether a group drag snaps absolutely or relatively.** Both are named,
+  first class modes, and there is no majority: Apple's "Snap Regions to
+  Absolute Value", "When you move or edit an item, it snaps exactly to the
+  nearest grid position", against "Snap Regions to Relative Value", which
+  keeps "the same relative distance from their original grid positions";
+  Steinberg's "Grid" against "Grid Relative", where "a moved event keeps its
+  original position relative to the grid". Absolute is Apple's and
+  Steinberg's default; relative is Ableton's: "Note movements also snap to an
+  'offset,' based on each note's original placement relative to the grid."
+
+  **Absolute is the default here**, and the reasoning is worth recording
+  because this entry first said the opposite and said it for a reason that
+  does not survive reading what absolute actually does to a group. Neither
+  mode quantises a performance. In both, one delta moves every note and the
+  group keeps its internal timing exactly; the modes differ only in where the
+  GRABBED note ends up. Absolute puts it on a grid line and carries the rest
+  along by the same amount, relative moves the whole group by a whole number
+  of steps and leaves every note at its own distance from the grid. So the
+  choice is between placing a group precisely and nudging it without touching
+  its relationship to the bar, not between keeping a feel and destroying one.
+
+  Absolute wins the default on two counts relative does not answer: it is
+  what dragging a single note in this roll has always done, so no existing
+  gesture changes under somebody's hands, and it is what Apple and Steinberg
+  both ship. Relative is offered rather than dropped because it is the right
+  answer for moving something played and left off the grid on purpose, which
+  is the case absolute handles least well. It is on the Selection menu.
+
+  The first version of this entry claimed relative was the default and
+  justified it with "moving a played riff a sixteenth later should not also
+  quantise it", which is true of both modes. The audit caught the entry still
+  saying it after the code had been changed, which is exactly what these
+  entries are for.
+- **What a group at a pitch limit does on a drag.** Published for velocity by
+  Apple, not for pitch by anybody. The same rule is used for both, which is
+  the answer the velocity text and Ardour's command names both point at.
+
+### What was rejected, and why
+
+- **Ableton's one dimensional timespan selection model.** Live's structural
+  selection is a time range: "Clicking and dragging in the MIDI Note Editor
+  selects a timespan", and notes inside it come along. It is a real divergence
+  and it is deliberately not followed: every other studio checked selects with
+  a two dimensional rectangle, and a pitch axis is half of what a piano roll
+  is for. Picking three notes out of a chord is impossible in a timespan.
+- **A second modifier for toggling, separate from adding.** Documented by
+  nobody. One modifier that does both is the published convention and
+  inventing a second would be a key nobody coming from another studio would
+  guess.
+- **Ardour's select the range between two notes.** The only studio with it,
+  and the modifier is not published in any readable form: the Ardour manual
+  renders with its modifier key macros empty and the source is behind a
+  sign in. Implementing it would mean choosing the key myself and implying
+  Ardour's authority for it. Left out rather than half sourced.
+- **Multiplicative velocity scaling, and compressing a selection toward the
+  drag.** Nobody documents either as a drag behaviour. Scaling also fails to
+  round trip through integers, so +20 then -20 would not return a pattern to
+  where it started, which is the kind of quiet damage this project is supposed
+  to refuse.
+- **Steinberg's offline Transpose Setup and its "Keep Notes in Range".** It
+  octave folds notes that would leave the range rather than clamping, which is
+  worth knowing and is not support for a clamp. It is a dialog over a
+  selection, not a drag, so it is a different feature and should not be cited
+  for this one.
+- **Reaper's behaviour, in all of it.** Deliberately absent. The Reaper user
+  guide PDFs truncate before the MIDI editor chapter through the fetch tool
+  and the wiki serves a stub, so nothing here is sourced from Reaper. Worth
+  flagging for later nights: Reaper is the one studio where marquee and
+  selection behaviour is configurable in preferences, so anything remembered
+  about it is likely to be somebody's remembered configuration rather than a
+  default.
+- **Legato, deferred rather than rejected.** It is well specified and cheap
+  once this lands: Live 12 extends or shortens each note to the next and "The
+  last note gets extended to the end of the loop", and Bitwig's Make Legato
+  treats a chord as a unit, which is the detail that stops a chord being
+  chained into a scale. It is a named command in its own right rather than
+  part of selecting, and Steinberg's own Legato topic could not be retrieved,
+  so it wants its own entry. The group length arithmetic built tonight is what
+  it will sit on.
+- **Keyboard shortcuts, deferred by file lock.** Select all, arrow key nudge,
+  arrow key transpose (Up and Down for a semitone, Shift for an octave, which
+  is the strongest consensus in the whole research: Steinberg, Bitwig, Live
+  and Ardour all publish it and agree) and Delete all need key handling, and
+  the roll sets `setWantsKeyboardFocus (false)` so that typing plays notes.
+  Routing keys to the focused view is `MainComponent`'s job and that file is
+  open in #61. Everything tonight is therefore reachable by mouse, and the
+  transpose and nudge amounts are in the header ready for the keys to call.
+  That is a real limitation and it is written into the pull request rather
+  than left for somebody to discover.
+
+### What was built
+
+`Source/NoteSelection.h`, no JUCE, holding the arithmetic: the marquee test,
+the selection algebra, and every group edit as a transform over a note list
+and a set of selected indices. `Tests/NoteSelectionTest.cpp` over it. Then the
+piano roll grew a Select tool, a marquee, a group drag, a group resize, a
+group velocity drag, and a Selection menu for the operations that are not
+gestures.
+
+### One rule runs through all of it
+
+Every limit in the header is turned into a limit on the DELTA, once, over the
+whole selection, and then one delta moves every note. Pitch, time, velocity
+and length all work that way, and all four take their bounds against zero, so
+a limit stops an edit and never forces one.
+
+That phrasing was arrived at twice, both times by something failing. Writing
+the test found that bounds taken from the group alone make a selection whose
+top note sits above the ceiling come out transposed down by however far it is
+over, as the answer to a request to move it sideways. Then the audit found the
+same shape again in two places that had been left clamping each note on the
+way out: a note arriving from a file shorter than a tick made a request to
+shorten the group lengthen it, and a velocity arriving below the floor was
+lifted on its own while the rest of the group stood still, which breaks the
+one thing those modes exist to keep. The invariant is now the same sentence in
+four places: a note that was inside its limits stays inside them, a note that
+was already outside is never pushed further out, and nothing is clamped per
+note on the way out.
+
+### What the audit found
+
+Nine findings, all fixed or recorded. The one that mattered:
+
+**A single click on a note destroyed notes.** A press on a note begins a group
+move from the moment the button goes down, and a bare click sends a mouse up
+with no drag in between, so overlap resolution ran on a gesture in which
+nothing had moved. Clicking a long note deleted a short one underneath it;
+clicking the short one cut the long one back to meet it; with eight notes
+selected, one click could delete unselected notes at eight pitches. Reachable
+in two ordinary Draw gestures, because drawing a note over another deliberately
+leaves the overlap. It was undoable, which was the only mercy. Resolution is
+now gated on the pattern actually having changed, read off the notes rather
+than off the pointer, so a two pixel drag that snaps to no change is a click
+as far as the pattern is concerned.
+
+**A selection survived an undo and pointed at different notes.** The first
+`validateSelection` only truncated out of range indices, which is a range
+check wearing an identity check's comment: an undo rebuilds the clips from
+deep copies, so every index can still be in range and every one of them point
+at a different note. Transpose then moved notes nobody had picked. The
+selected notes themselves are remembered now and anything that does not match
+drops the selection, because guessing which note somebody meant is worse than
+losing a selection. The channel rack reaches a shared pattern the same way.
+
+**`Move::beatsLimited` was wrong in 42 per cent of clamped moves**, measured.
+It tested whether the answer landed near a bound, but a snapped answer sits up
+to a whole grid step inside the bound, so real clamps went unreported and
+plain snapping was reported as a clamp. It is computed against what the same
+request does with the limits removed now, which is the only thing that tells
+snapping and clamping apart, and the test pins it both ways.
+
+The rest: the Selection menu captured a raw `this` where the quantise menu
+beside it uses a `SafePointer`; `duplicate` tested indices against a list it
+was appending to, so a stale index could come alive and the copies start being
+copied; duplicating no longer resolves overlaps, because a duplicate is a
+create rather than a move and resolving let it shorten one of the notes it had
+just copied; the Select tooltip said Command on two platforms that have Ctrl;
+and the snap submenu is named for moving, because a group resize snaps its end
+absolutely the way the single note resize always did and does not read the
+choice.
+
+### Mutation testing
+
+61 mutations in the first pass, 51 caught. Of the ten survivors, three are
+genuine no-ops and seven were real gaps in the test, every one of them a
+branch the generators could not reach:
+
+- Clamping each note inside `applyMove` is a no-op, which is worth writing
+  down because it is the headline fault the header exists to prevent. The
+  delta is already guaranteed to keep every in-range member in range, so the
+  per note clamp cannot bite. The meaningful versions of that mutation live in
+  `planMove` and are killed hard: dropping the pitch ceiling's bound against
+  zero fails over twenty thousand checks.
+- `lower_bound` to `upper_bound` in `remapAfter` is a no-op, because indices
+  present in the erased set are skipped one line above and the two bounds
+  agree for every index that reaches it.
+- Dropping the correction on the quotient's rounding in `snappedDeltaWithin`
+  is very nearly a no-op: measured, it fires zero times in three million
+  realistic cases and seven times in five million adversarial ones, with the
+  phase pushed to a billion and the grid to two to the minus twenty. It is a
+  real guard that nothing reachable from the roll can trip, and it stays
+  rather than being deleted because the arithmetic that would have to be
+  trusted instead is a rounded quotient.
+
+The seven gaps, all now closed, are the more useful list, because each one is
+a property the test claimed and did not have: that a move does not change a
+note's length or velocity; that snapping takes the NEAREST step rather than
+merely a feasible one; that absolute velocity clamps a value handed in from
+outside; that the velocity floor is the one a file can carry, checked through
+`midiVelocityToByte` rather than against the constant itself, so setting the
+constant to zero now fails; that the two absolute length modes floor what they
+are given; that no unselected note is left overlapping a selected one at the
+same pitch, which is the post-condition the whole of `resolveOverlaps` exists
+to produce and which nothing had asserted; and the two cases its generator
+could never produce, two notes sharing a start and two movers inside one
+victim.
+
+The generators now plant what they could not reach: zero length notes, lengths
+and velocities below their floors, and notes that start together. Each one of
+those was a surviving mutation before it was planted.
+
+Second pass after the fixes: 70 mutations, 63 caught. Five of those seven
+survivors were real gaps and are closed, and the recheck confirms them caught,
+so **68 of 70**. The five were: planting zero length notes did not pin the
+branch that handles them, because inside a rectangle the span test and the
+point test agree and come apart only at an exact edge, which random doubles
+never land on, so the distinguishing cases are written out by hand instead;
+the claim that nothing is clamped per note on the way out was untested for
+time and pitch, because a per note clamp can only be seen through a note
+already outside the clamp's own range and every note the generator made was
+inside it; the velocity floor was checked through `midiVelocityToByte`, which
+clamps, so the check could never fail and setting the floor to zero passed;
+and a group velocity edit was not required to be monotonic, so a bound not
+taken against zero went unnoticed.
+
+The last of those is the lesson worth carrying: a check written against the
+header's own constant cannot catch the constant being wrong. The floor is
+checked against `midiVelocityFromByte (1)` now, which is `MidiTimebase.h`'s
+own figure computed without reference to this header at all.
+
+---
+
+## 2026-11-03: quantise, and what a strength percentage is a percentage of
+
+### Status: merged
+
+Pull request **#64**, squash merged as `7ae88d9` on 2026-11-04. The `tests`
+job, `ubuntu-latest` and `windows-latest` were green on the head;
+`macos-latest` was still building, which is routine here and has not failed.
+The release notes went in with it rather than being written afterwards.
+
+Built across two nights: 11-03 did the research, the header, the test, the
+mutation pass, the piano roll and the first two audit rounds, and was cut off
+before finishing. 11-04 picked the draft up, ran the third audit round, fixed
+what it found, wrote the notes and merged.
+
+One note for whoever reads this next to the API rather than the web interface.
+The merge took six attempts and the reasons GitHub gave were all wrong: the
+pull request's record was stuck with `mergeable: null` and `mergeable_state:
+"unknown"` for twenty minutes and never settled, and the endpoint refused with
+"head branch is out of date" when the branch was strictly ahead of `main` and
+`main` was the merge base, "head branch was modified" when the ref had not
+moved for minutes, then 500 and finally 502. The 502 was returned **after the
+merge had already been performed**, so the state to trust is the pull request
+itself and the ref, not the response. There was never a review gate: `main`
+has no branch protection and no rulesets. An earlier version of this entry
+said the session was not permitted to merge, by analogy with #59, and that was
+wrong. Check the refs before believing a failure here.
+
+### What was looked at
+
+The lane this night was editing and the data model: the engine and the window
+were both off limits, because pull request #61 (the tuner) has
+`AudioEngine.{h,cpp}`, `MainComponent.{h,cpp}` and `InputSource.h` open, and
+`Source/Fx` is not clear either because #55 has `Svf.h` open. So anything
+whose work is in the audio path waited.
+
+| Candidate | Verdict |
+|---|---|
+| **Destructive note quantise** | **Chosen.** The studio has no way to move a played note onto the grid. `Groove.h` is the opposite job: it swings notes that are already on the grid, at playback, and leaves anything played off the grid where the performance put it. So a part played in live cannot be tidied at all, and that is one keystroke in every other studio. |
+| A time signature | Deferred, and it is the biggest single gap found tonight. The studio is 4/4 everywhere: `SongLength.h` has `kBeatsPerBar = 4.0` as a constant, `MidiFileIO` writes a fixed 4/4 meta event, and the play head handed to plugins is a default-constructed `juce::AudioPlayHead::TimeSignature`. Nothing stores a numerator at all. Fixing it reaches the ruler, the metronome's accent, the loop end, the play head and the file format at once, and two of those files are in #61. It wants a night where the engine is free. |
+| Multi-note selection in the piano roll | Deferred. The roll has draw and erase and no selection, so notes are edited one at a time, and that is worse than it sounds: there is no way to move or transpose eight notes together. But it is almost entirely untestable UI work, and quantise is the thing that needs the selection least, since every studio applies it to the whole clip when nothing is selected. Worth a night, and the quantiser built tonight takes a plain vector so it will slot straight in. |
+| Stem export | Deferred: the render loop is `AudioEngine::renderOffline`, which #61 has open. |
+| Clip gain on audio clips | Deferred for the same reason: it is read in `renderAudioClips`. |
+| Destructive randomise, as part of quantise | **Rejected, deliberately.** Avid publishes a quantified definition and it would have been cheap, but `Groove.h` already humanises at playback, where it can be dialled while listening and turned off without having lost anything. A second, destructive humaniser would be two controls meaning nearly the same thing, and the destructive one is the worse of the two. |
+| Logic's Q-Length and Q-Velocity | **Rejected**, and worth recording as a near miss. They read like "quantise the note end" and "quantise the velocity" and they are neither: both are percentages toward a **template region's** lengths and velocities, which is Logic's groove template feature. Building them under those names would have shipped Apple's name on a different feature. |
+| Logic's Q-Flam | Rejected for tonight: it spreads the notes of a chord into an arpeggio, which is an arrangement idea rather than a timing fix, and Apple publishes no unit or range for it. |
+
+### What was chosen
+
+`Source/Quantise.h`: destructive quantise of stored notes, as an editing
+action on a MIDI clip, with the grid, a strength, swing, a range gate, and a
+choice of what moves. No JUCE, so all of it is tested.
+
+### Where the behaviour came from
+
+The `dsp-researcher` agent went to the manufacturers' own manuals. The single
+most important finding is a negative one: **no manufacturer publishes an
+equation for quantise.** Four publish the behaviour in words, and two open
+source projects publish a numeric definition that agrees with them. So the
+header says in its own comment which parts are quoted and which are this
+project's decision, rather than implying an authority that is not there.
+
+**Strength** is linear interpolation between where the note was played and the
+grid, `new = old + strength * (grid - old)`. Nobody writes that equation, and
+four sources describe exactly it:
+
+- Avid, Pro Tools help, Additional Grid Quantize Options: notes are "moved a
+  percentage toward the Quantize Grid", range 0 to 100%.
+- Apple, Logic Pro User Guide, Quantize parameters (lgcp35029a2b): Q-Strength
+  "determines how far a note or transient marker is shifted toward the nearest
+  grid position", "100% results in full quantization, and 0% leaves the note
+  ... at its recorded position".
+- Steinberg, Cubase Plug-in Reference, Quantizer: Strength "determines how
+  close the notes should be moved to the quantize grid", and at 100% "all
+  notes are forced to the closest grid position".
+- Rosegarden's manual is the most explicit of any source: each note "will only
+  be moved that percentage of the distance toward its nearest grid line".
+  Ardour's says "as a percentage of the nominal distance".
+
+Ableton is the one that does not fit: Live's manual says Amount moves notes
+"only by a percentage of the set quantization value", which read literally is
+a percentage of the **step** rather than of the distance, and would overshoot
+the grid. Taken as loose prose for the same thing, since the literal reading
+is not a quantiser.
+
+Steinberg's iterative quantize page states a property that falls out of
+interpolation for free and is the best single discriminator against a "snap if
+close enough" shortcut: "Repeated use moves them progressively closer to the
+grid." Applying strength `s` twice leaves exactly `(1 - s)^2` of the original
+offset, which is smaller than `(1 - s)` and never zero below 1. The test
+asserts it.
+
+**Swing** is the position of the offbeat within its pair, 0.5 straight,
+0.6667 the third triplet, which is the convention `Groove.h` already uses, so
+an edit and a playback setting cannot disagree about what a swing number
+means. Apple's Q-Swing is on that scale and is quoted for it: it "alters the
+position of every second point in the current quantization grid", "values over
+50% delay the beats; values under 50% pre-delay (advance) them". Apple's own
+named presets give six exact points on the scale, 50, 54, 58, 62, 66 and 71
+per cent, and those six are in the test as fixed cases.
+
+Pro Tools and Rosegarden use the other published scale, 0% straight and 100%
+a triplet feel, with Avid's maximum of 300% putting the offbeat on the next
+grid point. The two convert exactly, `p = 50 + S/6`, pinned at three published
+points rather than one, and the header says so, because somebody reading an
+Avid number into this control would otherwise be four times out. Cubase's
+swing is a percentage whose numeric meaning Steinberg never states, so it
+cannot be matched from the documentation, and the header says that too.
+
+**The range gate** is the one every manual warns about by the way it is built,
+and Avid is the only source that quantifies it. Apple's Q-Range uses a sign:
+"a value of 0 means that every note ... is quantized", and "negative Q-Range
+values move only notes ... that fall outside the set range", leaving the ones
+near the grid alone. Apple documents only the negative case. Avid splits the
+same thing into two separately named options so the sign cannot be misread:
+**Include Within**, "only quantized if located within the specified percentage
+of the Quantize Grid", and **Exclude Within**, "not quantized if located
+within". Cubase has the same pair as Catch Range and Non-Quantize.
+
+This header follows Avid and names the two rather than signing one, because
+the sign is the documented trap: implemented backwards it is a control that
+visibly does something, to the wrong half of the notes. The window's width
+comes from Avid's two worked examples, which are the only quantified
+definition of a quantise gate in any primary source: a quarter note grid with
+Include at 50% gives "an eighth note area around each beat", and at 25% gives
+"a sixteenth note area", so the window is `range * grid` wide, centred, and a
+tolerance of `range * grid / 2` either side. At 100% the window is a whole
+step wide, which on a straight grid reaches every note, because nothing there
+is further than half a step from a grid point. Under swing it does not: the
+gap from a downbeat to a swung offbeat is up to one and a half steps, so a note
+in the middle of that gap is three quarters of a step from either end and
+stays outside even a full window. That is what Avid's definition says rather
+than something to correct, and the test pins it.
+
+**What moves** follows Avid's rule, which is the clearest published statement
+of the note length question and the one the other manuals agree with
+structurally. Note On and Note Off are separate choices; "Preserve Note
+Duration" is **unavailable** when both are selected, because the two requests
+contradict each other and Avid removes the option rather than silently picking
+one. Cubase splits the job into three differently named commands, Quantize
+("quantizes audio or MIDI event starts"), Quantize MIDI Event Ends and
+Quantize MIDI Event Lengths, rather than one command with a checkbox. Ableton
+says what end quantise costs: it "will stretch the note". Logic's Smart
+Quantize is described by what it refuses to break, keeping "the relative
+position of note on, note off, and CC events".
+
+So: starts only, length carried along, is the default, and anything else is an
+explicit choice. `preserveLengthApplies` returns false when both ends are
+being quantised, and the test asserts that the request is refused rather than
+quietly ignored, which is Avid's design copied deliberately.
+
+### What is a decision rather than a standard, stated as one
+
+- **Collisions, and only the ones quantise caused.** No manufacturer documents
+  what happens when two notes of the same pitch land on top of each other, and
+  quantise is the operation that causes it, since two notes a sixteenth apart
+  quantised to a quarter grid become one. This project already has a rule, in
+  `MidiTimebase.h`, written for the MIDI file round trip: the earlier note is
+  shortened to where the later one starts, and of two that begin together the
+  longer is kept and the other is counted as dropped. Quantise follows it, so
+  a quantised pattern exports as itself, which is what the cross-check in the
+  test measures.
+  **A pair that already overlapped is left alone**, and that restriction is
+  the whole of it: a held note re-struck before it is released is ordinary
+  material, and a pass that tidied one would be deleting part of a performance
+  nobody asked it to touch. The first version asked a weaker question, whether
+  either note had moved, and the audit showed what that costs. See the audit
+  section below.
+- **The minimum length** is one export tick, 1/960 of a beat, from
+  `MidiTimebase.h`'s existing rule that "a note on and a note off at the same
+  tick is a note that some studios draw and none of them play".
+- **Swing is clamped to 0.25 .. 0.75.** The top of that is Apple's own:
+  "The most practical settings are between 50% and 75%, which give a swing
+  feel to strictly quantized (or tightly played) regions." The bottom is this
+  project's, made symmetric so the pre-delay Apple documents has the same room
+  as the delay. It also keeps the grid usable: at 0 or 1 the offbeat lands on
+  a downbeat, the grid has half as many distinct points, and "the nearest grid
+  point" becomes a coin toss between two identical positions. Apple's whole
+  preset table, 50 to 71, is inside it.
+- **Pairs are counted from the clip's own origin**, which is what `Groove.h`
+  already does. No manufacturer says whether swing pairs count from the bar,
+  the clip or the project, so the two features here agree with each other
+  instead.
+- **Automation lanes are left alone.** Cubase has a MIDI CC option that moves
+  controllers with their notes, which needs a note-to-controller association
+  this project does not have: its lanes are curves rather than events
+  belonging to a note. Moving a curve under a quantised note would be
+  guesswork.
+
+### What the mutation pass and the audit found
+
+Both are worth recording, because the two faults that mattered were both the
+same shape: a rule that was *nearly* the right rule, with a comment claiming
+the right one.
+
+**Mutation testing**: 41 deliberate breakages compiled with the sanitizers,
+21 caught by the test as first written, 9 real gaps closed, 6 established as
+no-ops by an equivalence dump rather than by argument. The gaps worth naming
+are the gate's boundary being made strict, which leaves a note sitting exactly
+on the window's edge outside it (against a quarter note grid with Avid's fifty
+per cent window that is every eighth in a programmed part), and swapping the
+drop and trim branches, which deletes the later note instead of shortening the
+earlier one and still leaves a pattern a file can hold.
+
+**The audit** found two faults that would have lost somebody's work.
+
+The first is the one above: **a pre-existing overlap was resolved whenever
+either of its two notes moved at all.** A held eight beat note whose start was
+a thousandth of a beat off the grid lost half its length, and in the worst
+version the note that lost its tail had not moved at all. Sustained piano, a
+re-triggered pad and a roll on one drum all produce exactly that material. The
+fix is to ask whether the pair overlapped before the pass rather than whether
+either note moved, which needs the before picture and so changed
+`resolveOverlaps`'s signature. It also removed a cascade: under the old rule a
+gated pass could take one more pass per note to settle, twenty five for a line
+of twenty four, because each trim brought another end inside the gate's
+window. That case is kept in the test as a regression.
+
+The second: **quantise could push a note past its clip's own end**, where the
+engine and the export both skip it, so it sits in the roll looking normal and
+makes no sound. One bar of sixteenths quantised to a beat grid left five notes
+of which one was silent.
+
+The first fix for that grew the clip to cover the note, copying what drawing
+and dragging do, and a second round of the audit showed why that is wrong: a
+clip is a window onto its pattern and is often deliberately shorter than it,
+which is how one bar of a longer pattern gets looped. Growing it expanded a
+one bar clip to eight bars, un-hid every note the trim was hiding and moved
+over whatever was next on the track, on any press, which is far easier to hit
+than the silent note it was fixing. So the window is a quantise option now,
+and a note whose onset is inside it is never moved out of it: it stays where
+it was played, which is visible, instead of becoming silent, which is not. The
+same rule covers the front edge, which the second round also showed is
+reachable in two gestures after a clip's left edge has been dragged, and which
+the growing fix could not have helped with at all.
+
+The second round found one more fault of the same family, and it is the reason
+to run an audit twice. Resolving only self-caused collisions by comparing each
+note with the one before it is not enough: an inherited overlap is left in
+place, so it can sit between two notes the pass has just brought into
+collision, and that pair is then never compared. Half a per cent of passes
+over ordinary material came out with an overlap the pass had created, and an
+overlap of one pitch plays differently from the way it bounces, because the
+engine sends one note off per pitch while the export resolves the pair. Every
+note of a pitch already kept is compared now, not just the last one. The
+missing assertion, which is the one the invariant always needed, is that no
+pair may overlap after a pass that did not overlap before it.
+
+Also fixed from the audit, none of them data loss: the counts reported work
+that had been attempted rather than done, so a pass on a settled pattern
+claimed to have moved notes it had left alone; a position far enough out
+overflowed the signed arithmetic the grid search counts pairs with, which is
+undefined behaviour rather than a wrong answer; the tuplet formula in the
+comment was the reciprocal of the one Avid publishes, in the sentence directly
+after quoting Avid's own worked answer; the claim that a full window reaches
+everything is only true on a straight grid; the tooltip called a note lost to
+a collision "merged", which sounds like nothing was lost; and the last pass's
+report was not cleared when another clip or another project was opened, which
+is the leak `CLAUDE.md` says is the one that survives testing.
+
+Two claims in the header were also wrong rather than the code: the convergence
+figure cited a measurement that was not in the test, and Apple's swing preset
+table was quoted from research the audit could not reach. Both were checked
+again: the measurement is now in the test and prints its own worst case, and
+Apple's table was re-read at two of Apple's own pages, which give 50, 54, 58,
+62, 66 and 71 and no 75.
+
+### A third audit round, on the night of 2026-11-04
+
+The branch was picked up unfinished and the remaining work was the audit and
+the notes. A third round was run rather than trusting the second, for one
+specific reason: the second round found two faults **in the first round's own
+fixes**, and its own fixes had then never been read by anybody who had not
+just written them. That reasoning paid for itself.
+
+**It found one more data loss fault, and it was in the second round's fix.**
+The sub-tick merge, which turns two onsets closer than an export tick into
+one note, dropped whichever of the pair was sorted later. The sort puts the
+longer note first only where two starts are **exactly** equal, and that
+branch fires on starts that are unequal and under a tick apart, so the
+length had no say in it at all. The second round widened the branch to fire
+on pairs that were already overlapping, which is what made it reachable from
+ordinary material.
+
+What it cost, measured rather than imagined: a sixty-fourth of a beat
+artefact at velocity 0.10 struck a tick and a half before a two beat bass
+note at 0.95, quantised to the beat at the eighty per cent the piano roll
+offers as the setting that keeps the feel. The artefact is drawn to within a
+third of a tick of the bass note, the two become one onset, and the pass
+deleted the bass note and kept the artefact. A double triggered pad, a noisy
+input or a controller sending a stray note on all produce exactly that.
+
+It was also a disagreement between two code paths over the same material,
+which is the fault shape `CLAUDE.md` says is the worst this studio can have.
+`MidiTimebase.h` resolves the identical pair by keeping the longer, so the
+destructive edit and the bounce disagreed about which of the two was the
+note, and the edit was the one throwing the performance away. The header had
+already promised the project's own rule, "of two beginning together the
+longer is kept", in the paragraph directly above the code that did not do
+it: a comment claiming the opposite of the code, for the third time in this
+repository's history.
+
+The rule is now the export's rule, the longer of the two at its own onset,
+and of two equally long the earlier.
+
+**And it found that the assertion the second round credits with catching its
+own fault has almost no power.** The check that no pass may create an
+overlap of one pitch asked whether *any* pair in the before picture
+overlapped, not whether the pair in hand did, while the comment directly
+above it described matching an output pair back to the input pair it came
+from. Measured: 19749 of its 20000 rounds contain some inherited overlap, so
+it passed without looking at the pair in question 98.7 per cent of the time.
+Restoring the neighbours-only scan it was written to catch produced **zero**
+failures from the randomised sweep; only the one hand-picked three note case
+failed. It could not tell the fixed code from the broken code.
+
+Each note now carries a tag in its velocity, which `apply` leaves untouched
+and which compares exactly at powers of two over 128, so an overlapping
+output pair is matched back to the exact pair it came from. The same mutation
+now fails it 1390 times, which is the figure the second round's entry claimed
+and did not have a check for.
+
+Two lessons worth keeping, both about this project's own habits rather than
+about quantise:
+
+- **The entry below claimed two measurements that were not in the test.** The
+  second round removed an earlier pair of unchecked figures for exactly that
+  reason and then introduced another one in the same commit. A figure in a
+  commit message or a backlog entry is not a check, and the only cure that
+  has worked here is putting the measurement in the test and letting it print
+  its own worst case.
+- **An audit round that fixes something needs an audit round after it.** Two
+  rounds in a row found their predecessor's fix wrong, in the same part of
+  the same function. Rounds one and two each found faults that were
+  introduced by the round before, which says the stopping rule should be a
+  clean round and not a fixed number of them. This third round's own fixes
+  were mutation tested, eight mutations with the sanitizers and seven caught,
+  with the survivor established as a true no-op by an ordering argument
+  written into the header rather than by assertion.
+
+Also from this round, none of it behaviour: the claim that quantise leaves a
+pattern the export never has to repair had one uncovered case, a pair struck
+within a tick before the pass where one of the two is itself shorter than a
+tick, which nothing in the studio can make and which the header now states
+and sources instead of implying away; `preserveLengthApplies` is false for
+two targets for two different reasons and the comment gave only Avid's; and
+the tooltip rounded swing to whole per cent, so the menu item labelled
+66.67% reported back as 67%, a setting nothing in the menu can reach.
+
+### Still to do
+
+A keyboard shortcut for it, which
+needs `MainComponent`'s key handling and so wants a night when that file is
+not open in somebody else's pull request. Quantising a selection rather than
+the whole clip wants a selection to exist in the piano roll first, which is
+its own night's work and is listed above as the next thing worth doing here.
+
+---
+
+## 2026-10-29: whether the loudness histogram's ceiling should move
+
+Handed on rather than taken, because it changes a design constant and costs
+work in the device callback, and the night that found it was a hardening run.
+
+`LoudnessMeter.h` stores its block distribution as a histogram from -70 to +30
+LUFS at a hundredth of an LU per bin, which is 10000 bins and about 160 KB. The
+ceiling was chosen because +30 LUFS is thirty decibels past anything a
+converter can pass, so nothing can reach it without a gain mistake upstream.
+The night of 2026-10-29 fixed the part of that which was a fault: a programme
+above +29.995 LUFS used to report no integrated figure at all, because the
+relative gate landed in the catch all top bin and the rule that decides the
+gate's own bin by its centre then discarded the only bin with anything in it.
+
+What is left is a degradation rather than a fault. Above the ceiling every
+block shares one bin, so the relative gate cannot separate them and the figure
+is the ungated mean of everything up there. Measured: 5 s at +60 then 50 s at
++31 reads +49.540 where the exact gated figure is +59.875, and over four
+hundred thousand randomised programmes the worst case is 9.5 LU low. The
+loudness range collapses to 0.0 LU up there for the same reason, which the mix
+report prints in its warning colour.
+
+The question is whether that is worth removing. Raising `highestLufs` to +150
+makes the measured case exact: it was tried and it reads +59.875. The costs are
+that `numBins` goes from 10000 to 22000, so the histogram grows from about
+160 KB to about 350 KB, which is nothing, and that `updateIntegrated` scans
+`numBins - from` bins once per 100 ms block in the device callback, which
+roughly doubles. That is still a small number against a 100 ms budget, but it
+is audio thread work added to buy accuracy in a band that only a mistake
+reaches.
+
+Three things worth weighing, written down so the decision is made on them
+rather than remade from scratch:
+
+- Any finite histogram has a top, so raising it narrows the band this happens
+  in rather than removing it. +150 LUFS is 150 dB past full scale, which is
+  past anything a float mixer reaches without something diverging.
+- The reading up there is already finite and already says the master is tens of
+  decibels too loud, which is the only thing anybody needs from a meter at that
+  point. Getting it exact buys precision in a reading nobody will act on
+  precisely.
+- Against that: the ceiling's original justification was that nothing could
+  reach it, and that reasoning is what produced the fault. A constant chosen
+  because a case is unreachable is the shape of thing this project keeps having
+  to fix.
+
+Not urgent either way. The fault is fixed and the limit is documented in the
+header and pinned by a test that requires the figure to stay finite and above
++30.
+
+---
+
 ## 2026-10-28 and 2026-10-29: a tuner, and the pitch detector it is built on
 
 ### Status: built, tested, mutation tested, audited
@@ -582,7 +1356,6 @@ Two smaller things, recorded rather than done:
   is never set from the detected pitch, which would be a feedback path.
 
 ---
-
 ## 2026-10-27: the fader law, and where unity sits on the travel
 
 ### Status: built, tested, audited, and waiting on a human to merge it

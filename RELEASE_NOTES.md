@@ -1,6 +1,115 @@
-Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can pick up more than one note at a time.** Until now the piano roll
+edited exactly one note per gesture. There was no way to grab a chord, move a
+riff a sixteenth later, or transpose eight notes together: you did it one note
+at a time, eight times, and hoped you had not nudged one of them sideways on
+the way.
+
+There is a Select tool next to Draw and Delete. Drag a rectangle round the
+notes you want, or hold Ctrl (Command on a Mac) and drag to do the same thing
+without leaving the Draw tool. The rectangle catches anything it touches
+rather than only what it surrounds, which is what every studio that says
+anything about it does, so you do not have to lasso a long note from end to
+end. Shift and a click adds a note to the selection or takes it out again,
+Shift over a rectangle flips whatever it catches, and clicking a note that is
+already selected picks up the whole group rather than throwing the rest away.
+
+Drag the group and it moves as a group. That is the part that took the most
+care, and it is worth knowing what it protects you from. If a chord is near
+the top of the keyboard and you drag it up too far, every note stops together
+and the chord stays a chord. The obvious way to write it lets the top note
+stop while the others carry on, which turns a chord into a unison, makes no
+sound you would notice at the time, and leaves you finding it later by ear
+with no idea which gesture did it. The same rule runs through transposing, the
+velocity and the lengths: nothing in a group ever moves without the rest of
+it.
+
+A Selection button holds everything that is not a gesture: select all, none or
+invert, transpose by a semitone or an octave, nudge the velocity up or down,
+duplicate, and delete. Duplicate puts the copy immediately after what you
+selected and then selects the copy, so pressing it three times lays three
+copies end to end instead of piling them in one place.
+
+Drag a velocity marker belonging to a selected note and the whole selection
+moves together, keeping the differences between them, so a ramp you played
+stays a ramp instead of flattening the moment the loudest note hits the top.
+Painting a row of velocities flat still works exactly as it did, because that
+is still the quickest way to do that. Drag the right edge of a selected note
+and they all resize together keeping their relative lengths; hold Shift while
+you drag and they all end at the same point instead; hold Ctrl or Command and
+they all get the same length.
+
+Dragging a group snaps the note you grabbed to the grid, which is what
+dragging one note has always done here, so nothing you already do changes.
+There is a second mode on the Selection menu, under "Moving a group snaps to",
+that moves the group by whole steps and leaves every note exactly as far off
+the grid as you played it. Neither mode quantises anything: the group always
+keeps its own internal timing, and the two differ only in where the note you
+grabbed lands. Alt still ignores the grid entirely.
+
+One thing it now does that it did not before: if you move a note on top of
+another note at the same pitch, the one you moved wins, and the one underneath
+is shortened to meet it or removed if it was covered completely. That is
+Ableton's rule and it is there because two notes at one pitch overlapping is a
+thing that will or will not sound depending on the synth receiving it, which
+is the worst kind of problem to have in a file. It only happens when you
+actually move something: clicking a note to hear it leaves everything alone.
+
+What is missing, and is the next thing to do here: none of this is on the
+keyboard yet. No Ctrl+A, no arrow keys to nudge or transpose, no Delete key.
+That needs the main window to hand key presses to whichever view you are in,
+and that part of the code is being changed for something else at the moment.
+Everything is reachable with the mouse in the meantime.
+
+**You can tidy a part you played in.** There is a Quantise button on the piano
+roll's toolbar now, and until this there was no way at all to move a played
+note onto the grid. The groove setting swings notes that are already on the
+grid, at playback, and deliberately leaves anything played off it where you put
+it, which is the opposite job. So a part played in live had to be redrawn by
+hand or left as it was.
+
+It is not an all or nothing snap, which is the part worth knowing. The strength
+is how far each note travels toward the grid, so 100% puts everything exactly
+on it and 80% takes most of the slop out and leaves the feel. That is in the
+menu as the setting that keeps the feel, because it is the one you will want on
+a guitar or a vocal line. Press it again at 80% and it moves everything closer
+again, which is deliberate and is how every other studio behaves.
+
+The swing is on the same scale as the groove setting, so 50% is straight and
+66.67% is a triplet shuffle, and the two cannot disagree about what a number
+means. You can also quantise against a swung grid, which is how you tidy a part
+that was played with a shuffle without flattening the shuffle.
+
+Two things you can do that are worth finding. You can tell it to move only the
+notes that are already close, which tidies the nearly-right ones and leaves a
+note you pushed late on purpose alone. Or the exact opposite: leave the close
+ones and only pull in the ones that are badly out. And you can choose whether
+it moves note starts, note ends, or both. Starts, with the length carried
+along, is the default and is what you want nearly always.
+
+Three things it will not do to your part. It will not push a note past the end
+of the clip, where it would still be drawn in the roll and make no sound. If
+quantising lands two notes of the same pitch on top of each other, which
+happens when two notes a sixteenth apart both go to the same beat, it keeps the
+one that was actually audible and tells you it dropped the other, rather than
+keeping whichever came first: a stray blip a fraction of a tick before a long
+note is common on a noisy input, and keeping the blip would have thrown away
+the note. And an overlap you drew yourself is left exactly as you drew it,
+because a held note restruck before you let go is ordinary playing and not
+something to clean up.
+
+It tells you what it did after each press: how many notes moved, how many were
+shortened, how many were dropped, and how many it left alone because moving
+them would have pushed them out of the clip.
+
+Nothing here is invented. The strength, the swing scale, the close-notes gate
+and the choice of which end moves are all taken from what Avid, Apple,
+Steinberg and Ableton publish about their own, and where none of them says
+anything, which is what happens when two notes collide, this follows the rule
+the MIDI export here already used, so a quantised pattern bounces as itself.
 
 **Your faders have a proper scale now, and 0 dB is three quarters of the way
 up.** The number under each fader means something it can be checked against,
@@ -35,7 +144,7 @@ different places on screen, because the scale under them changed, but what each
 track is actually doing is identical to the hundredth of a decibel. The
 translation goes through the gain rather than through where the handle sat,
 which sounds like a technicality and is the whole thing: done the other way,
-every track in every old project would have come back about 4 dB quieter, by a
+every track in every old project would have come back about 4.4 dB quieter, by a
 different amount each, and it would have sounded like the mix had drifted with
 nothing to point at.
 

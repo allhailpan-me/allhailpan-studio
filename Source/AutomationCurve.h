@@ -113,8 +113,13 @@ inline float autoControlValue (AutoTargetKind kind, double curveValue) noexcept
         // the position, not the gain, so a straight line in the lane is
         // straight in decibels within one of the law's segments, which is
         // what a fade is supposed to be. Storing the gain instead would make
-        // a straight line a fade that is fast at the start and slow at the
-        // end.
+        // a straight line a fade out that hardly moves and then collapses:
+        // linear in gain reaches -6 dB only at the halfway point, -20 dB at
+        // nine tenths and -40 dB at ninety-nine hundredths, so nearly all of
+        // the audible travel happens in the last tenth of the gesture. Said
+        // as a fade out because the direction is not symmetric and this
+        // comment used to have it backwards: the same straight line as a fade
+        // in spends nearly all of its decibels at the beginning instead.
         case AutoTargetKind::insertVolume: return (float) v;
         case AutoTargetKind::insertPan:    return (float) (v * 2.0 - 1.0);
         case AutoTargetKind::channelParam:
