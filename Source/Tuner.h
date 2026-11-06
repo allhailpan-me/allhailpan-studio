@@ -1213,16 +1213,16 @@ public:
         // of a guitar, where a quarter of a hertz does not.
         const double absoluteCents = 1200.0 * std::log2 (e.hz);
 
-        // Clamped rather than trusted, and the direction of each clamp is the
-        // whole point of having them. A figure near zero would divide by
-        // nearly nothing and report an enormous rate, which only ever holds
-        // the display shut. The upper bound is generous because a legitimate
-        // interval really is most of a second at 192 kHz, and truncating a
-        // long one understates the span, which overstates the rate, which is
-        // the safe direction too. Neither clamp can open the gate early.
-        const double sincePrevious = std::min (10.0, std::max (1.0e-4, elapsedSeconds));
-
-        if (sincePrevious > g.stallFrames * g.frameSeconds)
+        // The stall bound is tested against the RAW figure and the span is
+        // summed from the CLAMPED one, and that order matters. An audit found
+        // the two the other way round: the clamp caps a gap at ten seconds, so
+        // once `stallFrames * frameSeconds` reached ten the bound could not be
+        // crossed by any gap however long, and keeping a window that should
+        // have been thrown away is the one direction that opens the gate
+        // early. Written as `! (gap <= bound)` rather than `gap > bound` so
+        // that a gap of NaN, which compares false against everything, is
+        // treated as a stall rather than as an ordinary frame.
+        if (! (elapsedSeconds <= g.stallFrames * g.frameSeconds))
         {
             // See GateSettings::stallFrames. The hold count goes with the
             // window: readings from before a stall cannot count towards an
@@ -1230,6 +1230,15 @@ public:
             history.clear();
             satisfiedInARow = 0;
         }
+
+        // Clamped rather than trusted, and the direction of each clamp is the
+        // whole point of having them. A figure near zero would divide by
+        // nearly nothing and report an enormous rate, which only ever holds
+        // the display shut. Truncating a long one understates the span, which
+        // overstates the rate, which is also the safe direction. Neither clamp
+        // can open the gate early, and neither is now load bearing for the
+        // stall bound above.
+        const double sincePrevious = std::min (10.0, std::max (1.0e-4, elapsedSeconds));
 
         history.push_back ({ absoluteCents, sincePrevious });
 
@@ -1457,13 +1466,6 @@ public:
         // Never zero. A wait of nothing, on a machine where the reading came
         // back in no measurable time at all, is a spin.
         return std::max (1.0e-4, base) * (1.0 + cfg.jitter * nextUnit());
-    }
-
-    /** The whole interval one pass occupies: the reading and then the wait.
-        What a caller hands the gate when it has no clock of its own. */
-    double expectedHop (double spentSeconds) noexcept
-    {
-        return std::max (0.0, spentSeconds) + nextWait (spentSeconds);
     }
 
 private:

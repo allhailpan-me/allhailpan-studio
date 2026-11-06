@@ -140,6 +140,14 @@ private:
         double previousStartedAt = 0.0;
         double measuredHop = pacing.settings().nominalSeconds;
 
+        // Time since the gate was last fed, which is not the same as time
+        // since the last pass: a pass with no new audio does not feed it. The
+        // gate is comparing one reading against the one before it, so the
+        // interval it needs is between those two readings and not between two
+        // passes. Understating it would overstate the rate and only hold the
+        // display shut, which is safe, but it is cheap to be right.
+        double sinceFed = pacing.settings().nominalSeconds;
+
         // The seed is the clock, so two instances started at different moments
         // dither differently. Nothing here has to reproduce a sequence: the
         // test reproduces it from its own seed.
@@ -150,7 +158,10 @@ private:
             const auto startedAt = juce::Time::getMillisecondCounterHiRes();
 
             if (previousStartedAt > 0.0)
+            {
                 measuredHop = (startedAt - previousStartedAt) / 1000.0;
+                sinceFed   += measuredHop;
+            }
 
             previousStartedAt = startedAt;
 
@@ -184,13 +195,6 @@ private:
             }
 
             analyser.setReferenceHz (wantedReference.load());
-
-            // So that the stall bound is expressed in this machine's real
-            // pacing rather than in the nominal one, which above 48 kHz it
-            // never reaches. Does not reset the window: a pacing figure that
-            // drifts with load would otherwise reopen the display every time
-            // the machine got busy.
-            analyser.setFrameSeconds (measuredHop);
 
             // Whether the device is still delivering, which the ring's own
             // counter cannot say on its own: it is monotonic, so it has to be
@@ -226,11 +230,26 @@ private:
 
                 next.waitingForAudio = true;
             }
+            else if (quietPasses > 0)
+            {
+                // No new samples since the last pass, so there is nothing new
+                // to read: the ring holds exactly the buffer that was analysed
+                // last time. Re-analysing it would produce an identical
+                // estimate, and an identical estimate is a reading the gate
+                // cannot tell from a fresh one. That matters now that the gate
+                // asks for several readings to agree: two of the agreements it
+                // wants could be re-reads of one buffer rather than new
+                // evidence. The previous reading is held instead, which is
+                // what the display was showing anyway.
+                next.reading = latest().reading;
+                next.waitingForAudio = false;
+            }
             else if (ring.readLatest (window))
             {
-                next.reading = analyser.process (window.data(), (int) window.size(), measuredHop);
+                next.reading = analyser.process (window.data(), (int) window.size(), sinceFed);
                 next.readings = ++readings;
                 next.waitingForAudio = false;
+                sinceFed = 0.0;
             }
             else
             {
@@ -247,6 +266,22 @@ private:
                 const juce::SpinLock::ScopedLockType lock (publishLock);
                 published = next;
             }
+
+            // After `process`, not before it, and that is a correctness
+            // ordering rather than tidiness. The gate's stall bound is
+            // `stallFrames` times this figure, and this pass's own interval is
+            // what the bound is being asked about: set it first and the
+            // comparison is `h > 4h`, which is false for every h, so the bound
+            // does nothing at all. An audit found exactly that, and measured
+            // the cost: a display opening on a string being turned at 5 cents
+            // a second two readings after a ten second gap. Scaled by the
+            // PREVIOUS hop the bound means what it says, and consecutive hops
+            // differ by at most the jitter factor, which is well inside four.
+            //
+            // It does not reset the window, deliberately: a pacing figure that
+            // drifts with load would otherwise reopen the display every time
+            // the machine got busy.
+            analyser.setFrameSeconds (measuredHop);
 
             // Measured from the start of the work rather than the end of it,
             // so the reading rate does not drift with how long a reading took.

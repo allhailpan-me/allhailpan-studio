@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <string>
 #include <thread>
@@ -2344,17 +2345,22 @@ static void testPacing()
         check (longest - shortest > 0.01 * s.nominalSeconds, "a seed of zero produced a constant interval");
     }
 
-    // A reading that costs nothing must not produce a wait of nothing, which
-    // would be a spin on a machine faster than any this was measured on.
+    // A wait is never zero or negative, which needs the one combination that
+    // can drive the base below nothing: no duty multiple at all, and a reading
+    // that costs more than the whole nominal interval. That is 192 kHz with
+    // the duty cycle turned off, and without the floor the base there is
+    // `nominal - spent`, which is negative, so the wait would be negative and
+    // the pass rate unbounded.
     {
         Tuner::Pacing p;
         Tuner::Pacing::Settings z = s;
         z.dutyMultiple = 0.0;
-        z.nominalSeconds = 1.0e-9;    // clamped on the way in
         p.configure (z, 5u);
 
-        for (int i = 0; i < 100; ++i)
-            check (p.nextWait (0.0) > 0.0, "a free reading produced a wait of nothing");
+        for (double spent : { 0.0, 0.009, 0.1, 0.197, 5.0 })
+            for (int i = 0; i < 40; ++i)
+                check (p.nextWait (spent) > 0.0,
+                       "a wait was not positive at a reading cost of " + std::to_string (spent));
     }
 }
 
@@ -2435,34 +2441,136 @@ static void testMeasuredInterval()
                  "  including when the nominal is five times out\n", trueCentsPerSecond);
 
     // A gap far longer than the caller's pacing throws the window away rather
-    // than being measured across. Without this, a real pitch movement divided
-    // by a real stall reads as settled: here, 20 cents of movement over an
-    // eleven second gap is 1.8 cents a second, which would pass a threshold
-    // of 1.3 if the gap were believed.
+    // than being measured across. The example has to be one that would really
+    // get through if the gap were believed, which the first version of this
+    // check was not: 20 cents over eleven seconds is 1.8 cents a second, and
+    // 1.8 is above the 1.3 threshold, so it would have been held shut anyway
+    // and the check was passing for the wrong reason.
+    //
+    // Ten cents over ten seconds is 1.0 cents a second, which is under the
+    // threshold, so a believed gap shows the note. And it is driven in the
+    // panel's own call order, because an audit found that order is what
+    // decides whether the bound exists at all.
     {
         Tuner::GateSettings g;
-        g.frameSeconds = 0.1;
-
         Tuner::Analyser a;
         a.configure (spec, g);
 
         std::mt19937 rng (11u);
-        const auto low  = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
-        const auto high = synth (series (220.0 * std::pow (2.0, 20.0 / 1200.0), 5, 1.0, 0.0, 0.25, rng, false),
-                                 sampleRate, n);
+        const double hop = 0.118;       // what the shipped pacing produces at 44.1 kHz
 
-        // Fill the window on a steady note, so there is something to throw.
-        for (int i = 0; i < g.stabilityFrames + g.holdFrames; ++i)
-            a.process (low.data(), n, 0.1);
+        const auto before = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
 
-        // Then a long gap, and a note 20 cents away.
-        const auto after = a.process (high.data(), n, 11.0);
+        // Fill the window and open the display on a steady note, so there is
+        // something worth throwing away.
+        for (int i = 0; i < g.stabilityFrames + g.holdFrames + 1; ++i)
+        {
+            a.process (before.data(), n, hop);
+            a.setFrameSeconds (hop);
+        }
 
-        check (! after.hasNote, "a reading across a stall was shown as settled");
-        check (after.movingCentsPerSecond == 0.0,
-               "a window that spanned a stall still reported a rate");
+        check (a.process (before.data(), n, hop).hasNote,
+               "the steady note this check starts from was never shown");
+        a.setFrameSeconds (hop);
 
-        std::printf ("  and a window that spans an eleven second gap is thrown away rather than divided by it\n");
+        // Then a ten second gap, after which the string is ten cents higher
+        // and being turned. Each reading after the gap is a real new reading,
+        // paced normally.
+        const double gap = 10.0;
+        bool shownAfterTheGap = false;
+        double worstRate = 0.0;
+
+        for (int i = 0; i < g.stabilityFrames - 1; ++i)
+        {
+            const double cents = 10.0 + 1.0 * (double) i;      // turning at about 8 cents a second
+            const auto v = synth (series (220.0 * std::pow (2.0, cents / 1200.0), 5, 1.0, 0.0, 0.25, rng, false),
+                                  sampleRate, n);
+
+            const auto r = a.process (v.data(), n, i == 0 ? gap : hop);
+            a.setFrameSeconds (i == 0 ? gap : hop);
+
+            shownAfterTheGap = shownAfterTheGap || r.hasNote;
+            worstRate = std::max (worstRate, r.movingCentsPerSecond);
+        }
+
+        check (! shownAfterTheGap,
+               "a window that spanned a ten second gap was shown as settled");
+
+        std::printf ("  and a window that spans a ten second gap is thrown away rather than divided by it\n");
+    }
+
+    // The bound is asked about the raw gap and not the clamped one, which only
+    // shows up once the bound itself is longer than the clamp. At 192 kHz on a
+    // loaded machine the nominal really does reach seconds, and four times a
+    // three second nominal is twelve, which is past the ten second ceiling the
+    // span's clamp imposes: tested against the clamped figure the comparison
+    // becomes `10 > 12` and no gap of any length can ever cross it.
+    {
+        Tuner::GateSettings g;
+        Tuner::Analyser a;
+        a.configure (spec, g);
+        a.setFrameSeconds (3.0);
+
+        std::mt19937 rng (29u);
+        const auto steady = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+
+        for (int i = 0; i < g.stabilityFrames + g.holdFrames + 1; ++i)
+            a.process (steady.data(), n, 3.0);
+
+        check (a.process (steady.data(), n, 3.0).hasNote,
+               "the steady note this check starts from was never shown");
+
+        // A minute of nothing, then the same note ten cents higher and moving
+        // slowly enough that a believed gap would show it.
+        const auto higher = synth (series (220.0 * std::pow (2.0, 10.0 / 1200.0), 5, 1.0, 0.0, 0.25, rng, false),
+                                   sampleRate, n);
+
+        const auto across = a.process (higher.data(), n, 60.0);
+        check (! across.hasNote, "a window spanning a minute was shown as settled");
+        check (across.movingCentsPerSecond == 0.0,
+               "a window spanning a minute still reported a rate, so the bound saw the clamped gap");
+    }
+
+    // An interval of NaN is a stall and not an ordinary frame. A clock that
+    // has gone backwards or a subtraction of two unset timestamps can produce
+    // one, and NaN compares false against everything, so a bound written the
+    // obvious way round lets it straight through as though no time had passed.
+    {
+        Tuner::GateSettings g;
+        Tuner::Analyser a;
+        a.configure (spec, g);
+
+        std::mt19937 rng (31u);
+        const auto steady = synth (series (220.0, 5, 1.0, 0.0, 0.25, rng, false), sampleRate, n);
+
+        for (int i = 0; i < g.stabilityFrames + g.holdFrames + 1; ++i)
+        {
+            a.process (steady.data(), n, 0.1);
+            a.setFrameSeconds (0.1);
+        }
+
+        check (a.process (steady.data(), n, 0.1).hasNote,
+               "the steady note this check starts from was never shown");
+
+        const auto nan = a.process (steady.data(), n, std::numeric_limits<double>::quiet_NaN());
+        check (! nan.hasNote, "a reading with an interval of NaN was shown as settled");
+        check (nan.movingCentsPerSecond == 0.0, "an interval of NaN did not throw the window away");
+    }
+
+    // The nominal can legitimately be seconds rather than a tenth of one, at
+    // 192 kHz where a reading costs 197 ms, so the clamp on it has to reach
+    // there. A clamp of one second would silently quarter the stall bound on
+    // exactly the hardware the headers design for.
+    {
+        Tuner::GateSettings g;
+        Tuner::Analyser a;
+        a.configure (spec, g);
+
+        a.setFrameSeconds (2.5);
+        checkNear (a.getFrameSeconds(), 2.5, 1.0e-12, "a nominal of 2.5 s was clamped away");
+
+        a.setFrameSeconds (1.0e-9);
+        check (a.getFrameSeconds() > 0.0, "a nominal of nearly nothing was not clamped to something usable");
     }
 }
 
@@ -2512,7 +2620,8 @@ struct VibratoResult
     int    shown      = 0;      // how many readings were shown at all
 };
 
-static VibratoResult sweepVibrato (double readingCostSeconds, double jitter, int holdFrames)
+static VibratoResult sweepVibrato (double readingCostSeconds, double jitter, int holdFrames,
+                                   bool primeWithAPreviousNote = false)
 {
     const double sampleRate = 44100.0;
     const double f0 = 220.0;
@@ -2567,6 +2676,29 @@ static VibratoResult sweepVibrato (double readingCostSeconds, double jitter, int
                     const int total = (int) (seconds * sampleRate) + n + 16;
                     const auto v = vibratoNote (f0, depth, rateHz, phase0, sampleRate, total);
 
+                    if (primeWithAPreviousNote)
+                    {
+                        // A steady note held long enough to open the display,
+                        // then one reading of silence to clear the window. The
+                        // vibrato that follows is a second note arriving on a
+                        // gate that has already been through a full cycle,
+                        // which is the ordinary case and the one nothing was
+                        // checking.
+                        std::mt19937 rng (3u);
+                        const auto steady = synth (series (196.0, 5, 1.0, 0.0, 0.25, rng, false),
+                                                   sampleRate, n);
+                        const std::vector<float> silence ((std::size_t) n, 0.0f);
+
+                        for (int i = 0; i < g.stabilityFrames + g.holdFrames + 1; ++i)
+                        {
+                            a.process (steady.data(), n, ps.nominalSeconds);
+                            a.setFrameSeconds (ps.nominalSeconds);
+                        }
+
+                        a.process (silence.data(), n, ps.nominalSeconds);
+                        a.setFrameSeconds (ps.nominalSeconds);
+                    }
+
                     const double centre = 1200.0 * std::log2 (f0);
                     double at = 0.0, previous = -1.0;
 
@@ -2578,8 +2710,17 @@ static VibratoResult sweepVibrato (double readingCostSeconds, double jitter, int
                             break;
 
                         const double hop = previous < 0.0 ? ps.nominalSeconds : at - previous;
-                        a.setFrameSeconds (hop);
+
+                        // The panel's order, which is the point: `process`
+                        // first and then `setFrameSeconds`, so the stall bound
+                        // is scaled by the previous hop and not by the one it
+                        // is being asked about. Set the other way round the
+                        // bound compares a gap against four times itself and
+                        // can never fire, which is how it shipped and what an
+                        // audit found. A sweep that did not copy the real order
+                        // would be testing a configuration nothing runs.
                         const auto r = a.process (v.data() + start, n, hop);
+                        a.setFrameSeconds (hop);
                         previous = at;
 
                         if (r.hasNote && r.hz > 0.0)
@@ -2629,6 +2770,88 @@ static void testVibrato()
     // and both fail here.
     check (shipped.worstCents < 8.0, "the mitigation did not hold the worst reading down");
     check (shipped.shown * 4 < control.shown, "the mitigation did not reduce how often a moving note is shown");
+
+    // The spread across the window, and not the first to last difference.
+    //
+    // This needs its own check and cannot be left to the sweep above. The two
+    // criteria are identical on any pitch that only goes one way, and every
+    // other signal in this file is monotone or steady, so replacing the spread
+    // with the difference between the two ends survived the entire suite. It
+    // is reached deterministically instead: at a fixed interval, a vibrato
+    // whose period divides the window exactly puts the two ends of that window
+    // on the same phase, so their difference is nothing while the readings
+    // between them are twenty cents away.
+    {
+        const double sampleRate = 44100.0;
+        const auto spec = fastSpec (sampleRate);
+
+        Tuner::Detector sizer;
+        sizer.configure (spec);
+        const int n = sizer.requiredSampleCount();
+
+        Tuner::GateSettings g;
+        g.holdFrames = 1;               // one agreement, so this is about the criterion alone
+        const double hop = 0.1;
+        const double span = (double) (g.stabilityFrames - 1) * hop;
+
+        int shown = 0;
+
+        // One and two whole vibrato cycles across the window. At one the ends
+        // coincide and the middle readings do not; at two the ends and the
+        // middle both coincide in pairs, which is the harder of the two.
+        for (int cycles = 1; cycles <= 2; ++cycles)
+        {
+            const double rateHz = (double) cycles / span;
+
+            for (double phase0 : { 0.0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8 })
+            {
+                Tuner::Analyser a;
+                a.configure (spec, g);
+
+                const int total = (int) (2.5 * sampleRate) + n + 16;
+                const auto v = vibratoNote (220.0, 20.0, rateHz, phase0, sampleRate, total);
+
+                for (int frame = 0;; ++frame)
+                {
+                    const int start = (int) ((double) frame * hop * sampleRate);
+
+                    if (start + n > total)
+                        break;
+
+                    const auto r = a.process (v.data() + start, n, hop);
+                    a.setFrameSeconds (hop);
+
+                    if (r.hasNote)
+                        ++shown;
+                }
+            }
+        }
+
+        std::printf ("  a vibrato whose period divides the window: %d readings shown\n", shown);
+        check (shown == 0,
+               "a vibrato whose ends coincide across the window was shown as settled");
+    }
+
+    // The agreements the hold asks for have to be fresh ones, including on the
+    // second note of a session. The counter lives with the window and the
+    // window is cleared in three places; removing any one of them is covered
+    // by another, so an audit found that removing TWO of them survived the
+    // whole suite and quietly reverted the hold to one agreement for every
+    // note after the first. Nothing here cleared a window and then reopened
+    // it, which is why. This does.
+    {
+        const double cost = 0.009;
+        const auto primed = sweepVibrato (cost, Tuner::Pacing::Settings{}.jitter,
+                                          Tuner::GateSettings{}.holdFrames, true);
+
+        std::printf ("  %-34s %10.3f c %12d\n", "after a previous note and silence",
+                     primed.worstCents, primed.shown);
+
+        check (primed.worstCents < 8.0,
+               "the hold did not survive a note arriving after a cleared window");
+        check (primed.shown * 4 < control.shown,
+               "a note after a cleared window was shown far more often than the first note was");
+    }
 
     // And the same at the reading cost 96 kHz produces, which is where the
     // duty cycle drops the reading rate into the middle of the vibrato band.
@@ -2708,6 +2931,16 @@ static void testRingCapacity()
                                                      Tuner::largestStudioBlockSamples),
                  Tuner::highestStudioSampleRate, Tuner::largestStudioBlockSamples,
                  (double) given / (double) d.requiredSampleCount());
+
+    // The two bounds are bounds on what hardware does rather than figures
+    // derived from anything here, so lowering either one keeps every check
+    // above satisfied: the requirement is recomputed from the same constant.
+    // They are pinned instead, with the reason, which is the only thing a test
+    // can do about a constant that describes the world.
+    check (Tuner::highestStudioSampleRate >= 192000.0,
+           "the rate bound no longer covers 192 kHz, which interfaces offer and the studio opens");
+    check (Tuner::largestStudioBlockSamples >= 4096,
+           "the block bound no longer covers the largest buffer an ASIO driver offers");
 
     // The margin the measurement in InputRing's comment says is worth having:
     // four times the snapshot tore nothing in 412710 reads, against 29 in
