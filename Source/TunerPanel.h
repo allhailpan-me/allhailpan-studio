@@ -28,29 +28,24 @@
     everything else while the tuner is open.
 
     THE COST GROWS AS THE SQUARE OF THE SAMPLE RATE, which is a property of the
-    window rather than of this code and is the reason for the duty cycle below.
-    The window is a fixed duration, so both the window and the longest lag are
-    proportional to the rate, and the difference function's work is their
-    product. Measured, release build:
+    window rather than of this code: the window is a fixed duration, so both it
+    and the longest lag are proportional to the rate, and the difference
+    function's work is their product. At 192 kHz one reading is 197 ms, so a
+    tenth of a second between readings is not available at any price.
 
-    | sample rate | buffer       | one reading |
-    |---|---|---|
-    |  44100 | 5734  (130 ms) |   9 ms |
-    |  48000 | 6239  (130 ms) |  11 ms |
-    |  96000 | 12473 (130 ms) |  48 ms |
-    | 192000 | 24939 (130 ms) | 197 ms |
+    How long to wait is therefore a decision with arithmetic behind it, and it
+    is `Tuner::Pacing` rather than two lines in here. The duty cycle, the
+    dither that keeps a vibrato from hiding behind the reading rate, the cost
+    table it was all measured from and what is still wrong with the whole
+    arrangement are in that header, where a test can drive it. This class keeps
+    the clock and the sleep.
 
-    So at 192 kHz a hundred milliseconds between readings is not available at
-    any price, and asking for it would spin a core for as long as the window is
-    open. `sleepFor` backs the spacing off instead, to whatever keeps this
-    thread under a quarter of a core. A slower reading rate makes the gate
-    stricter rather than wrong: four frames then span more of the string's
-    settling, so the display opens later and closer to where the note is going.
-
-    The real fix is to decimate the tap to a fixed analysis rate rather than
-    run the estimator at whatever the interface happens to be set to, which is
-    a filter design job with a specification behind it, and it is written up as
-    the next step in `Research/BACKLOG.md`.
+    What it does keep is the measuring. The interval between readings is not a
+    constant, so the gate is handed what the clock said rather than what this
+    thread intended, which is the fault an audit found in the first version of
+    this file: it passed the nominal tenth of a second at every rate, so above
+    48 kHz, where the duty cycle takes over, it told the gate a figure 1.92 and
+    then 7.88 times too small.
 
     Published through a spin lock rather than an atomic because a `Reading` is
     several numbers that have to agree with each other. Neither side of that
@@ -78,7 +73,15 @@ public:
 
     void stop()
     {
-        stopThread (1000);
+        // `stopThread` notifies as well as signalling, so the wait is one
+        // reading rather than one interval. One reading is the 197 ms measured
+        // at 192 kHz, the top of the studio's range, and the cost grows as the
+        // square of the rate: four seconds is that with room for a device two
+        // doublings faster on a machine several times slower. On a timeout
+        // JUCE kills the thread by force, which here would be inside the
+        // estimator's own buffers with the publish lock possibly held, so the
+        // margin is deliberately silly rather than tight.
+        stopThread (4000);
     }
 
     /** The reference pitch, in Hz. Read at the top of every pass, so moving it
@@ -129,9 +132,38 @@ private:
         int quietPasses = 0;
         int readings = 0;
 
+        // The interval that actually elapsed between the start of this pass
+        // and the start of the one before it, which is what the gate needs and
+        // the only thing that can be measured rather than intended. Seeded
+        // with the nominal so the first full window is not divided by a figure
+        // from before the thread existed.
+        double previousStartedAt = 0.0;
+        double measuredHop = pacing.settings().nominalSeconds;
+
+        // Time since the gate was last fed, which is not the same as time
+        // since the last pass: a pass with no new audio does not feed it. The
+        // gate is comparing one reading against the one before it, so the
+        // interval it needs is between those two readings and not between two
+        // passes. Understating it would overstate the rate and only hold the
+        // display shut, which is safe, but it is cheap to be right.
+        double sinceFed = pacing.settings().nominalSeconds;
+
+        // The seed is the clock, so two instances started at different moments
+        // dither differently. Nothing here has to reproduce a sequence: the
+        // test reproduces it from its own seed.
+        pacing.configure ({}, (std::uint64_t) juce::Time::getHighResolutionTicks());
+
         while (! threadShouldExit())
         {
             const auto startedAt = juce::Time::getMillisecondCounterHiRes();
+
+            if (previousStartedAt > 0.0)
+            {
+                measuredHop = (startedAt - previousStartedAt) / 1000.0;
+                sinceFed   += measuredHop;
+            }
+
+            previousStartedAt = startedAt;
 
             auto& ring = engine.tunerInput();
             const double rate = engine.getSampleRate();
@@ -147,14 +179,12 @@ private:
                 Tuner::Spec spec;
                 spec.sampleRate = rate;
 
-                // The gate measures how fast the pitch is still moving, so it
-                // needs to know how often it is being asked. Handed its own
-                // pacing figure rather than agreeing with a constant in
-                // Tuner.h, because a correctness figure that lives in the
-                // window and has to match an assumption elsewhere is the
-                // arrangement CLAUDE.md records going wrong before.
+                // The nominal pacing only, which is what the gate assumes when
+                // it is not handed a measured interval and the scale its stall
+                // bound is expressed in. The interval the rate is actually
+                // divided by is passed to `process` per reading, below.
                 Tuner::GateSettings gate;
-                gate.frameSeconds = frameMs / 1000.0;
+                gate.frameSeconds = pacing.settings().nominalSeconds;
 
                 analyser.configure (spec, gate);
 
@@ -200,11 +230,26 @@ private:
 
                 next.waitingForAudio = true;
             }
+            else if (quietPasses > 0)
+            {
+                // No new samples since the last pass, so there is nothing new
+                // to read: the ring holds exactly the buffer that was analysed
+                // last time. Re-analysing it would produce an identical
+                // estimate, and an identical estimate is a reading the gate
+                // cannot tell from a fresh one. That matters now that the gate
+                // asks for several readings to agree: two of the agreements it
+                // wants could be re-reads of one buffer rather than new
+                // evidence. The previous reading is held instead, which is
+                // what the display was showing anyway.
+                next.reading = latest().reading;
+                next.waitingForAudio = false;
+            }
             else if (ring.readLatest (window))
             {
-                next.reading = analyser.process (window.data(), (int) window.size());
+                next.reading = analyser.process (window.data(), (int) window.size(), sinceFed);
                 next.readings = ++readings;
                 next.waitingForAudio = false;
+                sinceFed = 0.0;
             }
             else
             {
@@ -222,41 +267,53 @@ private:
                 published = next;
             }
 
-            // Ten readings a second where that is affordable, measured from the
-            // start of the work rather than the end of it so the rate does not
-            // drift with how long a reading took. Where it is not affordable,
-            // this thread sleeps for three times what the reading cost instead,
-            // which holds it under a quarter of a core at every sample rate the
-            // studio runs at. Asking for a tenth of a second at 192 kHz, where
-            // a reading is two tenths, would spin a core for as long as the
-            // window is open, in a process that is also running a device
-            // callback.
-            const double spent = juce::Time::getMillisecondCounterHiRes() - startedAt;
-            const double sleepFor = std::max (frameMs - spent, spent * 3.0);
+            // After `process`, not before it, and that is a correctness
+            // ordering rather than tidiness. The gate's stall bound is
+            // `stallFrames` times this figure, and this pass's own interval is
+            // what the bound is being asked about: set it first and the
+            // comparison is `h > 4h`, which is false for every h, so the bound
+            // does nothing at all. An audit found exactly that, and measured
+            // the cost: a display opening on a string being turned at 5 cents
+            // a second two readings after a ten second gap. Scaled by the
+            // PREVIOUS hop the bound means what it says, and consecutive hops
+            // differ by at most the jitter factor, which is well inside four.
+            //
+            // It does not reset the window, deliberately: a pacing figure that
+            // drifts with load would otherwise reopen the display every time
+            // the machine got busy.
+            analyser.setFrameSeconds (measuredHop);
+
+            // Measured from the start of the work rather than the end of it,
+            // so the reading rate does not drift with how long a reading took.
+            // Everything about how long to wait, including why it is not the
+            // same length twice, is in `Tuner::Pacing`.
+            const double spent = (juce::Time::getMillisecondCounterHiRes() - startedAt) / 1000.0;
+            const double sleepFor = pacing.nextWait (spent);
 
             if (threadShouldExit())
                 break;
 
-            wait (sleepFor);
+            // `wait` takes milliseconds and rounds to an int, so a sub
+            // millisecond wait would round to zero and spin. One millisecond
+            // is the floor rather than zero.
+            wait (std::max (1, (int) std::lround (sleepFor * 1000.0)));
         }
     }
 
-    /** A hundred milliseconds between readings, which is handed to the gate as
-        `GateSettings::frameSeconds` rather than having to agree with anything.
-
-        The gate's criterion is a rate, in cents per second, so driving this
-        faster or slower does not change how close to settled the string is
-        when the display opens: measured, between 0.17 and 0.46 cents across
-        every rate from 5 to 60 readings a second. What this figure trades is
-        how quickly the needle responds against what the analysis costs, which
-        is a few milliseconds of work per reading. */
-    static constexpr double frameMs = 100.0;
-
     /** How many passes with no new audio at all before the display is blanked.
-        Three of them is about three tenths of a second, which is longer than
-        any block the studio can be asked for and short enough that nobody
-        reads a dead note off the screen. */
+
+        Three, which is how the figure has to be expressed: a count of passes
+        and not a duration, because a pass is a tenth of a second at 44.1 and
+        48 kHz and most of a second at 192, where one reading costs more than
+        the nominal interval. What it has to beat is the longest gap between
+        blocks the device can leave, and that scales the same way a pass does,
+        which is why a count travels and a duration would not. Short enough at
+        every rate that nobody reads a dead note off the screen. */
     static constexpr int quietPassesAllowed = 3;
+
+    /** The duty cycle and the dither. Owned here, configured in `run` so the
+        seed is the moment the thread started, and touched by nothing else. */
+    Tuner::Pacing pacing;
 
     AudioEngine& engine;
     std::atomic<double> wantedReference { Tuner::Scale::standardReferenceHz };

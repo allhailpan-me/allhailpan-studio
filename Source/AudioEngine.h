@@ -538,8 +538,13 @@ public:
         return InputSource::assignmentFromStored (tunerSource.load());
     }
 
-    /** Which device input channel the last block actually read, or -1 for
-        none.
+    /** Which device input channel the last block read while the tuner was
+        listening, or -1 for none.
+
+        Only written inside that test, so while the tuner is closed it keeps
+        whatever it last saw rather than returning to -1. Nothing reads it
+        then, and keeping it true in a state nobody observes would mean a store
+        in the device callback on every block for the rest of the session.
 
         The display needs this rather than the assignment above: following the
         mixer means the answer depends on how the mixer is wired, and a choice

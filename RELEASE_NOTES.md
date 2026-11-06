@@ -15,8 +15,8 @@ which is when you are most likely to want it. There is an A4 reference too, from
 where you put it and belongs to the studio rather than to one song, because a
 tuning reference is about the instruments in the room.
 
-**It waits about a second and a half before it shows you a number, and that is
-the whole point of it.** A plucked steel string is sharp when you hit it. Not
+**It waits about one and three quarter seconds before it shows you a number,
+and that is the whole point of it.** A plucked steel string is sharp when you hit it. Not
 slightly: it falls 12.5 cents while it rings, with most of that gone in the
 first half second, and it was measured on an acoustic guitar's open low E at a
 conference paper rather than guessed at here. Twelve and a half cents is twelve
@@ -35,6 +35,26 @@ rather than a pick, and it settles sooner. And it will say nothing at all rather
 than show you a wrong number: if it is reading dashes it has not heard a note it
 can trust yet, and the line underneath says whether that is silence, no input,
 or a note still settling.
+
+**Two things it is worth me being straight about, both found by auditing it
+after it had already gone in.**
+
+It can be fooled by a deliberate vibrato. If you wobble a note at roughly the
+rate it takes readings, several readings in a row can land on the same point of
+the wobble, agree with each other, and give you a confident number up to about
+five cents out. That is now measured and written down rather than waiting to be
+discovered, and it is a good deal better than it was: before this it could be
+nineteen cents out, which is a fifth of a semitone, and it would have looked
+exactly as settled. Hold the note steady and it is accurate to a fraction of a
+cent. Wobble it and do not trust the last digit.
+
+And it is noticeably slower at 96 and 192 kHz, because the analysis costs four
+times as much work every time the sample rate doubles. At 44.1 and 48 kHz it
+takes about eight readings a second and settles in under two. At 192 kHz it
+takes about one a second, wants five or six before it will commit, and the
+vibrato problem above is worse there. If you are tuning, 44.1 or 48 is the
+setting to be in, which is where most of us record anyway. Making that
+difference go away is the next piece of work on it.
 
 **What it covers.** Everything from a five string bass tuned down to drop A, up
 past the top of a guitar's range. The low end is the same figure Korg design

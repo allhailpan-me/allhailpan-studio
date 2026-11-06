@@ -21,12 +21,13 @@ AudioEngine::AudioEngine()
     for (auto& g : soloGain)
         g.store (1.0f);
 
-    // Half a second at 192 kHz, which is the longest half second the studio
-    // can be asked for, so the ring never has to be resized once the audio
-    // thread may be writing to it. At 44.1 kHz that is two and a bit seconds,
-    // which only makes the reader's tear check easier to satisfy: the longest
-    // snapshot the estimator asks for is about a tenth of a second.
-    tunerRing.setSize (96000);
+    // Derived in Tuner.h rather than written down here, because the ring's
+    // capacity requirement is a correctness requirement and the two numbers it
+    // relates used to meet in this file, which no test can compile. It comes
+    // out at about half a second at 192 kHz, the longest half second the
+    // studio can be asked for, so the ring never has to be resized once the
+    // audio thread may be writing to it.
+    tunerRing.setSize (Tuner::studioRingCapacity());
 }
 
 AudioEngine::~AudioEngine()
