@@ -74,7 +74,22 @@ namespace
     // cannot drift, which it already had: it used to say "+3.5 dB on every
     // strip at once", a figure nothing in the repository produced and which
     // was wrong in size, in sign and in being uniform at all.
-    constexpr int formatVersion = 7;
+    // 8 adds the punch flag: whether recording replaces what is inside the
+    // loop range instead of laying another take over it. Older files load
+    // unchanged, because a file with no flag in it is not punching, which is
+    // what every version up to 7 did.
+    //
+    // This bump is the one that could have been argued either way, so the
+    // reasoning is written down rather than left implied. A previous release
+    // reading a file saved by this build would ignore the flag and record an
+    // ordinary take where a punch was set up, which is the behaviour that was
+    // there before punch existed and does nothing destructive. Against that:
+    // the flag changes what the record button does to a performance already on
+    // the track, and a studio where the record button means two different
+    // things depending on which build opened the file is worse than one that
+    // says the file is too new. Every bump from 2 onward has been
+    // unconditional and this one follows them.
+    constexpr int formatVersion = 8;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -403,6 +418,10 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("loopStart", project.loopStart);
     root.setAttribute ("loopEnd", project.loopEnd);
 
+    // The punch is saved with the range it is taken from, because the two are
+    // one setting from the player's point of view. See Project::punchEnabled.
+    root.setAttribute ("punch", project.punchEnabled);
+
     // ---- channel rack ----
     root.setAttribute ("rackStart", project.rackStart);
     root.setAttribute ("rackBars", project.rackBars);
@@ -730,6 +749,11 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
 
     project.setLoopRange (root->getDoubleAttribute ("loopStart", 0.0),
                           root->getDoubleAttribute ("loopEnd", 0.0));
+
+    // No attribute means not punching, which is what every version before 8
+    // did, so a project made before the punch existed opens with the record
+    // button meaning what it has always meant.
+    project.punchEnabled = root->getBoolAttribute ("punch", false);
 
     project.rackStart       = std::max (0.0, root->getDoubleAttribute ("rackStart", 0.0));
     project.rackBars        = juce::jlimit (1, 4, root->getIntAttribute ("rackBars", 1));

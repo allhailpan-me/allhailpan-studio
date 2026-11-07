@@ -175,6 +175,7 @@ private:
         and one poll of a published flag is cheaper than keeping a list of
         callers in step. */
     void refreshSoloAlert();
+    void refreshPunchButton();
 
     // views and misc
     void undoRedo (bool redo);
@@ -207,7 +208,8 @@ private:
     void markDirty();
     /** Takes the loop range as it stands to be the saved one, so that opening
         or saving a project does not leave it looking modified. */
-    void noteLoopRange() { lastLoopStart = project.loopStart; lastLoopEnd = project.loopEnd; }
+    void noteLoopRange() { lastLoopStart = project.loopStart; lastLoopEnd = project.loopEnd;
+                           lastPunchEnabled = project.punchEnabled; }
     void updateTitle();
     void ignoreEditsForAWhile() { ignoreEditsUntil = juce::Time::getMillisecondCounter() + 2000; }
     std::unique_ptr<juce::AudioPluginInstance> createPluginForProject (const juce::PluginDescription&, juce::String& error);
@@ -247,6 +249,11 @@ private:
 
     // top bar
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, recordButton { "Rec" }, clickButton { "Click" };
+
+    // Punch in and punch out. A button rather than a menu item because it is
+    // the thing you reach for between takes, and lit in the record colour
+    // because what it changes is what the record button does. See Punch.h.
+    juce::TextButton punchButton { "Punch" };
 
     // Lights whenever anything in the mixer is soloed, and clears every solo
     // when clicked. Ardour has one, internally called "rude solo", and it is
@@ -293,6 +300,13 @@ private:
     // What the loop range was when it was last noticed, so that moving it
     // marks the project as worth saving without becoming an undo step.
     double lastLoopStart = 0.0, lastLoopEnd = 0.0;
+    bool   lastPunchEnabled = false;
+
+    // The transport rolls in this far before a punch in, so the crossfade at
+    // the punch has something of the new pass to fade from and the player
+    // hears what they are playing into. One bar, which is Logic's published
+    // figure for exactly this. See Punch.h and startRecording.
+    static constexpr double kPunchLeadInBeats = 4.0;
     juce::uint32 ignoreEditsUntil = 0;
     int autosaveTicks = 0;
 
