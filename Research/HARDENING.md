@@ -7,6 +7,305 @@ Newest first.
 
 ---
 
+## 2026-11-04: the matched bell, where the equations came from a scan
+
+### What is being looked at
+
+`Source/Fx/BellMatch.h`, 328 lines, and `Tests/BellMatchTest.cpp`, 493 lines,
+which covers it. A priority 2 target: a test suspected of being weaker than it
+looks.
+
+Picked for three reasons. It is live: `Fx/Svf.h` calls `matchedBell` for the
+equaliser's `bellMatched` response, so this is what an equaliser band runs.
+Its cover is among the thinnest of any real arithmetic header here, 1.50 lines
+of test to one of source. And its equations were **transcribed from a third
+party scan of a paywalled paper**, by a tool that admitted restoring dropped
+square root signs, which is a provenance nothing else in this repository has.
+A faithful implementation of a mistranscribed equation is a filter that is
+confidently wrong, and an equaliser's gain is the number a studio is judged by.
+
+No previous night has touched it: it appears nowhere in this log before today.
+
+Not `Source/Envelope.h`, `Source/Fx/Svf.h`, `Source/AudioEngine.*`,
+`Source/InputSource.h`, `Source/MainComponent.*`, `Source/Tuner.h`,
+`Source/TunerPanel.h` or `Tests/run.sh`, which open pull requests #65, #55 and
+#61 are changing, and not `Source/Quantise.h`, which #64 asked later nights to
+leave alone.
+
+### The transcription is right, and now it is right for a stated reason
+
+The provenance was the reason for picking this, so it was settled first and
+independently of the test. The header's defence is that three numbers printed
+in the paper's section 6 reproduce to six decimal places, which is a real
+check and a narrow one: three scalars from one worked example, all at the same
+bandwidth and the same gain.
+
+There is a much stronger statement available, and it needs no access to the
+paper at all. **Five conditions determine a digital biquad**, and the design
+claims all five: the gain at DC is `G0`, the gain at Nyquist is `G1`, the gain
+at the centre is `G`, the gain at both bandedges is `GB`, and the two
+bandedges are `dw` apart. A realisation that satisfies all five is the right
+filter whatever happened to the square roots on the way out of the scan.
+
+Measured over 18989 randomised designs, centre frequencies from 0.002 to 0.95
+of Nyquist, Q from 0.3 to 20, gains from 0.3 to 36 dB, and a third of them
+with a reference gain other than unity:
+
+| condition | worst error |
+|---|---|
+| gain at DC against `G0` | 3.9e-15 dB |
+| gain at Nyquist against `G1` | 1.9e-15 dB |
+| gain at the centre against `G` | 2.8e-11 dB |
+| gain at both bandedges against `GB` | 1.2e-13 dB |
+| bandwidth between the bandedges against `dw` | 6.1e-13 relative |
+
+And equation (21) itself, the prescribed Nyquist gain, was re-derived here
+from the analogue prototype rather than read: the prototype with peak `G` at
+`w0`, reference `G0`, and bandwidth `dw` taken where the gain is `GB`, has
+squared magnitude
+
+    |H(w)|^2 = (G0^2 (w0^2-w^2)^2 + G^2 dw^2 r w^2) / ((w0^2-w^2)^2 + dw^2 r w^2)
+
+with `r = (GB^2-G0^2)/(G^2-GB^2)`, and at `w = pi` that is the header's
+`g1Squared` line character for character. It agrees with the implementation to
+**0.0e+00 dB**, which is to say bit for bit.
+
+The feasibility boundary was derived the same way rather than taken on trust.
+With the bandedge at the half gain point, `GB^2 = G0 G`, the ratio `r` is
+exactly `1/G`, and the condition `G1^2 < GB^2` reduces to `pi^2 - w0^2 > pi
+dw`, which with `dw = w0/Q` is the quadratic the header's closed form solves.
+That is **why** the gain cancels out of a condition on gain, which the header
+states as a surprise and does not explain. One consequence worth having
+written down: since `dw < pi - w0^2/pi` at the boundary, a feasible design
+always has its bandwidth inside the band, so the tangent in equation (19)
+cannot be asked for an angle past a quarter turn. There is no tangent blowup
+to defend against, and that is a property of the boundary rather than luck.
+
+### Round one: the arithmetic is well covered
+
+70 deliberate breakages of `Fx/BellMatch.h`, every one built the way
+`Tests/run.sh` builds (`-fsanitize=address,undefined
+-fno-sanitize-recover=undefined`), aimed at each equation in turn: a sign, an
+inverted ratio, a dropped square, a dropped factor, two gains swapped, a
+tangent unhalved, `A` and `B` exchanged, each of the five numbers handed to
+the filter. **61 caught, 9 survived.**
+
+The whole header is copied into the scratch tree rather than the one file,
+because `Fx/Svf.h` includes `BellMatch.h` by a quoted relative path and the
+test reaches the header both directly and through the filter. A harness that
+mutated only the direct path would have reported four more survivors than
+there are.
+
+Every one of the nine survivors is a **guard**, and none of them is an
+equation. That is a good result for 328 lines of transcribed algebra.
+
+### Round two: and then the regions nobody visits
+
+The worrying thing about round one is the shape of what caught things. Of the
+61, nineteen were caught by the regression vector at one setting and
+twenty-two by five hand picked cases at 44.1 kHz. A test can be strong on
+every equation and still not notice the correction being **switched off**
+somewhere, because a band running the conventional bell is still a bell.
+
+So: 12 more breakages, none of them touching an equation. Seven of them insert
+one line at the top of `matchedBell` declining the correction in one part of
+the space, the others measure the boundary or the centre frequency against a
+fixed sample rate. **7 caught, 5 survived**, and four of the five are the kind
+of fault this project keeps meeting:
+
+- **`off-above-q-10`**, the correction declined for every band with Q above
+  10. Survived. A narrow band is where an equaliser does its surgical work.
+- **`off-below-q-half`**, declined for every band with Q below 0.5. Survived.
+  That is every broad tone shaping move there is.
+- **`off-above-48k`**, declined at 96 and 192 kHz. Survived. The whole studio
+  would run the uncorrected bell at the two rates where there is most band
+  above 20 kHz to get wrong.
+- **`boundary-fixed-44k`**, the feasibility boundary measured against a hard
+  coded 44.1 kHz rather than the rate in hand. Survived. At 96 kHz the
+  boundary would sit at 13.6 kHz where it belongs at 29.7, so every band
+  between the two would drop silently to the conventional design. This is the
+  fault `Fx/Tilt.h`'s entry in `CLAUDE.md` is about, in a file that takes the
+  sample rate as an argument and looked immune to it.
+
+One cause: `theBoundaryIsTheClosedForm` is a good check that only ever runs at
+44.1 kHz, and nothing anywhere asserts that a band which should be matched
+**is** matched, outside five settings. `isMatched()` is read twice in the file,
+once to require it true at those five and once to require it false above the
+boundary.
+
+The fifth survivor, `feasibility-both-dropped`, is a no-op and a deliberate
+one: with both feasibility checks gone an infeasible design still declines,
+because the square root of a negative quantity in equation (19) gives a NaN
+that the final `isfinite` sweep catches. Round one's `finite-guard-dropped`
+survives for the mirror image reason. Three independent backstops, any one of
+which can be removed without a visible change, and no two of which can.
+
+### Nothing in the header is wrong
+
+Said plainly, because a clean audit is a result and dressing it up as one
+would make the next one worth less. 328 lines of algebra transcribed from a
+scan of a paywalled paper, and every one of the five conditions that determine
+the filter holds to between 1e-15 and 1e-11 everywhere a band can be set,
+including with a reference gain the shipping caller never uses. The one
+equation that could have been read from the paper rather than derived was
+derived here and agrees bit for bit. There is no fault to report and the
+correction does what the header says it does.
+
+One thing the header **implied** and did not say is now said, with the
+measurement and the mechanism, and that is the only change to `Source` in this
+pull request. See below.
+
+### What the four region survivors asked for, and what was written
+
+`Tests/BellMatchTest.cpp`, 493 lines to 1194. Seven new checks and three
+existing ones widened, each one there because a breakage survived everything
+already in the file.
+
+- **All five design conditions, over the reachable space rather than three of
+  them at one setting.** The two the file never checked are the bandedge gain
+  and the distance between the bandedges, which is what Q means, and they are
+  also the two that cannot be satisfied by accident: the gain at DC is one
+  line of the design and the gain at Nyquist is `m0` by the structure of the
+  filter, while the bandedges come out of equations (16), (17) and (19)
+  together. 2667 randomised designs over the clamped space at four rates, in
+  both directions of gain. The bandedges are found by bisecting the realised
+  filter rather than by rearranging the design equations, because a bandedge
+  computed from the algebra that placed it agrees with itself however wrong
+  both are.
+- **The prescribed Nyquist gain against the analogue prototype's gain at half
+  the sample rate**, derived in the test. This is what makes the transcription
+  provable without the paper, and it is the check that the file's own comment
+  said was the most important one and could not make: three scalars from one
+  worked example become an identity over every design.
+- **The correction is applied wherever the predicate says and nowhere else**,
+  over 90000 settings at six sample rates, with both branches required to be
+  well populated. This is the check the file was missing entirely, and it is
+  what the four region breakages were about.
+- **The boundary is the closed form at every rate a device can open at**,
+  which was a good check running at one rate. The search step is now a
+  fraction of the band rather than five hertz, so it resolves the boundary
+  equally well at 192 kHz as at 44.1.
+- **A bandedge gain the caller chose.** `matchedBellBoost` takes the peak,
+  bandedge and reference gains separately and the header explains why: the
+  paper's own example uses a bandedge nine decibels up on a twelve decibel
+  boost. Nothing called it with anything but that one example and the half
+  gain point, which left four guards unreachable. 4000 triples in every order,
+  1425 designed and 2575 refused, and every design that reports success has to
+  satisfy all five conditions. `bellIsMatchable` does not apply to these: its
+  closed form is derived with the bandedge at the half gain point, which is
+  exactly why the gain cancels out of it, so with a free bandedge the only
+  feasibility test is the one inside the design.
+- **The centre is the most the band does anywhere.** Not implied by the five
+  conditions: a filter can pass through `G` at its centre and reach further
+  somewhere else, and a prescribed Nyquist gain lifting the upper skirt is
+  where that would happen. Measured against the response at the centre rather
+  than against the gain asked for, because the two differ by the arithmetic's
+  own noise and the claim worth making is that nothing beats the centre.
+- **Arguments that are not settings are refused**: a Q of zero or negative, a
+  centre at DC or negative or at or above Nyquist, no sample rate. Not
+  reachable through `Svf::set`, which clamps, which is the reason to pin them
+  now rather than later.
+- **The cut mirrors its boost over the whole reachable space**, 1801 pairs to
+  5.2e-10 dB, where the fixed cases were three frequencies and three gains at
+  one rate. A boost and its cut are the same design problem, so one being
+  feasible while the other is not would mean the boundary had picked up a
+  dependence on the sign of the gain, and that is asserted rather than assumed.
+
+### The one thing the header implied
+
+**The correction is an improvement at every band above a Q of about 0.15, and
+it can be 0.58 dB worse below that.** The header reads as though it is better
+everywhere, and the test asserted it at five settings.
+
+The cause is the bilinear transform rather than anything in the paper. The
+analogue prototype is geometrically symmetric about its centre in frequency;
+the digital filter is geometrically symmetric in `tan(w/2)`, and the tangent
+stretches the top of the band. So a band whose upper bandedge is near Nyquist
+has to put its lower bandedge lower than the prototype does, and on a band
+wider than about seven times its own centre frequency that drops the lower
+skirt below where it belongs. The correction trades an upper skirt crushed to
+nothing for a lower skirt slightly too low, which is the better trade
+everywhere except on the widest bands. Worst measured 0.58 dB, at the Q of
+0.025 the mixer clamps to. The header now says so, and the test fails if the
+exception grows past a decibel.
+
+**And one warning about measuring it, which cost an hour here.** Judged over
+20 Hz to 20 kHz rather than over the whole band, the same comparison reports
+the matched design as up to **21 dB worse**, and that figure is real and says
+nothing about the filter: at 192 kHz a band can be centred at 54 kHz, and a
+comparison that stops at 20 kHz is then looking at nothing but the bottom of
+the skirt, where the two designs differ most and neither is doing the job the
+band was set to do. The first version of this audit had a fault written up
+from that number before the band was checked. It is the trap
+`Fx/Saturator.h`'s entry in `CLAUDE.md` is about, met again in a file that has
+nothing to do with aliasing.
+
+### After
+
+**87 mutations against the strengthened test, 78 caught, 9 survived**, against
+68 of 87 before. The five new breakages aimed at the new checks were all
+caught. Every one of the nine survivors is a guard, and the structure behind
+them is worth writing down because it is the reason they cannot be caught
+individually:
+
+`matchedBellBoost` has five places it can refuse: the precheck in
+`matchedBell`, the gain ordering, the feasibility test on `G1`, the two root
+guards on `wSquared` and `aSquared`, and the closing `isfinite` sweep. For a
+band the mixer can set, the precheck and the `G1` test are the same condition,
+proved identical above, so either one can go. For a bandedge gain the caller
+chose, an infeasible triple puts a negative quantity under the square root in
+equation (19) and the NaN reaches whichever guard is still standing: `NaN > 0`
+and `NaN >= 0` are both false, so the root guards return the default
+`BellDesign` with `matched` already false, and the `isfinite` sweep would
+have caught it anyway.
+
+Measured rather than argued. Removing the precheck, the `G1` test and the
+`isfinite` sweep **all three at once** still passes the whole file. Removing
+four, the `G1` test, the `isfinite` sweep and both root guards, **fails**, and
+what fails is the new free bandedge sweep: `a design with a free bandedge has
+no bandedge at w0 0.720408 pi, dw 1.07378 pi`. So no single guard here is load
+bearing, nothing short of four of the five can be removed without the file
+noticing, and before this night nothing could have noticed at all.
+
+The nine, with the judgement on each:
+
+- **`boundary-inclusive`**, `hz < boundary` made `hz <=`: no-op. The boundary
+  is one frequency wide and the `G1` test decides the same thing a rounding
+  apart.
+- **`g1-feasibility-loosened`**, **`g1-feasibility-dropped`**,
+  **`matchable-precheck-dropped`**, **`feasibility-both-dropped`**: no-ops, by
+  the chain above. The first three are each other's backstop and the fourth
+  falls through to the root guards.
+- **`finite-guard-dropped`**, **`asquared-guard-dropped`**,
+  **`wsquared-guard-dropped`**: no-ops individually and load bearing as a
+  group, which the paired runs above measure.
+- **`flat-return-dropped`**, the early return for a band of no gain: no-op. A
+  gain of zero makes the peak and the bandedge gains equal, and the ordering
+  test one line down refuses it for that reason instead. Worth keeping as
+  written, because it refuses for the reason that is true rather than for a
+  consequence of it.
+
+### This needs a click, not more work
+
+CI is green on the head of `harden/bell-match`: the `tests` job,
+`ubuntu-latest` and `windows-latest` all passed, and `macos-latest` was still
+queued, which is routine here. The session that did the work was **not
+permitted to merge without review**, so pull request #66 is ready for review
+and the merge is the owner's to make. Nothing is left to do on the branch. A
+later night should not pick the matched bell up again: if #66 is still open it
+needs reviewing and merging, and if it has been merged this entry is the
+record of it.
+
+### Reachability: none of it, today
+
+`Svf::Type::bellMatched` is referenced nowhere outside `Fx/Svf.h`: this is the
+design an equaliser band will run, and the studio has no equaliser yet. So
+nothing here is audible to anybody now, which is the same status `Fx/OnePole`
+and `Fx/Svf`'s own faults had when they were fixed, and the right time to
+prove the arithmetic is before the band is wired to a knob rather than after.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
