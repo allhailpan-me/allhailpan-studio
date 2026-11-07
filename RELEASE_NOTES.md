@@ -1,6 +1,74 @@
-There is a tuner now, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can punch in now: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can punch in now.** Drag a loop range over the line you want to redo,
+press Punch next to the Click button, arm the track the part is on, and record.
+The new performance replaces what is inside that range and nothing else. The
+rest of the take is exactly as you left it.
+
+This is the thing the studio most obviously could not do. Before tonight,
+recording over a part you had already played put the new take on top of the old
+one and you heard both at once, at full level, which is no use to anybody and is
+not what any other studio does. So if one line of a verse was wrong, the only
+way out was to sing or play the whole verse again and hope the rest of it came
+out as well as it did the first time.
+
+**It rolls in a bar before the punch**, so you get to play into it rather than
+stab at the first note cold. You hear what is already on the track up to the
+point the studio takes over, and because the recorder is running for that whole
+bar, the join at the punch has real audio either side of it rather than a hard
+cut.
+
+**Nothing is destroyed.** The clip turns into a take folder with your original
+performance as take 1 and the punch as take 2, and the join is a short
+crossfade. So you can drag across a lane afterwards to move the join a bit
+earlier or later, or drag back across the whole clip to put the original
+performance back as if you had never punched. The audio files on disk are not
+touched either way. And because this is the same comping the studio already had,
+a bounce gets the punch exactly as you heard it.
+
+**Where the crossfades go took reading the manuals rather than guessing**, and
+it is the detail that decides whether this is any good. Pro Tools puts the fade
+in the old material, finishing right at the punch point rather than straddling
+it, so the take you just punched in is at full level from its first sample. The
+obvious way to write it, with the fade centred on the join, takes a few
+milliseconds off the front of the new part, and the front of the new part is
+usually the exact thing you punched in to fix. Avid's own advice is to crossfade
+without removing essential audio, and that is why.
+
+A few things worth knowing, because I would rather say them than have you find
+them:
+
+- **A punch does not loop.** With Punch on, recording is one pass. Going round
+  a loop would mean every pass after the first started exactly on the punch
+  point with nothing to lead in from, and the join would suffer for it. Pro
+  Tools takes the same view. Doing it properly needs a lead in for every pass
+  and is on the list.
+- **It will not punch into a clip that is warped, stretched or already comped**,
+  and it says so rather than doing something odd. In both cases punching would
+  change how the part you did not punch sounds, which is the opposite of the
+  promise. Your take still lands on the track, above the old one, so nothing you
+  played is lost.
+- **Stop early and you keep what you did not punch.** If you drop out halfway
+  through the range, the rest of the range stays as it was rather than going
+  silent.
+- **Punch is saved with the song**, along with the loop range it is taken from,
+  so a song you were part way through fixing opens ready to carry on. That also
+  means this version writes a project file the previous version will not open.
+- Tracking a band with several inputs at once, only the first track punches; the
+  others land as ordinary takes.
+
+**And one thing I got wrong and caught before it shipped**, because it is the
+kind of thing worth being honest about. The first working version placed the
+punched take by measuring from where the transport started rolling instead of
+from the start of the clip it was punching into. The two are the same number for
+an ordinary recording, so everything looked right. For a punch they are a bar or
+more apart, and the result was that the bars you punched went silent, in the
+mix and in the bounce, while the studio told you the rest of the take was
+untouched. Nothing errored. An audit found it, the arithmetic has moved
+somewhere it can be tested, and there is now a check that a note played at a
+beat ends up at that beat.
 
 **There is a tuner.** Ctrl+T, or File > Tuner. Play one note and it tells you
 which note it is and how many cents sharp or flat, with a needle that fills its
