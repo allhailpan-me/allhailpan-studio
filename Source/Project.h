@@ -385,14 +385,24 @@ struct TakeFolder
         return juce::isPositiveAndBelow (index, (int) takes.size()) ? &takes[(size_t) index] : nullptr;
     }
 
-    /** The longest any take runs, in seconds of source. The folder clip is as
-        long as its longest pass, so a take that overran is not cut off by the
-        folder having been sized to a shorter one. */
+    /** How far into the folder the furthest take reaches. The folder clip is as
+        long as this, so a take that overran is not cut off by the folder having
+        been sized to a shorter one.
+
+        It is `start + length` and not `length`, which is what the sentence
+        above has always claimed and what the code did not do. The two are the
+        same number for a loop recording, where every pass begins at the
+        folder's start, which is why nothing had noticed: they differ for a pass
+        that began later than the folder, and a punch is made of exactly those,
+        since the transport rolls in after the clip it is punching into has
+        started. Sized by length alone, the tail of such a pass sits past the
+        end of the folder where the comp cannot reach it, and nothing says so.
+    */
     double longestSeconds() const noexcept
     {
         double longest = 0.0;
         for (const auto& t : takes)
-            longest = std::max (longest, t.length);
+            longest = std::max (longest, std::max (0.0, t.start) + t.length);
         return longest;
     }
 
@@ -1125,7 +1135,8 @@ public:
         notAudio,
         stretched,       // warped, stretched or tempo matched: see below
         tooManyTakes,
-        missedTheClip    // the range does not meet the clip after all
+        alreadyComped,   // one crossfade width per folder: see punchTake
+        missedTheClip    // the range does not meet the clip, or the pass does not cover it
     };
 
     /** Replaces what is inside the punch with a pass, and leaves the rest of
@@ -1174,6 +1185,21 @@ public:
         if (! c->isTakeFolder()
             && (! c->warp.empty() || c->stretch != 1.0 || c->pitch != 0.0 || c->followTempo))
             return PunchRefusal::stretched;
+
+        // A folder carries one crossfade width for every join it has, and a
+        // punch needs that width to be the one its own boundaries were shifted
+        // by: see Punch::applyTo. So punching into a folder that is already
+        // comped would set the width for the punch and change every join the
+        // producer had already made, by however much the two differ. Measured
+        // on a three pass folder set to 40 ms, a punch whose pass gave it only
+        // 2 ms of lead in took an untouched join from 40 ms down to 2.
+        //
+        // That is not a thing to ship quietly, and the alternative is a width
+        // per join, which is a change to the comp model rather than to the
+        // punch. Refused and said out loud, which is what this project does
+        // with warping and stretching on a folder for the same kind of reason.
+        if (c->isTakeFolder() && c->folder->comp.size() > 1)
+            return PunchRefusal::alreadyComped;
 
         const size_t already = c->folder != nullptr ? (size_t) c->folder->size() : 1u;
         if (already + passes.size() > kMaxCompTakes)

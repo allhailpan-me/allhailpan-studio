@@ -353,47 +353,56 @@ inline Result regionFor (const Range& r,
     if (outSec - inSec < kMinPunchSeconds)
         return out;
 
-    // How much of the punch actually lands on this clip. A punch is set on the
-    // timeline and the clip it is punching into is wherever it is, so the two
-    // need not meet at all: the loop locators can sit before the clip starts
-    // or after it ends, and a punch that misses has nothing to replace.
+    // WHERE THE PUNCH CAN ACTUALLY REACH, which is the punch narrowed by two
+    // separate facts about the world rather than by any kind of margin.
     //
-    // Refusing here rather than letting it through is the point. `setCompRegion`
-    // clamps a region to the folder and then drops it for being too short, so a
-    // punch that missed would come back valid, change nothing, and report that
-    // it had punched. The take would be nowhere and the clip would be as it
-    // was. A punch that silently did not happen is worse than one that says so,
-    // because the player has already moved on.
-    const double overlapFrom = std::max (inSec,  0.0);
-    const double overlapTo   = std::min (outSec, m.folderSeconds);
+    // By the clip, because a comp cannot play past the end of the clip it is
+    // on, and a punch range is set on the timeline where the clip may not be:
+    // the loop locators can sit before a clip starts or after it ends, and a
+    // punch that misses has nothing to replace.
+    //
+    // By the pass, because the player decides when to stop. Somebody who
+    // punches four bars and stops after two has recorded two, and the other
+    // two have to come back as they were. Clamping here is what makes that
+    // happen: without it the comp would hand those two bars to a take with no
+    // audio in them, `buildCompSpans` would clamp the read to nothing, and the
+    // punch would replace the second half of the phrase with silence. Which is
+    // worse than either keeping it or replacing it, and says nothing.
+    const double reachFrom = std::max (std::max (inSec,  0.0),             m.from);
+    const double reachTo   = std::min (std::min (outSec, m.folderSeconds), m.to);
 
-    if (overlapTo - overlapFrom < kMinPunchSeconds)
+    if (reachTo - reachFrom < kMinPunchSeconds)
         return out;
 
     double width = std::isfinite (requestedCrossfadeSeconds)
                      ? std::max (0.0, requestedCrossfadeSeconds)
                      : 0.0;
 
-    // Not wider than the punch, measured over the part of it that lands on the
-    // clip rather than over the part that was asked for. A decision rather than
-    // a standard: see above.
-    width = std::min (width, overlapTo - overlapFrom);
+    // Not wider than the punch, measured over the part of it that is really
+    // being replaced rather than over the part that was asked for. A decision
+    // rather than a published figure: see above.
+    width = std::min (width, reachTo - reachFrom);
 
-    // What the new pass can actually feed each join. Only a boundary that
-    // exists constrains anything: an open ended side has no join on it.
-    if (r.hasIn)
-        width = std::min (width, std::max (0.0, inSec - m.from));
-    if (r.hasOut)
-        width = std::min (width, std::max (0.0, m.to - outSec));
+    // What the pass can feed each join. A join needs the new take to have
+    // audio on the far side of it, and where it has none the honest answer is
+    // no fade rather than a fade that reads off the end of the file. Both
+    // limits apply whichever boundary the punch range declares, because what
+    // decides whether there is a join at a given end is whether the comp has a
+    // boundary there, and after the clamping above it may have one at an end
+    // the range left open.
+    width = std::min (width, std::max (0.0, reachFrom - m.from));
+    width = std::min (width, std::max (0.0, m.to - reachTo));
 
     const double half = width * 0.5;
 
-    // The shift. Half a width earlier at the in point and half a width later
-    // at the out point is what puts each centred window where Avid puts it,
-    // entirely outside the punch. An open ended side is not shifted: it runs
-    // to the folder's edge, where the comp model gives no fade at all.
-    out.from = r.hasIn  ? inSec  - half : 0.0;
-    out.to   = r.hasOut ? outSec + half : m.folderSeconds;
+    // The shift, which is the whole geometry: half a width earlier at the in
+    // point and half a width later at the out point puts each centred window
+    // entirely outside the punch, where Avid puts it. A boundary that has
+    // fallen on the folder's own edge is shifted past it and `setCompRegion`
+    // clamps it back, which is right: the comp model gives no fade at an edge
+    // because there is nothing on the far side to fade to.
+    out.from = reachFrom - half;
+    out.to   = reachTo   + half;
 
     out.crossfadeSeconds = width;
     out.valid            = true;
@@ -436,6 +445,76 @@ inline bool applyTo (std::vector<CompSegment>& comp, double& folderCrossfadeMs,
     setCompRegion (comp, region.from, region.to, newTake, numTakes, folderSeconds);
     folderCrossfadeMs = region.crossfadeSeconds * 1000.0;
     return true;
+}
+
+//==============================================================================
+/** Where a captured pass sits inside the clip it is being punched into.
+
+    THIS IS THE LINE THAT WAS WRONG, so it lives here where it can be tested
+    rather than in the window where it could not be.
+
+    A pass's position inside a folder is seconds from the folder's start, and a
+    folder's start is its clip's start. For an ordinary recording those are the
+    same thing, because the clip is created at the first pass's own position,
+    and the window's existing arithmetic measures from there. A punch lands in a
+    clip that is already somewhere else, and the transport rolled in a bar
+    before the punch rather than at the clip, so measuring from the roll in puts
+    the audio in the folder offset by the distance between the two.
+
+    What that produced was not a wrong number anybody would see. It was the
+    punched take sitting far enough along the folder that the comp's read of it
+    clamped to nothing, so the bars that were punched went silent in both
+    playback and the bounce, with the window reporting "Punched in over bars 5
+    to 7. The rest of the take is untouched." Where the pass was long enough to
+    cover the region anyway, it played three bars of the wrong part of the
+    performance at full level with a clean crossfade either side. Nothing
+    errored either way.
+
+    `head` is the pass's own pre-roll, the audio in front of where the pass is
+    heard from, which `RecordAlign.h` keeps in the file so a trim can be taken
+    back. `duration` is the whole file. The answer is in the three numbers a
+    `Take` needs, and it never carries a negative position: a pass that began
+    before the clip has the difference taken off its front instead, because the
+    comp cannot read in front of the folder, so that audio has no part to play
+    and a take sitting before the folder it is in is a second case for every
+    lookup to handle.
+*/
+struct Placement
+{
+    double start  = 0.0;   // seconds into the folder where the pass begins
+    double offset = 0.0;   // seconds into the source where it begins
+    double length = 0.0;   // seconds of source it runs for
+    bool   valid  = false; // false when there is nothing of it left to hear
+};
+
+inline Placement placePass (double passStartBeat, double clipStartBeat, double bpm,
+                            double headSeconds, double durationSeconds) noexcept
+{
+    Placement out;
+
+    if (! std::isfinite (headSeconds) || ! std::isfinite (durationSeconds))
+        return out;
+
+    const double head = std::max (0.0, headSeconds);
+    const double into = secondsInto (passStartBeat, clipStartBeat, bpm);
+
+    if (! std::isfinite (into))
+        return out;
+
+    // How much of the pass sits before the clip it is being punched into, and
+    // is therefore unreachable by the comp.
+    const double before = std::max (0.0, -into);
+
+    out.start  = std::max (0.0, into);
+    out.offset = head + before;
+    out.length = durationSeconds - out.offset;
+
+    // A pass entirely in front of the clip, or shorter than its own pre-roll,
+    // has nothing left to be heard. Saying so beats a take of no length in a
+    // folder, which draws as a lane with nothing in it.
+    out.valid = out.length > 0.0;
+
+    return out;
 }
 
 /** Whether a punch would land on a clip that is already carrying something,

@@ -312,19 +312,33 @@ int main()
 
             const std::string label = "trial " + std::to_string (trial);
 
+            // Where the punch really reaches: narrowed by the clip, because a
+            // comp cannot play past the end of one, and by the pass, because
+            // the player decides when to stop.
+            const double reachFrom = std::max (std::max (sc.inSec, 0.0), sc.material.from);
+            const double reachTo   = std::min (std::min (sc.outSec, sc.folderSeconds),
+                                               sc.material.to);
+
             // The width can never exceed what was asked for, and can never be
             // wider than the material feeding either join. A width that
             // outran its material is a fade reading off the end of a file.
             check (w <= Punch::kDefaultCrossfadeMs * 0.001 + 1.0e-12,
                    label + ": the crossfade came back wider than the one asked for");
-            if (sc.range.hasIn)
-                check (w <= sc.inSec - sc.material.from + 1.0e-12,
-                       label + ": the pre-crossfade is wider than the pass's lead in");
-            if (sc.range.hasOut)
-                check (w <= sc.material.to - sc.outSec + 1.0e-12,
-                       label + ": the post-crossfade is wider than the pass's tail");
-            check (w <= sc.outSec - sc.inSec + 1.0e-12,
-                   label + ": the crossfade is wider than the punch it brackets");
+            check (w <= reachFrom - sc.material.from + 1.0e-12,
+                   label + ": the pre-crossfade is wider than the pass's lead in");
+            check (w <= sc.material.to - reachTo + 1.0e-12,
+                   label + ": the post-crossfade is wider than the pass's tail");
+            check (w <= reachTo - reachFrom + 1.0e-12,
+                   label + ": the crossfade is wider than the part of the punch that is "
+                            "really being replaced");
+
+            // And the region is the reach, shifted by half a width at each
+            // end, which is what stops a punch replacing part of the phrase
+            // with silence at one end and is the geometry at the other.
+            checkClose (r.from, reachFrom - w * 0.5, 1.0e-9,
+                        label + ": the comp region does not start half a width before the reach");
+            checkClose (r.to, reachTo + w * 0.5, 1.0e-9,
+                        label + ": the comp region does not end half a width after the reach");
 
             // THE PUNCH IS HEARD ALONE, AT FULL LEVEL, END TO END. The old
             // take must be silent and the new one at unity everywhere from the
@@ -334,8 +348,9 @@ int main()
             // The punch is clipped to the folder first: a comp cannot play
             // past the end of the clip it is on, so the part of a punch that
             // runs off the end is not this check's business.
-            const double fromAt = std::max (sc.inSec, 0.0);
-            const double toAt   = std::min (sc.outSec, sc.folderSeconds);
+            const double fromAt = std::max (std::max (sc.inSec, 0.0), sc.material.from);
+            const double toAt   = std::min (std::min (sc.outSec, sc.folderSeconds),
+                                            sc.material.to);
 
             if (toAt > fromAt)
             {
@@ -376,14 +391,15 @@ int main()
                     if (f.inTo > f.inFrom)
                     {
                         ++withBothJoins;
-                        check (f.inTo <= sc.inSec + 1.0e-9,
+                        check (f.inTo <= std::max (std::max (sc.inSec, 0.0), sc.material.from) + 1.0e-9,
                                label + ": the pre-crossfade reaches into the punch");
                         check (f.inFrom >= sc.material.from - 1.0e-9,
                                label + ": the pre-crossfade starts before the pass does");
                     }
                     if (f.outTo > f.outFrom)
                     {
-                        check (f.outFrom >= sc.outSec - 1.0e-9,
+                        check (f.outFrom >= std::min (std::min (sc.outSec, sc.folderSeconds),
+                                                      sc.material.to) - 1.0e-9,
                                label + ": the post-crossfade starts inside the punch");
                         check (f.outTo <= sc.material.to + 1.0e-9,
                                label + ": the post-crossfade runs past the end of the pass");
@@ -406,8 +422,12 @@ int main()
             // THE OLD PERFORMANCE IS UNTOUCHED OUTSIDE THE JOINS, which is
             // the other half of what a punch promises: everything that was not
             // punched comes back exactly as it was.
-            const double outsideBefore = sc.inSec - w - 1.0e-6;
-            if (sc.range.hasIn && outsideBefore > 1.0e-6)
+            const double reachedFrom = std::max (std::max (sc.inSec, 0.0), sc.material.from);
+            const double reachedTo   = std::min (std::min (sc.outSec, sc.folderSeconds),
+                                                 sc.material.to);
+
+            const double outsideBefore = reachedFrom - w - 1.0e-6;
+            if (outsideBefore > 1.0e-6)
             {
                 checkClose (gainOf (spans, 0, outsideBefore), 1.0, 1.0e-9,
                             label + ": the old performance is not at full level before the punch");
@@ -415,8 +435,8 @@ int main()
                             label + ": the punch is sounding before its own pre-crossfade");
             }
 
-            const double outsideAfter = sc.outSec + w + 1.0e-6;
-            if (sc.range.hasOut && outsideAfter < sc.folderSeconds - 1.0e-6)
+            const double outsideAfter = reachedTo + w + 1.0e-6;
+            if (outsideAfter < sc.folderSeconds - 1.0e-6)
             {
                 checkClose (gainOf (spans, 0, outsideAfter), 1.0, 1.0e-9,
                             label + ": the old performance did not come back after the punch");
@@ -657,6 +677,203 @@ int main()
     }
 
     // ---------------------------------------------------------------------
+    // WHERE A PASS SITS IN THE FOLDER IT IS PUNCHED INTO. This is the one
+    // that was got wrong, and it was got wrong in the window where nothing
+    // could see it: the pass was placed from where the transport rolled rather
+    // than from the clip's own start, which put the audio along the folder by
+    // the distance between the two and made the punch play silence, or three
+    // bars of the wrong part of the performance at full level.
+    //
+    // The property is the only one that matters and it is worth stating
+    // plainly: a sample that was played at a beat has to end up at that beat.
+    // Everything else about a Placement follows from it.
+    // ---------------------------------------------------------------------
+    {
+        std::mt19937 rng (76543u);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        int placed = 0, began = 0, beforeClip = 0;
+
+        for (int trial = 0; trial < 4000; ++trial)
+        {
+            const double bpm       = 40.0 + unit (rng) * 200.0;
+            const double clipStart = unit (rng) * 64.0;
+
+            // The transport rolls in before the punch, so it lands either side
+            // of the clip's own start depending on where the clip is.
+            const double passStart = clipStart + (unit (rng) - 0.35) * 32.0;
+            const double head      = unit (rng) * 0.4;
+            const double duration  = head + 0.05 + unit (rng) * 30.0;
+
+            const auto p = Punch::placePass (passStart, clipStart, bpm, head, duration);
+            const std::string label = "placement trial " + std::to_string (trial);
+
+            const double into = Punch::secondsInto (passStart, clipStart, bpm);
+            if (into < 0.0)
+                ++beforeClip;
+
+            if (! p.valid)
+            {
+                // The only honest reason to refuse is that there is nothing
+                // left of the pass once the part in front of the clip has been
+                // taken off its front.
+                check (into + duration - head <= 0.0 + 1.0e-9,
+                       label + ": a pass with audio left in it was refused");
+                continue;
+            }
+
+            ++placed;
+
+            check (p.start >= 0.0, label + ": a take was placed before the folder it is in");
+            check (p.offset >= head - 1.0e-12,
+                   label + ": the placement read into the pass's own pre-roll");
+            checkClose (p.offset + p.length, duration, 1.0e-9,
+                        label + ": the placement does not run to the end of the file");
+
+            if (p.start > 1.0e-9)
+                ++began;
+
+            // THE PROPERTY. Walk the pass and check that every sample is where
+            // it was played. Written out rather than reduced to the algebra,
+            // because the algebra is what was wrong.
+            for (int i = 0; i <= 16; ++i)
+            {
+                const double y = p.length * (double) i / 16.0;
+
+                // The beat this sample was played at: its position in the
+                // source, less the pre-roll, after the pass started.
+                const double playedAt = passStart + (p.offset + y - head) * bpm / 60.0;
+
+                // Where it has to land in the folder.
+                const double wanted = Punch::secondsInto (playedAt, clipStart, bpm);
+
+                checkClose (p.start + y, wanted, 1.0e-6,
+                            label + ": the sample played at beat " + std::to_string (playedAt)
+                              + " is not where it was played");
+            }
+        }
+
+        check (placed > 2000, "too few placements were checked: " + std::to_string (placed));
+        check (began > 500, "almost no pass began after the clip it was punched into, which is "
+                            "the ordinary case: " + std::to_string (began));
+        check (beforeClip > 500, "almost no pass began before the clip it was punched into: "
+                                   + std::to_string (beforeClip));
+
+        std::printf ("  %d placements checked, %d starting inside the clip, %d before it\n",
+                     placed, began, beforeClip);
+
+        // And once by hand. 120 bpm, a clip at beat 8, a pass that rolled in at
+        // beat 12 with a tenth of a second of pre-roll in front of it.
+        const auto a = Punch::placePass (12.0, 8.0, 120.0, 0.1, 5.0);
+        check (a.valid, "the worked placement was refused");
+        checkClose (a.start, 2.0, 1.0e-12, "four beats at 120 bpm is not two seconds into the folder");
+        checkClose (a.offset, 0.1, 1.0e-12, "the pass's own pre-roll was not kept in front of it");
+        checkClose (a.length, 4.9, 1.0e-12, "the placement is not the rest of the file");
+
+        // The same pass against a clip that starts later than it does: two
+        // seconds of it are in front of the clip and come off its front.
+        const auto b = Punch::placePass (12.0, 16.0, 120.0, 0.1, 5.0);
+        check (b.valid, "a pass that began before the clip was refused");
+        checkClose (b.start, 0.0, 1.0e-12, "a pass before the clip was given a negative position");
+        checkClose (b.offset, 2.1, 1.0e-12, "the part in front of the clip was not taken off the front");
+        checkClose (b.length, 2.9, 1.0e-12, "the length was not reduced with the offset");
+
+        // Nothing left of it at all.
+        check (! Punch::placePass (0.0, 64.0, 120.0, 0.0, 5.0).valid,
+               "a pass entirely in front of the clip was placed anyway");
+        check (! Punch::placePass (0.0, 0.0, 120.0, 6.0, 5.0).valid,
+               "a pass shorter than its own pre-roll was placed anyway");
+    }
+
+    // ---------------------------------------------------------------------
+    // The punch reaches only where the clip is and where the pass is. Four
+    // cases, all of them things a player does, and each of them silent if the
+    // clamping is missing: the comp would hand a stretch to a take with no
+    // audio in it and `buildCompSpans` would clamp the read to nothing, so the
+    // punch would replace part of the phrase with silence.
+    // ---------------------------------------------------------------------
+    {
+        const Punch::Range r { 8.0, 16.0, true, true };     // 4 s to 8 s at 120 bpm
+
+        // The player stopped halfway through the punch.
+        {
+            Scene sc;
+            sc.folderSeconds = 20.0; sc.bpm = 120.0;
+            sc.range = r; sc.inSec = 4.0; sc.outSec = 8.0;
+            sc.material = { 2.0, 6.0, 20.0 };               // ran out at 6 s
+
+            const auto got = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
+            check (got.valid, "a punch the player stopped halfway through was refused");
+            check (got.to <= 6.0 + 1.0e-9,
+                   "the punch reaches past the end of the pass, so it replaces audio with nothing");
+
+            std::vector<CompSegment> comp { { 0.0, 0 } };
+            const auto spans = compFor (sc, got, comp);
+            checkClose (gainOf (spans, 1, 5.0), 1.0, 1.0e-9,
+                        "the punch is not at full level where the pass does reach");
+            checkClose (gainOf (spans, 0, 7.0), 1.0, 1.0e-9,
+                        "the old performance did not come back where the player stopped");
+            checkClose (renderAt (spans, { 0.5, 1.0 }, 7.0), 0.5, 1.0e-9,
+                        "the stretch past the end of the pass is not the original performance");
+        }
+
+        // The player started late, after the punch in had gone by.
+        {
+            Scene sc;
+            sc.folderSeconds = 20.0; sc.bpm = 120.0;
+            sc.range = r; sc.inSec = 4.0; sc.outSec = 8.0;
+            sc.material = { 5.0, 12.0, 20.0 };              // nothing before 5 s
+
+            const auto got = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
+            check (got.valid, "a punch whose pass started late was refused");
+            check (got.from >= 5.0 - 1.0e-9,
+                   "the punch starts before the pass does, so it replaces audio with nothing");
+            checkClose (got.crossfadeSeconds, 0.0, 1.0e-12,
+                        "a join with no material in front of it was given a crossfade anyway");
+
+            std::vector<CompSegment> comp { { 0.0, 0 } };
+            const auto spans = compFor (sc, got, comp);
+            checkClose (renderAt (spans, { 0.5, 1.0 }, 4.5), 0.5, 1.0e-9,
+                        "the stretch before the pass began is not the original performance");
+            checkClose (renderAt (spans, { 0.5, 1.0 }, 6.0), 1.0, 1.0e-9,
+                        "the punch is not heard where the pass does reach");
+        }
+
+        // The punch hangs off the end of the clip, and only a sliver of it
+        // lands. The crossfade may not be wider than what is really replaced.
+        {
+            Scene sc;
+            sc.folderSeconds = 4.003;  sc.bpm = 120.0;      // the clip ends 3 ms into the punch
+            sc.range = r; sc.inSec = 4.0; sc.outSec = 8.0;
+            sc.material = { 0.0, 12.0, 4.003 };
+
+            const auto got = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
+            check (got.valid, "a punch overhanging the clip's end was refused");
+            check (got.crossfadeSeconds <= 0.003 + 1.0e-9,
+                   "the crossfade is wider than the part of the punch that lands on the clip, so "
+                   "it replaces more of the performance than was punched");
+        }
+
+        // And the floor on a punch at all, which the header claims is the same
+        // figure the comp refuses a segment shorter than.
+        {
+            Scene sc;
+            sc.folderSeconds = 20.0; sc.bpm = 120.0;
+            sc.material = { 0.0, 20.0, 20.0 };
+
+            const double justUnder = kMinCompSpan * 0.5 * 120.0 / 60.0;
+            const double justOver  = kMinCompSpan * 4.0 * 120.0 / 60.0;
+
+            check (! Punch::regionFor ({ 8.0, 8.0 + justUnder, true, true },
+                                       0.0, sc.bpm, sc.material).valid,
+                   "a punch shorter than the comp's own minimum segment was accepted");
+            check (Punch::regionFor ({ 8.0, 8.0 + justOver, true, true },
+                                     0.0, sc.bpm, sc.material).valid,
+                   "a punch longer than the comp's own minimum segment was refused");
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // One sided punches, which is Ardour's In only and Out only.
     // ---------------------------------------------------------------------
     {
@@ -672,7 +889,10 @@ int main()
         const auto in = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
         check (in.valid, "In only was refused");
         checkClose (in.from, 4.0 - 0.005, 1.0e-12, "In only did not shift its one boundary");
-        checkClose (in.to, 10.0, 1.0e-12, "In only did not run to the end of the folder");
+        // Past the folder's end, which `setCompRegion` clamps back: the shift is
+        // applied at both ends and an end that has fallen on the folder's own
+        // edge gets no fade from the comp model anyway.
+        checkClose (in.to, 10.0 + 0.005, 1.0e-12, "In only did not run to the end of the folder");
 
         std::vector<CompSegment> compIn { { 0.0, 0 } };
         const auto spansIn = compFor (sc, in, compIn);
@@ -688,7 +908,8 @@ int main()
         sc.material = { -1.0, 8.0, 10.0 };   // rolled from before the clip
         const auto out = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
         check (out.valid, "Out only was refused");
-        checkClose (out.from, 0.0, 1.0e-12, "Out only did not start at the folder");
+        checkClose (out.from, -0.005, 1.0e-12,
+                    "Out only did not start at the folder, before the clamp");
         checkClose (out.to, 6.0 + 0.005, 1.0e-12, "Out only did not shift its one boundary");
 
         std::vector<CompSegment> compOut { { 0.0, 0 } };

@@ -208,8 +208,14 @@ private:
     void markDirty();
     /** Takes the loop range as it stands to be the saved one, so that opening
         or saving a project does not leave it looking modified. */
+    // Called wherever the loop range or the punch arrives from somewhere other
+    // than a click on the button: File > New, and opening a project. The button
+    // is refreshed with them, because latching the values without refreshing is
+    // what left it lit over a project that had punch off, and dark over one
+    // that had it on, with the record button then punching unannounced.
     void noteLoopRange() { lastLoopStart = project.loopStart; lastLoopEnd = project.loopEnd;
-                           lastPunchEnabled = project.punchEnabled; }
+                           lastPunchEnabled = project.punchEnabled;
+                           refreshPunchButton(); }
     void updateTitle();
     void ignoreEditsForAWhile() { ignoreEditsUntil = juce::Time::getMillisecondCounter() + 2000; }
     std::unique_ptr<juce::AudioPluginInstance> createPluginForProject (const juce::PluginDescription&, juce::String& error);
@@ -301,6 +307,15 @@ private:
     // marks the project as worth saving without becoming an undo step.
     double lastLoopStart = 0.0, lastLoopEnd = 0.0;
     bool   lastPunchEnabled = false;
+
+    // The punch as it was when the record button was pressed, and nothing
+    // reads the project's own range between then and the take landing. The
+    // ruler is live while the transport rolls, so an unlatched range would let
+    // a drag during a take decide what the performance replaced, and turning
+    // Punch off mid take would sum the pass with the old one. Same discipline
+    // as the record alignment figure, for the same reason. Unusable when
+    // nothing is being punched.
+    Punch::Range punchArmed { 0.0, 0.0, false, false };
 
     // The transport rolls in this far before a punch in, so the crossfade at
     // the punch has something of the new pass to fade from and the player
