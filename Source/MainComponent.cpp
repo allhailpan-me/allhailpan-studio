@@ -134,6 +134,34 @@ MainComponent::MainComponent()
         clickButton.setToggleState (engine.isMetronomeOn(), juce::dontSendNotification);
     };
 
+    punchButton.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
+    punchButton.setTooltip ("Replaces what is inside the loop range when you record, and leaves "
+                            "the rest of the take alone. Drag a loop range in the ruler first. "
+                            "Recording rolls in a bar early so the join has something to fade from.");
+    punchButton.onClick = [this]
+    {
+        project.punchEnabled = ! project.punchEnabled;
+        refreshPunchButton();
+
+        // Said once, here, rather than left for the record button to refuse:
+        // the punch is set on the loop locators, so turning it on with no
+        // range set is a reasonable thing to do in the wrong order and the
+        // only unhelpful answer is silence.
+        if (project.punchEnabled && ! project.hasLoopRange())
+            setStatus ("Punch is on, but there is no loop range to punch. Drag one in the "
+                       "playlist ruler and that becomes the punch in and punch out.");
+        else if (project.punchEnabled)
+            setStatus ("Punch is on. Recording will replace bars "
+                         + juce::String (project.loopStart / 4.0 + 1.0, 2) + " to "
+                         + juce::String (project.loopEnd / 4.0 + 1.0, 2)
+                         + " on the armed track and leave the rest of the take as it is.");
+        else
+            setStatus ("Punch is off. Recording lays down a new take as it always has.");
+
+        project.changed();
+    };
+    refreshPunchButton();
+
     soloAlertButton.setClickingTogglesState (false);
     soloAlertButton.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
     soloAlertButton.setTooltip ("Lights when something in the mixer is soloed. Click to clear every solo.");
@@ -325,7 +353,8 @@ MainComponent::MainComponent()
 
     for (auto* c : { static_cast<juce::Component*> (&playButton), static_cast<juce::Component*> (&stopButton),
                      static_cast<juce::Component*> (&recordButton), static_cast<juce::Component*> (&recordMode), static_cast<juce::Component*> (&monitorBox), static_cast<juce::Component*> (&countInBox),
-                     static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&soloAlertButton),
+                     static_cast<juce::Component*> (&clickButton), static_cast<juce::Component*> (&punchButton),
+                     static_cast<juce::Component*> (&soloAlertButton),
                      static_cast<juce::Component*> (&playlistTab),
                      static_cast<juce::Component*> (&pianoTab), static_cast<juce::Component*> (&rackTab),
                      static_cast<juce::Component*> (&modTab), static_cast<juce::Component*> (&reportTab),
@@ -587,7 +616,35 @@ void MainComponent::toggleRecord()
     // happened to be. Otherwise the first pass would be the odd one out: it
     // would start somewhere else and be a different length from the nine
     // after it, and nothing in the folder would line up.
-    if (project.hasLoopRange())
+    //
+    // A punch is the exception, and it has to be. The crossfade at the punch
+    // in sits in front of it and is read from the new pass, so starting the
+    // transport exactly at the punch in leaves the join nothing to fade from
+    // and the punch arrives as a butt join every time. Rolling in before it is
+    // also what the player needs: Nuendo's own reason for punch recording is
+    // that you "want to listen to what is already recorded up to the recording
+    // start position".
+    //
+    // One bar, which is Logic's published figure: "Logic Pro will begin
+    // recording approximately one bar before the punch-in locator", and what
+    // it buys there is the same thing it buys here, that "the start point of
+    // the region [can] be adjusted later". A bar rather than a number of
+    // seconds because every other range in this transport is in beats and a
+    // musician counts themselves in in bars.
+    //
+    // The range is latched here and read nowhere else for the rest of the
+    // take, which is the discipline `CLAUDE.md` already states for the record
+    // alignment figure, "the way Ardour refuses an alignment change while a
+    // DiskWriter is running". The playlist ruler is live while the transport
+    // rolls: drag the loop during a take and an unlatched punch would land the
+    // performance over a stretch the player was not playing to, and switching
+    // Punch off mid take would lay the pass over the old one instead and sum
+    // with it, which is the fault this whole thing exists to remove.
+    punchArmed = project.punchRange();
+
+    if (Punch::isUsable (punchArmed))
+        engine.setSongStart (std::max (0.0, project.loopStart - kPunchLeadInBeats));
+    else if (project.hasLoopRange())
         engine.setSongStart (project.loopStart);
 
     engine.stopAndRewind();
@@ -618,9 +675,20 @@ void MainComponent::toggleRecord()
                                        : "MIDI and automation";
     juce::String msg = countBeats > 0.0 ? "Counting in, then recording " + what + "..."
                                         : "Recording " + what + ". Press Space or Stop to finish.";
-    if (project.hasLoopRange() && recordingSomeAudio)
+    if (Punch::isUsable (punchArmed) && recordingSomeAudio)
+        msg << "  Punching in over the loop range: everything outside it is left alone. "
+               "The transport will not loop, so this is one pass.";
+    else if (project.hasLoopRange() && recordingSomeAudio)
         msg << "  Every time round the loop is kept as its own take.";
     setStatus (msg);
+}
+
+void MainComponent::refreshPunchButton()
+{
+    // Lit only when it is actually going to do something. Punch left on with
+    // no loop range is not punching, and a button that says it is would be
+    // lying about what the record button is about to do.
+    punchButton.setToggleState (project.isPunching(), juce::dontSendNotification);
 }
 
 void MainComponent::collectRecordedMidi()
@@ -804,6 +872,14 @@ void MainComponent::finishRecording()
                 track = project.firstEmptyTrackFrom (track + 1);
             }
         }
+
+        // The latch is released only now, after every take is down, so that
+        // dragging the loop range the moment the transport stops cannot change
+        // where the performance just played lands. It also puts the engine's
+        // loop range back, which pushArrangement leaves alone while a punch is
+        // armed.
+        punchArmed = { 0.0, 0.0, false, false };
+        pushArrangement (false);
     }
 
     playlist.refresh();
@@ -850,6 +926,41 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
     std::vector<Take> takes;
     double folderStart = -1.0;
 
+    // The clip a punch would land in, found before the passes are built rather
+    // than after, because a punch needs the passes measured from somewhere
+    // else and that cannot be worked out afterwards.
+    //
+    // Where a pass sits inside a folder is seconds from the folder's start, and
+    // a folder's start is its clip's start beat. For an ordinary recording the
+    // two are the same thing, because the clip is created at the first pass's
+    // own position. A punch lands in a clip that is already somewhere, and the
+    // transport rolled in a bar before the punch rather than at the clip, so
+    // the pass's position inside that folder is measured from the clip and not
+    // from the roll in. Measured from the wrong one, the audio is offset inside
+    // the folder by however far apart the two are, and what the punch plays is
+    // either silence or the wrong part of the performance, at full level, with
+    // a clean crossfade either side of it. Nothing errors.
+    double punchClipStart = 0.0;
+    int    punchClipId    = -1;
+
+    // Only the track this call is for, which with several inputs at once means
+    // only the first player's. Each later input is given a track found empty,
+    // so there is nothing on it to punch into and its pass lands as an
+    // ordinary take. That is the right way round for the case somebody is
+    // actually in, which is fixing one line of one part, and it is written
+    // down because punching while tracking a band would otherwise be
+    // surprising in a way nothing explains.
+    if (Punch::isUsable (punchArmed))
+    {
+        if (auto* target = project.punchTargetOn (track, punchArmed))
+        {
+            punchClipId    = target->id;
+            punchClipStart = target->start;
+        }
+    }
+
+    std::vector<Take> punchPasses;
+
     for (size_t i = 0; i < passes.size(); ++i)
     {
         auto& pass = passes[i];
@@ -892,6 +1003,26 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
         // a punch in does not slide to the front of the folder.
         take.start = std::max (0.0, (pass.startBeat - folderStart) * 60.0 / std::max (1.0, project.bpm));
 
+        if (punchClipId >= 0)
+        {
+            // The same pass, placed from the clip's start instead of from the
+            // roll in. The arithmetic is in Punch.h, where it is tested,
+            // because getting it wrong here is silent: see Punch::placePass.
+            const auto placed = Punch::placePass (pass.startBeat, punchClipStart,
+                                                  std::max (1.0, project.bpm), head, duration);
+
+            if (placed.valid && placed.length > 0.01)
+            {
+                Take p;
+                p.name   = "Punch";
+                p.sample = sample;
+                p.start  = placed.start;
+                p.offset = placed.offset;
+                p.length = placed.length;
+                punchPasses.push_back (std::move (p));
+            }
+        }
+
         takes.push_back (std::move (take));
     }
 
@@ -909,6 +1040,77 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
 
     juce::String msg;
 
+    // ---- the punch ----
+    // Recording over something already on the track replaces what is inside
+    // the punch and leaves the rest of the performance as it was, which is
+    // what every studio's default does and what this one would not do before:
+    // the take would have been laid over the old one and both would have
+    // played at once. See Punch.h for the geometry and the sources.
+    //
+    // The passes are passed by copy rather than moved, because a refusal has
+    // to leave the ordinary path below something to put down. Losing a
+    // performance because a punch could not be made is not a trade worth
+    // taking, and copying a take copies a name and a pointer rather than any
+    // audio.
+    if (punchClipId >= 0 && ! punchPasses.empty())
+    {
+        const auto refusal = project.punchTake (punchClipId, punchPasses, punchArmed);
+
+        switch (refusal)
+        {
+            case Project::PunchRefusal::none:
+            {
+                msg = "Punched in over bars "
+                        + juce::String (punchArmed.inBeat  / 4.0 + 1.0, 2) + " to "
+                        + juce::String (punchArmed.outBeat / 4.0 + 1.0, 2) + " on "
+                        + project.tracks[(size_t) track].name
+                        + ". The rest of the take is untouched: drag across a lane to move the "
+                          "join, or back over the whole clip to put the original performance "
+                          "back.";
+
+                if (unsaved > 0)
+                    msg << (anyToDisk ? "  (" + juce::String (unsaved) + " passes couldn't be written to disk.)"
+                                      : "  (Kept in this session, but nothing could be written to disk.)");
+                if (dropped > 0)
+                    msg << "  (" << dropped << " samples dropped. Try a larger buffer size.)";
+
+                browser.refresh();
+                setStatus (msg);
+                return;
+            }
+
+            case Project::PunchRefusal::stretched:
+                // Said rather than worked around. A take folder reads its
+                // passes directly, so it cannot carry warp markers or a
+                // stretch ratio, and punching into a clip that has either
+                // would change how the part nobody punched sounds.
+                msg = "That clip is warped or stretched, so it can't be punched into without "
+                      "changing the rest of it. The take is on the track as it is, above the "
+                      "old one. ";
+                break;
+
+            case Project::PunchRefusal::alreadyComped:
+                msg = "That clip is already comped, and a folder has one crossfade length for "
+                      "all of its joins, so punching into it would change the joins you made. "
+                      "The take is on the track as it is. ";
+                break;
+
+            case Project::PunchRefusal::tooManyTakes:
+                msg = "That clip already holds as many passes as a folder can. The take is on "
+                      "the track as it is. ";
+                break;
+
+            case Project::PunchRefusal::missedTheClip:
+                msg = "The punch range and that clip do not overlap by enough to punch, or the "
+                      "pass stopped before reaching it. The take is on the track as it is. ";
+                break;
+
+            case Project::PunchRefusal::noClip:
+            case Project::PunchRefusal::notAudio:
+                break;      // nothing to punch into: an ordinary take, below
+        }
+    }
+
     if (takes.size() == 1)
     {
         // One pass is one clip, the way it has always been. Wrapping a single
@@ -922,8 +1124,8 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
         clip.offset = takes[0].offset;
         clip.length = takes[0].length;
         project.selection.insert (project.addClip (clip));
-        msg = unsaved == 0 ? "Take saved to " + takes[0].sample->file.getFullPathName()
-                           : juce::String ("Take kept in this session, but it couldn't be saved to disk.");
+        msg << (unsaved == 0 ? "Take saved to " + takes[0].sample->file.getFullPathName()
+                             : juce::String ("Take kept in this session, but it couldn't be saved to disk."));
     }
     else
     {
@@ -954,7 +1156,7 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
         const auto* folder = project.folderFor (id);
         const int   count  = folder != nullptr ? folder->size() : 0;
 
-        msg = juce::String (count) + " takes in a folder on "
+        msg << juce::String (count) + " takes in a folder on "
             + project.tracks[(size_t) track].name
             + ". Drag across a lane to comp from that take.";
     }
@@ -1177,7 +1379,21 @@ void MainComponent::pushArrangement (bool allowRenders)
     snap.modulators = project.modulators;      // small, so copied whole
     engine.setSnapshot (std::move (snap));
 
-    if (project.hasLoopRange())
+    // A punch does not loop, and that is a decision with a published precedent
+    // rather than a limitation nobody thought about. Every pass after the first
+    // begins exactly at the punch in, because that is where the transport wraps
+    // to, so it has no lead in and the crossfade in front of the punch has
+    // nothing of the new pass to fade from: the join can only be a butt join,
+    // which is the one thing `CompModel.h` says a comp boundary must not be.
+    // Pro Tools makes the same call the same way round, listing "Loop playback
+    // not available" as a cost of its punch modes.
+    //
+    // Cubase and Logic do allow the pair, and each pass punching the same span
+    // into a folder of takes is the better end state. It needs a lead in for
+    // every pass rather than only the first, which is a change to the recorder
+    // rather than to the punch, and it is written into the backlog as the next
+    // step rather than half done here.
+    if (project.hasLoopRange() && ! Punch::isUsable (punchArmed))
         engine.setLoopRange (project.loopStart, project.loopEnd);
     else
         engine.clearLoopRange();
@@ -1201,11 +1417,19 @@ void MainComponent::changeListenerCallback (juce::ChangeBroadcaster* source)
         // part of the undo history, so commit() above never notices it. It
         // still has to make the project worth saving, or moving the loop and
         // closing the window would quietly lose it.
-        if (project.loopStart != lastLoopStart || project.loopEnd != lastLoopEnd)
+        if (project.loopStart != lastLoopStart || project.loopEnd != lastLoopEnd
+            || project.punchEnabled != lastPunchEnabled)
         {
-            lastLoopStart = project.loopStart;
-            lastLoopEnd   = project.loopEnd;
+            lastLoopStart    = project.loopStart;
+            lastLoopEnd      = project.loopEnd;
+            lastPunchEnabled = project.punchEnabled;
             markDirty();
+
+            // The punch is the loop range, so clearing the range with a click
+            // in the ruler turns the punch off in effect. The button has to
+            // follow it or it would still be lit over a punch that cannot
+            // happen.
+            refreshPunchButton();
         }
 
         playlist.refresh();
@@ -1983,7 +2207,8 @@ void MainComponent::resized()
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
     tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
-    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (14);
+    clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (4);
+    punchButton .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
     pianoTab    .setBounds (bar.removeFromLeft (80));
     rackTab     .setBounds (bar.removeFromLeft (52));

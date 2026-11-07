@@ -4,6 +4,7 @@
 #include "WarpMap.h"
 #include "AutomationCurve.h"
 #include "CompModel.h"
+#include "Punch.h"
 #include "ClipFade.h"
 #include "Groove.h"
 #include "SongLength.h"
@@ -384,14 +385,24 @@ struct TakeFolder
         return juce::isPositiveAndBelow (index, (int) takes.size()) ? &takes[(size_t) index] : nullptr;
     }
 
-    /** The longest any take runs, in seconds of source. The folder clip is as
-        long as its longest pass, so a take that overran is not cut off by the
-        folder having been sized to a shorter one. */
+    /** How far into the folder the furthest take reaches. The folder clip is as
+        long as this, so a take that overran is not cut off by the folder having
+        been sized to a shorter one.
+
+        It is `start + length` and not `length`, which is what the sentence
+        above has always claimed and what the code did not do. The two are the
+        same number for a loop recording, where every pass begins at the
+        folder's start, which is why nothing had noticed: they differ for a pass
+        that began later than the folder, and a punch is made of exactly those,
+        since the transport rolls in after the clip it is punching into has
+        started. Sized by length alone, the tail of such a pass sits past the
+        end of the folder where the comp cannot reach it, and nothing says so.
+    */
     double longestSeconds() const noexcept
     {
         double longest = 0.0;
         for (const auto& t : takes)
-            longest = std::max (longest, t.length);
+            longest = std::max (longest, std::max (0.0, t.start) + t.length);
         return longest;
     }
 
@@ -708,6 +719,34 @@ public:
 
     double loopLengthBeats() const noexcept { return hasLoopRange() ? loopEnd - loopStart : 0.0; }
 
+    // ---- punch ----
+    // With this on, recording replaces what is inside the loop range and
+    // leaves everything outside it alone. The punch range is the loop range,
+    // which is a published default rather than a shortcut: Cubase locks "the
+    // punch in position ... to the left locator position and the punch out
+    // position to the right locator position", and Studio One's Auto Punch
+    // sets the same two locators its loop recording uses. Cubase can unlock
+    // the pair and that is worth having later; nothing here assumes they are
+    // the same two numbers for ever, because Punch::Range is passed about
+    // rather than read off this object.
+    //
+    // Not in the undo history, and saved with the project, for exactly the
+    // reasons written above the loop range: it is where you are working.
+    bool punchEnabled = false;
+
+    /** The punch, or an unusable range when there is nothing to punch. Both
+        boundaries are always present because both come from the loop range;
+        Punch::Range carries the one sided cases for when the pair is unlocked.
+    */
+    Punch::Range punchRange() const noexcept
+    {
+        if (! punchEnabled || ! hasLoopRange())
+            return { 0.0, 0.0, false, false };     // not a punch: see Punch::Range
+        return { loopStart, loopEnd, true, true };
+    }
+
+    bool isPunching() const noexcept { return Punch::isUsable (punchRange()); }
+
     // ---- channel rack ----
     // The rack edits a region of the arrangement rather than owning its own
     // kind of data: every step is a real note in a real MIDI clip, so the same
@@ -752,6 +791,7 @@ public:
         bpm = startingBpm;
 
         loopStart = loopEnd = 0.0;
+        punchEnabled = false;
 
         autoFadeSeconds = ClipFade::defaultAutoSeconds;
 
@@ -1048,6 +1088,202 @@ public:
         tidyFolder (c);
 
         return addClip (std::move (c));
+    }
+
+    /** The audio clip a punch would land on, on one track, or null when there
+        is nothing punchable there and the recording is an ordinary one.
+
+        The clip under the punch in is the one chosen where several overlap,
+        because that is the one whose phrase is being fixed. Where none is under
+        it, which is the case for a punch that begins before the clip, the
+        leftmost one that overlaps is taken. Leftmost on the timeline and not
+        first in the list: the list is in the order clips were added, so taking
+        the first of it would make what a punch landed in depend on the order
+        somebody happened to build the arrangement in.
+
+        A muted clip is not a candidate. Muting it is how you set a take aside,
+        so it is not the performance being fixed, and punching into something
+        that cannot be heard would look exactly like a punch that did nothing.
+        The recording lands as an ordinary take above it instead.
+    */
+    Clip* punchTargetOn (int track, const Punch::Range& range)
+    {
+        if (! Punch::isUsable (range))
+            return nullptr;
+
+        Clip* leftmost = nullptr;
+
+        for (auto& c : clips)
+        {
+            if (! c.isAudio() || c.track != track || c.muted)
+                continue;
+
+            const double from = c.start;
+            const double to   = c.endBeat (bpm);
+
+            if (! Punch::overlaps (range, from, to))
+                continue;
+
+            if (range.hasIn && range.inBeat >= from && range.inBeat < to)
+                return &c;
+
+            if (leftmost == nullptr || c.start < leftmost->start)
+                leftmost = &c;
+        }
+
+        return leftmost;
+    }
+
+    /** Why a punch could not be made, so the window can say which rather than
+        appearing to do nothing. */
+    enum class PunchRefusal
+    {
+        none,
+        noClip,          // nothing under the punch: record it as an ordinary take
+        notAudio,
+        stretched,       // warped, stretched or tempo matched: see below
+        tooManyTakes,
+        alreadyComped,   // one crossfade width per folder: see punchTake
+        missedTheClip    // the range does not meet the clip, or the pass does not cover it
+    };
+
+    /** Replaces what is inside the punch with a pass, and leaves the rest of
+        the performance exactly as it was.
+
+        The clip becomes a take folder if it was not one already: the audio
+        that was there is take 0 and the new pass is take 1, and the comp plays
+        the pass across the punch and the original everywhere else. Nothing is
+        trimmed and no file is touched, which is what every studio's default
+        does, and it means the punch can be moved, narrowed or thrown away
+        afterwards by comping, which is the whole reason this model was chosen.
+        See Punch.h.
+
+        Nothing is changed when the answer is no. The region is worked out
+        before the clip is touched for exactly that reason: a punch that half
+        happened would leave a folder with a pass in it that the comp does not
+        play, which looks like a recording that went missing.
+    */
+    PunchRefusal punchTake (int clipId, std::vector<Take> passes, const Punch::Range& range)
+    {
+        auto* c = find (clipId);
+        if (c == nullptr)
+            return PunchRefusal::noClip;
+        if (! c->isAudio())
+            return PunchRefusal::notAudio;
+
+        // A pass with nothing in it is not a pass. Dropping them here rather
+        // than refusing the whole punch is what keeps a loop recording whose
+        // last time round was a false start from losing the rest of it.
+        passes.erase (std::remove_if (passes.begin(), passes.end(),
+                                      [] (const Take& t)
+                                      {
+                                          return t.sample == nullptr || ! (t.length > 0.0);
+                                      }),
+                      passes.end());
+
+        if (passes.empty())
+            return PunchRefusal::noClip;
+
+        // A folder reads its takes directly, so warping, stretching, pitching
+        // and tempo matching are turned off on one rather than half supported,
+        // which `tidyFolder` does and `CLAUDE.md` records the reason for.
+        // Punching into a clip carrying any of them would therefore change how
+        // the part nobody punched sounds, which is the opposite of the promise.
+        // Refused and said out loud instead.
+        if (! c->isTakeFolder()
+            && (! c->warp.empty() || c->stretch != 1.0 || c->pitch != 0.0 || c->followTempo))
+            return PunchRefusal::stretched;
+
+        // A folder carries one crossfade width for every join it has, and a
+        // punch needs that width to be the one its own boundaries were shifted
+        // by: see Punch::applyTo. So punching into a folder that is already
+        // comped would set the width for the punch and change every join the
+        // producer had already made, by however much the two differ. Measured
+        // on a three pass folder set to 40 ms, a punch whose pass gave it only
+        // 2 ms of lead in took an untouched join from 40 ms down to 2.
+        //
+        // That is not a thing to ship quietly, and the alternative is a width
+        // per join, which is a change to the comp model rather than to the
+        // punch. Refused and said out loud, which is what this project does
+        // with warping and stretching on a folder for the same kind of reason.
+        if (c->isTakeFolder() && c->folder->comp.size() > 1)
+            return PunchRefusal::alreadyComped;
+
+        const size_t already = c->folder != nullptr ? (size_t) c->folder->size() : 1u;
+        if (already + passes.size() > kMaxCompTakes)
+            return PunchRefusal::tooManyTakes;
+
+        // How long the folder will be once the passes are in it. `tidyFolder`
+        // sizes a folder to its longest take, so this is the same figure it
+        // will arrive at, worked out before anything is changed.
+        double folderSeconds = c->isTakeFolder() ? c->folder->longestSeconds() : c->length;
+        for (const auto& t : passes)
+            folderSeconds = std::max (folderSeconds, t.length);
+
+        // The last pass is the punched one. That is Cubase's `Cycle History +
+        // Replace` exactly: what is overlapped is "replaced by the last
+        // recorded take", and "if you record in cycle mode, all takes from the
+        // current cycle recording are kept". So going round the loop twice
+        // leaves both performances in the folder to choose between, with the
+        // second one in the punch, which is what somebody who went round again
+        // was asking for.
+        const Take& punchedPass = passes.back();
+        const Punch::Material material { punchedPass.start,
+                                         punchedPass.start + punchedPass.length,
+                                         folderSeconds };
+        const auto region = Punch::regionFor (range, c->start, bpm, material);
+
+        if (! region.valid)
+            return PunchRefusal::missedTheClip;
+
+        if (! c->isTakeFolder())
+        {
+            // The audio that was there becomes the first pass. Its offset goes
+            // with it, because that is where in the source the clip was
+            // reading, and the folder's own offset is then nought: a folder
+            // reads each take at the take's offset rather than the clip's.
+            Take original;
+            original.name   = "Original";
+            original.sample = c->sample;
+            original.start  = 0.0;
+            original.offset = c->offset;
+            original.length = c->length;
+
+            c->folder = std::make_shared<TakeFolder>();
+            c->folder->takes.push_back (std::move (original));
+            c->folder->comp.clear();
+            c->folder->comp.push_back ({ 0.0, 0 });
+
+            // A clip with a folder reads its takes and not this, and the
+            // struct's own comment says it is null then. Leaving it set would
+            // be a second source of truth for the same audio.
+            c->sample.reset();
+        }
+
+        for (auto& t : passes)
+            c->folder->takes.push_back (std::move (t));
+
+        const int punched = c->folder->size() - 1;
+
+        tidyFolder (*c);
+
+        // The comp and the folder's crossfade in one call, because the shift
+        // off each punch point is half of that width and the two have to agree
+        // or the fade reaches into the punch. See Punch::applyTo.
+        //
+        // The answer is checked rather than assumed. Everything it refuses for
+        // has been refused above already, so it cannot fail from here today,
+        // and a punch that silently did not happen is the worst outcome this
+        // whole path has: the folder would hold a pass the comp never plays,
+        // which looks like a recording that went missing. One refactor is all
+        // it would take.
+        if (! Punch::applyTo (c->folder->comp, c->folder->crossfadeMs, region,
+                              punched, c->folder->size(), c->length))
+            return PunchRefusal::missedTheClip;
+
+        selection = { c->id };
+        changed();
+        return PunchRefusal::none;
     }
 
     /** Appends a pass to a folder already on the playlist, and makes it the
