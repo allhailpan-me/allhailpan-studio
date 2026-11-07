@@ -42,7 +42,7 @@ blindly. Newest first.
 
 ## 2026-11-07: punch recording, and the crossfade that must not touch the punch
 
-### Status: decided, building
+### Status: built, tested, mutation tested, audited, fixed
 
 Punch in and punch out recording has been deferred on eight separate nights:
 10-08, 10-13, 10-15, 10-21, 10-22, 10-27, 10-28 and 11-06. Every entry says
@@ -303,29 +303,146 @@ the take folder here already does with loop passes.
   unverified for audio. It does not matter here, because this design captures
   the whole pass deliberately, but it is not to be cited as an audio source.
 
+### What the audit found, and it was the whole value of the night
+
+The `auditor` agent was sent at the crossfade geometry, which is the load
+bearing claim. It found the geometry sound and found the fault one level
+below it: **the geometry was being handed material measured from the wrong
+place, so the ordinary punch produced silence where the line used to be.**
+
+A pass's position inside a folder is seconds from the folder's start, and a
+folder's start is its clip's start. The window measured it from where the
+transport rolled, which is right for an ordinary recording because the clip
+is created at the first pass's own position, and wrong for a punch because
+the clip is already somewhere else and the transport rolls in a bar before
+the punch. The take was placed along the folder by the distance between the
+two origins. `buildCompSpans` then clamped its read to nothing, and the
+punched bars went silent in both playback and the bounce, while the window
+reported "Punched in over bars 5 to 7. The rest of the take is untouched."
+Where the pass was long enough to cover the region anyway, it played three
+bars of the wrong part of the performance at full level with a clean 10 ms
+crossfade either side of it.
+
+**The lesson is about where the line was, not what it said.** The branch had
+462 lines of tested header and 710 lines of test either side of one untested
+line in `MainComponent.cpp`, and that line was the only one that was wrong.
+`Punch.h` was right and `PunchTest.cpp` was right, and the test encoded the
+correct model of where a take sits, so it could not see the window disagreeing
+with it. The arithmetic is now `Punch::placePass`, in the header, and the test
+states the property rather than the algebra: a sample played at a beat ends up
+at that beat. The algebra is what was wrong.
+
+Five more, all of them ordinary things a player does.
+
+- **Stop halfway through a punch** and the rest of it was handed to a take
+  with no audio in it, so the second half of the phrase was replaced with
+  silence rather than kept. The punch now reaches only where the clip is and
+  where the pass is.
+- **The punch range was not latched** when recording started. The ruler is
+  live while the transport rolls, so dragging the loop during a take decided
+  what the performance replaced, and switching Punch off mid take laid the
+  pass over the old one and summed with it, which is the fault the night
+  exists to remove. `CLAUDE.md` already states this discipline for the record
+  alignment figure, "the way Ardour refuses an alignment change while a
+  `DiskWriter` is running".
+- **A looped punch gave every pass after the first no lead in**, because that
+  is where the transport wraps to, so the join in front of the punch could
+  only be a butt join, and `punchTake` punches the last pass. A punch
+  therefore does not loop, which is the call Pro Tools makes the same way
+  round. See below for what allowing it properly needs.
+- **Punching into an already comped folder changed joins the producer had
+  made.** A folder carries one crossfade width for all of its joins and a
+  punch needs that width to be the one its boundaries were shifted by.
+  Measured on a three pass folder set to 40 ms, an untouched join came back
+  at 2 ms. Refused now, and the reason is in `Punch.h`.
+- **`TakeFolder::longestSeconds` counted how long each take is, not where it
+  sits**, which its own comment has always claimed it did. The two agree for
+  a loop recording, where every pass starts at the folder's start, which is
+  why nothing had noticed. A punch is made of passes that start later than
+  the folder, so the tail of one sat past the end of the folder where the comp
+  cannot reach it.
+- **The Punch button lied after File > New and after opening a project.** Both
+  paths latch the loop range without going through the branch that refreshed
+  the button, so punch could be on with the button dark and the record button
+  punching unannounced.
+
+The audit also found two stale claims in this very entry, which were written
+before the branch had finished and had stopped being true. They are corrected
+in place above and below. That is the pattern `CLAUDE.md` names twice, and a
+decision record is as able to drift as a comment.
+
+### Mutation testing
+
+Thirty three deliberate breakages of `Punch.h`, each compiled with the
+sanitizers exactly as `Tests/run.sh` has them, because a harness weaker than
+the real test run has already misled an audit on this project.
+
+**Thirty two caught, one survived**, and the survivor is established as a
+genuine no-op rather than a gap. Among those caught: the real fault above,
+reproduced deliberately as "measure from the roll in rather than from the
+clip"; the centred crossfade, which is the intuitive reading of the geometry;
+the shift in the wrong direction at each end; both ends of the reach clamping;
+`applyTo` not setting the folder's width, and setting it in seconds instead of
+milliseconds.
+
+The survivor is the `std::isfinite` guard on the requested crossfade width.
+Removing it changes nothing, because a NaN reaches `std::max (0.0, x)` as
+nought (the comparison is false and the first argument comes back, which is
+the subtlety `normaliseCompSegments` already has a paragraph about) and an
+infinity is caught by the first `std::min` after it. It is kept because it
+says what it means, and it is marked in the header as a deliberate no-op.
+
+An earlier run had four survivors. Two were the `std::max (0.0, ...)` floors
+on the width caps, which the reach clamping had made unreachable three lines
+further up: they were deleted rather than defended, since two no-ops guarding
+an invariant that is stated directly above them are worse than neither. The
+fourth was the folder's start being dropped from the reach, which needed a
+punch beginning before the clip, played by a pass that began 5 ms before that:
+measured from the wrong one, the only width the folder has comes back at 5 ms
+instead of 10. There is a test for it now.
+
 ### Deliberately left for later
 
 - **Unlocking the punch range from the loop locators**, which is Cubase's
-  `Lock Punch Points to Locators`. The arithmetic tonight takes a punch range
-  as two numbers, so this is a persisted pair and a ruler lane and nothing
-  else.
+  `Lock Punch Points to Locators`. `Punch::Range` already takes a punch as
+  two numbers and carries Ardour's one sided cases, so this is a persisted
+  pair and a ruler lane and nothing else. `Project::punchRange` is the only
+  thing that assumes the pair.
+- **A lead in for every pass of a looped punch**, which is what allowing loop
+  and punch together needs. Cubase and Logic both allow the pair and agree on
+  the meaning, each pass punching the same span into a folder of takes, so
+  this is the better end state and the research is already done. What it needs
+  is in the recorder rather than in the punch: a pass after the first begins
+  where the transport wrapped, and the audio in front of it is the tail of the
+  pass before, which `RecordAlign.h` deliberately leaves in that pass's own
+  file rather than duplicating. Until that changes, a punch does not loop.
 - **The 4 ms monitor only crossfade** at the punch boundaries, from the v6
-  Reference Guide. It belongs on the monitoring path, which is the one with
-  the delay compensation exemption on it, and it is a real published
-  behaviour rather than a nicety.
-- **Pre-roll as a transport feature.** The recorder already keeps what it
-  captured before the record point and reports it as the pass's pre-roll, so
-  the material the pre-crossfade needs is there whenever the transport rolled
-  before the punch in. Rolling the transport back automatically, with a
-  published figure to roll back by, is separate. Logic's "approximately one
-  bar" is the only published DAW figure found and is the one to use.
+  Reference Guide: with the written crossfade set to zero, "Pro Tools always
+  executes a 4 millisecond 'monitor only' crossfade (which is not written to
+  disk)". It belongs on the monitoring path, which is the one with the delay
+  compensation exemption on it, and it is a real published behaviour rather
+  than a nicety.
 - **Post-roll, and Cubase's prerequisite for it.** Post-roll has no meaning
   unless the transport stops by itself, which is why Cubase's own procedure
   begins "Activate Stop after Automatic Punch Out". Worth keeping together
-  when either is built.
-- **Punching into a clip that is already a take folder.** Tonight's
-  arithmetic handles it, but the chooser in `finishAudioRecording` only looks
-  for the simple case plus the folder it already knows how to extend.
+  when either is built. Note that the lead in built tonight is the roll back
+  half of pre-roll and not the whole feature: there is no pre-roll amount to
+  set, and Cubase treats "roll the transport back" and "keep a buffer of input
+  before the record point" as two separate published features.
+- **Punching into a clip that is already comped**, which is refused tonight
+  for the reason above. It wants a crossfade width per join rather than one
+  per folder, which is a change to `CompModel.h` and wants its own night.
+- **A width per join would also make the punch's guarantee permanent.** It
+  holds at the moment of punching rather than for ever: `Project` already has
+  a `setCompCrossfadeMs`, with no caller outside itself today, and the day
+  anything wires a control to it, widening a punched folder takes the fade
+  back into the punch. Measured at 1.8 dB off the attack at 50 ms where 10 was
+  asked for.
+- **Punching more than one input at once.** `finishAudioRecording` is called
+  per input, with the armed track for the first and a track found empty for
+  each of the rest, so only the first player's part can be punched. Right for
+  the case somebody is in, and worth knowing before tracking a band with
+  Punch left on.
 
 ---
 

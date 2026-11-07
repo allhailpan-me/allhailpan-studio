@@ -1091,19 +1091,27 @@ public:
     }
 
     /** The audio clip a punch would land on, on one track, or null when there
-        is nothing there and the recording is an ordinary one.
+        is nothing punchable there and the recording is an ordinary one.
 
         The clip under the punch in is the one chosen where several overlap,
-        because that is the one whose phrase is being fixed. Falling back to the
-        first that overlaps at all matters for a one sided punch, which has no
-        in point to be under.
+        because that is the one whose phrase is being fixed. Where none is under
+        it, which is the case for a punch that begins before the clip, the
+        leftmost one that overlaps is taken. Leftmost on the timeline and not
+        first in the list: the list is in the order clips were added, so taking
+        the first of it would make what a punch landed in depend on the order
+        somebody happened to build the arrangement in.
+
+        A muted clip is not a candidate. Muting it is how you set a take aside,
+        so it is not the performance being fixed, and punching into something
+        that cannot be heard would look exactly like a punch that did nothing.
+        The recording lands as an ordinary take above it instead.
     */
     Clip* punchTargetOn (int track, const Punch::Range& range)
     {
         if (! Punch::isUsable (range))
             return nullptr;
 
-        Clip* firstOverlapping = nullptr;
+        Clip* leftmost = nullptr;
 
         for (auto& c : clips)
         {
@@ -1119,11 +1127,11 @@ public:
             if (range.hasIn && range.inBeat >= from && range.inBeat < to)
                 return &c;
 
-            if (firstOverlapping == nullptr)
-                firstOverlapping = &c;
+            if (leftmost == nullptr || c.start < leftmost->start)
+                leftmost = &c;
         }
 
-        return firstOverlapping;
+        return leftmost;
     }
 
     /** Why a punch could not be made, so the window can say which rather than
@@ -1262,8 +1270,16 @@ public:
         // The comp and the folder's crossfade in one call, because the shift
         // off each punch point is half of that width and the two have to agree
         // or the fade reaches into the punch. See Punch::applyTo.
-        Punch::applyTo (c->folder->comp, c->folder->crossfadeMs, region,
-                        punched, c->folder->size(), c->length);
+        //
+        // The answer is checked rather than assumed. Everything it refuses for
+        // has been refused above already, so it cannot fail from here today,
+        // and a punch that silently did not happen is the worst outcome this
+        // whole path has: the folder would hold a pass the comp never plays,
+        // which looks like a recording that went missing. One refactor is all
+        // it would take.
+        if (! Punch::applyTo (c->folder->comp, c->folder->crossfadeMs, region,
+                              punched, c->folder->size(), c->length))
+            return PunchRefusal::missedTheClip;
 
         selection = { c->id };
         changed();

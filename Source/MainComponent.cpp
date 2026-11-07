@@ -943,6 +943,13 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
     double punchClipStart = 0.0;
     int    punchClipId    = -1;
 
+    // Only the track this call is for, which with several inputs at once means
+    // only the first player's. Each later input is given a track found empty,
+    // so there is nothing on it to punch into and its pass lands as an
+    // ordinary take. That is the right way round for the case somebody is
+    // actually in, which is fixing one line of one part, and it is written
+    // down because punching while tracking a band would otherwise be
+    // surprising in a way nothing explains.
     if (Punch::isUsable (punchArmed))
     {
         if (auto* target = project.punchTargetOn (track, punchArmed))

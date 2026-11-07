@@ -854,6 +854,41 @@ int main()
                    "it replaces more of the performance than was punched");
         }
 
+        // A punch that begins before the clip, played by a pass that also began
+        // before it. The join at the in point is on the folder's own edge, so
+        // the comp model gives it no fade, and the one at the out point must
+        // still get its full width: the lead the pass has in front of the
+        // folder is lead, and narrowing the only width the folder has because
+        // of it would shorten the join at the other end for no reason.
+        {
+            Scene sc;
+            sc.folderSeconds = 20.0; sc.bpm = 120.0;
+            sc.range = { -4.0, 8.0, true, true };       // minus 2 s to plus 4 s
+            sc.inSec = 0.0; sc.outSec = 4.0;
+            // The pass rolled in only 5 ms before the punch in, but the punch
+            // in is before the clip, so what the join at the other end can
+            // have is governed by what the pass has in front of the *folder*
+            // and not by what it has in front of a punch point the comp will
+            // never put a boundary at. Measured from the wrong one, the only
+            // width the folder has comes back at 5 ms instead of 10.
+            sc.material = { -2.005, 12.0, 20.0 };
+
+            const auto got = Punch::regionFor (sc.range, 0.0, sc.bpm, sc.material);
+            check (got.valid, "a punch beginning before the clip was refused");
+            checkClose (got.crossfadeSeconds, Punch::kDefaultCrossfadeMs * 0.001, 1.0e-12,
+                        "the join at the punch out was narrowed by lead the pass had in front "
+                        "of the clip, which no join needs");
+
+            std::vector<CompSegment> comp { { 0.0, 0 } };
+            const auto spans = compFor (sc, got, comp);
+            checkClose (gainOf (spans, 1, 0.0), 1.0, 1.0e-12,
+                        "the punch is not at full level at the folder's start");
+            checkClose (gainOf (spans, 1, 4.0 - 1.0e-9), 1.0, 1.0e-9,
+                        "the punch is not at full level up to its punch out");
+            checkClose (gainOf (spans, 0, 4.011), 1.0, 1.0e-9,
+                        "the old performance did not come back after the punch out");
+        }
+
         // And the floor on a punch at all, which the header claims is the same
         // figure the comp refuses a segment shorter than.
         {

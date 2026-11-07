@@ -113,6 +113,17 @@
     already per folder rather than global, so a punched folder carrying the
     punch width is in keeping with what is there.
 
+    Two consequences of there being one width per folder, both real and both
+    written down here rather than discovered later. A folder that is already
+    comped is refused a punch, because setting the width for the punch would
+    change every join the producer had already made, and `Project::punchTake`
+    does that refusing and says why. And the guarantee holds at the moment of
+    punching rather than for ever: widen a punched folder's crossfade
+    afterwards and the fade walks back into the punch, which measures 1.8 dB
+    off the attack at 50 ms where 10 was asked for. Nothing offers that control
+    today, and the day something does, what it wants is a width per join rather
+    than a guard here.
+
     WHY THE WHOLE PASS IS CAPTURED AND ONLY THE PUNCH IS HEARD
 
     Unanimous in the sources, and it is what makes the geometry above possible
@@ -270,7 +281,11 @@ inline double secondsInto (double beat, double folderStartBeat, double bpm) noex
 
     `from` and `to` are where its audio sits, which is wider than the punch
     because the whole pass was captured. `from` may be negative, meaning the
-    pass began before the clip being punched into.
+    pass began before the clip being punched into, and the arithmetic below
+    takes that case. Note that `placePass` never produces one: it trims the
+    front of such a pass instead, because a take sitting before the folder it
+    is in is a second case for every lookup to handle. So the negative case is
+    reachable only by a caller that places its own takes.
 
     `folderSeconds` is how long the folder will be once the pass is in it,
     which is not necessarily how long it was: a punch can run past the end of
@@ -282,6 +297,7 @@ struct Material
     double to            = 0.0;
     double folderSeconds = 0.0;
 };
+
 
 /** The comp region a punch becomes, in folder seconds, plus the crossfade the
     folder has to carry for the geometry to hold.
@@ -297,10 +313,6 @@ struct Result
     double crossfadeSeconds = 0.0;
     bool   valid            = false;
 
-    /** How much of the old material in front of the punch the pre-crossfade
-        consumes. Nothing depends on it; it is here because it is the one
-        number somebody looking at a punched join will want to know. */
-    double leadInSeconds() const noexcept { return crossfadeSeconds; }
 };
 
 /** Works out the comp region, the shift, and the width that can actually be
@@ -374,6 +386,13 @@ inline Result regionFor (const Range& r,
     if (reachTo - reachFrom < kMinPunchSeconds)
         return out;
 
+    // A width that is not a number is no width. Written out rather than left
+    // to the `std::min` chain below, which would also contain it: a NaN
+    // reaches `std::max (0.0, x)` as nought because the comparison is false and
+    // the first argument is returned, which is the same subtlety
+    // `normaliseCompSegments` has a paragraph about, and an infinity is caught
+    // by the first `std::min`. Saying it here means nobody has to work that
+    // out. This is deliberately a no-op and is recorded as one.
     double width = std::isfinite (requestedCrossfadeSeconds)
                      ? std::max (0.0, requestedCrossfadeSeconds)
                      : 0.0;
@@ -390,8 +409,16 @@ inline Result regionFor (const Range& r,
     // decides whether there is a join at a given end is whether the comp has a
     // boundary there, and after the clamping above it may have one at an end
     // the range left open.
-    width = std::min (width, std::max (0.0, reachFrom - m.from));
-    width = std::min (width, std::max (0.0, m.to - reachTo));
+    //
+    // Neither needs a floor at nought. The clamping above puts `reachFrom` at
+    // or after `m.from` and `reachTo` at or before `m.to` by construction, so
+    // both differences are already positive. They were written with a
+    // `std::max (0.0, ...)` round them before the clamping went in, when the
+    // reach was the punch itself and a player who stopped early made the
+    // second one negative. Keeping the floor now would be two no-ops defending
+    // an invariant that is three lines above them.
+    width = std::min (width, reachFrom - m.from);
+    width = std::min (width, m.to - reachTo);
 
     const double half = width * 0.5;
 
