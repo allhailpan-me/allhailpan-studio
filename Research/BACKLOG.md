@@ -40,6 +40,295 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-07: punch recording, and the crossfade that must not touch the punch
+
+### Status: decided, building
+
+Punch in and punch out recording has been deferred on eight separate nights:
+10-08, 10-13, 10-15, 10-21, 10-22, 10-27, 10-28 and 11-06. Every entry says
+the same thing in slightly different words, and the 10-21 entry says it
+best: the thing it actually needs is a published answer to what happens to
+the audio already on the track, because recording here finds an empty track
+rather than punching into an occupied one, so a punch take would sum with
+the performance it was meant to replace. That entry named the two things to
+read before choosing, Pro Tools' playlists and Reaper's "trim content behind
+media items", and asked for a night of its own. This is that night.
+
+### What was looked at
+
+The `dsp-researcher` agent was sent at the published specifications rather
+than at anybody's recollection of them. It came back with Avid, Steinberg,
+Apple, PreSonus, Ardour, Cockos, Magix and Audacity, and with a list of what
+it could not retrieve, which is below and matters as much.
+
+### The blocking question, answered
+
+**No shipping studio sums a punch take with the material underneath. Not
+one.** Summing is not one of the three candidate models the earlier entries
+named; it is a fourth thing that nobody ships. The three real models all
+exist, in different studios:
+
+| Studio | What happens to the audio underneath |
+|---|---|
+| Logic Pro | A take folder. `Overlapping Track Recordings > Audio > Cycle Off` offers exactly Create Take Folder, Create Track, Create Track Alternative |
+| Pro Tools | A playlist lane, plus a continuous parent file. "Recording with QuickPunch is nondestructive" |
+| Ardour | `Layered` by default, where the new region is opaque and only the top layer plays; `Non-Layered` trims the regions underneath |
+| Cubase and Nuendo | A project wide choice of `Keep History`, `Cycle History + Replace` and `Replace`, where replacing is of overlapped *events* and not of files |
+| Studio One | Non destructive, and auto crossfaded at its edges with the existing event |
+| Reaper | Layered takes by default; trimming is the opt in named "tape mode" |
+
+The decisive quote for the trim model is Ardour's rather than Reaper's, and
+that is a correction to what the 10-21 entry assumed. Ardour publishes the
+model completely, including the reversibility: existing regions are trimmed
+"so that there are no overlaps", and this "does not affect the previously
+recorded audio data, and trimmed regions can be expanded again at will."
+(The Ardour Manual, *Track Modes*.) Reaper's own user guide chapters on
+punch recording are unreachable: the PDF's text extraction stops inside
+chapter 1, the Cockos wiki now serves a content free stub, and the forums
+are behind a script gate. So Reaper is cited here only for the fact that
+trimming is called "tape mode" and is opt in, which comes from Cockos' own
+Quick Start Guide. The backlog named the less authoritative of its two
+sources, and the research found the better one.
+
+Worth keeping from Apple, because it is the strongest single statement:
+Logic's **MIDI** list carries `Merge`, `Overlap` and a whole `Replace`
+submenu, and its **audio** list carries none of them. The studio that models
+overlapping recordings most thoroughly offers merge semantics for MIDI and
+deliberately does not expose them for audio.
+
+Three things the studios agree on, which are therefore standard rather than
+a choice:
+
+1. The punch must not sum with what is underneath.
+2. The audio file underneath is not modified. Every default is non
+   destructive, and where destruction exists it is a separately named mode
+   documented as irreversible: Pro Tools `DestructivePunch`, Reaper's tape
+   mode, Audacity's punch and roll. Ardour has no destructive mode at all.
+3. The join wants a crossfade, and the studios that automate it do it
+   without asking.
+
+### What was chosen, and why
+
+**Candidate (b), the take folder, through the comp that is already here.**
+`CompModel.h` is already "which take is heard where, and the equal-power
+crossfade at each join", already in seconds rather than beats, and already
+survives a tempo change. A punch is exactly a three segment comp: the
+original up to the punch in, the new take across the punch, the original
+after the punch out. `Clip::compSpans` already turns that into reads and
+`pushArrangement` already turns those into `AudioClipRT`, so **the export
+gets the punch for free**, which is the same argument `CLAUDE.md` already
+records for comping, and the reason this is the cheap model here rather than
+merely the popular one.
+
+The other two were rejected on the sources. Candidate (a), a destructive
+trim, is what every manual warns about, and Avid's own documentation of
+`DestructivePunch` is the best argument against it: it needs every file to
+start at sample 0, needs each file to be at least as long as a preference
+setting, and needs a `PREPARE DPE TRACKS` consolidation pass first, because
+writing in place into an existing file requires the file to already
+physically cover the punch range. Candidate (c), the non destructive trim,
+is well specified by Ardour and would need a second parallel mechanism here
+alongside the comp, for a result the comp already produces.
+
+### The detail that would have been got wrong, and is the point of the night
+
+**The crossfade lies entirely outside the punch range, in the old material.**
+From the Pro Tools Reference Guide v6, Chapter 14: QuickPunch "writes a
+pre-crossfade at the punch-in point (which occurs up to but not into the
+punched region boundary)" and "a post-crossfade at the punch-out point
+(which occurs after the punched region)".
+
+So the geometry is neither of the two obvious readings. The pre-crossfade
+*ends* at the punch in, the post-crossfade *starts* at the punch out, and
+the punched region is left intact end to end:
+
+```
+      pre-crossfade              punched region             post-crossfade
+  |<---- length ---->|                                  |<---- length ---->|
+  ====================+==================================+====================
+                   punch in                           punch out
+   (old material)                (new material)              (old material)
+```
+
+`CompModel.h` centres its crossfade on the join: `CompSpan::fadeIn` and
+`fadeOut` are half widths either side of a boundary, which is right for a
+comp between two takes of the same performance and wrong for a punch. A
+centred fade attenuates the first and last few milliseconds of the take that
+was just punched in, and the attack is usually the reason somebody punched.
+Avid's own advice warns against exactly this: set a crossfade "to prevent
+clicks and pops without removing essential audio".
+
+The fix needs no change to the comp model at all. **Put the comp boundary
+half a crossfade before the punch in, and half a crossfade after the punch
+out.** The centred window then lands in [punch in minus a width, punch in],
+which is the published geometry, and the new take is at full gain for every
+sample of the punch. It is also robust to the comp model narrowing a join
+where there is no room for it: narrowing only shortens the fade and finishes
+it earlier, so the take is still at full gain across the whole punch, and
+what gets consumed is old material before the punch in, which is what Avid
+describes anyway.
+
+### Capture the whole pass, present only the punched span
+
+Unanimous, and it is what makes the geometry above possible at all. Avid:
+"Pro Tools begins recording a new file when playback begins, automatically
+generating clips in that file at each punch in/out point", and "the complete
+audio file appears in the Clips List along with the QuickPunch created
+clips". Logic captures "approximately one bar before the punch-in locator"
+and says why: "This allows the start point of the region to be adjusted
+later, enabling you to hear the lead-in, if desired."
+
+Three published behaviours depend on it and none is available without it:
+the pre-crossfade needs new take material in a span the user did not punch;
+dragging the punch open afterwards needs something to reveal; and not
+starting or stopping the recorder mid pass is what gives Pro Tools
+"instantaneous monitor switching on punch-out" with no dropout. That last
+one maps straight onto this project's rule that the audio thread must not
+allocate: open the file when the transport rolls, never at the punch point.
+
+The happy consequence is that **the engine needs no change**. The recorder
+here already writes the whole pass, and `RecordAlign.h` already lands it. A
+punch is entirely a question of where the take goes and what the comp
+selects, which is why this lands as arithmetic plus one branch in
+`finishAudioRecording` rather than as a new record mode in the device
+callback.
+
+### The crossfade length: two published figures, and a choice between them
+
+The 10-15 entry's note that Avid "suggests 10 ms for its punch crossfade" is
+correct, and the source is now pinned. It is not the Auto Region Fade
+preference: it is `Quick Punch/Track Punch Crossfade Length`, under Setup >
+Preferences > Editing, Fades. Avid's current user guide says "10ms is a good
+starting point". The Pro Tools Reference Guide v6 said "A good
+general-purpose crossfade length for punches is 4 milliseconds". Audacity's
+punch and roll publishes 10 ms as its actual default. Avid publishes no
+default and no range for the preference itself, which was looked for and not
+found.
+
+So 10 ms is a choice between two published suggestions rather than a
+specification, and it is recorded as such in the header. It is used as the
+folder's `crossfadeMs` for a punch, where the existing comp default would
+otherwise apply.
+
+One more figure from the same v6 page, kept because it is a specification in
+its own right and is deliberately not implemented tonight: with the written
+crossfade set to zero, "Pro Tools always executes a 4 millisecond 'monitor
+only' crossfade (which is not written to disk)". That is a real published
+floor on the monitor path and this studio's monitor path is the one with the
+compensation exemption on it. Noted below as left for later.
+
+### The punch range: locked to the loop locators, which is a published default
+
+Two camps. Cubase, Logic, Ardour and Sequoia all have a dedicated punch
+locator pair. Pro Tools, Studio One and Reaper use the ordinary timeline or
+loop selection: Reaper's record mode is literally named `Time selection auto
+punch`, and Studio One's Auto Punch procedure sets "the Left Locator" and
+"the Right Locator", which are the same two locators its loop recording
+uses.
+
+Cubase has both, and its default is the one taken here: "The punch in
+position is locked to the left locator position and the punch out position
+to the right locator position", with a `Lock Punch Points to Locators`
+toggle that makes them independent. So **the punch range is the loop range**
+for now, which is Studio One's behaviour exactly and Cubase's out of the
+box, and it means no new persisted range, no new ruler lane and no new
+dragging. Unlocking it is the obvious next step and is recorded below rather
+than half built.
+
+Ardour's one sided punch is worth having and is cheap: "In only" records
+"from the In marker on, without an end boundary" and "Out only" records
+"until the Out marker, without a beginning boundary". Both are in the
+arithmetic tonight.
+
+### Loop and punch together
+
+Allowed, following the two studios that publish a behaviour and agree on it.
+Cubase in cycle mode: "recording is stopped at the punch out position and
+resumed at the punch in position", and under `Cycle History + Replace` "all
+takes from the current cycle recording are kept". Logic: on each pass "only
+events or audio that falls within the area defined by the autopunch locators
+is recorded", and cycle mode "allows you to practice as many times as you
+like before performing the final take". Pro Tools forbids the combination,
+and its courseware lists "Loop playback not available" as a QuickPunch
+disadvantage, but that is one against two and the two agree on the meaning:
+every pass punches the same span and the passes become takes. That is what
+the take folder here already does with loop passes.
+
+### What was rejected, and why
+
+- **Summing the punch with what is underneath.** Nobody ships it. It is the
+  current behaviour by accident rather than by choice, and it is what this
+  night exists to replace.
+- **A destructive punch.** Rejected on Avid's own documentation of what it
+  costs, above. No studio makes it the default and Ardour has removed it.
+- **Candidate (c), the non destructive trim.** Well specified by Ardour and
+  genuinely good, but it needs a second mechanism parallel to the comp for a
+  result the comp already gives, and it would not get the export for free.
+- **A dedicated punch locator pair, tonight.** The majority of the
+  professional tools have one and it is the better end state, but Cubase's
+  default and Studio One's only behaviour are both "the loop locators", so
+  shipping that first is following a published default rather than cutting a
+  corner. Deferred deliberately, with the unlock named.
+- **Centring the crossfade on the punch point.** The intuitive reading, and
+  it is wrong against the only published statement of the geometry. Recorded
+  as rejected because it is what a later night would otherwise "simplify"
+  the shifted boundaries into.
+- **A Pro Tools style parent clip in a clip list.** The whole pass file is
+  written and adopted, which is what matters, but exposing the parent file as
+  a separate browsable object is a different feature and not one anybody is
+  short of here.
+- **Reaper as a source for anything but two option names.** Its punch
+  chapters, its trim behind section and its overlapping items section are all
+  unreachable, and the wiki is gone. Flagged so a later night does not spend
+  the time again: Reaper's user guide PDF truncates after chapter 1 through
+  the fetch tool, not merely before the MIDI editor chapter as the 11-05
+  entry found.
+
+### What could not be sourced, named as such
+
+- A published default or range for `Quick Punch/Track Punch Crossfade
+  Length`. Looked for in four Avid documents.
+- Pro Tools' default pre-roll and post-roll values, and whether they default
+  to enabled.
+- Which `Overlapping Track Recordings > Audio` option Logic defaults to.
+- Cubase's pre-roll and post-roll *units*, which two versions of the manual
+  decline to state.
+- Studio One's punch crossfade length, which the manual says is "very small"
+  and does not quantify.
+- What happens when a loop range and a punch range are both active, in
+  Studio One, Ardour and Reaper.
+- The audio version of Avid's "Punch Recording Over a Specified Range"
+  topic. Only the MIDI one was reachable, so the rule that nothing is
+  recorded before the punch in point is quoted from the MIDI page and is
+  unverified for audio. It does not matter here, because this design captures
+  the whole pass deliberately, but it is not to be cited as an audio source.
+
+### Deliberately left for later
+
+- **Unlocking the punch range from the loop locators**, which is Cubase's
+  `Lock Punch Points to Locators`. The arithmetic tonight takes a punch range
+  as two numbers, so this is a persisted pair and a ruler lane and nothing
+  else.
+- **The 4 ms monitor only crossfade** at the punch boundaries, from the v6
+  Reference Guide. It belongs on the monitoring path, which is the one with
+  the delay compensation exemption on it, and it is a real published
+  behaviour rather than a nicety.
+- **Pre-roll as a transport feature.** The recorder already keeps what it
+  captured before the record point and reports it as the pass's pre-roll, so
+  the material the pre-crossfade needs is there whenever the transport rolled
+  before the punch in. Rolling the transport back automatically, with a
+  published figure to roll back by, is separate. Logic's "approximately one
+  bar" is the only published DAW figure found and is the one to use.
+- **Post-roll, and Cubase's prerequisite for it.** Post-roll has no meaning
+  unless the transport stops by itself, which is why Cubase's own procedure
+  begins "Activate Stop after Automatic Punch Out". Worth keeping together
+  when either is built.
+- **Punching into a clip that is already a take folder.** Tonight's
+  arithmetic handles it, but the chooser in `finishAudioRecording` only looks
+  for the simple case plus the folder it already knows how to extend.
+
+---
+
 ## 2026-11-06, later the same day: the question nine days of audits had not asked the tuner
 
 The entry below records the tuner merging, and that its audits "cost more than
