@@ -42,7 +42,12 @@ blindly. Newest first.
 
 ## 2026-11-07: punch recording, and the crossfade that must not touch the punch
 
-### Status: built, tested, mutation tested, audited, fixed
+### Status: merged
+
+Pull request **#73**, squash merged as `fdb3d1e` on 2026-11-07. The `tests` job,
+`ubuntu-latest` and `windows-latest` were all green on the head that merged, and
+macOS was still building, which is the case the nightly rule allows for. The
+release notes went in behind it.
 
 Punch in and punch out recording has been deferred on eight separate nights:
 10-08, 10-13, 10-15, 10-21, 10-22, 10-27, 10-28 and 11-06. Every entry says
