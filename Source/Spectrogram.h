@@ -82,7 +82,16 @@ public:
         if (fft.getSize() != newFftSize || newHop < 1 || newHop > newFftSize / 2
             || newSampleRate <= 0.0)
         {
+            // Everything the last clip left behind goes too. Clearing the size
+            // alone leaves `getNumFrames` and `getAnalysedLength` reporting a
+            // clip analysed at a resolution this no longer has, while
+            // `isPrepared` says no, and a caller should not have to know that
+            // state exists. It is the half reset CLAUDE.md warns about in the
+            // rule on new state, in the small.
             fftSize = 0;
+            frames.clear();
+            numFrames = 0;
+            analysedLength = 0;
             return false;
         }
 

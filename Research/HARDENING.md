@@ -7,6 +7,272 @@ Newest first.
 
 ---
 
+## 2026-11-05: the resynthesis after a spectral repair
+
+### What was looked at
+
+`Source/Spectrogram.h`: the short time analysis and the weighted overlap-add
+that puts a clip back together after an edit. It is the floor under the
+spectral editor, and the half of it that fails quietly is the resynthesis.
+
+Nothing in the arithmetic turned out to be wrong. The test over it had a large
+hole, and it was in the one place the header exists for. One small
+inconsistency in `prepare` was fixed.
+
+### The hole: a round trip over untouched frames cannot see the taper
+
+Every reconstruction check in `Tests/SpectrogramTest.cpp` ran over frames that
+nothing had modified. That case is degenerate, and it is worth writing out why,
+because it is not obvious from reading either file.
+
+Call the analysis window w. `synthesise` accumulates
+`sum(n) = sum over f of w(i) b_f(i)` and `envelope(n) = sum over f of w(i)^2`,
+and divides. With the frames untouched, `b_f(i)` is exactly `w(i) x(n)`, so
+
+    sum(n) = x(n) * sum of w(i)^2 = x(n) * envelope(n)
+
+and the division returns `x(n)` exactly, at every sample, head and tail
+included. Nothing about that depends on what power of w the synthesis stage
+multiplies by. Put w^0 in and accumulate w^0 in the envelope and the round trip
+is still exact. Put w^2 in and accumulate w^3 and it is still exact. The same
+number divides out whatever it multiplied in.
+
+So the round trip, the head and tail check and the sample rate and length sweep
+together pinned the analysis window, through the overlap-add constant that
+`overlapEnvelope` measures, and said nothing whatever about the synthesis
+window. Which is the whole reason this is weighted overlap-add rather than
+plain overlap-add.
+
+Dropping the synthesis window and the square in the envelope to match, which
+turns WOLA into OLA, passed all eight checks in the file. So did a triangular
+synthesis window, the window applied twice, its square root, and a scale error
+of one part in a million.
+
+### What that mutation actually does, measured
+
+It is not a no-op, and it took three probes to find a signal. The first two are
+worth recording so nobody repeats them:
+
+- A stationary edit, the same band gated in every frame, is identical between
+  the two: both read the kept tone at -0.00 dB and the gated tone 70.6 dB down.
+- An edit localised in time, a burst gated over the frames it occupies, is also
+  effectively identical: 0.00891 of the burst left against 0.00973, under 1 dB
+  apart.
+
+The reason is that both forms reconstruct `x` exactly and then add a weighted
+sum of whatever the edit changed, `d_f`. WOLA weights each `d_f` by that frame's
+window and OLA weights them equally, and `d_f` is itself roughly proportional to
+the window, so the two agree to first order. They part company only where `d_f`
+is *not* proportional to the window, which is the time domain aliasing a
+modified spectrum wraps into the edges of its block.
+
+The third probe reaches that directly: analyse silence, set one bin of one
+frame, and look at the shape that comes out. The peak of the burst across the
+window, in sixteenths:
+
+    weighted   0.004 0.017 0.037 0.062 0.087 0.109 0.124 0.130
+               0.130 0.125 0.111 0.090 0.065 0.040 0.019 0.005
+    unweighted 0.098 0.098 0.098 0.098 0.098 0.098 0.098 0.098
+               0.098 0.098 0.098 0.098 0.098 0.098 0.098 0.098
+
+The step between the sample before the edit and its first sample went from
+0.0000 to 0.0977, which is the whole of the burst's peak. Every spectral repair
+would begin and end with a click, at the window boundary of each edited frame.
+That is the fault the header's own first paragraph is about, and it would have
+been reported as the repair sounding wrong rather than as the resynthesis
+sounding wrong.
+
+### What the survivors asked for, and what was written
+
+Seven new checks in `Tests/SpectrogramTest.cpp`.
+
+**`anEditInOneFrameComesOutShapedLikeTheWindow`** is the one that matters. A
+single bin of a single frame is the one edit whose inverse transform can be
+written down without transforming anything: bins b and N-b hold a conjugate
+pair, so the block is `(2A/N) cos(2 pi b i / N)`, and the output has to be that
+windowed and divided by the window sum squared. The window and the envelope are
+both written out independently in the test, from the definition, rather than
+read back from the class, so this is a check and not an echo. It matches to
+7.4e-09 against a peak of 0.13, and it pins the synthesis window, its exponent,
+the envelope, the centring and the frame to sample mapping in one measurement.
+A scale error of one part in a million on the synthesis stage is caught, which
+no round trip at a 1e-5 tolerance can see.
+
+The edit is made in the first frame, one in the middle and the last. The middle
+one alone is not enough, and that is the kind of detail that makes the
+difference between a check and a decoration: in the deep interior the envelope
+is its flat constant of 1.5, so hard coding 1.5 would give the same answer and
+the envelope goes unchecked. At the head and the tail it is 1.25 and climbing,
+which is also where a repair at the start or end of a clip lands.
+
+**`anEditIsTaperedRatherThanDroppedIn`** says the same thing as the complaint
+rather than as algebra: the edit swells out of silence and back into it, and
+touches nothing outside the one window its frame covers. The measure is how loud
+the burst gets in the outer eighth of its window against the middle eighth, and
+it is asserted as a band rather than a ceiling. A ceiling alone says "tapered
+somehow", and the taper has to be this window's and not another: a Hann reaches
+14.6 per cent, a triangular window 27.7 and the window applied twice 2.1, and
+all three leave an untouched round trip exact.
+
+A note for anyone measuring this again. A step between neighbouring samples is
+no use as the measure, which cost a false failure to learn: the burst is a
+6 kHz tone, which at 48 kHz turns over in eight samples, so neighbours differ
+by 70.7 per cent of the peak with nothing wrong at all, against the unweighted
+build's 100. The envelope over an eighth of the window is what tells the two
+apart.
+
+**`theFrameCountIsOnePastTheLastFrameInsideTheClip`** pins `frameCountFor`
+against the two properties it exists for rather than restating its formula: the
+last frame's centre is past the last sample, so the tail is under a window that
+is still opening, and it is the first frame of which that is true, so none is
+wasted.
+
+The first of those has to be a **strict** inequality, and the first version of
+this check was written with "at or past". Write `length - 1` as `q` hops and a
+remainder `r`. The right count is `q + 2`, and `q + 1` satisfies "at or past"
+whenever `r` is nothing, which is every length the hop divides into: every clip
+at a hop of one, every other clip at a hop of two. So taking one off the
+divisor, which is short by a frame at exactly those lengths, passed the check
+written to catch it. Strict admits one count and no other, at every hop and
+length in the sweep. The header's own wording, "one past the frame centred on
+the last sample", was right and the test's was not.
+
+**`theEnvelopeTheTestsMeasureIsTheOneSynthesiseDividesBy`** ties the two
+accumulation loops together. `overlapEnvelope` is a second copy of the loop
+inside `synthesise`, which is the shape CLAUDE.md warns about in the playback
+against export rule, and the closed form above cannot tie them because it never
+calls `overlapEnvelope`. Adding two to the frame count inside `overlapEnvelope`
+alone passed everything else, and made the edge figure this file prints look
+*better* than the truth, 0.667 against 0.576, which is the diagnostic a reader
+would trust. Both are now compared against one envelope accumulated from the
+window, at three hops and five lengths.
+
+**`everyHopThatIsAcceptedReconstructs`** covers the hops the old round trip did
+not. `prepare` accepts anything from one sample to half the window, and
+`impossibleSettingsAreRefused` asserts that half is accepted, but the only hop
+ever reconstructed through was a quarter. A hop of half is where the window sum
+thins to 0.5, the closest anything inside a clip comes to the floor
+`synthesise` divides against, and raising that floor to 0.6, which turns those
+samples into silence, survived the whole file. Hops that do not divide into the
+window are in there too, because a caller may ask for one and an untouched clip
+still has to come back. Worst error 5.96e-08, which is the single precision
+floor.
+
+**`theEnvelopeFloorIsNeverReachedInsideTheClip`** produces the number behind the
+comment above that floor: 0.5, nine orders of magnitude clear of the 1e-9
+guard. Where the minimum lives is now argued rather than sampled. The envelope
+only grows as frames are added, so for a given sample the thinnest
+configuration is the shortest clip containing it, and the fewer frames overlap
+the thinner it gets, so the minimum sits at the largest hop allowed. Swept that
+way over every power of two window from 8 to 4096 and every hop from 1 to half
+the window, the global minimum is exactly 0.5 and is reached only at a hop of
+half the window. The cases in the test are the ones that can reach it. The
+other half of the claim is checked too: asking for more samples than were
+analysed is where the floor does bite, and it gives silence rather than a
+division by nothing.
+
+**`preparingAgainForgetsTheLastClip`** and
+**`aNegativeLengthIsNothingRatherThanNonsense`** close two sequences nothing had
+driven. Changing the window size while looking at a clip is ordinary, and
+leaving the old frame count behind while clearing the frames reports frames
+that are not there, which is an out of bounds read for the next caller to walk
+them.
+
+### The one thing changed in Source
+
+A **refused** `prepare` cleared `fftSize` and nothing else, so
+`getNumFrames()` and `getAnalysedLength()` went on reporting a clip analysed at
+a resolution the object no longer had, while `isPrepared()` said no. The one
+caller, `SpectralEdit::apply`, checks `isPrepared()` first and so was never
+exposed to it, which is why this is an inconsistency rather than a fault. It is
+the half reset CLAUDE.md's rule on new state is about, in the small, and the
+header already claimed a refused request "leaves this unprepared". It now does:
+the frames, the count and the length go with the size.
+
+### Mutation testing
+
+43 mutations, compiled with address and undefined behaviour sanitizers exactly
+as `Tests/run.sh` has them. Two were dropped as duplicates of others once their
+anchors turned out to be ambiguous, leaving **41 applied**.
+
+| | Caught | Survived |
+|---|---|---|
+| Against the test as it was | 25 | 16 |
+| Against the test now | 40 | 1 |
+
+The sixteen that survived the old test, and the judgement on each:
+
+| Mutation | Judgement |
+|---|---|
+| Synthesis window dropped, envelope dropped to match (WOLA becomes OLA) | **Gap.** A click at each end of every repair |
+| Synthesis window applied twice, envelope cubed | **Gap.** Same hole. Measures 2.1 per cent at the window edge against 14.6 |
+| Square root of the window on synthesis, envelope matched | **Gap.** Same hole, the other direction: 38.7 per cent |
+| Triangular synthesis window, envelope matched | **Gap.** Same hole, and the most plausible of them as an edit: 27.7 per cent |
+| Synthesis scaled by one part in a million | **Gap.** Invisible to any round trip at a 1e-5 tolerance |
+| Envelope accumulates the window rather than its square, in `overlapEnvelope` only | **Gap.** The two loops could drift apart |
+| `overlapEnvelope` counts two frames more than `synthesise` | **Gap.** Same, and it flattered the printed figure |
+| One frame too many | **Gap.** A transform per clip on a window entirely off the end, and a column a user interface draws with nothing in it |
+| Frame count off by one in the divisor (`numSamples / hop`) | **Gap.** One extra frame whenever the length is a multiple of the hop |
+| Frame count one off the divisor (`(numSamples - 2) / hop`) | **Gap.** One frame short whenever the hop divides the length, which at a hop of one is every clip in the studio |
+| Envelope floor raised to 0.6 | **Gap.** Silence wherever the overlap thins, at the one hop nothing reconstructed through |
+| A refused `prepare` leaves the last clip's frame count behind | **Gap**, and the source now does not do it |
+| `prepare` does not reset the frame count at all | **Gap.** An out of bounds read for the next caller to walk the frames |
+| A negative length taken at face value | **Gap.** A lie in the accessor a caller sizes a buffer from |
+| Window applied to the wrong sample in `analyse` (off by one) | **Gap.** Caught now by the closed form |
+| Envelope floor raised to 1e-1 | **Genuine no-op**, now with a number behind it |
+
+The last of those is the one that still survives, and it is the right answer.
+Nothing inside a clip gets thinner than 0.5, so a floor anywhere below that
+cannot fire: it is a guard sitting nine orders of magnitude below anything
+reachable, which is what a guard should look like. A floor of 0.6, which is
+above the thinnest real overlap, is caught.
+
+### Checked and found sound
+
+- The reconstruction is exact at every hop `prepare` accepts, including half
+  the window and hops that do not divide into it: worst 5.96e-08 over lengths
+  from one sample to 4096, which is the single precision floor.
+- The overlap-add constants are what the texts say, and the existing test
+  already asserted the harder half of that, that the hops which should not be
+  flat are measurably not.
+- The analysis window is the periodic Hann and the frames are centred. A
+  symmetric window, a Hamming, a sign flip, a window read one sample out and a
+  window read backwards are all caught.
+- The closed form's one blind spot, found by the audit and worth knowing: with
+  a real valued amplitude in the edited bin, dropping the conjugate in
+  `RealFFT::inverse` is invisible to it, because the conjugate of a real number
+  is itself. The existing untouched round trip catches that one. A real edit is
+  `bins[b] *= gain`, which keeps the phase, so the bins a repair produces are
+  complex and this check exercises only the real half.
+
+### Audited by somebody who did not write it
+
+The `auditor` agent read the change without having written it, and it earned
+its place. Three of the four things it was pointed at held up. The fourth did
+not: it found that the frame count check admitted a one frame short
+implementation at every length the hop divides into, proved it by mutation, and
+worked out the strict inequality that fixes it. It also found that the claim
+made here that the two accumulation loops "cannot drift apart silently any
+more" was false as first written, that the taper thresholds were about twice
+what correct code measures and admitted a triangular window, that a comment
+said 0.4 per cent where the code printed 14.6, that the mutation ledger did not
+add up, and that four `check` calls standing in front of out of bounds writes
+did not return. All of that is fixed above, which is the second time the
+auditor has caught something in a change that its author had already convinced
+themselves of.
+
+### Left alone deliberately
+
+`Source/Fx/Unit.h` is the only JUCE free header in `Source` with no test at
+all, and it was the first candidate for tonight. Nothing includes it: no file
+in `Source` or `Tests` mentions it, and the `Fx/Plugin.h` its own documentation
+says wraps it does not exist. It is infrastructure that landed ahead of its
+consumer, in the bell pull request, and a test over it would be protecting
+nothing that ships. Worth a night once something uses it, and worth knowing
+that its header comment currently points at a file that is not there.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
