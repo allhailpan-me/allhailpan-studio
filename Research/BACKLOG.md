@@ -40,6 +40,158 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
+
+### Status: in progress
+
+The 11-03 entry called this "the biggest single gap found tonight" and deferred
+it because two of the files it reaches were open in another pull request. They
+are both merged now and the engine is free, so this is the night.
+
+What was there before tonight: nothing. `SongLength.h` carried
+`kBeatsPerBar = 4.0` as a constant, `MidiFileIO.cpp` wrote a fixed
+`timeSignatureMetaEvent (4, 4)`, the play head handed to every hosted plugin
+was a default constructed `juce::AudioPlayHead::TimeSignature`, and twenty odd
+call sites across the playlist, the piano roll, the rack and the transport
+divided or multiplied by a literal `4.0` to get from beats to bars. A song in
+3/4 or 6/8 could be played, because playback never asks what a bar is, and
+could not be written, because every bar line, every click, every snap and every
+position readout was wrong.
+
+### What was looked at
+
+The `dsp-researcher` agent was sent at seven questions, and came back with five
+answered from primary sources and two marked unknown, which is the right shape
+for an answer. The full report is summarised here because two of its findings
+changed the design and one of them found a bug that is already shipped.
+
+**The denominator does not touch the tempo.** This was the question that
+decides every conversion in the feature, and the answer is quarter notes per
+minute, always. Apple states it outright: "The tempo indicator in the LCD
+always relates to quarter notes, even if eighth notes are chosen as the
+denominator for the time signature", and on the same page, "Changing the time
+signature does not affect project playback, but does determine the time grid in
+the Tracks area and MIDI editors." (Logic Pro User Guide, *Set the project time
+signature*.) Steinberg's own VST 3 `ProcessContext` expresses every musical
+quantity in quarter notes and carries the signature as separate information.
+Ardour's `Temporal::Tempo` carries a note type independent of the meter
+denominator and documents its default as "Note Type (default '4': quarter
+note)".
+
+So in 6/8 at 120 bpm a bar is 3 quarter notes and 1.5 seconds, not 3.0. The
+rule that falls out of it, and the one the test exists to defend: **the
+denominator may not appear in any conversion to seconds.** Seconds per stored
+beat stays `60 / bpm` with nothing else in it.
+
+Two studios do something else and neither is a counterexample. Pro Tools has a
+per tempo event "Tempo Resolution (BPM Rate)" which, following a dotted quarter
+click in 6/8, makes 120 bpm mean 120 dotted quarters: a display and entry
+reference rather than a different time base. Ardour did count denominator units
+before 2008, in Paul Davis' own words on their forum, and changed it.
+
+Cubase, Reaper and Live publish no answer to this question at all, and the
+researcher marked them unknown rather than inferring from three manuals that do
+not say. Recorded so nobody re-reads those three looking for it.
+
+**The bar|beat display counts denominator units, so the storage and the display
+disagree on the word "beat" and that is correct.** Logic, again explicitly: "A
+beat corresponds to the denominator in the time signature." Ardour's
+`temporal/tempo.h` names both coordinates and keeps them apart deliberately:
+QUARTER NOTES, linear, and BEAT, "a fraction of a PULSE. Defined by the meter in
+effect ... This means that measuring time in BEATS is potentially non-linear".
+So 6/8 reads 1.1 to 1.6 and 7/8 reads 1.1 to 1.7.
+
+That naming collision is where this feature goes wrong, so `Meter.h` never uses
+the bare word: everything it computes is in quarter notes or in display beats,
+named as such.
+
+**A bug already shipped, found by reading JUCE rather than by looking for it.**
+`juce::MidiMessage::timeSignatureMetaEvent` returns
+`{ 0xff, 0x58, 0x04, numerator, powerOfTwo, 1, 96 }`. The specification says the
+last two bytes are "the number of MIDI clocks in a metronome click" and "the
+number of notated 32nd-notes in a MIDI quarter-note (24 MIDI Clocks)", which for
+4/4 with a quarter note click are 24 and 8. JUCE writes 1 and 96: a click every
+twenty fourth of a quarter note, and a quarter note notated as twelve whole
+notes. Every MIDI file this studio has ever exported carries those two bytes.
+Nothing reads them in practice, which is why it has gone unnoticed, and that is
+not a reason to keep writing them. The event is assembled by hand now.
+
+The spec's own 6/8 example is `FF 58 04 06 03 24 08`, and the widely mirrored
+jglatt copy of that example gives the cc byte as `18`, which is 24 decimal, one
+quarter note, contradicting its own prose. The spec's `0x24` is 36 decimal, a
+dotted quarter, three eighths, which is what the prose says. Noted because that
+page is the first hit for anybody checking a 6/8 meta event.
+
+**Nobody publishes a default click pattern for a compound meter.** Cubase
+publishes its 4/4 default and only that ("the click level of the first click is
+high, while the level of the other beats is low"); Logic, Pro Tools and Reaper
+publish the controls and no defaults; Ableton and Ardour could not be sourced at
+all. Pro Tools is explicit that it accents beat 1 and nothing else. So the click
+here sounds once per denominator unit with beat 1 accented, and the comment says
+in as many words that this is a choice rather than a standard, with Logic's
+separate `Group` click layer named as the way to add the compound pulse later.
+
+### What was chosen, and why
+
+**One signature for the project, stored as a map with one entry, reached
+through accessors that take a position.** Every studio looked at allows the
+signature to change mid song, with a primary citation for each, so a single
+signature is not the finished feature and nobody will mistake it for one. The
+reason to ship it anyway is that the map is the smaller half of the work: the
+expensive part is the twenty odd call sites, and they are the same call sites
+either way.
+
+The trap the researcher named is worth quoting, because it is the whole reason
+the interface looks the way it does: a no argument `beatsPerBar()` makes every
+call site a site that has to be found again when the map arrives, and the ones
+that are missed are silently wrong rather than failing to compile. So
+`Meter.h` ships `meterAt (double quarterNotes)` and
+`barLengthQuarters (double quarterNotes)` from the first commit, with an
+implementation that ignores its argument. The argument is free now and is the
+whole migration later.
+
+Cubase's first signature event is the shape copied for the entry itself: "The
+first signature event is always positioned at bar 1. You cannot change this."
+
+**Denominators 1, 2, 4, 8, 16 and 32, and numerators 1 to 99.** That is
+Ableton's published denominator set widened by 32, which Ardour's manual uses
+as an example ("complex time signatures such as 11/8 or 27/32"), and the
+numerator bound that Ableton and Avid both publish. Non powers of two are
+refused, and the reason to cite is external rather than a preference: the
+Standard MIDI File `dd` byte is a log, so a 4/3 meter has no byte, and
+accepting it in the project would mean exporting a file that says something
+else.
+
+### What was rejected, or deliberately left for later
+
+- **A full meter map.** The map is the next night's work and the interface is
+  already shaped for it. Three things to decide before writing it, all from the
+  research: whether a change may fall mid bar (Pro Tools refuses, Ableton allows
+  and then offers to repair the "fragmentary bar"), that bar numbering is
+  monotonic while BBT is not, and that the map wants `WarpMap.h`'s
+  normalisation discipline rather than a second shape.
+- **Logic's `Group` click layer**, the separate dotted quarter pulse in a
+  compound meter. It is an additional click generator rather than a different
+  click rate, which is the thing to get right, and it wants a preference and a
+  second click voice.
+- **Pro Tools' per meter click note value**, and Cubase's per beat accent
+  levels. Both are real published controls and both want a click pattern editor
+  rather than an arithmetic change.
+- **Composite signatures**, Cubase's "3+3+2". Worth knowing before anybody
+  reaches for it that in Cubase these are notation only: "This does not affect
+  the metronome or anything else, only beams and ties."
+- **Tempo referenced to anything but the quarter note**, which is Pro Tools'
+  Tempo Resolution. Rejected rather than deferred: it changes what the number in
+  the transport means, and the one thing every source here agrees on is that the
+  stored time base is quarter notes.
+
+### What is left to do
+
+Everything below the research. Written down now so the pull request can be
+picked up if this run is cut off.
+
+---
+
 ## 2026-11-07: punch recording, and the crossfade that must not touch the punch
 
 ### Status: merged
