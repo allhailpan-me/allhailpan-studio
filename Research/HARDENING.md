@@ -32,10 +32,210 @@ changing, and not `AudioEngine.*`, `MainComponent.*`, `Meter.h`,
 `PlaylistComponent.*`, `Project.h`, `ProjectIO.cpp` or `SongLength.h`, which
 open pull request #74 is changing.
 
-### Status
+### One thing wrong, and it is in the test's own documentation
 
-In progress. This note is committed before the work so that an interrupted
-run leaves a record of what was being audited.
+No fault in the arithmetic. 91 mutations, every one built with the sanitizers
+exactly as `Tests/run.sh` has them, and nothing in `NoteSelection.h` computes
+a wrong answer. Said plainly because it is the result.
+
+What is wrong is a claim. `Tests/NoteSelectionTest.cpp` opens with a section
+headed "Two deliberate breakages survive on purpose", and the first of them
+is not true:
+
+> Clamping each note inside `applyMove` produces identical output, which is
+> worth saying out loud because it is the headline fault this whole header
+> exists to prevent.
+
+It does not produce identical output. Clamping the pitch per note inside
+`applyMove` is caught, and so is clamping the start:
+
+```
+CAUGHT  applyMove: each note clamped on the way out
+          <- FAIL a moved group keeps its intervals
+CAUGHT  applyMove: each note's START clamped on the way out
+          <- FAIL a moved group keeps its rhythm (-1.662 against -3.866)
+```
+
+The same file says so thirty lines further down, in the generator that makes
+it true, which plants pitches at 128 to 140 and at -12 to -1 and starts
+before the origin, with the comment: "without them the claim that nothing is
+clamped per note on the way out is untested: a per note clamp can only be
+seen through a note that is outside the clamp's own range". That is exactly
+right, and it is why the clamp is caught: a note that arrived from a file
+outside the range gets lifted into it while the rest of the group does not,
+and the interval assertion sees it over 60000 trials.
+
+So two passages in one file contradict each other and the wrong one is the
+one a reader meets first. The consequence is not academic. It tells the next
+person that the single fault this header exists to prevent is invisible to
+the test, when it is the thing the test is best in the world at catching.
+Somebody who believed it would stop looking for the check that is already
+there, and might add that clamp to `applyMove` thinking it harmless. The
+comment is corrected rather than deleted, because which breakages survive is
+worth recording; it just has to be the ones that do.
+
+The other two claims in that section hold. `remapAfter` with `upper_bound`
+and the deletion of the rounding correction inside `snappedDeltaWithin` both
+survive, for the reasons given there, and both were rechecked here.
+
+### Four gaps, two of which a guard would not have survived
+
+**`remove` is never asserted to remove anything.** Its body can be deleted
+outright and the whole suite passes:
+
+```
+SURVIVED  remove: body deleted outright
+SURVIVED  remove: upper_bound, so the wrong member goes
+```
+
+The second is the same no-op by another route: with `upper_bound` the
+iterator lands past the member, `*at == index` is false, and nothing is
+erased. The only thing asserted about `remove` today is that it is
+idempotent, and a function that does nothing is perfectly idempotent. That
+is a tautology of the kind the night of 2026-10-28 found in the fader law:
+an assertion that cannot fail in the direction it was written for.
+
+It is not dead code. `PianoRollComponent.cpp:573` is Select Inverse, which
+builds `all()` and removes each selected index from it, so a `remove` that
+did nothing would make Select Inverse select everything, including what was
+already selected.
+
+**An absolute snap with no reachable grid line is never asserted to stand
+still.** `snappedDeltaWithin` has a branch for the case where no position on
+the grid progression keeps the group inside its limits, and the answer is to
+stand still. Both ways of getting that wrong survive:
+
+```
+SURVIVED  nothing-reachable returns lo instead of standing still
+SURVIVED  nothing-reachable returns hi instead of standing still
+```
+
+The branch is not unreachable, which was the first guess and was wrong. It
+is reached, with a limit that is nowhere near zero:
+
+```
+BRANCH-WITH-NONZERO-LO  lo=-0.141433 hi=0  grid=0.333333 phase=-0.546167
+BRANCH-WITH-NONZERO-HI  lo=0  hi=0.0286242 grid=0.25  phase=-15.0993
+```
+
+It is reached in `testGroupMovePreservesShape`, which is the test that
+imposes a `maxStart`, and that test asserts intervals, rhythm and the limits
+but says nothing about the grid. The test that does assert the grid,
+`testSnapModes`, leaves `maxStart` at infinity, so `kMax` is infinite, so
+`kMin > kMax` never happens there and the branch is never reached under the
+one assertion that would see it. Each test is individually reasonable and
+between them the property falls down the gap.
+
+With either mutation the group slides up to a grid step to the exact edge of
+its travel and lands off the grid, on a drag that absolute snapping says
+should not move it at all: the one thing absolute snapping promises is that
+the grabbed note is on a line.
+
+**The velocity ceiling's bound against zero is unchecked, while its floor
+twin is caught.** The generator plants velocities at both rails and below the
+floor, but never above the ceiling:
+
+```
+CAUGHT    velocity group: floor bound not taken against zero
+SURVIVED  velocity group: ceiling bound not taken against zero
+```
+
+`hi = std::max (0.0, kMaxVelocity - highest)` can only differ from
+`kMaxVelocity - highest` when some selected note is already louder than the
+ceiling, and nothing in the test ever is. The floor side is planted on
+purpose, with a comment saying why, so this is half an invariant tested
+rather than an oversight about the whole of it. Worth closing for a second
+reason: with the bound removed, `hi` goes negative while `lo` stays at or
+below zero, and `std::clamp (amount, lo, hi)` with `lo > hi` is undefined
+behaviour rather than a wrong answer.
+
+**`resolveOverlaps` is the one function whose stale index guard nothing
+checks, and its report can over-count.** Every other such guard in the
+header is caught, three of them by the address sanitizer:
+
+```
+CAUGHT    extentBeats: stale index trusted        <- ASAN
+CAUGHT    velocity group: stale index trusted     <- ASAN
+CAUGHT    length group: stale index trusted       <- ASAN
+CAUGHT    applyMove: stale index trusted          <- ASAN
+CAUGHT    duplicate: stale index trusted
+SURVIVED  overlaps: stale selection index trusted
+```
+
+`testStaleIndicesAreIgnored` walks `planMove`, `applyMove`, `applyVelocity`
+and `applyLength` and stops there. And the report is read: the roll puts it
+on screen at `PianoRollComponent.cpp:481`, so a wrong count is a number
+shown to the producer, which is this project's recurring shape.
+
+```
+SURVIVED  overlaps: infinity reset dropped on its own
+SURVIVED  PAIR: infinity reset dropped AND the doomed guard dropped
+```
+
+The first is a genuine no-op: the `! contains (doomed, other)` guard catches
+it. The pair is not. With both gone, a note that one mover tail-cuts and a
+later mover then covers at the start is counted in `report.trimmed` as well
+as deleted, so the roll reports a trim that never happened to a note that is
+no longer there.
+
+### The eight survivors that are genuine no-ops, and why
+
+- **`kMin` by `floor` instead of `ceil`**, and **`kMax` by `ceil` instead of
+  `floor`**, and **deleting the rounding correction**, all three survive
+  alone and are three statements of one guarantee. `floor` undershoots by at
+  most one step and the correction line puts it back; `ceil` is already right
+  so deleting the correction changes nothing. Removing one of each pair is
+  caught at once, which is what says the test can see a breached limit
+  through the snap path:
+  ```
+  CAUGHT  PAIR: correction deleted AND kMin by floor
+            <- FAIL a note that was in range is not moved before the start
+  CAUGHT  PAIR: correction deleted AND kMax by ceil
+            <- FAIL a note that was in range is not moved past the end
+  CAUGHT  snap clamp removed entirely
+  ```
+  So the belt and the braces are both real, and neither is load bearing on
+  its own. Left exactly as they are.
+- **`transpose` asking for `Snap::absolute` instead of `Snap::off`.**
+  Provably identical rather than untested: `transpose` leaves `beats` at zero
+  and `anchorStart` at zero, so `phase` is zero, and `lo <= 0 <= hi` by
+  construction means `kMin <= 0 <= kMax`, so `round (0)` clamps to zero and
+  the delta is zero. Both paths return zero beats and `beatsLimited` false.
+- **`remapAfter` with `upper_bound`.** As the test already documents: any
+  index in the erased set is skipped by the `contains` guard one line above,
+  and for every index that reaches the count the two bounds agree.
+- **A covered start trimmed rather than deleted, in `resolveOverlaps`.** The
+  stub rule does the deletion anyway. `mover.start <= victim.start` makes
+  `earliestCut - victim.start` zero or negative, which is under any floor, and
+  a cut that leaves less than a note behind is already a deletion.
+- **The negative length guard on `victimEnd`**, and **the one on
+  `moverEnd`.** Both only differ when a length is negative, and a negative
+  length puts `victimEnd` before `victim.start`, which leaves the tail test
+  false exactly as the guarded version does. Nothing in this header can
+  produce a negative length, so the guards are for a loaded file and are
+  correct; there is simply no observable difference.
+- **The infinity reset in `resolveOverlaps` on its own**, as above.
+
+### Mutation testing
+
+91 mutations in six batches, all compiled with
+`-fsanitize=address,undefined -fno-sanitize-recover=undefined` as
+`Tests/run.sh` has them, plus a control run with no change to prove the
+harness was running the real test.
+
+| Area | Tried | Caught |
+|---|---|---|
+| The marquee and the selection as a set | 17 | 15 |
+| Moving a group, the snap progression and the limits | 28 | 22 |
+| Velocity, length, erase, duplicate | 26 | 24 |
+| Overlap resolution | 24 | 19 |
+| Stale index guards | 4 | 4 |
+
+Aimed at what would be a real mistake: a bound not taken against zero, a
+bound measured from the wrong end of the chord, `ceil` for `floor`, a phase
+sign, half open for closed at a boundary, the earliest cut for the latest,
+additive for multiplicative, a guard deleted, two passes swapped so that
+indices move under them.
 
 ---
 
