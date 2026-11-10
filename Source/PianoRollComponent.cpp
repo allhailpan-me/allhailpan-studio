@@ -1045,13 +1045,14 @@ void PianoRollComponent::paint (juce::Graphics& g)
         const double barBeats  = project.meter.barLengthQuartersAt (0.0);
         const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
-        // Six pixels apart at the least: a quarter of a display beat is a
-        // hundred and twenty eighth of a quarter note in a 1/32 signature, and
-        // the fallback has to stay drawable rather than drawing a line per
-        // pixel. The old code's 0.25 was in quarters and was safe by accident.
-        const double fallback = 0.25 * beatBeats;
-        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize
-                           : std::max (fallback, fallback * std::ceil (6.0 / std::max (1.0e-9, fallback * ppb)));
+        // The snap grid where it is far enough apart to read, and otherwise
+        // the finest spacing that is, down to a step. See
+        // Meter::gridStepQuarters: a step is a quarter of a display beat, so
+        // it divides one, which is what keeps the bar lines on the grid.
+        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0)
+                           ? snapSize
+                           : project.meter.gridStepQuartersAt (0.0, ppb, 6.0, 0.25 * beatBeats);
+
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
             const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;

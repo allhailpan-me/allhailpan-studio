@@ -572,12 +572,11 @@ void MainComponent::applyTimeSignature (const Meter::Signature& signature)
     playlist.refresh();
     pianoRoll.repaint();
 
-    // refresh rather than repaint: the rack's "Bar N" readout and its own
-    // controls are set in refresh, so a repaint left the bar number saying
-    // what it said under the old signature until somebody left the view and
-    // came back. The modulator panel rebuilds its rate menu, where "1 bar" is
-    // a bar of the signature.
-    rack.refresh();
+    // refresh rather than repaint, because the modulator panel's rate menu is
+    // built there and a label in it reads "1 bar" only in a signature whose
+    // bar is that many quarters. The rack is deliberately not refreshed: it
+    // does not follow the signature at all, and the note on rackLengthBeats
+    // in Project.h says why that is tonight's answer.
     modPanel.refresh();
     markDirty();
 }

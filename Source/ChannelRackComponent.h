@@ -3,7 +3,6 @@
 #include "Project.h"
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
-#include <cmath>
 
 //==============================================================================
 /** The channel rack: one row per instrument, one column per step.
@@ -77,13 +76,8 @@ public:
         for (auto* box : { &stepsBox, &barsBox })
             addAndMakeVisible (box);
 
-        // Note values rather than "16 steps/bar", because a step is a note
-        // value: sixteen 1/16 steps fill a 4/4 bar and twelve fill a 6/8 bar,
-        // so the old label was only true in 4/4. The stored number is
-        // unchanged, so no saved project moves.
-        stepsBox.addItemList ({ "1/8 steps", "1/16 steps", "1/32 steps" }, 1);
-        stepsBox.setTooltip ("How long a step is. Sixteen 1/16 steps fill a 4/4 bar "
-                             "and twelve fill a 6/8 bar.");
+        stepsBox.addItemList ({ "8 steps/bar", "16 steps/bar", "32 steps/bar" }, 1);
+        stepsBox.setTooltip ("How finely the bar is divided");
         stepsBox.onChange = [this]
         {
             const int steps[] { 8, 16, 32 };
@@ -103,14 +97,14 @@ public:
         addButton (prevBar, "<", "Move the pattern a bar earlier");
         prevBar.onClick = [this]
         {
-            project.rackStart = std::max (0.0, project.rackStart - project.rackBarBeats());
+            project.rackStart = std::max (0.0, project.rackStart - 4.0);
             commit();
         };
 
         addButton (nextBar, ">", "Move the pattern a bar later");
         nextBar.onClick = [this]
         {
-            project.rackStart += project.rackBarBeats();
+            project.rackStart += 4.0;
             commit();
         };
 
@@ -136,7 +130,7 @@ public:
         const int barsIndex = project.rackBars == 2 ? 2 : project.rackBars == 4 ? 3 : 1;
         barsBox.setSelectedId (barsIndex, juce::dontSendNotification);
 
-        positionLabel.setText ("Bar " + juce::String ((int) project.meter.barBeatAt (project.rackStart).bar),
+        positionLabel.setText ("Bar " + juce::String ((int) (project.rackStart / 4.0) + 1),
                                juce::dontSendNotification);
 
         const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
@@ -182,9 +176,7 @@ public:
 
         const float rowH  = grid.getHeight() / (float) rows;
         const float stepW = grid.getWidth()  / (float) steps;
-        const double stepBeats = project.rackStepBeats();
-        const double beatBeats = project.meter.beatLengthQuartersAt (project.rackStart);
-        const double barBeats  = project.rackBarBeats();
+        const int   perBeat = std::max (1, project.rackStepsPerBar / 4);
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
 
@@ -216,18 +208,8 @@ public:
                 juce::Rectangle<float> cell (grid.getX() + s * stepW, y, stepW, rowH);
                 auto inner = cell.reduced (1.5f);
 
-                // Asked of the position rather than of the step number, so
-                // that it is right in a signature where a bar is not a whole
-                // number of steps: a step is on a beat when its own beat
-                // position is a multiple of one.
-                const double at = (double) s * stepBeats;
-                const auto isMultipleOf = [at] (double of)
-                {
-                    return of > 0.0 && std::abs (at / of - std::round (at / of)) < 1.0e-6;
-                };
-
-                const bool onBeat = isMultipleOf (beatBeats);
-                const bool onBar  = isMultipleOf (barBeats);
+                const bool onBeat = (s % perBeat) == 0;
+                const bool onBar  = (s % std::max (1, project.rackStepsPerBar)) == 0;
 
                 g.setColour (onBar ? Ahp::panel3 : onBeat ? Ahp::panel2 : Ahp::panel);
                 g.fillRect (inner);
@@ -429,13 +411,7 @@ private:
                 return;
 
             const int steps   = project.rackStepCount();
-            // Steps to a beat, for the "Every beat" fill. A whole number
-            // whenever the step is finer than the denominator unit, which is
-            // every ordinary case; where it is not, the fill falls back to
-            // every step rather than to a stride that lands between beats.
-            const double stepsPerBeat = project.rackStepsPerDisplayBeat();
-            const int perBeat = std::abs (stepsPerBeat - std::round (stepsPerBeat)) < 1.0e-6
-                              ? std::max (1, (int) std::lround (stepsPerBeat)) : 1;
+            const int perBeat = std::max (1, project.rackStepsPerBar / 4);
             auto& info = project.channels[(size_t) row];
 
             switch (result)

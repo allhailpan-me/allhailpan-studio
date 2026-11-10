@@ -390,7 +390,6 @@ int main()
             const auto b = Meter::metaEventBytes (bad);
             checkEqualInt (b[3], 4, name (bad) + ": an unaccepted signature writes 4/4's numerator");
             checkEqualInt (b[4], 2, name (bad) + ": and 4/4's denominator byte");
-            check (b[3] >= 0 && b[3] <= 255, name (bad) + ": and a numerator byte that fits in a byte");
         }
 
         // A reader must not be talked into an impossible signature by a file.
@@ -551,8 +550,10 @@ int main()
         {
             checkEqualInt (Meter::barOf ({ 7, 8 }, huge), 1,
                            "a position too large to have a bar number reads as bar 1");
-            checkEqualInt (Meter::barBeatAt ({ 7, 8 }, huge).bar, 1,
-                           "and its readout is bar 1 rather than an overflow");
+            const auto at = Meter::barBeatAt ({ 7, 8 }, huge);
+            checkEqualInt (at.bar, 1, "and its readout is bar 1 rather than an overflow");
+            checkEqualInt (at.beat, 1, "and beat 1, not the last beat of the bar");
+            checkEqual (at.fraction, 0.0, "and no fraction of a beat");
             checkEqualInt (Meter::clickIndexAt ({ 7, 8 }, huge), 0,
                            "and it sounds no click");
             check (Meter::isValid (map.at (huge)), "and the map still answers with a signature");
@@ -566,6 +567,7 @@ int main()
                        "and the one above it does not");
 
         check (Meter::isValid (map.at (nan)), "a NaN position still answers with a signature");
+        checkEqual (Meter::barBeatAt ({ 7, 8 }, nan).fraction, 0.0, "a NaN position has no fraction either");
         checkEqualInt (Meter::barOf ({ 7, 8 }, nan), 1, "a NaN position reads as bar 1 rather than wandering");
         checkEqualInt (Meter::barOf ({ 7, 8 }, inf), 1, "and so does an infinite one");
         checkEqualInt (Meter::barBeatAt ({ 7, 8 }, nan).beat, 1, "and its beat is 1");
@@ -618,6 +620,91 @@ int main()
                 checkEqual (floored / bar, std::floor (floored / bar), name (s) + ": and is a bar line");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 7c. The grid spacing the editors draw to.
+    //
+    // Three promises, over every accepted signature and every zoom the
+    // editors can reach: it is at least as wide as asked, it divides the bar
+    // so that every bar line gets a line, and it is positive and finite so the
+    // loop that steps along it terminates.
+    //
+    // The second is the one with teeth. Doubling up from a display beat
+    // satisfies the first two only when the numerator is a power of two: 99/32
+    // has a bar of 12.375 quarters and four quarters is not a part of it, so a
+    // doubling ladder drew lines either side of the bar and none on it.
+    // -----------------------------------------------------------------------
+    {
+        const double zooms[] { 2.0, 2.5, 3.0, 4.0, 7.0, 8.0, 50.0, 137.0, 400.0 };
+        const double wanted = 6.0;
+
+        for (const auto& s : all)
+        {
+            const double bar  = Meter::barLengthQuarters (s);
+            const double beat = Meter::beatLengthQuarters (s);
+
+            for (double zoom : zooms)
+                for (double finest : { beat, 0.25 * beat, 0.5 * beat })
+                {
+                    const double step = Meter::gridStepQuarters (s, zoom, wanted, finest);
+
+                    check (step > 0.0 && std::isfinite (step),
+                           name (s) + ": the grid step is a positive finite spacing");
+                    check (step * zoom >= wanted - 1.0e-9,
+                           name (s) + ": the grid step is at least as wide as asked");
+
+                    // Divides the bar, or is a whole number of bars. Either
+                    // way every bar line falls on a line of the grid.
+                    const double barsPerStep  = step / bar;
+                    const double stepsPerBar  = bar / step;
+                    const bool onTheBar = std::abs (stepsPerBar - std::round (stepsPerBar)) < 1.0e-9
+                                       || std::abs (barsPerStep - std::round (barsPerStep)) < 1.0e-9;
+                    check (onTheBar, name (s) + ": and the bar line falls on it");
+
+                    // Never coarser than a bar while a bar is readable. The
+                    // multi-bar rung exists for a zoom where even a bar is
+                    // narrower than the minimum, and must not be reached
+                    // otherwise: a grid drawn every four bars while every bar
+                    // would have fitted is a grid that has stopped being one.
+                    check (step <= bar + 1.0e-9 || bar * zoom < wanted,
+                           name (s) + ": and is no coarser than a bar while a bar is readable");
+                }
+
+            // It uses the finest spacing when that is already wide enough,
+            // rather than jumping to a beat.
+            checkEqual (Meter::gridStepQuarters (s, 1000.0, wanted, 0.25 * beat), 0.25 * beat,
+                        name (s) + ": a step that is already wide enough is what is drawn");
+
+            // And a spacing finer than a display beat is never offered when it
+            // would be too narrow.
+            check (Meter::gridStepQuarters (s, 2.0, wanted, 0.25 * beat) >= beat - 1.0e-9
+                   || 0.25 * beat * 2.0 >= wanted,
+                   name (s) + ": a step too narrow to read is not drawn");
+        }
+
+        // Nothing that is not a zoom may reach it either.
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        check (Meter::gridStepQuarters ({ 4, 4 }, nan, 6.0, 1.0) > 0.0, "a NaN zoom still gives a spacing");
+        check (Meter::gridStepQuarters ({ 4, 4 }, 8.0, nan, 1.0) > 0.0, "a NaN minimum still gives a spacing");
+        check (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, nan) > 0.0, "a NaN finest still gives a spacing");
+        check (Meter::gridStepQuarters ({ 4, 4 }, 0.0, 6.0, 1.0) > 0.0, "a zoom of zero still gives a spacing");
+
+        // The 4/4 answers, pinned, because these are what the editors drew
+        // before the signature existed and nothing should have moved.
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, 1.0), 1.0, "4/4 at 8 px a quarter draws beats");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 2.0, 6.0, 1.0), 4.0, "4/4 at 2 px a quarter draws bars");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 0.5, 6.0, 1.0), 12.0, "4/4 at half a pixel draws three bars");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 30.0, 6.0, 0.25), 0.25, "4/4 at 30 px a quarter draws steps");
+        // 99/32's bar is 12.375 quarters, and the only spacings that divide it
+        // are the divisors of 99 times a thirty second: 3, 9, 11, 33 and 99 of
+        // them. At four pixels a quarter the first one wide enough is 33, a
+        // third of the bar. A doubling ladder would have stopped at four
+        // quarters, which is not a part of 12.375 at all.
+        checkEqual (Meter::gridStepQuarters ({ 99, 32 }, 4.0, 6.0, 0.125), 33.0 * 0.125,
+                    "99/32 climbs to a third of its bar, which divides it");
+        checkEqual (Meter::gridStepQuarters ({ 99, 32 }, 50.0, 6.0, 0.125), 0.125,
+                    "and zoomed in it draws every thirty second");
     }
 
     // -----------------------------------------------------------------------

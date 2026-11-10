@@ -616,17 +616,13 @@ void PlaylistComponent::paint (juce::Graphics& g)
         const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
 
-        // Six pixels apart at the least, at every step of the fallback and not
-        // only at the first. A display beat can be a thirty second note, so a
-        // bar of one is an eighth of a quarter: without the second test, a
-        // 1/32 project zoomed out drew the grid every thirty second of a
-        // quarter and put six thousand lines a quarter pixel apart across the
-        // window. The old code could stop at four quarters and was safe by
-        // accident.
-        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize
-                           : (beatBeats * ppb >= 6.0) ? beatBeats
-                           : (barBeats  * ppb >= 6.0) ? barBeats
-                                                      : std::max (barBeats, 6.0 / std::max (1.0e-9, ppb));
+        // The snap grid where it is far enough apart to read, and otherwise
+        // the finest spacing that is: see Meter::gridStepQuarters, which is
+        // where the "and still lands on every bar line" part lives.
+        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0)
+                           ? snapSize
+                           : project.meter.gridStepQuartersAt (0.0, ppb, 6.0, beatBeats);
+
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
             const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;

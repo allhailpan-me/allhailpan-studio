@@ -1481,7 +1481,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             // denominator unit: six times a 6/8 bar rather than four times
             // three quarters. So the index this counts is a click index and
             // not a quarter, and the two agree only in 4/4.
-            const auto clickIndex = (juce::int64) std::floor (position / quartersPerClick);
+            const auto clickIndex = Meter::clickIndexAt (signature, position);
             if (clickIndex != lastClickIndex)
             {
                 lastClickIndex = clickIndex;

@@ -251,9 +251,13 @@ inline constexpr double kMaxQuarters = 9007199254740992.0;   // 2^53
 /** Bar number at a position, one based, floored.
 
     Anything that is not a position reads as bar 1: a NaN, an infinity, and a
-    finite number too large to have a bar number. The engine's transport
-    position can be a NaN for one block after a device change, and a NaN bar
-    number would be drawn as a bar line somewhere unpredictable.
+    finite number too large to have a bar number. These are public functions
+    taking a bare double, so what reaches them is whatever a caller has, and
+    the cast to `long long` of a double that does not fit in one is undefined
+    behaviour rather than a large answer. Nothing in the studio is known to
+    produce such a position today; the guard is here because a function that
+    can be handed one has to say what it does with it, not because a path to it
+    has been found.
 */
 inline long long barOf (const Signature& s, double quarters) noexcept
 {
@@ -397,6 +401,60 @@ inline double snapQuarters (const Signature& s, double fractionOfDisplayBeat) no
         return barLengthQuarters (s);
 
     return std::max (0.0, fractionOfDisplayBeat) * beatLengthQuarters (s);
+}
+
+//==============================================================================
+/** The finest grid line spacing, in quarters, that is at least `minimumPixels`
+    apart at a given zoom and still lands on every bar line.
+
+    The editors draw a grid under the ruler and colour each line by whether it
+    is a bar, a display beat or neither, so a spacing that does not divide the
+    bar is a grid whose lines are mostly uncoloured and whose bars have no line
+    at all. Six pixels divided by the zoom is far enough apart and is exactly
+    that: a 2/4 project at two and a half pixels a quarter would get lines
+    every 2.4 quarters against bars every 2.
+
+    So the candidates climb through spacings that do divide the bar. From
+    `finest`, which the caller gives as a step or a display beat, to a display
+    beat, then to each multiple of a display beat that divides the numerator,
+    then to whole bars. A multiple that does not divide the numerator is
+    skipped rather than rounded to: 99/32 has a bar of 12.375 quarters and four
+    quarters is not a part of it, which is how doubling up from a display beat
+    was found to put lines either side of the bar and none on it.
+
+    `finest` has to divide a display beat for the first rung to keep the
+    promise, which a quarter of one does.
+*/
+inline double gridStepQuarters (const Signature& signature, double pixelsPerQuarter,
+                                double minimumPixels, double finest) noexcept
+{
+    const Signature s = validated (signature);
+    const double beat = beatLengthQuarters (s);
+    const double bar  = barLengthQuarters (s);
+
+    const double zoom = std::isfinite (pixelsPerQuarter) ? std::max (1.0e-6, pixelsPerQuarter) : 1.0;
+    const double want = std::isfinite (minimumPixels) ? std::max (0.0, minimumPixels) : 0.0;
+
+    const auto wideEnough = [zoom, want] (double spacing) { return spacing * zoom >= want; };
+
+    double spacing = (std::isfinite (finest) && finest > 0.0) ? std::min (finest, beat) : beat;
+
+    if (wideEnough (spacing))
+        return spacing;
+
+    spacing = beat;
+
+    for (int k = 2; k <= s.numerator && ! wideEnough (spacing); ++k)
+        if (s.numerator % k == 0)
+            spacing = (double) k * beat;
+
+    if (wideEnough (spacing))
+        return spacing;
+
+    // Whole bars, however many it takes. The ceiling is at least one, so this
+    // always returns something at least a bar wide and the caller's loop over
+    // it always terminates.
+    return bar * std::max (1.0, std::ceil (want / (bar * zoom)));
 }
 
 //==============================================================================
@@ -669,6 +727,12 @@ struct Map
     double snapQuartersAt (double quarters, double fractionOfDisplayBeat) const noexcept
     {
         return snapQuarters (at (quarters), fractionOfDisplayBeat);
+    }
+
+    double gridStepQuartersAt (double quarters, double pixelsPerQuarter,
+                               double minimumPixels, double finest) const noexcept
+    {
+        return gridStepQuarters (at (quarters), pixelsPerQuarter, minimumPixels, finest);
     }
 
     /** Refuses anything out of range rather than clamping it, so a bad edit
