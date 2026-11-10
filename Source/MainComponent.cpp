@@ -234,6 +234,33 @@ MainComponent::MainComponent()
     };
     engine.setBpm (tempo.getValue());
 
+    timeSigLabel.setColour (juce::Label::textColourId, Ahp::muted);
+    timeSigField.setEditable (false, true, false);
+    timeSigField.setJustificationType (juce::Justification::centred);
+    timeSigField.setColour (juce::Label::outlineColourId, Ahp::line);
+    timeSigField.setTooltip ("The time signature, as beats per bar over the note that is a beat: "
+                             "4/4, 3/4, 6/8, 7/8, 12/8. The tempo is quarter notes per minute "
+                             "whatever this says, so changing it moves the bar lines, the click "
+                             "and the grid and does not move a note.");
+    timeSigField.onTextChange = [this]
+    {
+        Meter::Signature typed;
+        if (Meter::parse (timeSigField.getText().toStdString(), typed))
+        {
+            applyTimeSignature (typed);
+        }
+        else
+        {
+            // Put back what was there rather than guessing at what was meant.
+            // "4/3" read as 4/4 would leave somebody looking at a signature
+            // they did not type.
+            showTimeSignature();
+            setStatus ("A time signature is beats per bar over the note that is a beat, like 4/4 "
+                       "or 6/8. The beat has to be a whole, half, quarter, eighth, sixteenth or "
+                       "thirty second note, because those are the only ones a MIDI file can say.");
+        }
+    };
+
     tempoLabel.setColour (juce::Label::textColourId, Ahp::muted);
     clock.setJustificationType (juce::Justification::centred);
     clock.setFont (juce::FontOptions (20.0f));
@@ -332,6 +359,9 @@ MainComponent::MainComponent()
         tempo.setValue (bpm, juce::sendNotificationSync);
     };
 
+    // And its signature, through the one path in, for the same reason.
+    playlist.onSetTimeSignature = [this] (Meter::Signature s) { applyTimeSignature (s); };
+
     pianoRoll.onInteraction = [this] { grabKeyboardFocus(); };
     pianoRoll.onSetPosition = [this] (double b) { setPosition (b); };
 
@@ -372,6 +402,7 @@ MainComponent::MainComponent()
                      static_cast<juce::Component*> (&undoButton), static_cast<juce::Component*> (&redoButton),
                      static_cast<juce::Component*> (&fileButton),
                      static_cast<juce::Component*> (&tempo), static_cast<juce::Component*> (&tempoLabel),
+                     static_cast<juce::Component*> (&timeSigField), static_cast<juce::Component*> (&timeSigLabel),
                      static_cast<juce::Component*> (&clock), static_cast<juce::Component*> (&channelLabel),
                      static_cast<juce::Component*> (&channelBox), static_cast<juce::Component*> (&instrumentBox),
                      static_cast<juce::Component*> (&insertLabel), static_cast<juce::Component*> (&insertBox),
@@ -512,6 +543,36 @@ void MainComponent::playFrom (double beat)
         engine.setPlaying (true);
     }
     playlist.repaint();
+}
+
+void MainComponent::showTimeSignature()
+{
+    // dontSendNotification, or setting the text would re-enter onTextChange
+    // and apply the signature a second time.
+    timeSigField.setText (juce::String (Meter::toString (project.meter.at (0.0))),
+                          juce::dontSendNotification);
+}
+
+void MainComponent::applyTimeSignature (const Meter::Signature& signature)
+{
+    if (! project.meter.setFirst (signature))
+        return;
+
+    // The engine holds its own copy for the click and the play head, read
+    // once a block on the audio thread. Both halves of this have to move
+    // together or the click is in one signature and the grid in another.
+    engine.setTimeSignature (project.meter.at (0.0));
+    showTimeSignature();
+
+    // The song end is where the last clip's bar finishes, so it moves with the
+    // signature: pushArrangement is what hands the new figure to the engine,
+    // and without it the transport would keep looping on the old bar line.
+    pushArrangement (true);
+
+    playlist.refresh();
+    pianoRoll.repaint();
+    rack.repaint();
+    markDirty();
 }
 
 void MainComponent::setPosition (double beat)
@@ -2225,6 +2286,8 @@ void MainComponent::resized()
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
     tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
+    timeSigLabel.setBounds (bar.removeFromLeft (26));
+    timeSigField.setBounds (bar.removeFromLeft (52));  bar.removeFromLeft (6);
     clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (4);
     punchButton .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
@@ -2592,6 +2655,12 @@ void MainComponent::newProject()
         // clip, the same way a tempo change typed in by hand does.
         self.tempo.setValue (self.project.bpm, juce::sendNotificationSync);
 
+        // And the signature, which clearAll put back to 4/4. The engine has
+        // its own copy for the click and the play head, so a new project left
+        // on the engine's old signature would click in sevens over an empty
+        // 4/4 timeline.
+        self.applyTimeSignature (self.project.meter.at (0.0));
+
         self.engine.setSongStart (0.0);
         self.engine.stopAndRewind();
 
@@ -2641,6 +2710,13 @@ bool MainComponent::loadProject (const juce::File& file, bool recovered)
 
     ignoreEditsForAWhile();
     tempo.setValue (report.bpm, juce::dontSendNotification);
+
+    // ProjectIO::load put the signature into the project; this is what carries
+    // it to the engine and the field. Not through applyTimeSignature, which
+    // marks the project dirty, and opening a file is not an edit to it.
+    engine.setTimeSignature (project.meter.at (0.0));
+    showTimeSignature();
+
     engine.stopAndRewind();
 
     if (result.failed())
@@ -2946,7 +3022,8 @@ void MainComponent::exportMidi (bool onlySelected)
         if (chosen.getFileExtension().isEmpty())
             chosen = chosen.withFileExtension (".mid");
 
-        const auto result = MidiFileIO::write (chosen, tracks, self.project.bpm, songName, hadAutomation);
+        const auto result = MidiFileIO::write (chosen, tracks, self.project.bpm,
+                                               self.project.meter.at (0.0), songName, hadAutomation);
 
         if (! result.ok)
         {

@@ -23,6 +23,7 @@ public:
     std::function<void(int)>           onRouteTrack;      // track index changed its insert
     std::function<void(const juce::String&)> onStatus;    // say what happened in the status bar
     std::function<void(double)>        onSetTempo;        // adopt a tempo (goes through the engine)
+    std::function<void(Meter::Signature)> onSetTimeSignature;  // adopt a signature, the same way
 
     bool isEditing() const noexcept;   // true while the mouse or a slider is mid-drag
 

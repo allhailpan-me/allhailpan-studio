@@ -2788,6 +2788,15 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
     bool sawTempoChanges = false, splitByChannel = false;
     double adoptedTempo = 0.0;
 
+    // The same idea as the tempo, and a weaker condition: a signature moves no
+    // note, so adopting one costs nothing but a grid somebody did not choose,
+    // and the only state to compare against is whether the project is still in
+    // 4/4. There is no "starting signature" preference to compare with the way
+    // the tempo has one.
+    Meter::Signature adoptedSignature = Meter::kDefault;
+    bool adoptSignature = false;
+    bool sawSignatureChanges = false;
+
     for (const auto& path : paths)
     {
         const juce::File file (path);
@@ -2820,6 +2829,16 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
             adoptedTempo = read.bpm;   // applied below, once the clips are in
         }
 
+        sawSignatureChanges = sawSignatureChanges || read.hasSignatureChanges;
+
+        if (read.hasSignature && ! adoptSignature && onSetTimeSignature
+            && project.meter.at (0.0) == Meter::kDefault
+            && read.signature != Meter::kDefault)
+        {
+            adoptedSignature = read.signature;
+            adoptSignature   = true;
+        }
+
         for (const auto& imported : read.tracks)
         {
             if (track >= (int) project.tracks.size())
@@ -2845,7 +2864,13 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
             // which is the only thing that keeps the tracks of a multi-track
             // file lined up with each other.
             const double needed  = pattern->lastBeat();
-            const double barBeats = project.meter.barLengthQuartersAt (beat);
+
+            // The signature the project is about to be in, not the one it is
+            // in now: the adoption below happens after the clips are made, so
+            // reading the project here would round a 7/8 file's clips to bars
+            // of four and then move the bar lines out from under them.
+            const double barBeats = adoptSignature ? Meter::barLengthQuarters (adoptedSignature)
+                                                   : project.meter.barLengthQuartersAt (beat);
             const double bars     = std::max (1.0, std::ceil (needed / barBeats));
 
             Clip c;
@@ -2877,6 +2902,9 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
     if (adoptedTempo > 0.0 && clipsMade > 0 && onSetTempo)
         onSetTempo (adoptedTempo);
 
+    if (adoptSignature && clipsMade > 0 && onSetTimeSignature)
+        onSetTimeSignature (adoptedSignature);
+
     if (! problems.isEmpty() && clipsMade == 0)
         return problems[0];
 
@@ -2892,6 +2920,13 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
 
     if (adoptedTempo > 0.0)
         report << ", at the file's tempo of " << juce::String (adoptedTempo, 2) << " bpm";
+
+    if (adoptSignature && clipsMade > 0)
+        report << ", in the file's " << juce::String (Meter::toString (adoptedSignature));
+
+    if (sawSignatureChanges)
+        report << ". The file changes time signature part way through, and this studio has "
+                  "one signature for the whole project, so its opening one is what was used";
 
     report << ".";
 

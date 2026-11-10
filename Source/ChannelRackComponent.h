@@ -3,6 +3,7 @@
 #include "Project.h"
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
+#include <cmath>
 
 //==============================================================================
 /** The channel rack: one row per instrument, one column per step.
@@ -97,14 +98,14 @@ public:
         addButton (prevBar, "<", "Move the pattern a bar earlier");
         prevBar.onClick = [this]
         {
-            project.rackStart = std::max (0.0, project.rackStart - 4.0);
+            project.rackStart = std::max (0.0, project.rackStart - project.rackBarBeats());
             commit();
         };
 
         addButton (nextBar, ">", "Move the pattern a bar later");
         nextBar.onClick = [this]
         {
-            project.rackStart += 4.0;
+            project.rackStart += project.rackBarBeats();
             commit();
         };
 
@@ -130,7 +131,7 @@ public:
         const int barsIndex = project.rackBars == 2 ? 2 : project.rackBars == 4 ? 3 : 1;
         barsBox.setSelectedId (barsIndex, juce::dontSendNotification);
 
-        positionLabel.setText ("Bar " + juce::String ((int) (project.rackStart / 4.0) + 1),
+        positionLabel.setText ("Bar " + juce::String ((int) project.meter.barBeatAt (project.rackStart).bar),
                                juce::dontSendNotification);
 
         const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
@@ -176,7 +177,7 @@ public:
 
         const float rowH  = grid.getHeight() / (float) rows;
         const float stepW = grid.getWidth()  / (float) steps;
-        const int   perBeat = std::max (1, project.rackStepsPerBar / 4);
+        const double perBeat = project.rackStepsPerDisplayBeat();
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
 
@@ -208,7 +209,14 @@ public:
                 juce::Rectangle<float> cell (grid.getX() + s * stepW, y, stepW, rowH);
                 auto inner = cell.reduced (1.5f);
 
-                const bool onBeat = (s % perBeat) == 0;
+                // Steps per beat is not a whole number in every signature:
+                // sixteen steps over seven eighths is two and two sevenths. So
+                // a step is on a beat when it is the first step of its beat,
+                // which is a comparison with the step before rather than a
+                // remainder, and step 0 always is.
+                const int beatHere   = (int) std::floor ((double) s / perBeat);
+                const int beatBefore = s > 0 ? (int) std::floor ((double) (s - 1) / perBeat) : -1;
+                const bool onBeat = beatHere != beatBefore;
                 const bool onBar  = (s % std::max (1, project.rackStepsPerBar)) == 0;
 
                 g.setColour (onBar ? Ahp::panel3 : onBeat ? Ahp::panel2 : Ahp::panel);
@@ -411,7 +419,7 @@ private:
                 return;
 
             const int steps   = project.rackStepCount();
-            const int perBeat = std::max (1, project.rackStepsPerBar / 4);
+            const int perBeat = std::max (1, (int) std::lround (project.rackStepsPerDisplayBeat()));
             auto& info = project.channels[(size_t) row];
 
             switch (result)

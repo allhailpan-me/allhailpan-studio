@@ -771,9 +771,25 @@ public:
     int    rackBars      = 1;
     int    rackStepsPerBar = 16;
 
-    double rackStepBeats() const noexcept { return 4.0 / std::max (1, rackStepsPerBar); }
+    // The rack divides a bar, so a step is the bar divided by the number of
+    // steps and not a fixed sixteenth note: sixteen steps of a 6/8 bar are
+    // sixteen across three quarters. The alternative, keeping a step a
+    // sixteenth note, would give a 6/8 bar twelve steps where the control says
+    // sixteen, and the control is what somebody is looking at.
+    double rackBarBeats() const noexcept { return meter.barLengthQuartersAt (rackStart); }
+    double rackStepBeats() const noexcept { return rackBarBeats() / std::max (1, rackStepsPerBar); }
     int    rackStepCount() const noexcept { return std::max (1, rackBars) * std::max (1, rackStepsPerBar); }
-    double rackLengthBeats() const noexcept { return std::max (1, rackBars) * 4.0; }
+    double rackLengthBeats() const noexcept { return std::max (1, rackBars) * rackBarBeats(); }
+
+    /** Steps to a display beat, for the rack's own grid shading. Not a whole
+        number in every case: sixteen steps over seven eighths is two and two
+        sevenths, and the shading then falls where it falls rather than being
+        rounded into a lie. */
+    double rackStepsPerDisplayBeat() const noexcept
+    {
+        return (double) std::max (1, rackStepsPerBar)
+             / (double) std::max (1, meter.at (rackStart).numerator);
+    }
 
     // Effects that couldn't be loaded, by insert * kNumFxSlots + slot
     std::map<int, std::shared_ptr<juce::XmlElement>> missingFx;
@@ -1782,7 +1798,12 @@ public:
 
         double first = 1e12, last = 0.0;
         for (auto& c : picked) { first = std::min (first, c.start); last = std::max (last, c.endBeat (bpm)); }
-        const double span = std::ceil ((last - first) * 4.0 - 1e-9) / 4.0;   // round up to a step
+        // Round up to a step, where a step is a quarter of a display beat, so
+        // the copy lands on the same grid the editors snap to: a sixteenth
+        // note in 4/4 and in 6/8 alike, because a display beat is an eighth
+        // there.
+        const double step = 0.25 * meter.beatLengthQuartersAt (first);
+        const double span = std::ceil ((last - first) / step - 1.0e-9) * step;
 
         selection.clear();
         for (auto& c : picked)

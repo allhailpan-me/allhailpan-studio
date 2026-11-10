@@ -281,6 +281,22 @@ private:
     juce::Slider     tempo;
     juce::Label      tempoLabel { {}, "Tempo" }, clock;
 
+    /** The time signature, as a field somebody types "7/8" into.
+
+        A field rather than two spin boxes or a menu, because the range the
+        studio accepts is 99 numerators by six denominators and no menu of 594
+        entries is usable. Meter::parse is what decides whether what was typed
+        is a signature, so what the studio will take from a keyboard is tested
+        rather than assumed, and anything it refuses puts the old text back.
+    */
+    juce::Label      timeSigLabel { {}, "Sig" }, timeSigField;
+
+    /** Puts the signature into the project, the engine and the field at once,
+        and refreshes everything the bar lines are drawn on. The one path in,
+        which is what the tempo control is for the tempo. */
+    void applyTimeSignature (const Meter::Signature&);
+    void showTimeSignature();
+
     // channel bar
     juce::Label      channelLabel { {}, "Channel" }, insertLabel { {}, "Mixer" }, typingLabel;
     juce::ComboBox   channelBox, instrumentBox, insertBox;
