@@ -413,7 +413,17 @@ struct Move
 inline double snappedDeltaWithin (double raw, double grid, double phase,
                                   double lo, double hi) noexcept
 {
-    if (! (grid > 0.0) || ! std::isfinite (grid) || ! std::isfinite (raw))
+    // `isnormal` rather than `isfinite`, which is not pedantry: a subnormal
+    // grid is finite and greater than zero, so it passed, and then
+    // `raw / grid` and `-anchorStart / grid` both overflow to infinity. The
+    // first makes this return an infinite delta and the second makes it
+    // return a NaN, and `applyMove` writes either straight into the start of
+    // every selected note, where a NaN start never compares greater than
+    // anything again and the note can no longer be found by any hit test.
+    // Nothing can reach it today, because the grid comes from the roll's own
+    // snap menu, but a guard written to be total has to be total or it is
+    // just decoration.
+    if (! (grid > 0.0) || ! std::isnormal (grid) || ! std::isfinite (raw))
         return std::clamp (0.0, std::min (lo, hi), std::max (lo, hi));
 
     const auto deltaFor = [grid, phase] (double k) noexcept
@@ -475,6 +485,17 @@ inline Move planMove (const std::vector<Note>& notes, const Set& sel,
 
     double lowestStart  = std::numeric_limits<double>::infinity();
     double highestStart = -std::numeric_limits<double>::infinity();
+
+    // The pitches start at the rails rather than at the extremes of an int,
+    // which looks like the usual mistake and is deliberate. It can only
+    // differ from the honest initialisers when EVERY selected note is
+    // already outside the range a file can hold, and in that case it errs
+    // towards a smaller delta: with every note above 127, `lo` becomes
+    // `lowNote - 127` and the lowest member still lands above `lowNote`;
+    // with every note below 0, `hi` becomes `highNote` and the highest
+    // member still lands below it. So no limit can be breached through
+    // them, only a move cut shorter than it strictly had to be. Said here
+    // because the next reader will otherwise correct it.
     int    lowestNote   = kHighestNote;
     int    highestNote  = kLowestNote;
     size_t counted      = 0;

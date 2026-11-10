@@ -32,15 +32,23 @@ changing, and not `AudioEngine.*`, `MainComponent.*`, `Meter.h`,
 `PlaylistComponent.*`, `Project.h`, `ProjectIO.cpp` or `SongLength.h`, which
 open pull request #74 is changing.
 
-### One thing wrong, and it is in the test's own documentation
+### Nothing in the arithmetic is wrong
 
-No fault in the arithmetic. 91 mutations, every one built with the sanitizers
-exactly as `Tests/run.sh` has them, and nothing in `NoteSelection.h` computes
-a wrong answer. Said plainly because it is the result.
+Said plainly because it is the result. 95 mutations, every one built with the
+sanitizers exactly as `Tests/run.sh` has them, and an independent read by the
+auditor, and `NoteSelection.h` does not compute a wrong answer anywhere. The
+auditor also checked it against a brute force oracle over 300000 cases per
+grid, and fuzzed `resolveOverlaps` over 200000 trials with coincident starts,
+zero length notes, negative length notes and self overlapping selections, with
+no violation of any post-condition.
 
-What is wrong is a claim. `Tests/NoteSelectionTest.cpp` opens with a section
-headed "Two deliberate breakages survive on purpose", and the first of them
-is not true:
+What was wrong was two claims and four gaps in the test, and one guard that is
+total in its comment and not in its code.
+
+### A claim in the test that was the opposite of the truth
+
+`Tests/NoteSelectionTest.cpp` opened with a section headed "Two deliberate
+breakages survive on purpose", and the first of them was not true:
 
 > Clamping each note inside `applyMove` produces identical output, which is
 > worth saying out loud because it is the headline fault this whole header
@@ -57,185 +65,334 @@ CAUGHT  applyMove: each note's START clamped on the way out
 ```
 
 The same file says so thirty lines further down, in the generator that makes
-it true, which plants pitches at 128 to 140 and at -12 to -1 and starts
-before the origin, with the comment: "without them the claim that nothing is
-clamped per note on the way out is untested: a per note clamp can only be
-seen through a note that is outside the clamp's own range". That is exactly
-right, and it is why the clamp is caught: a note that arrived from a file
-outside the range gets lifted into it while the rest of the group does not,
-and the interval assertion sees it over 60000 trials.
+it true, which plants pitches at 128 to 140 and at -12 to -1 and starts before
+the origin, with the comment: "without them the claim that nothing is clamped
+per note on the way out is untested: a per note clamp can only be seen through
+a note that is outside the clamp's own range". That is exactly right, and the
+auditor confirmed it is the whole reason, by removing only those three planted
+lines and watching both mutations go back to surviving:
 
-So two passages in one file contradict each other and the wrong one is the
-one a reader meets first. The consequence is not academic. It tells the next
-person that the single fault this header exists to prevent is invisible to
-the test, when it is the thing the test is best in the world at catching.
-Somebody who believed it would stop looking for the check that is already
-there, and might add that clamp to `applyMove` thinking it harmless. The
-comment is corrected rather than deleted, because which breakages survive is
-worth recording; it just has to be the ones that do.
+```
+=== with the out-of-range plants REMOVED from the generator ===
+SURVIVED  CONTROL (de-planted test, unmutated header)
+SURVIVED  applyMove: pitch clamped per note
+SURVIVED  applyMove: start clamped per note
+```
 
-The other two claims in that section hold. `remapAfter` with `upper_bound`
-and the deletion of the rounding correction inside `snappedDeltaWithin` both
-survive, for the reasons given there, and both were rechecked here.
+So two passages in one file contradicted each other and the wrong one was the
+one a reader meets first. The consequence is not academic: it told the next
+person that the single fault this header exists to prevent is invisible to the
+test, when it is the thing the test catches best. Believing it would mean
+either hunting for a check that is already written, or adding that clamp to
+`applyMove` in the belief that nothing could see it. The note is corrected
+rather than deleted, because which breakages survive is worth recording; it
+just has to be the ones that do.
 
-### Four gaps, two of which a guard would not have survived
+The other two claims in that section hold, and both were rechecked here.
 
-**`remove` is never asserted to remove anything.** Its body can be deleted
-outright and the whole suite passes:
+### And a claim this night made that was also wrong
+
+Written down because it is the same fault one paragraph later, and because the
+auditor caught it rather than this session.
+
+The first version of the new overlap check said the trim count is "a wrong
+number shown to the producer", citing `PianoRollComponent.cpp:481`. It is not
+shown anywhere. The roll reads the report only as a yes or no, at
+`PianoRollComponent.cpp:483`, to decide whether to write the edit back; line
+481 is the call itself. The counts that do reach the screen, at `:706` and
+`:879`, belong to `lastQuantise`, which is `Quantise.h`'s own report struct
+with its own `trimmed` field. Two structs with the same field name, one of
+them displayed, and the citation went to the wrong one.
+
+That changes how the mutation it guards is classified. With the reset to
+infinity and the `doomed` guard both removed, the only thing that differs is
+`report.trimmed`: the length it writes lands on a note deleted two statements
+later, and `report.deleted` already makes the write-back condition true. So in
+the studio as it ships today that mutation is invisible, exactly like the ten
+filed below as no-ops. The check is kept because a published count is one
+somebody will read eventually, and the comment now says that rather than
+claiming a reader who does not exist.
+
+### Four gaps, each with the mutation that proves it
+
+**`remove` was never asserted to remove anything.** Its body could be deleted
+outright and the whole suite passed:
 
 ```
 SURVIVED  remove: body deleted outright
 SURVIVED  remove: upper_bound, so the wrong member goes
 ```
 
-The second is the same no-op by another route: with `upper_bound` the
-iterator lands past the member, `*at == index` is false, and nothing is
-erased. The only thing asserted about `remove` today is that it is
-idempotent, and a function that does nothing is perfectly idempotent. That
-is a tautology of the kind the night of 2026-10-28 found in the fader law:
-an assertion that cannot fail in the direction it was written for.
+The second is the same no-op by another route: with `upper_bound` the iterator
+lands past the member, `*at == index` is false, and nothing is erased. The only
+thing asserted about `remove` was that it is idempotent, and a function that
+does nothing is perfectly idempotent. That is the tautology the night of
+2026-10-28 found in the fader law: an assertion that cannot fail in the
+direction it was written for.
 
 It is not dead code. `PianoRollComponent.cpp:573` is Select Inverse, which
-builds `all()` and removes each selected index from it, so a `remove` that
-did nothing would make Select Inverse select everything, including what was
-already selected.
+builds `all()` and removes each selected index from it, so a `remove` that did
+nothing would make Select Inverse select everything, the already selected
+notes included. The test now asserts the complement directly.
 
-**An absolute snap with no reachable grid line is never asserted to stand
-still.** `snappedDeltaWithin` has a branch for the case where no position on
-the grid progression keeps the group inside its limits, and the answer is to
-stand still. Both ways of getting that wrong survive:
+**An absolute snap with no reachable grid line was never asserted to stand
+still.** Both ways of getting it wrong survived:
 
 ```
 SURVIVED  nothing-reachable returns lo instead of standing still
 SURVIVED  nothing-reachable returns hi instead of standing still
 ```
 
-The branch is not unreachable, which was the first guess and was wrong. It
-is reached, with a limit that is nowhere near zero:
+The branch is not unreachable, which was the first guess and was wrong. It is
+reached, with a limit nowhere near zero:
 
 ```
 BRANCH-WITH-NONZERO-LO  lo=-0.141433 hi=0  grid=0.333333 phase=-0.546167
 BRANCH-WITH-NONZERO-HI  lo=0  hi=0.0286242 grid=0.25  phase=-15.0993
 ```
 
-It is reached in `testGroupMovePreservesShape`, which is the test that
-imposes a `maxStart`, and that test asserts intervals, rhythm and the limits
-but says nothing about the grid. The test that does assert the grid,
-`testSnapModes`, leaves `maxStart` at infinity, so `kMax` is infinite, so
-`kMin > kMax` never happens there and the branch is never reached under the
-one assertion that would see it. Each test is individually reasonable and
-between them the property falls down the gap.
+It is reached in `testGroupMovePreservesShape`, the test that imposes a
+`maxStart`, and that test asserts intervals, rhythm and the limits but says
+nothing about the grid. The test that does assert the grid, `testSnapModes`,
+left `maxStart` at infinity, so `kMax` was infinite, so `kMin > kMax` never
+happened there and the branch was never reached under the one assertion that
+would see it. Each test was individually reasonable and between them the
+property fell down the gap.
 
-With either mutation the group slides up to a grid step to the exact edge of
-its travel and lands off the grid, on a drag that absolute snapping says
-should not move it at all: the one thing absolute snapping promises is that
-the grabbed note is on a line.
+**No caller reaches that branch today**, and the write-up should say so rather
+than implying a shipped fault: `selectionLimits()` at
+`PianoRollComponent.cpp:310` sets `minStart` to zero and deliberately leaves
+`maxStart` at infinity, and it is the only source of `Limits` in the studio.
+The header's own comment says as much. It is closed because the bound is part
+of a published API and the header offers it to callers.
 
-**The velocity ceiling's bound against zero is unchecked, while its floor
-twin is caught.** The generator plants velocities at both rails and below the
-floor, but never above the ceiling:
+**The velocity ceiling's bound against zero was unchecked while its floor twin
+was caught.** The generator planted velocities at both rails and below the
+floor, never above the ceiling:
 
 ```
 CAUGHT    velocity group: floor bound not taken against zero
 SURVIVED  velocity group: ceiling bound not taken against zero
 ```
 
-`hi = std::max (0.0, kMaxVelocity - highest)` can only differ from
-`kMaxVelocity - highest` when some selected note is already louder than the
-ceiling, and nothing in the test ever is. The floor side is planted on
-purpose, with a comment saying why, so this is half an invariant tested
-rather than an oversight about the whole of it. Worth closing for a second
-reason: with the bound removed, `hi` goes negative while `lo` stays at or
-below zero, and `std::clamp (amount, lo, hi)` with `lo > hi` is undefined
-behaviour rather than a wrong answer.
+`hi = std::max (0.0, kMaxVelocity - highest)` can only differ from the bare
+subtraction when some selected note is already louder than the ceiling, and
+nothing in the test ever was. With the bound gone, `hi` goes negative while
+`lo` stays at or below zero, and `std::clamp (amount, lo, hi)` with `lo > hi`
+violates its precondition. The standard calls that undefined; libstdc++ only
+checks it under `_GLIBCXX_ASSERTIONS`, which `Tests/run.sh` does not set, so
+what actually happens is a wrong answer: `clamp` returns `hi`, and a request
+to lift the group quietens it instead. Planting a velocity above the ceiling
+is what makes that visible, and what catches it is the floor assertions that
+were already there. The mirrored ceiling assertion added alongside is the
+statement of the rule rather than the thing that fires.
 
-**`resolveOverlaps` is the one function whose stale index guard nothing
-checks, and its report can over-count.** Every other such guard in the
-header is caught, three of them by the address sanitizer:
+**`resolveOverlaps` was the one stale index guard nothing reached.** Every
+other one in the header is caught, four of them by the address sanitizer:
 
 ```
+CAUGHT    planMove: stale index trusted           <- ASAN
+CAUGHT    applyMove: stale index trusted          <- ASAN
 CAUGHT    extentBeats: stale index trusted        <- ASAN
 CAUGHT    velocity group: stale index trusted     <- ASAN
 CAUGHT    length group: stale index trusted       <- ASAN
-CAUGHT    applyMove: stale index trusted          <- ASAN
 CAUGHT    duplicate: stale index trusted
 SURVIVED  overlaps: stale selection index trusted
 ```
 
-`testStaleIndicesAreIgnored` walks `planMove`, `applyMove`, `applyVelocity`
-and `applyLength` and stops there. And the report is read: the roll puts it
-on screen at `PianoRollComponent.cpp:481`, so a wrong count is a number
-shown to the producer, which is this project's recurring shape.
+`testStaleIndicesAreIgnored` walked `planMove`, `applyMove`, `applyVelocity`
+and `applyLength` and stopped there. Writing the new case took two attempts,
+which is the part worth keeping: a selection is sorted, so a stale index is
+always reached last, and a mover that covers a start breaks out of the loop
+before getting to it. The first version of the check passed an unguarded read.
+It has to be a tail trim, so the loop carries on.
 
+### One guard that was total in its comment and not in its code
+
+Found by the auditor, in `snappedDeltaWithin`. The guard reads
+
+```c++
+if (! (grid > 0.0) || ! std::isfinite (grid) || ! std::isfinite (raw))
 ```
-SURVIVED  overlaps: infinity reset dropped on its own
-SURVIVED  PAIR: infinity reset dropped AND the doomed guard dropped
-```
 
-The first is a genuine no-op: the `! contains (doomed, other)` guard catches
-it. The pair is not. With both gone, a note that one mover tail-cuts and a
-later mover then covers at the start is counted in `report.trimmed` as well
-as deleted, so the roll reports a trim that never happened to a note that is
-no longer there.
+and a **subnormal** grid is finite and greater than zero, so it walks through.
+Then `raw / grid` and `-anchorStart / grid` both overflow, the function
+returns an infinite delta or a NaN, and `applyMove` writes it into the start
+of every selected note. A NaN start never compares greater than anything
+again, so the note stops being found by any hit test: it is on screen and
+unclickable, and it is in the file.
 
-### The eight survivors that are genuine no-ops, and why
+Nothing can reach it, because `request.grid` comes from the roll's own snap
+menu. It is fixed anyway, as `! std::isnormal (grid)`, because a guard written
+to be total has to be total or it is decoration, and this one costs a word.
+The test asserts that a subnormal grid leaves every start exactly where it
+was, and reverting the guard fails it.
+
+### The ten survivors that are genuine no-ops, and why
+
+Each was argued rather than assumed, and the auditor attacked the reasoning
+separately and agreed with all ten, with two corrections folded in below.
 
 - **`kMin` by `floor` instead of `ceil`**, and **`kMax` by `ceil` instead of
-  `floor`**, and **deleting the rounding correction**, all three survive
-  alone and are three statements of one guarantee. `floor` undershoots by at
-  most one step and the correction line puts it back; `ceil` is already right
-  so deleting the correction changes nothing. Removing one of each pair is
-  caught at once, which is what says the test can see a breached limit
+  `floor`**, and **deleting the rounding correction**: three statements of one
+  guarantee. For a non-integral quotient `floor + 1 == ceil`, which is exactly
+  when the correction fires, so each repairs the other. Removing one of each
+  pair is caught at once, which is what says the test can see a breached limit
   through the snap path:
   ```
   CAUGHT  PAIR: correction deleted AND kMin by floor
             <- FAIL a note that was in range is not moved before the start
   CAUGHT  PAIR: correction deleted AND kMax by ceil
             <- FAIL a note that was in range is not moved past the end
-  CAUGHT  snap clamp removed entirely
   ```
-  So the belt and the braces are both real, and neither is load bearing on
-  its own. Left exactly as they are.
-- **`transpose` asking for `Snap::absolute` instead of `Snap::off`.**
-  Provably identical rather than untested: `transpose` leaves `beats` at zero
-  and `anchorStart` at zero, so `phase` is zero, and `lo <= 0 <= hi` by
-  construction means `kMin <= 0 <= kMax`, so `round (0)` clamps to zero and
-  the delta is zero. Both paths return zero beats and `beatsLimited` false.
-- **`remapAfter` with `upper_bound`.** As the test already documents: any
-  index in the erased set is skipped by the `contains` guard one line above,
-  and for every index that reaches the count the two bounds agree.
+  So the belt and the braces are both real and neither is dead. On the
+  correction: this entry first said "`ceil` is already right so deleting the
+  correction changes nothing", which is weaker than the truth the test file
+  already records, that it fires zero times in three million realistic cases
+  and seven times in five million adversarial ones. The measurement stands;
+  the sweeping version of it does not.
+- **`transpose` asking for `Snap::absolute` instead of `Snap::off`.** Provably
+  identical rather than untested: `transpose` leaves `beats` and
+  `anchorStart` at zero, so `phase` is zero, and `lo <= 0 <= hi` gives
+  `kMin <= 0 <= kMax`, with the correction unable to push `kMin` above zero
+  because `deltaFor (0)` is zero and never below `lo`. Both paths return zero
+  beats and `beatsLimited` false.
+- **`remapAfter` with `upper_bound`.** As the test already documents: any index
+  in the erased set is skipped by the `contains` guard one line above, and for
+  every index that reaches the count the two bounds are the same iterator.
 - **A covered start trimmed rather than deleted, in `resolveOverlaps`.** The
-  stub rule does the deletion anyway. `mover.start <= victim.start` makes
-  `earliestCut - victim.start` zero or negative, which is under any floor, and
-  a cut that leaves less than a note behind is already a deletion.
-- **The negative length guard on `victimEnd`**, and **the one on
-  `moverEnd`.** Both only differ when a length is negative, and a negative
-  length puts `victimEnd` before `victim.start`, which leaves the tail test
-  false exactly as the guarded version does. Nothing in this header can
-  produce a negative length, so the guards are for a loaded file and are
-  correct; there is simply no observable difference.
-- **The infinity reset in `resolveOverlaps` on its own**, as above.
+  stub rule does the deletion anyway: `mover.start <= victim.start` makes the
+  cut length zero or negative, and a cut leaving less than a note behind is
+  already a deletion. One correction: that is true under the DEFAULT floor,
+  not under any floor. `resolveOverlaps` takes `minLength` as a parameter, and
+  at `minLength = 0` a mover starting exactly on the victim's start gives a
+  length of zero, and `0.0 < 0.0` is false, so the victim would be trimmed to
+  nothing instead of deleted. Every caller today passes the default, and
+  there is one caller.
+- **The negative length guard on `victimEnd`**, and **the one on `moverEnd`.**
+  Both differ only when a length is negative, and a negative length puts the
+  end before the start, which leaves the tail test false exactly as the
+  guarded version does. Nothing in this header can produce a negative length,
+  so the guards are for a loaded file and are right; there is simply nothing
+  to observe.
+- **The infinity reset in `resolveOverlaps` alone**, and **the `doomed` guard
+  alone.** Each is caught by the other. Both together are not, and that is
+  the fourth gap above.
 
 ### Mutation testing
 
-91 mutations in six batches, all compiled with
+95 mutations in seven batches, every one compiled with
 `-fsanitize=address,undefined -fno-sanitize-recover=undefined` as
-`Tests/run.sh` has them, plus a control run with no change to prove the
-harness was running the real test.
+`Tests/run.sh` has them, plus a control run with no change at the start of
+every batch to prove the harness was running the real test, and three
+instrumented runs that are measurements rather than mutations.
 
 | Area | Tried | Caught |
 |---|---|---|
 | The marquee and the selection as a set | 17 | 15 |
-| Moving a group, the snap progression and the limits | 28 | 22 |
+| Moving a group, the snap progression and the limits | 26 | 20 |
 | Velocity, length, erase, duplicate | 26 | 24 |
-| Overlap resolution | 24 | 19 |
+| Overlap resolution | 22 | 15 |
 | Stale index guards | 4 | 4 |
+| **Total** | **95** | **78** |
 
-Aimed at what would be a real mistake: a bound not taken against zero, a
-bound measured from the wrong end of the chord, `ceil` for `floor`, a phase
-sign, half open for closed at a boundary, the earliest cut for the latest,
-additive for multiplicative, a guard deleted, two passes swapped so that
-indices move under them.
+Of the 17 survivors, 7 are caught by the strengthened test and 10 are the
+no-ops above. Every one of the 17 was re-run against the new test afterwards,
+along with three mutations aimed at the new checks themselves, to confirm that
+the ten still survive, that the seven now die, and that the stand-still
+assertion and the subnormal guard are load bearing rather than decorative.
+
+The harness is a scratch script and is not in the repository, so these counts
+cannot be reproduced from a checkout. Said rather than left implied.
+
+Aimed at what would be a real mistake: a bound not taken against zero, a bound
+measured from the wrong end of the chord, `ceil` for `floor`, a phase sign,
+half open for closed at a boundary, the earliest cut for the latest, additive
+for multiplicative, a guard deleted, two passes swapped so that indices move
+under them.
+
+### One new check had to be written twice, which is the lesson of the night
+
+The first version of the stand-still assertion was this:
+
+```c++
+else
+    for (const auto index : sel)
+        check (copy[index].start == before[index].start,
+               "or, with no reachable grid line, does not move at all");
+```
+
+It cannot fail. Inside that arm `move.beats` is zero, and `applyMove` does
+`n.start += move.beats`, so every start is unchanged whatever the decision to
+stand still was worth. The auditor measured it: the arm ran on 109 of 40000
+trials and could not have fired on any of them. It is the same shape as the
+`remove` tautology this night was written to close, introduced while closing
+it, in the same file, by the same session.
+
+It now asserts the reason instead of the outcome: that no multiple of the grid
+lies inside the anchor's allowed travel, so standing still was the only
+answer available. That version is load bearing, and taking the branch one step
+too eagerly fails it:
+
+```
+CAUGHT  stand-still taken too eagerly (kMin >= kMax)
+          <- FAIL and it stands still only when no grid line is reachable
+```
+
+The generator is also made to say how often it reaches the branch, 42 times in
+40000, and to fail if it stops reaching it, the way the marquee generator
+counts its partial overlaps.
+
+### Audited by somebody who did not write it
+
+The auditor found the false citation, the tautology and the subnormal guard,
+all three of which this session had written or read past. It found no fault in
+`NoteSelection.h` itself, and said what it had checked so the next reader does
+not repeat it: `snappedDeltaWithin` against a brute force oracle at three
+magnitudes of anchor, `resolveOverlaps` fuzzed over 200000 adversarial trials,
+`remapAfter` with erased indices past the end of the list, `duplicate` with a
+zero extent, `planMove` over 400000 trials with the roll's own limits, and
+every comment in the header against its code.
+
+One thing it checked and left as a note rather than a finding is worth
+carrying forward: the rail valued initialisers in `planMove`, `lowestNote =
+kHighestNote` and its three siblings, look like the usual mistake and are
+load bearing in the safe direction. They can only differ from the honest
+initialisers when every selected note is already outside the range, and then
+they err towards a shorter delta rather than a breached limit. The header now
+says so, because the next reader would otherwise correct them.
+
+### What is now proven that was not
+
+- `remove` removes the note it is given, leaves every other membership alone,
+  and builds the complement that Select Inverse is made of.
+- An absolute snap either lands the grabbed note on a grid line or stands
+  still, and it stands still only when no line is reachable.
+- A velocity already above the ceiling is not dragged back down, and does not
+  drag the group with it: the half of the group-stops invariant that was only
+  ever tested at the floor.
+- `resolveOverlaps` does not read a stale index, in the case that actually
+  reaches one, and counts no note as both trimmed and deleted.
+- A grid that is finite, positive and subnormal leaves every note where it
+  was, instead of writing a NaN into the arrangement.
+- And the record of which deliberate breakages survive is true, which it was
+  not.
+
+### Left alone deliberately
+
+- **`Fx/Unit.h`**, 234 lines with no JUCE and no test, for the fifth night. It
+  still describes itself as the shape every effect has, alongside an
+  `Fx/Plugin.h` that does not exist, and nothing in `Source` or `Tests`
+  includes it. A test over it would still be a test of a decision somebody
+  else is making.
+- **`snappedDeltaWithin` above a phase of about 1e16**, where the auditor's
+  oracle does find it returning a delta past its limit. That needs an
+  `anchorStart` of order 1e15 beats, which at 120 bpm is longer than the
+  universe has been going, and the header and the test both already own the
+  trade they made for the precision they have.
+- **`duplicate` when the extent is zero**, which lands the copies exactly on
+  the originals. Reachable only when every selected note has zero length and
+  the same start, which no edit in this header can produce.
 
 ---
 
