@@ -656,7 +656,7 @@ void PianoRollComponent::showSelectionMenu()
 
 double PianoRollComponent::quantiseGrid() const
 {
-    const double fromSnap = Meter::snapQuarters (project.meter.at (0.0),
+    const double fromSnap = project.meter.snapQuartersAt (0.0,
                                                  rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 
     // "None" is a choice about drawing freely, and a quantise has to have a
@@ -1045,7 +1045,13 @@ void PianoRollComponent::paint (juce::Graphics& g)
         const double barBeats  = project.meter.barLengthQuartersAt (0.0);
         const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
-        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize : 0.25 * beatBeats;
+        // Six pixels apart at the least: a quarter of a display beat is a
+        // hundred and twenty eighth of a quarter note in a 1/32 signature, and
+        // the fallback has to stay drawable rather than drawing a line per
+        // pixel. The old code's 0.25 was in quarters and was safe by accident.
+        const double fallback = 0.25 * beatBeats;
+        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize
+                           : std::max (fallback, fallback * std::ceil (6.0 / std::max (1.0e-9, fallback * ppb)));
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
             const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;
@@ -1228,7 +1234,7 @@ double PianoRollComponent::snapValue (const juce::ModifierKeys& mods) const
     if (mods.isAltDown())
         return 0.0;
 
-    return Meter::snapQuarters (project.meter.at (0.0),
+    return project.meter.snapQuartersAt (0.0,
                                 rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 }
 

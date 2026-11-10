@@ -132,42 +132,48 @@ ImportResult read (const juce::File& file)
     // carrying several is read as its opening signature with the caller told.
     // Without this a 7/8 file arrived with its notes in the right places and
     // the bar lines in fours, which is a grid that disagrees with the music.
-    for (int t = 0; t < midi.getNumTracks(); ++t)
+    // findAllTimeSigEvents rather than a loop over the tracks, which is what
+    // the tempo above uses and the reason matters: it merges every track into
+    // one sequence sorted by time, where walking the tracks takes the first
+    // event in track order. A type 1 file whose second track carries 7/8 at
+    // tick 0 and whose first carries 4/4 later would have had its "opening
+    // signature" read as the 4/4.
+    juce::MidiMessageSequence signatureEvents;
+    midi.findAllTimeSigEvents (signatureEvents);
+
+    for (int i = 0; i < signatureEvents.getNumEvents(); ++i)
     {
-        if (const auto* sequence = midi.getTrack (t))
+        const auto& m = signatureEvents.getEventPointer (i)->message;
+        if (! m.isTimeSignatureMetaEvent())
+            continue;
+
+        // Read from the raw bytes rather than through
+        // juce::MidiMessage::getTimeSignatureInfo, which computes the
+        // denominator as `1 << d[1]` with no bound on the shift: a file
+        // carrying a denominator byte of 200, which nothing stops it from
+        // carrying, is undefined behaviour before any validation of ours could
+        // see it.
+        //
+        // Meter::fromMetaEventBytes undoes the logarithm itself, refuses a
+        // byte out of range, and gives 4/4 instead, which is what the format
+        // says an absent signature means anyway.
+        //
+        // isTimeSignatureMetaEvent does not check the length, so the guard is
+        // needed rather than decorative.
+        if (m.getMetaEventLength() < 2)
+            continue;
+
+        const auto* data = m.getMetaEventData();
+        const auto read = Meter::fromMetaEventBytes (data[0], data[1]);
+
+        if (! result.hasSignature)
         {
-            for (int i = 0; i < sequence->getNumEvents(); ++i)
-            {
-                const auto& m = sequence->getEventPointer (i)->message;
-                if (! m.isTimeSignatureMetaEvent())
-                    continue;
-
-                // Read from the raw bytes rather than through
-                // juce::MidiMessage::getTimeSignatureInfo, which computes the
-                // denominator as `1 << d[1]` with no bound on the shift: a
-                // file carrying a denominator byte of 200, which nothing stops
-                // it from carrying, is undefined behaviour before any
-                // validation of ours could see it.
-                //
-                // Meter::fromMetaEventBytes undoes the logarithm itself,
-                // refuses a byte out of range, and gives 4/4 instead, which is
-                // what the format says an absent signature means anyway.
-                if (m.getMetaEventLength() < 2)
-                    continue;
-
-                const auto* data = m.getMetaEventData();
-                const auto read = Meter::fromMetaEventBytes (data[0], data[1]);
-
-                if (! result.hasSignature)
-                {
-                    result.signature    = read;
-                    result.hasSignature = true;
-                }
-                else if (read != result.signature)
-                {
-                    result.hasSignatureChanges = true;
-                }
-            }
+            result.signature    = read;
+            result.hasSignature = true;
+        }
+        else if (read != result.signature)
+        {
+            result.hasSignatureChanges = true;
         }
     }
 

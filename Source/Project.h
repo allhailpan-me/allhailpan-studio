@@ -771,24 +771,46 @@ public:
     int    rackBars      = 1;
     int    rackStepsPerBar = 16;
 
-    // The rack divides a bar, so a step is the bar divided by the number of
-    // steps and not a fixed sixteenth note: sixteen steps of a 6/8 bar are
-    // sixteen across three quarters. The alternative, keeping a step a
-    // sixteenth note, would give a 6/8 bar twelve steps where the control says
-    // sixteen, and the control is what somebody is looking at.
+    // **A step is a note value, not a fraction of the bar**, and the two are
+    // the same thing only in 4/4. `rackStepsPerBar` is therefore a resolution
+    // named for 4/4: sixteen steps a bar is a sixteenth note, which is what it
+    // has always been, so no saved project moves.
+    //
+    // The number of steps shown follows from the bar instead. A 6/8 bar is
+    // three quarters, so at a sixteenth note it is twelve steps and the rack
+    // shows twelve. Dividing the bar into sixteen whatever the signature would
+    // have been the obvious reading of the control's own label and is wrong
+    // twice over. `Groove::stepBeats` is a fixed note value, 0.25 for a
+    // sixteenth, and `Groove::place` only moves a note within 0.02 of that
+    // grid, so steps that were a fraction of a 7/8 bar missed the swing grid
+    // and the Feel box displaced an arbitrary one step in eight: not a groove
+    // that did nothing, which would at least be harmless, but a mangled
+    // rhythm. And a sixteenth note stays where it is when the signature
+    // changes, so a pattern already drawn is still on the steps it was drawn
+    // on rather than between them.
     double rackBarBeats() const noexcept { return meter.barLengthQuartersAt (rackStart); }
-    double rackStepBeats() const noexcept { return rackBarBeats() / std::max (1, rackStepsPerBar); }
-    int    rackStepCount() const noexcept { return std::max (1, rackBars) * std::max (1, rackStepsPerBar); }
-    double rackLengthBeats() const noexcept { return std::max (1, rackBars) * rackBarBeats(); }
+    double rackStepBeats() const noexcept { return 4.0 / std::max (1, rackStepsPerBar); }
 
-    /** Steps to a display beat, for the rack's own grid shading. Not a whole
-        number in every case: sixteen steps over seven eighths is two and two
-        sevenths, and the shading then falls where it falls rather than being
-        rounded into a lie. */
+    /** Steps in one bar of the signature, at least one, rounded up: a bar that
+        is not a whole number of steps is covered rather than cut short. */
+    int rackStepsInBar() const noexcept
+    {
+        return std::max (1, (int) std::ceil (rackBarBeats() / rackStepBeats() - 1.0e-9));
+    }
+
+    int    rackStepCount() const noexcept { return std::max (1, rackBars) * rackStepsInBar(); }
+
+    /** The rack's window is exactly the steps it shows, so it changes when the
+        step count changes and not otherwise. `rackClip` matches on it. */
+    double rackLengthBeats() const noexcept { return (double) rackStepCount() * rackStepBeats(); }
+
+    /** Steps to a display beat, which is a whole number whenever the step is
+        finer than the denominator unit: two in 6/8 at a sixteenth, four in 4/4.
+        It is less than one the other way round, at eight steps a bar in a
+        sixteenths signature, and the callers round it up to one. */
     double rackStepsPerDisplayBeat() const noexcept
     {
-        return (double) std::max (1, rackStepsPerBar)
-             / (double) std::max (1, meter.at (rackStart).numerator);
+        return meter.beatLengthQuartersAt (rackStart) / rackStepBeats();
     }
 
     // Effects that couldn't be loaded, by insert * kNumFxSlots + slot
@@ -874,12 +896,28 @@ public:
     Clip* rackClip (int channel)
     {
         const double len = rackLengthBeats();
+        Clip* sameStart = nullptr;
+
         for (auto& c : clips)
             if (! c.isAudio() && c.channel == channel
-                && std::abs (c.start - rackStart) < 1.0e-6
-                && std::abs (c.length - len) < 1.0e-6)
-                return &c;
-        return nullptr;
+                && std::abs (c.start - rackStart) < 1.0e-6)
+            {
+                if (std::abs (c.length - len) < 1.0e-6)
+                    return &c;
+
+                // The window exactly is what the rack wants, but the window
+                // can change under a pattern that is already there: the bar
+                // count, and now the signature. Matching only on an exact
+                // length meant the rack found nothing, repainted empty with
+                // the pattern still on the playlist and still playing, and
+                // then added a second clip over the first on the next click.
+                // The clip at the same start on the same channel is the same
+                // pattern whatever length it is.
+                if (sameStart == nullptr)
+                    sameStart = &c;
+            }
+
+        return sameStart;
     }
 
     /** The track this channel's rack clips sit on, claiming a free one the
@@ -926,7 +964,16 @@ public:
     Clip* rackClipFor (int channel)
     {
         if (auto* existing = rackClip (channel))
+        {
+            // Grown to cover the window, never shortened. A step drawn near
+            // the end of a window longer than the clip would otherwise be a
+            // note past the clip's end, which is a note that does not sound.
+            // Shortening would throw away notes that are still the producer's,
+            // and the window can shrink: a smaller bar count, or a shorter
+            // signature.
+            existing->length = std::max (existing->length, rackLengthBeats());
             return existing;
+        }
 
         Clip c;
         c.type    = ClipType::midi;

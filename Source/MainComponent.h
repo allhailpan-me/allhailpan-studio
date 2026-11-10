@@ -337,7 +337,16 @@ private:
     // the punch has something of the new pass to fade from and the player
     // hears what they are playing into. One bar, which is Logic's published
     // figure for exactly this. See Punch.h and startRecording.
-    static constexpr double kPunchLeadInBeats = 4.0;
+    //
+    // A bar of the signature, read at the punch in, so it is one bar and not
+    // four quarters: in 12/8 four quarters is two thirds of a bar and in 7/8
+    // it rolls in from the middle of one. The comment said "one bar" and the
+    // constant said four, which is the shape of fault this project keeps
+    // meeting, so there is no constant any more.
+    double punchLeadInBeats (double atBeat) const
+    {
+        return project.meter.barLengthQuartersAt (atBeat);
+    }
     juce::uint32 ignoreEditsUntil = 0;
     int autosaveTicks = 0;
 

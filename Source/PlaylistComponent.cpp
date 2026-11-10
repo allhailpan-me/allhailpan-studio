@@ -594,10 +594,12 @@ void PlaylistComponent::paint (juce::Graphics& g)
         for (int bar = (int) std::floor (b0 / barBeats); bar * barBeats <= b1; ++bar)
             if (((bar % 8) + 8) % 8 >= 4)
             {
-                // Shaded four bars on, four bars off, which is a phrase rather
-                // than a count of beats. It used to be `(bar / 4) % 2`, which
-                // reads the same for a positive bar and alternates wrongly
-                // either side of bar 0, where the ruler can be scrolled.
+                // Shaded four bars on, four bars off, which is a phrase
+                // rather than a count of beats, so it follows the signature's
+                // bar and not a count of four quarters. The modulo is written
+                // to survive a negative bar, which `scrollBeats` is clamped
+                // against reaching today: `(bar / 4) % 2` would be the same
+                // thing for every bar the ruler can currently show.
                 g.setColour (Ahp::panel2);
                 g.fillRect (juce::Rectangle<float> (beatToX (bar * barBeats), (float) grid.getY(), (float) (barBeats * ppb), (float) grid.getHeight()));
             }
@@ -613,8 +615,18 @@ void PlaylistComponent::paint (juce::Graphics& g)
 
         const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
+
+        // Six pixels apart at the least, at every step of the fallback and not
+        // only at the first. A display beat can be a thirty second note, so a
+        // bar of one is an eighth of a quarter: without the second test, a
+        // 1/32 project zoomed out drew the grid every thirty second of a
+        // quarter and put six thousand lines a quarter pixel apart across the
+        // window. The old code could stop at four quarters and was safe by
+        // accident.
         const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize
-                           : (beatBeats * ppb >= 6.0 ? beatBeats : barBeats);
+                           : (beatBeats * ppb >= 6.0) ? beatBeats
+                           : (barBeats  * ppb >= 6.0) ? barBeats
+                                                      : std::max (barBeats, 6.0 / std::max (1.0e-9, ppb));
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
             const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;
@@ -1705,7 +1717,7 @@ double PlaylistComponent::snapValue (const juce::ModifierKeys& mods) const
         return 0.0;
     // The table is in display beats; what the grid and the drags want is
     // quarter notes, which is what every position in the project is in.
-    return Meter::snapQuarters (project.meter.at (0.0),
+    return project.meter.snapQuartersAt (0.0,
                                 snapChoices[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 }
 

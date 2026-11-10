@@ -107,10 +107,20 @@ public:
         the tempo counts quarter notes whatever the signature says. See Meter.h.
 
         Two independent atomics rather than one, because `Meter::Signature` is
-        not lock free on every platform and the two halves are only ever read
-        together at the top of a block, where a signature changed between the
-        two reads would at worst give one block of an accent in the wrong place.
-        A lock here would be a lock on the audio thread for a pair of integers.
+        not lock free on every platform, and a lock here would be a lock on the
+        audio thread for a pair of integers. The two halves are only ever read
+        together at the top of a block, and what a read torn between them costs
+        is one block: an accent in the wrong place, and a bar start reported to
+        a hosted plugin that is a bar line of neither signature. Both halves
+        are validated on the way in, so every torn pair is still a signature
+        the studio accepts, which is why nothing downstream has to check.
+
+        Changing the signature while the click is running also fires one click
+        immediately, because the click index is in the old unit and the new one
+        puts it somewhere else: at quarter 10.5, going from 4/4 to 1/1 takes it
+        from 10 to 2. A click mid beat the moment somebody types a signature is
+        the honest consequence of the index being a count rather than a time,
+        and is not worth a block of state to suppress.
 
         Anything the studio does not accept is refused rather than stored, so
         the callback never has to check what it reads.

@@ -127,7 +127,14 @@ private:
 
             // Rates are musical divisions rather than hertz, so everything
             // stays locked to the tempo.
-            const double beats[] { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0 };
+            //
+            // The four note values are note values and stay put. The four bar
+            // entries are bars of the signature, because "1 bar" has to be one
+            // bar: left at four quarters a modulator set to it walked round the
+            // bar line in 7/8 and fired twice a bar in 12/8, and the label was
+            // then a lie in every signature whose bar is not four quarters.
+            const double bar = owner.project.meter.barLengthQuartersAt (0.0);
+            const double beats[] { 0.25, 0.5, 1.0, 2.0, bar, 2.0 * bar, 4.0 * bar, 8.0 * bar };
             const char*  names[] { "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars", "4 bars", "8 bars" };
             for (int i = 0; i < 8; ++i)
             {

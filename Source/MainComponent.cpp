@@ -571,7 +571,14 @@ void MainComponent::applyTimeSignature (const Meter::Signature& signature)
 
     playlist.refresh();
     pianoRoll.repaint();
-    rack.repaint();
+
+    // refresh rather than repaint: the rack's "Bar N" readout and its own
+    // controls are set in refresh, so a repaint left the bar number saying
+    // what it said under the old signature until somebody left the view and
+    // came back. The modulator panel rebuilds its rate menu, where "1 bar" is
+    // a bar of the signature.
+    rack.refresh();
+    modPanel.refresh();
     markDirty();
 }
 
@@ -703,7 +710,8 @@ void MainComponent::toggleRecord()
     // it buys there is the same thing it buys here, that "the start point of
     // the region [can] be adjusted later". A bar rather than a number of
     // seconds because every other range in this transport is in beats and a
-    // musician counts themselves in in bars.
+    // musician counts themselves in in bars, and a bar of the signature rather
+    // than four quarters, which are the same thing only in 4/4.
     //
     // The range is latched here and read nowhere else for the rest of the
     // take, which is the discipline `CLAUDE.md` already states for the record
@@ -716,7 +724,7 @@ void MainComponent::toggleRecord()
     punchArmed = project.punchRange();
 
     if (Punch::isUsable (punchArmed))
-        engine.setSongStart (std::max (0.0, project.loopStart - kPunchLeadInBeats));
+        engine.setSongStart (std::max (0.0, project.loopStart - punchLeadInBeats (project.loopStart)));
     else if (project.hasLoopRange())
         engine.setSongStart (project.loopStart);
 

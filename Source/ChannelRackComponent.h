@@ -77,8 +77,13 @@ public:
         for (auto* box : { &stepsBox, &barsBox })
             addAndMakeVisible (box);
 
-        stepsBox.addItemList ({ "8 steps/bar", "16 steps/bar", "32 steps/bar" }, 1);
-        stepsBox.setTooltip ("How finely the bar is divided");
+        // Note values rather than "16 steps/bar", because a step is a note
+        // value: sixteen 1/16 steps fill a 4/4 bar and twelve fill a 6/8 bar,
+        // so the old label was only true in 4/4. The stored number is
+        // unchanged, so no saved project moves.
+        stepsBox.addItemList ({ "1/8 steps", "1/16 steps", "1/32 steps" }, 1);
+        stepsBox.setTooltip ("How long a step is. Sixteen 1/16 steps fill a 4/4 bar "
+                             "and twelve fill a 6/8 bar.");
         stepsBox.onChange = [this]
         {
             const int steps[] { 8, 16, 32 };
@@ -177,7 +182,9 @@ public:
 
         const float rowH  = grid.getHeight() / (float) rows;
         const float stepW = grid.getWidth()  / (float) steps;
-        const double perBeat = project.rackStepsPerDisplayBeat();
+        const double stepBeats = project.rackStepBeats();
+        const double beatBeats = project.meter.beatLengthQuartersAt (project.rackStart);
+        const double barBeats  = project.rackBarBeats();
 
         g.setFont (juce::Font (juce::FontOptions (11.0f)));
 
@@ -209,15 +216,18 @@ public:
                 juce::Rectangle<float> cell (grid.getX() + s * stepW, y, stepW, rowH);
                 auto inner = cell.reduced (1.5f);
 
-                // Steps per beat is not a whole number in every signature:
-                // sixteen steps over seven eighths is two and two sevenths. So
-                // a step is on a beat when it is the first step of its beat,
-                // which is a comparison with the step before rather than a
-                // remainder, and step 0 always is.
-                const int beatHere   = (int) std::floor ((double) s / perBeat);
-                const int beatBefore = s > 0 ? (int) std::floor ((double) (s - 1) / perBeat) : -1;
-                const bool onBeat = beatHere != beatBefore;
-                const bool onBar  = (s % std::max (1, project.rackStepsPerBar)) == 0;
+                // Asked of the position rather than of the step number, so
+                // that it is right in a signature where a bar is not a whole
+                // number of steps: a step is on a beat when its own beat
+                // position is a multiple of one.
+                const double at = (double) s * stepBeats;
+                const auto isMultipleOf = [at] (double of)
+                {
+                    return of > 0.0 && std::abs (at / of - std::round (at / of)) < 1.0e-6;
+                };
+
+                const bool onBeat = isMultipleOf (beatBeats);
+                const bool onBar  = isMultipleOf (barBeats);
 
                 g.setColour (onBar ? Ahp::panel3 : onBeat ? Ahp::panel2 : Ahp::panel);
                 g.fillRect (inner);
@@ -419,7 +429,13 @@ private:
                 return;
 
             const int steps   = project.rackStepCount();
-            const int perBeat = std::max (1, (int) std::lround (project.rackStepsPerDisplayBeat()));
+            // Steps to a beat, for the "Every beat" fill. A whole number
+            // whenever the step is finer than the denominator unit, which is
+            // every ordinary case; where it is not, the fill falls back to
+            // every step rather than to a stride that lands between beats.
+            const double stepsPerBeat = project.rackStepsPerDisplayBeat();
+            const int perBeat = std::abs (stepsPerBeat - std::round (stepsPerBeat)) < 1.0e-6
+                              ? std::max (1, (int) std::lround (stepsPerBeat)) : 1;
             auto& info = project.channels[(size_t) row];
 
             switch (result)

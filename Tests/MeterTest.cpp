@@ -379,6 +379,20 @@ int main()
             check (back == s, name (s) + ": survives a round trip through the file bytes");
         }
 
+        // The writer refuses a signature nothing validated, which is the one
+        // claim its comment makes and was the one thing never exercised: the
+        // Map cannot hold 200/4, but the free function takes a struct with
+        // public fields, and writing nn = 200 or, after the byte truncates,
+        // nn = 44, would be a file saying something nobody asked for.
+        for (const auto bad : { Meter::Signature { 200, 4 }, Meter::Signature { 300, 4 },
+                                Meter::Signature { 4, 3 },   Meter::Signature { 0, 4 } })
+        {
+            const auto b = Meter::metaEventBytes (bad);
+            checkEqualInt (b[3], 4, name (bad) + ": an unaccepted signature writes 4/4's numerator");
+            checkEqualInt (b[4], 2, name (bad) + ": and 4/4's denominator byte");
+            check (b[3] >= 0 && b[3] <= 255, name (bad) + ": and a numerator byte that fits in a byte");
+        }
+
         // A reader must not be talked into an impossible signature by a file.
         check (Meter::fromMetaEventBytes (6, 6)   == Meter::kDefault, "a denominator byte of 6 is refused");
 
@@ -461,6 +475,25 @@ int main()
         check (Meter::validated ({ 4, 3 }) == Meter::kDefault, "an impossible signature falls back to 4/4");
         check (Meter::validated ({ 7, 8 }) == Meter::Signature { 7, 8 }, "a possible one is left alone");
 
+        // 4/4 pinned as a literal, not as a comparison with kDefault.
+        //
+        // Every statement in here about "the default" used to compare against
+        // kDefault itself, which is a restatement of the implementation and
+        // not a check on it: changing kDefault to 4/8 passed the whole file.
+        // What that would mean in the studio is that every project saved
+        // before the signature existed opens with its bar lines in halves,
+        // two clicks a bar and a MIDI export announcing 4/8, which is the
+        // exact promise the format version 9 note makes.
+        check (Meter::kDefault == Meter::Signature { 4, 4 }, "the default signature is 4/4");
+        check (Meter::barLengthQuarters (Meter::kDefault) == 4.0, "and its bar is four quarters");
+
+        // And the default BarBeat, which is what a position that is not a
+        // position reads as. Bar 1 beat 1, not bar 0.
+        check (Meter::BarBeat {}.bar == 1, "a default BarBeat is bar 1");
+        check (Meter::BarBeat {}.beat == 1, "and beat 1");
+        checkEqualInt (Meter::barBeatAt ({ 7, 8 }, std::numeric_limits<double>::quiet_NaN()).bar, 1,
+                       "a NaN position reads as bar 1 and not bar 0");
+
         Meter::Map map;
         check (map.at (0.0) == Meter::kDefault, "a new project is in 4/4");
 
@@ -506,6 +539,31 @@ int main()
         // unpredictable.
         const double nan = std::numeric_limits<double>::quiet_NaN();
         const double inf = std::numeric_limits<double>::infinity();
+
+        // And a position that is finite and still not a position. A bar
+        // number is a long long, and the cast from a double that does not fit
+        // in one is undefined behaviour rather than a large answer: 1e300
+        // quarters tripped "signed integer overflow: 9223372036854775807 + 1"
+        // under the suite's own sanitizers. ProjectIO loads a clip start with
+        // a floor of zero and no ceiling, so a damaged project can carry one
+        // as far as the position readout.
+        for (double huge : { 1.0e300, -1.0e300, 1.0e18, -1.0e18, 1.0e16 })
+        {
+            checkEqualInt (Meter::barOf ({ 7, 8 }, huge), 1,
+                           "a position too large to have a bar number reads as bar 1");
+            checkEqualInt (Meter::barBeatAt ({ 7, 8 }, huge).bar, 1,
+                           "and its readout is bar 1 rather than an overflow");
+            checkEqualInt (Meter::clickIndexAt ({ 7, 8 }, huge), 0,
+                           "and it sounds no click");
+            check (Meter::isValid (map.at (huge)), "and the map still answers with a signature");
+        }
+
+        // The bound itself, either side: 2^53 is in and the double above it is
+        // out, so the guard is where it says it is.
+        check (Meter::barOf ({ 4, 4 }, Meter::kMaxQuarters) != 1,
+               "the largest position with a bar number has one");
+        checkEqualInt (Meter::barOf ({ 4, 4 }, std::nextafter (Meter::kMaxQuarters, 1.0e300)), 1,
+                       "and the one above it does not");
 
         check (Meter::isValid (map.at (nan)), "a NaN position still answers with a signature");
         checkEqualInt (Meter::barOf ({ 7, 8 }, nan), 1, "a NaN position reads as bar 1 rather than wandering");
@@ -622,6 +680,61 @@ int main()
             Meter::Signature got { 0, 0 };
             check (Meter::parse (Meter::toString (s), got) && got == s,
                    name (s) + ": what the control shows is what the control takes");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. The Map's delegating accessors.
+    //
+    // Everything in the studio goes through these rather than through the free
+    // functions, and nothing above touched them: an audit mutated each one and
+    // all nine survived the suite. Making `barLengthQuartersAt` return a
+    // display beat puts every bar line in the studio on the eighth note in
+    // 6/8, loops the song at the end of an eighth, rounds a recorded take to
+    // an eighth and makes a two bar count-in two eighths, and the tests were
+    // green. So each one is checked against the free function it delegates to,
+    // over every accepted signature, which is the whole of what it promises.
+    // -----------------------------------------------------------------------
+    {
+        for (const auto& s : all)
+        {
+            Meter::Map map;
+            check (map.setFirst (s), name (s) + ": the map takes it");
+
+            // firstSignature is what ProjectIO::save writes. Returning the
+            // default from it would save every 7/8 project as 4/4.
+            check (map.firstSignature() == s, name (s) + ": firstSignature is what was set");
+
+            for (double q : { 0.0, 0.5, 3.0, 17.25, 101.0, 1000.75 })
+            {
+                checkEqual (map.barLengthQuartersAt (q), Meter::barLengthQuarters (s),
+                            name (s) + ": the map's bar length is the signature's bar");
+                checkEqual (map.beatLengthQuartersAt (q), Meter::beatLengthQuarters (s),
+                            name (s) + ": the map's display beat is the signature's");
+                checkEqual (map.barFloorQuartersAt (q), Meter::barFloorQuarters (s, q),
+                            name (s) + ": the map's bar floor is the signature's");
+                checkEqual (map.roundUpToBarAt (q, 1.0e-3), Meter::roundUpToBar (s, q, 1.0e-3),
+                            name (s) + ": the map's bar rounding is the signature's, tolerance and all");
+
+                const auto a = map.barBeatAt (q);
+                const auto b = Meter::barBeatAt (s, q);
+                checkEqualInt (a.bar, b.bar,   name (s) + ": the map's bar is the signature's");
+                checkEqualInt (a.beat, b.beat, name (s) + ": the map's beat is the signature's");
+                checkEqual (a.fraction, b.fraction, name (s) + ": and so is the fraction");
+
+                for (double fraction : { Meter::kSnapWholeBar, 1.0, 0.5, 0.25, 1.0 / 24.0, 0.0 })
+                    checkEqual (map.snapQuartersAt (q, fraction), Meter::snapQuarters (s, fraction),
+                                name (s) + ": the map's snap size is the signature's");
+            }
+
+            // The tolerance in particular: dropping it, or rounding down,
+            // changes the length of every recorded clip and every clip the
+            // piano roll grows, and nothing was asking.
+            const double bar = Meter::barLengthQuarters (s);
+            checkEqual (map.roundUpToBarAt (2.0 * bar + 1.0e-4, 1.0e-3), 2.0 * bar,
+                        name (s) + ": the map keeps the tolerance");
+            check (map.roundUpToBarAt (bar * 1.5, 1.0e-3) > bar * 1.5,
+                   name (s) + ": and rounds up rather than down");
         }
     }
 

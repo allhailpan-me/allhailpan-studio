@@ -1487,7 +1487,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 lastClickIndex = clickIndex;
                 if (clickOn)
                 {
-                    clickSamplesLeft = (int) (sampleRate * 0.05);
+                    // Fifty milliseconds, or half the time until the next
+                    // click, whichever is shorter. A display beat can be a
+                    // thirty second note, which at 400 bpm is 18.75 ms, so a
+                    // fixed 50 ms would retrigger a click that was still
+                    // sounding and the metronome would buzz rather than tick.
+                    const double untilNext = quartersPerClick * 60.0 / std::max (1.0, currentBpm);
+                    clickSamplesLeft = (int) (sampleRate * std::min (0.05, untilNext * 0.5));
                     clickPhase = 0.0;
                     clickFreq  = Meter::isAccentedClick (signature, clickIndex) ? 1760.0 : 1320.0;
 

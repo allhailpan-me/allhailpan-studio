@@ -93,6 +93,17 @@
     The entry itself is fixed at bar 1, which is Cubase's shape: "The first
     signature event is always positioned at bar 1. You cannot change this."
 
+    **One call site is not covered by that argument and it is the hard one.**
+    `AudioEngine::audioDeviceIOCallbackWithContext` cannot read a map at all:
+    it runs on the audio thread, where it may not allocate, lock or follow a
+    pointer that the message thread could be rewriting. So it latches one
+    signature from two atomics at the top of each block and uses the free
+    functions. A mid song map will need a lock free handoff of its own, the way
+    the arrangement already gets one, and the accessors below will not save it
+    that work. Said here rather than left for whoever meets it, because an
+    argument that quietly does not cover its hardest case is worse than no
+    argument.
+
     ## What is accepted
 
     Denominators 1, 2, 4, 8, 16 and 32, numerators 1 to 99. That is the set
@@ -112,15 +123,15 @@ namespace Meter
 {
 
 /** The numerator bounds Ableton and Avid both publish. */
-static constexpr int kMinNumerator = 1;
-static constexpr int kMaxNumerator = 99;
+inline constexpr int kMinNumerator = 1;
+inline constexpr int kMaxNumerator = 99;
 
 /** MIDI's timing clock rate, from the MIDI 1.0 specification: "TIMING CLOCK:
     Clock-based MIDI systems are synchronized with this message, which is sent
     at a rate of 24 per quarter note." The time signature meta event's third
     byte is in these units always, whatever the file's own tick division is.
 */
-static constexpr int kMidiClocksPerQuarter = 24;
+inline constexpr int kMidiClocksPerQuarter = 24;
 
 /** The time signature meta event's fourth byte: "the number of notated
     32nd-notes in a MIDI quarter-note". Eight is the truthful answer whenever a
@@ -131,7 +142,7 @@ static constexpr int kMidiClocksPerQuarter = 24;
     MIDI thinks of as a quarter-note (24 clocks) is to be notated as, or
     related to in terms of, something else." Nothing here does that.
 */
-static constexpr int kMidiNotated32ndsPerQuarter = 8;
+inline constexpr int kMidiNotated32ndsPerQuarter = 8;
 
 /** Which denominators can be accepted. Powers of two from a whole note to a
     thirty second, which is the range the MIDI byte can express and the range
@@ -158,7 +169,7 @@ struct Signature
 };
 
 /** Four four, which is also what a MIDI file with no signature event means. */
-static constexpr Signature kDefault { 4, 4 };
+inline constexpr Signature kDefault { 4, 4 };
 
 inline bool isValid (const Signature& s) noexcept
 {
@@ -226,10 +237,27 @@ struct BarBeat
     double    fraction = 0.0;
 };
 
-/** Bar number at a position, one based, floored. */
+/** How far a position may be from zero and still have a bar number.
+
+    A bar number is a `long long`, and the cast from a double that does not fit
+    in one is undefined behaviour rather than a large number. 1e300 quarters is
+    not a musical position, but `ProjectIO` loads a clip's start with a floor of
+    zero and no ceiling, so a hand edited or damaged project can carry one as
+    far as the position readout. A bound of 2^53 quarters is longer than the
+    age of the universe at any tempo and is exactly representable.
+*/
+inline constexpr double kMaxQuarters = 9007199254740992.0;   // 2^53
+
+/** Bar number at a position, one based, floored.
+
+    Anything that is not a position reads as bar 1: a NaN, an infinity, and a
+    finite number too large to have a bar number. The engine's transport
+    position can be a NaN for one block after a device change, and a NaN bar
+    number would be drawn as a bar line somewhere unpredictable.
+*/
 inline long long barOf (const Signature& s, double quarters) noexcept
 {
-    if (! std::isfinite (quarters))
+    if (! std::isfinite (quarters) || std::abs (quarters) > kMaxQuarters)
         return 1;
 
     return (long long) std::floor (quarters / barLengthQuarters (s)) + 1;
@@ -243,7 +271,7 @@ inline double barStartQuarters (const Signature& s, long long bar) noexcept
 
 inline BarBeat barBeatAt (const Signature& s, double quarters) noexcept
 {
-    if (! std::isfinite (quarters))
+    if (! std::isfinite (quarters) || std::abs (quarters) > kMaxQuarters)
         return {};
 
     BarBeat r;
@@ -314,7 +342,7 @@ inline double quartersAt (const Signature& s, const BarBeat& p) noexcept
 */
 inline long long clickIndexAt (const Signature& s, double quarters) noexcept
 {
-    if (! std::isfinite (quarters))
+    if (! std::isfinite (quarters) || std::abs (quarters) > kMaxQuarters)
         return 0;
 
     return (long long) std::floor (quarters / beatLengthQuarters (s));
@@ -358,7 +386,7 @@ inline double barFloorQuarters (const Signature& s, double quarters) noexcept
     A bar cannot be written as a fixed number of display beats, because the
     numerator is what it is, so it has a sentinel rather than a value.
 */
-static constexpr double kSnapWholeBar = -1.0;
+inline constexpr double kSnapWholeBar = -1.0;
 
 inline double snapQuarters (const Signature& s, double fractionOfDisplayBeat) noexcept
 {
@@ -394,7 +422,13 @@ inline double roundUpToBar (const Signature& s, double quarters, double toleranc
         return 0.0;
 
     const double bar = barLengthQuarters (s);
-    const double tol = std::isfinite (tolerance) ? std::max (0.0, tolerance) : 0.0;
+
+    // `std::max (0.0, tolerance)` reads a NaN tolerance as none, and the
+    // argument order is what does it: std::max returns its first argument when
+    // the comparison is false, and every comparison with a NaN is. Written the
+    // other way round it would return the NaN. So there is no isfinite guard
+    // here, and this comment is why.
+    const double tol = std::max (0.0, tolerance);
 
     return std::ceil (quarters / bar - tol / bar) * bar;
 }
@@ -446,6 +480,14 @@ inline int midiClocksForQuarters (double clickLengthQuarters) noexcept
     if (! std::isfinite (clickLengthQuarters) || clickLengthQuarters <= 0.0)
         return kMidiClocksPerQuarter;
 
+    // Clamped into a byte, and the clamp is unreachable from the signatures
+    // the studio accepts: a display beat is `4 / d` for `d` in 1 .. 32, so the
+    // click is 96, 48, 24, 12, 6 or 3 clocks and nothing else. It is here for
+    // the caller that does not exist yet rather than for the ones that do, and
+    // worth knowing before writing that caller: a dotted whole note click in
+    // 4/1, which is what Logic's Group layer would want, is 144 clocks and
+    // fits, while a longer one would be clamped into a lie rather than
+    // refused. The byte cannot say it, so the click would have to.
     const double clocks = clickLengthQuarters * (double) kMidiClocksPerQuarter;
     return (int) std::max (1.0, std::min (255.0, std::floor (clocks + 0.5)));
 }
@@ -608,15 +650,11 @@ struct Map
         return Meter::quartersAt (at (atBar), p);
     }
 
-    long long clickIndexAt (double quarters) const noexcept
-    {
-        return Meter::clickIndexAt (at (quarters), quarters);
-    }
-
-    bool isAccentedClick (double quarters, long long clickIndex) const noexcept
-    {
-        return Meter::isAccentedClick (at (quarters), clickIndex);
-    }
+    // There is deliberately no clickIndexAt or isAccentedClick here. The only
+    // thing that clicks is the audio thread, which cannot read a map, and two
+    // accessors with no caller are two things that can quietly stop being
+    // right. See the note above about the one call site this design does not
+    // cover.
 
     double roundUpToBarAt (double quarters, double tolerance) const noexcept
     {
