@@ -6,19 +6,33 @@
 
 namespace
 {
+    // In display beats rather than in quarter notes, so that the names stay
+    // true in every signature: a beat to snap to is an eighth in 6/8, and a
+    // step is a quarter of whatever a beat is. Meter::snapQuarters multiplies
+    // up, and in 4/4 every one of these comes out at the number it was before
+    // the signature existed. A bar has no fixed number of beats, so it has a
+    // sentinel.
     const std::vector<std::pair<juce::String, double>> snapChoices {
-        { "Bar", 4.0 }, { "Beat", 1.0 }, { "1/2 beat", 0.5 }, { "1/3 beat", 1.0 / 3.0 },
+        { "Bar", Meter::kSnapWholeBar }, { "Beat", 1.0 }, { "1/2 beat", 0.5 }, { "1/3 beat", 1.0 / 3.0 },
         { "Step", 0.25 }, { "1/2 step", 0.125 }, { "1/3 step", 1.0 / 12.0 },
         { "1/4 step", 0.0625 }, { "1/6 step", 1.0 / 24.0 }, { "None", 0.0 }
     };
 
-    juce::String formatPosition (double beats)
+    // bar : beat : tick, where a beat is the denominator unit and not a
+    // quarter note. Logic: "A beat corresponds to the denominator in the time
+    // signature", so 6/8 reads 1:1 to 1:6. The third field is 96ths of a
+    // display beat, which is a choice: Logic uses a user chosen division with
+    // ticks under it, Live uses sixteenths and Ardour uses ticks referenced to
+    // the quarter, so there is no convention to follow. 96 is what this field
+    // has always shown and divides by two, three and four, which is what makes
+    // a triplet read as a round number.
+    juce::String formatPosition (const Meter::Map& meter, double beats)
     {
         beats = std::max (0.0, beats);
-        const auto bar  = (int) (beats / 4.0) + 1;
-        const auto beat = (int) std::fmod (beats, 4.0) + 1;
-        const auto tick = (int) ((beats - std::floor (beats)) * 96.0 + 1e-6) % 96;
-        return juce::String (bar) + ":" + juce::String (beat) + ":" + juce::String (tick).paddedLeft ('0', 2);
+        const auto at = meter.barBeatAt (beats);
+        const auto tick = (int) (at.fraction * 96.0 + 1.0e-6) % 96;
+        return juce::String ((int) at.bar) + ":" + juce::String (at.beat) + ":"
+             + juce::String (tick).paddedLeft ('0', 2);
     }
 
     void quiet (juce::Component& c)
@@ -369,7 +383,11 @@ double PlaylistComponent::guessSourceBpm (const Clip& clip) const
 
     for (int bars : barCounts)
     {
-        const double candidate = bars * 4.0 * 60.0 / seconds;
+        // Bars of whatever the project's signature says, so a 6/8 loop is
+        // read as the number of 6/8 bars it is. The quarters per bar is the
+        // only part of this the signature touches: the tempo on the other side
+        // of it is still quarters per minute.
+        const double candidate = bars * project.meter.barLengthQuartersAt (0.0) * 60.0 / seconds;
 
         if (candidate < 60.0 || candidate > 200.0)
             continue;
@@ -438,8 +456,9 @@ void PlaylistComponent::updateClipBar()
         const bool rendering = isRendering && isRendering (*c);
         juce::String status = rendering
             ? juce::String ("Rendering high-quality stretch...")
-            : "Starts " + formatPosition (c->start) + "   Length "
-                  + juce::String (c->lengthBeats (project.bpm) / 4.0, 3) + " bars";
+            : "Starts " + formatPosition (project.meter, c->start) + "   Length "
+                  + juce::String (c->lengthBeats (project.bpm)
+                                    / project.meter.barLengthQuartersAt (c->start), 3) + " bars";
         if (folder)
         {
             const int joins = std::max (0, (int) c->compSpans().size() - 1);
@@ -522,7 +541,8 @@ void PlaylistComponent::refresh()
 void PlaylistComponent::updatePlayhead()
 {
     const double beat = engine.getBeatPosition();
-    positionLabel.setText (mouseOverGrid ? formatPosition (hoverBeat) : formatPosition (beat), juce::dontSendNotification);
+    positionLabel.setText (mouseOverGrid ? formatPosition (project.meter, hoverBeat)
+                                        : formatPosition (project.meter, beat), juce::dontSendNotification);
 
     if (engine.isPlaying())
     {
@@ -569,11 +589,17 @@ void PlaylistComponent::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState s (g);
         g.reduceClipRegion (grid);
 
-        for (int bar = (int) (b0 / 4.0); bar * 4.0 <= b1; ++bar)
-            if ((bar / 4) % 2 == 1)
+        const double barBeats = project.meter.barLengthQuartersAt (0.0);
+
+        for (int bar = (int) std::floor (b0 / barBeats); bar * barBeats <= b1; ++bar)
+            if (((bar % 8) + 8) % 8 >= 4)
             {
+                // Shaded four bars on, four bars off, which is a phrase rather
+                // than a count of beats. It used to be `(bar / 4) % 2`, which
+                // reads the same for a positive bar and alternates wrongly
+                // either side of bar 0, where the ruler can be scrolled.
                 g.setColour (Ahp::panel2);
-                g.fillRect (juce::Rectangle<float> (beatToX (bar * 4.0), (float) grid.getY(), (float) (4.0 * ppb), (float) grid.getHeight()));
+                g.fillRect (juce::Rectangle<float> (beatToX (bar * barBeats), (float) grid.getY(), (float) (barBeats * ppb), (float) grid.getHeight()));
             }
 
         // the ALLHAILPAN mark, big and quiet, fixed behind everything
@@ -585,12 +611,14 @@ void PlaylistComponent::paint (juce::Graphics& g)
             g.setOpacity (1.0f);
         }
 
+        const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
-        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize : (ppb >= 6.0 ? 1.0 : 4.0);
+        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize
+                           : (beatBeats * ppb >= 6.0 ? beatBeats : barBeats);
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
-            const bool isBar  = std::abs (b / 4.0 - std::round (b / 4.0)) < 1e-6;
-            const bool isBeat = std::abs (b - std::round (b)) < 1e-6;
+            const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;
+            const bool isBeat = std::abs (b / beatBeats - std::round (b / beatBeats)) < 1e-6;
             g.setColour (isBar ? Ahp::muted.withAlpha (0.8f) : isBeat ? Ahp::line : Ahp::line.withAlpha (0.45f));
             g.fillRect (juce::Rectangle<float> (std::round (beatToX (b)), (float) grid.getY(), 1.0f, (float) grid.getHeight()));
         }
@@ -619,7 +647,10 @@ void PlaylistComponent::paint (juce::Graphics& g)
         {
             const float dash[] = { 4.0f, 3.0f };
             juce::Path p, dashed;
-            p.addRectangle (beatToX (dropBeat), trackToY (dropTrack) + 2.0f, (float) (4.0 * ppb), (float) trackH - 5.0f);
+            // One bar wide, which is what a dropped clip usually turns out
+            // to be and is a bar rather than four beats.
+            p.addRectangle (beatToX (dropBeat), trackToY (dropTrack) + 2.0f,
+                            (float) (project.meter.barLengthQuartersAt (dropBeat) * ppb), (float) trackH - 5.0f);
             juce::PathStrokeType (1.0f).createDashedStroke (dashed, p, dash, 2);
             g.setColour (Ahp::bone);
             g.fillPath (dashed);
@@ -644,11 +675,12 @@ void PlaylistComponent::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState s (g);
         g.reduceClipRegion (ruler);
         g.setFont (juce::FontOptions (11.0f));
-        const int every = ppb * 4 >= 36 ? 1 : ppb * 16 >= 36 ? 4 : 16;
-        for (int bar = (int) (b0 / 4.0); bar * 4.0 <= b1; ++bar)
+        const double rulerBarBeats = project.meter.barLengthQuartersAt (0.0);
+        const int every = ppb * rulerBarBeats >= 36 ? 1 : ppb * rulerBarBeats * 4 >= 36 ? 4 : 16;
+        for (int bar = (int) std::floor (b0 / rulerBarBeats); bar * rulerBarBeats <= b1; ++bar)
         {
             if (bar % every) continue;
-            const float x = beatToX (bar * 4.0);
+            const float x = beatToX (bar * rulerBarBeats);
             g.setColour (Ahp::bone);
             g.drawText (juce::String (bar + 1), juce::Rectangle<float> (x + 3.0f, (float) ruler.getY(), 40.0f, 14.0f), juce::Justification::centredLeft);
             g.fillRect (juce::Rectangle<float> (x, (float) ruler.getY() + 14.0f, 1.0f, 12.0f));
@@ -1241,9 +1273,10 @@ void PlaylistComponent::addAutomationFor (int track, const AutoTarget& target)
     // Put at the left of what is on screen, rounded down to a bar, because
     // that is the part of the arrangement the producer is looking at. Four
     // bars long, which is long enough to draw a gesture in and short enough to
-    // trim rather than having to cut down.
-    const double start  = std::max (0.0, std::floor (scrollBeats / 4.0) * 4.0);
-    const double length = 16.0;
+    // trim rather than having to cut down. Four bars of the signature, so it
+    // still lands on the grid in 3/4.
+    const double start  = std::max (0.0, project.meter.barFloorQuartersAt (scrollBeats));
+    const double length = 4.0 * project.meter.barLengthQuartersAt (start);
 
     // A curve already covering this stretch of the arrangement for the same
     // control is selected rather than buried under a second one. Another curve
@@ -1670,7 +1703,10 @@ double PlaylistComponent::snapValue (const juce::ModifierKeys& mods) const
 {
     if (mods.isAltDown())
         return 0.0;
-    return snapChoices[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
+    // The table is in display beats; what the grid and the drags want is
+    // quarter notes, which is what every position in the project is in.
+    return Meter::snapQuarters (project.meter.at (0.0),
+                                snapChoices[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 }
 
 double PlaylistComponent::snap (double beat, const juce::ModifierKeys& mods, bool roundDown) const
@@ -2808,8 +2844,9 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
             // here would. Note positions keep the beats they had in the file,
             // which is the only thing that keeps the tracks of a multi-track
             // file lined up with each other.
-            const double needed = pattern->lastBeat();
-            const double bars   = std::max (1.0, std::ceil (needed / 4.0));
+            const double needed  = pattern->lastBeat();
+            const double barBeats = project.meter.barLengthQuartersAt (beat);
+            const double bars     = std::max (1.0, std::ceil (needed / barBeats));
 
             Clip c;
             c.type    = ClipType::midi;
@@ -2818,7 +2855,7 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
             c.track   = track;
             c.start   = beat;
             c.offset  = 0.0;
-            c.length  = bars * 4.0;
+            c.length  = bars * barBeats;
 
             project.selection.insert (project.addClip (c));
             ++clipsMade;

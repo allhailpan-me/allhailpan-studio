@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "Project.h"
+#include "Meter.h"
 #include "MidiTimebase.h"
 
 // Standard MIDI File import and export.
@@ -47,6 +48,13 @@ namespace MidiFileIO
         juce::String sequenceName;      // the file's own name for the sequence
         double  bpm = 0.0;              // 0 when the file states no tempo
         bool    hasTempoChanges = false;  // more than one distinct tempo
+
+        // The file's own time signature. A file that states none means 4/4,
+        // which is what the format says, so `signature` is usable either way
+        // and `hasSignature` is what says whether to adopt it.
+        Meter::Signature signature = Meter::kDefault;
+        bool    hasSignature = false;
+        bool    hasSignatureChanges = false;  // more than one distinct signature
         int     fileType = 1;           // 0, 1 or 2 as the header declares
         double  lengthBeats = 0.0;
 
@@ -95,7 +103,8 @@ namespace MidiFileIO
         expects to read.
     */
     ExportResult write (const juce::File&, const std::vector<ExportTrack>&,
-                        double bpm, const juce::String& sequenceName,
+                        double bpm, const Meter::Signature& signature,
+                        const juce::String& sequenceName,
                         bool hadAutomation = false);
 
     // ---- the arrangement ------------------------------------------------

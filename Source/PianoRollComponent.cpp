@@ -4,8 +4,10 @@
 
 namespace
 {
+    // In display beats, with a sentinel for a bar. See the same table in
+    // PlaylistComponent.cpp and Meter::snapQuarters for why.
     const std::vector<std::pair<juce::String, double>> rollSnaps {
-        { "Bar", 4.0 }, { "Beat", 1.0 }, { "1/2 beat", 0.5 }, { "1/3 beat", 1.0 / 3.0 },
+        { "Bar", Meter::kSnapWholeBar }, { "Beat", 1.0 }, { "1/2 beat", 0.5 }, { "1/3 beat", 1.0 / 3.0 },
         { "Step", 0.25 }, { "1/2 step", 0.125 }, { "1/3 step", 1.0 / 12.0 },
         { "1/4 step", 0.0625 }, { "1/6 step", 1.0 / 24.0 }, { "None", 0.0 }
     };
@@ -375,7 +377,7 @@ void PianoRollComponent::growClipToFitSelection()
             furthest = std::max (furthest, pat->notes[index].start + pat->notes[index].length);
 
     if (furthest > c->offset + c->length)
-        c->length = std::ceil ((furthest - c->offset) / 4.0) * 4.0;
+        c->length = project.meter.roundUpToBarAt (furthest - c->offset, 0.0);
 }
 
 void PianoRollComponent::beginGroupDrag (const juce::MouseEvent& e, int grabbedIndex, bool resizing)
@@ -654,17 +656,19 @@ void PianoRollComponent::showSelectionMenu()
 
 double PianoRollComponent::quantiseGrid() const
 {
-    const double fromSnap = rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
+    const double fromSnap = Meter::snapQuarters (project.meter.at (0.0),
+                                                 rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 
     // "None" is a choice about drawing freely, and a quantise has to have a
-    // grid, so it falls back to a step rather than doing nothing silently.
-    return fromSnap > 0.0 ? fromSnap : 0.25;
+    // grid, so it falls back to a step rather than doing nothing silently. A
+    // step is a quarter of a display beat, so in 6/8 it is a sixteenth note.
+    return fromSnap > 0.0 ? fromSnap : 0.25 * project.meter.beatLengthQuartersAt (0.0);
 }
 
 juce::String PianoRollComponent::quantiseGridName() const
 {
     const double fromSnap = rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
-    if (fromSnap > 0.0)
+    if (fromSnap > 0.0 || fromSnap == Meter::kSnapWholeBar)
         return rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].first;
     return "Step";
 }
@@ -1038,12 +1042,14 @@ void PianoRollComponent::paint (juce::Graphics& g)
             }
         }
 
+        const double barBeats  = project.meter.barLengthQuartersAt (0.0);
+        const double beatBeats = project.meter.beatLengthQuartersAt (0.0);
         const double snapSize = snapValue ({});
-        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize : 0.25;
+        const double minor = (snapSize > 0.0 && snapSize * ppb >= 6.0) ? snapSize : 0.25 * beatBeats;
         for (double b = std::floor (b0 / minor) * minor; b <= b1; b += minor)
         {
-            const bool isBar  = std::abs (b / 4.0 - std::round (b / 4.0)) < 1e-6;
-            const bool isBeat = std::abs (b - std::round (b)) < 1e-6;
+            const bool isBar  = std::abs (b / barBeats  - std::round (b / barBeats))  < 1e-6;
+            const bool isBeat = std::abs (b / beatBeats - std::round (b / beatBeats)) < 1e-6;
             g.setColour (isBar ? Ahp::muted : isBeat ? Ahp::line : Ahp::line.withAlpha (0.4f));
             g.fillRect (juce::Rectangle<float> (std::round (beatToX (b)), (float) grid.getY(), 1.0f, (float) grid.getHeight()));
         }
@@ -1114,9 +1120,10 @@ void PianoRollComponent::paint (juce::Graphics& g)
         juce::Graphics::ScopedSaveState s (g);
         g.reduceClipRegion (ruler);
         g.setFont (juce::FontOptions (11.0f));
-        for (int bar = (int) (b0 / 4.0); bar * 4.0 <= b1; ++bar)
+        const double rulerBarBeats = project.meter.barLengthQuartersAt (0.0);
+        for (int bar = (int) std::floor (b0 / rulerBarBeats); bar * rulerBarBeats <= b1; ++bar)
         {
-            const float x = beatToX (bar * 4.0);
+            const float x = beatToX (bar * rulerBarBeats);
             g.setColour (Ahp::bone);
             g.drawText (juce::String (bar + 1), juce::Rectangle<float> (x + 3.0f, (float) ruler.getY(), 40.0f, (float) rulerH),
                         juce::Justification::centredLeft);
@@ -1220,7 +1227,9 @@ double PianoRollComponent::snapValue (const juce::ModifierKeys& mods) const
 {
     if (mods.isAltDown())
         return 0.0;
-    return rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second;
+
+    return Meter::snapQuarters (project.meter.at (0.0),
+                                rollSnaps[(size_t) std::max (0, snapBox.getSelectedId() - 1)].second);
 }
 
 double PianoRollComponent::snap (double beat, const juce::ModifierKeys& mods, bool roundDown) const
@@ -1465,7 +1474,7 @@ void PianoRollComponent::mouseDown (const juce::MouseEvent& e)
 
     // grow the clip if the note lands past its end
     if (n.start + n.length > c->offset + c->length)
-        c->length = std::ceil ((n.start + n.length - c->offset) / 4.0) * 4.0;
+        c->length = project.meter.roundUpToBarAt (n.start + n.length - c->offset, 0.0);
     changed (false);
 }
 
@@ -1538,7 +1547,7 @@ void PianoRollComponent::mouseDrag (const juce::MouseEvent& e)
             const double end    = std::max (n.start + minLen, snap (xToBeat (e.position.x), e.mods));
             n.length = end - n.start;
             if (end > c->offset + c->length)
-                c->length = std::ceil ((end - c->offset) / 4.0) * 4.0;
+                c->length = project.meter.roundUpToBarAt (end - c->offset, 0.0);
             break;
         }
 

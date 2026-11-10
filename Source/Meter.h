@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <string>
 
 //==============================================================================
 /** The time signature: how many beats are in a bar and which note is a beat.
@@ -317,6 +318,44 @@ inline bool isAccentedClick (const Signature& s, long long clickIndex) noexcept
     return clickIndex % (long long) std::max (1, s.numerator) == 0;
 }
 
+/** Rounds a position down to the bar line at or before it. */
+inline double barFloorQuarters (const Signature& s, double quarters) noexcept
+{
+    if (! std::isfinite (quarters))
+        return 0.0;
+
+    const double bar = barLengthQuarters (s);
+    return std::floor (quarters / bar) * bar;
+}
+
+//==============================================================================
+/** A snap size, as a fraction of a display beat, and the sentinel for a whole
+    bar.
+
+    The editors offer Bar, Beat, halves and thirds of a beat, and steps, which
+    are quarters of a beat. Those names are all relative to a display beat, so
+    they are stored that way and multiplied up here: in 6/8 a beat to snap to
+    is an eighth, and a step is a sixteenth of the bar rather than a sixteenth
+    note. In 4/4 every one of them comes out at the number it was before the
+    signature existed, which is what makes this safe to change under every
+    saved project.
+
+    A bar cannot be written as a fixed number of display beats, because the
+    numerator is what it is, so it has a sentinel rather than a value.
+*/
+static constexpr double kSnapWholeBar = -1.0;
+
+inline double snapQuarters (const Signature& s, double fractionOfDisplayBeat) noexcept
+{
+    if (! std::isfinite (fractionOfDisplayBeat))
+        return 0.0;
+
+    if (fractionOfDisplayBeat == kSnapWholeBar)
+        return barLengthQuarters (s);
+
+    return std::max (0.0, fractionOfDisplayBeat) * beatLengthQuarters (s);
+}
+
 //==============================================================================
 /** Rounds a position up to a bar line, within a tolerance.
 
@@ -433,6 +472,79 @@ inline Signature fromMetaEventBytes (int numeratorByte, int denominatorByte) noe
 }
 
 //==============================================================================
+/** "7/8", for a control to show. */
+inline std::string toString (const Signature& s)
+{
+    return std::to_string (s.numerator) + "/" + std::to_string (s.denominator);
+}
+
+/** Reads a signature a person typed, and refuses anything that is not one.
+
+    In here rather than in the control, so that what the studio will accept
+    from a keyboard is tested rather than assumed. The rule is deliberately
+    strict: digits, one slash, digits, with whitespace allowed around them and
+    nothing else at all. "4 / 4" is a signature; "4/4 (swing)", "4-4", "four
+    four", "4/" and "4/4/4" are not.
+
+    Refusing is the point. A control that read "4/3" as 4/4 would leave
+    somebody looking at a signature they did not type, and one that read it as
+    the 4 and threw the rest away would be worse. On false, nothing is written
+    to `out` and the caller puts back what was there.
+*/
+inline bool parse (const std::string& text, Signature& out) noexcept
+{
+    const auto isSpace = [] (char c) { return c == ' ' || c == '\t'; };
+
+    size_t i = 0;
+    const size_t n = text.size();
+
+    const auto skipSpace = [&] { while (i < n && isSpace (text[i])) ++i; };
+
+    // No more than three digits, so that a field somebody leant on cannot
+    // overflow before the range check sees it.
+    const auto readNumber = [&] (int& value)
+    {
+        const size_t start = i;
+        value = 0;
+        while (i < n && text[i] >= '0' && text[i] <= '9')
+        {
+            if (i - start >= 3)
+                return false;
+
+            value = value * 10 + (text[i] - '0');
+            ++i;
+        }
+        return i > start;
+    };
+
+    int numerator = 0, denominator = 0;
+
+    skipSpace();
+    if (! readNumber (numerator))
+        return false;
+
+    skipSpace();
+    if (i >= n || text[i] != '/')
+        return false;
+    ++i;
+
+    skipSpace();
+    if (! readNumber (denominator))
+        return false;
+
+    skipSpace();
+    if (i != n)
+        return false;
+
+    const Signature parsed { numerator, denominator };
+    if (! isValid (parsed))
+        return false;
+
+    out = parsed;
+    return true;
+}
+
+//==============================================================================
 /** The signature map.
 
     Today it holds one entry, fixed at bar 1, and every accessor takes a
@@ -494,6 +606,16 @@ struct Map
     double roundUpToBarAt (double quarters, double tolerance) const noexcept
     {
         return roundUpToBar (at (quarters), quarters, tolerance);
+    }
+
+    double barFloorQuartersAt (double quarters) const noexcept
+    {
+        return barFloorQuarters (at (quarters), quarters);
+    }
+
+    double snapQuartersAt (double quarters, double fractionOfDisplayBeat) const noexcept
+    {
+        return snapQuarters (at (quarters), fractionOfDisplayBeat);
     }
 
     /** Refuses anything out of range rather than clamping it, so a bad edit

@@ -1396,14 +1396,14 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     if (rewind.exchange (false))
     {
         position = songStart.load();
-        lastBeat = -1;
+        lastClickIndex = noClickYet;
         jumped = true;
     }
     const double jumpTo = locateRequest.exchange (-1.0e9);
     if (jumpTo > -1.0e8)
     {
         position = jumpTo;
-        lastBeat = -1;
+        lastClickIndex = noClickYet;
         jumped = true;
     }
 
@@ -1415,6 +1415,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     const bool   clickOn        = metronome.load() || counting;
     const double currentBpm     = bpm.load();
     const double beatsPerSample = currentBpm / 60.0 / sampleRate;
+
+    // Read once per block, like the pan law, so that one block is clicked
+    // under one signature. The tempo conversion above has no business knowing
+    // about it: the signature moves bar lines and nothing else, so
+    // beatsPerSample stays the tempo over sixty with no denominator in it.
+    const Meter::Signature signature = getTimeSignature();
+    const double quartersPerClick    = Meter::beatLengthQuarters (signature);
     // isRecordingAudio rather than recorder.isActive: the input takes live in
     // inputRecorders now, and reading only the instrument recorder here meant
     // the transport looped at the end of the last clip during an input
@@ -1457,7 +1464,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (! counting && loopTo > loopFrom && position >= loopTo)
             {
                 position = loopFrom;
-                lastBeat = -1;
+                lastClickIndex = noClickYet;
                 wrapped  = true;
 
                 // Where the recorder splits one continuous capture into one
@@ -1470,15 +1477,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (i < slots)
                 blockBeats[(size_t) i] = position;
 
-            const auto beat = (juce::int64) std::floor (position);
-            if (beat != lastBeat)
+            // The click sounds once per display beat, which is the
+            // denominator unit: six times a 6/8 bar rather than four times
+            // three quarters. So the index this counts is a click index and
+            // not a quarter, and the two agree only in 4/4.
+            const auto clickIndex = (juce::int64) std::floor (position / quartersPerClick);
+            if (clickIndex != lastClickIndex)
             {
-                lastBeat = beat;
+                lastClickIndex = clickIndex;
                 if (clickOn)
                 {
                     clickSamplesLeft = (int) (sampleRate * 0.05);
                     clickPhase = 0.0;
-                    clickFreq  = (beat % 4 == 0) ? 1760.0 : 1320.0;
+                    clickFreq  = Meter::isAccentedClick (signature, clickIndex) ? 1760.0 : 1320.0;
 
                     // Read once per click rather than per sample: a level
                     // changed mid click would otherwise step on a decay that
@@ -1593,6 +1604,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (lock.isLocked() && numSamples <= capacity && numSamples <= slots)
         {
             playHead.bpm       = currentBpm;
+            playHead.signature = signature;
             playHead.ppq       = blockStartBeat;
             playHead.seconds   = blockStartBeat * 60.0 / currentBpm;
             playHead.samples   = (juce::int64) (playHead.seconds * sampleRate);
@@ -2830,11 +2842,11 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     // Remember the live transport so the session is undisturbed afterwards
     const double savedPosition = position;
     const bool   savedPlaying  = playing.load();
-    const auto   savedLastBeat = lastBeat;
+    const auto   savedLastClickIndex = lastClickIndex;
 
     playing.store (true);
     position = fromBeat;
-    lastBeat = -1;
+    lastClickIndex = noClickYet;
     liveMidi.clear();
     panicRequest.store (true);                // start from silence
 
@@ -2880,6 +2892,12 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         }
 
         playHead.bpm       = bpm.load();
+
+        // The same signature the live path reports. A hosted plugin that
+        // follows the bar has to hear the same bar in a bounce as it did
+        // through the speakers, which is the rule that `mixChannelOutput` and
+        // `routeSends` exist for applied to the play head.
+        playHead.signature = getTimeSignature();
         playHead.ppq       = blockStart;
         playHead.seconds   = blockStart * 60.0 / playHead.bpm;
         playHead.samples   = (juce::int64) (playHead.seconds * sampleRate);
@@ -2941,7 +2959,7 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     // Leave the session exactly as it was
     panicRequest.store (true);
     position = savedPosition;
-    lastBeat = savedLastBeat;
+    lastClickIndex = savedLastClickIndex;
     playing.store (savedPlaying);
     playHead.playing = savedPlaying;
 

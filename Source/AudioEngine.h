@@ -2,6 +2,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <atomic>
+#include <limits>
 #include <array>
 #include "Project.h"
 #include "Recorder.h"
@@ -99,6 +100,34 @@ public:
 
     void   setBpm (double newBpm) noexcept       { bpm.store (juce::jlimit (20.0, 400.0, newBpm)); }
     double getBpm() const noexcept               { return bpm.load(); }
+
+    /** The time signature, which the engine needs for two things and only two:
+        where the metronome's accent falls, and what bar position to report to a
+        hosted plugin. It changes nothing about how the transport moves, because
+        the tempo counts quarter notes whatever the signature says. See Meter.h.
+
+        Two independent atomics rather than one, because `Meter::Signature` is
+        not lock free on every platform and the two halves are only ever read
+        together at the top of a block, where a signature changed between the
+        two reads would at worst give one block of an accent in the wrong place.
+        A lock here would be a lock on the audio thread for a pair of integers.
+
+        Anything the studio does not accept is refused rather than stored, so
+        the callback never has to check what it reads.
+    */
+    void setTimeSignature (const Meter::Signature& s) noexcept
+    {
+        if (! Meter::isValid (s))
+            return;
+
+        sigNumerator.store (s.numerator);
+        sigDenominator.store (s.denominator);
+    }
+
+    Meter::Signature getTimeSignature() const noexcept
+    {
+        return Meter::validated ({ sigNumerator.load(), sigDenominator.load() });
+    }
     void setMetronome (bool on) noexcept         { metronome.store (on); }
     bool isMetronomeOn() const noexcept          { return metronome.load(); }
 
@@ -663,14 +692,30 @@ private:
         juce::int64 samples = 0;
         bool playing = false, recording = false, looping = false;
         double loopStart = 0.0, loopEnd = 0.0;
+        Meter::Signature signature = Meter::kDefault;
 
         juce::Optional<PositionInfo> getPosition() const override
         {
             PositionInfo info;
             info.setBpm (bpm);
-            info.setTimeSignature (juce::AudioPlayHead::TimeSignature {});
+
+            // A default constructed juce::AudioPlayHead::TimeSignature is not
+            // "unknown": its members are 4 and 4, so handing one over was a
+            // positive assertion that the project is in 4/4. It has to carry
+            // the real numbers.
+            juce::AudioPlayHead::TimeSignature timeSignature;
+            timeSignature.numerator   = signature.numerator;
+            timeSignature.denominator = signature.denominator;
+            info.setTimeSignature (timeSignature);
+
             info.setPpqPosition (ppq);
-            info.setPpqPositionOfLastBarStart (std::floor (ppq / 4.0) * 4.0);
+
+            // The bar start, which an arpeggiator or a bar synced loop player
+            // reads. JUCE only raises VST 3's kBarPositionValid when this is
+            // actually set, so leaving it out means every such plugin gets no
+            // bar position at all and says nothing about it.
+            const double bar = Meter::barLengthQuarters (signature);
+            info.setPpqPositionOfLastBarStart (std::floor (ppq / bar) * bar);
             info.setTimeInSamples (samples);
             info.setTimeInSeconds (seconds);
             info.setIsPlaying (playing);
@@ -909,6 +954,7 @@ private:
     std::atomic<bool>   offlineActive { false };
     std::atomic<double> countInEnd { -1.0e9 };
     std::atomic<double> bpm { 128.0 }, beatPosition { 0.0 }, songStart { 0.0 }, locateRequest { -1.0e9 }, songEnd { 0.0 };
+    std::atomic<int>    sigNumerator { 4 }, sigDenominator { 4 };
     std::atomic<double> loopRangeStart { 0.0 }, loopRangeEnd { 0.0 };
     std::atomic<float>  inputLevel { 0.0f };
     std::atomic<bool>   tunerListening { false };
@@ -939,7 +985,16 @@ private:
     int sentToPluginCount = 0;
 
     double position = 0.0;
-    juce::int64 lastBeat = -1;
+    // The click index the metronome last sounded on, and a sentinel for "none
+    // yet" that cannot be a click index. It was -1, which is a real index: one
+    // click before the start of the song, which is exactly where a count-in
+    // locates the transport. With a bar of one beat and a one bar count-in the
+    // first click of the count was swallowed, and the narrowness of that is
+    // the reason it survived. A click index is also no longer a quarter note
+    // now that the click follows the denominator, so the name is the honest
+    // one.
+    static constexpr juce::int64 noClickYet = std::numeric_limits<juce::int64>::min();
+    juce::int64 lastClickIndex = noClickYet;
     // Where the transport came back round inside the block being processed.
     // Audio-thread only, and fixed size: the loop range has a floor of a
     // sixteenth note, so more than one wrap in a block is already impossible

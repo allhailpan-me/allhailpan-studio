@@ -13,9 +13,11 @@
 //
 // There is no standard that defines this. Whole bars is what was asked for and
 // is what a producer expects when auditioning a beat, so it is the choice here.
-// The studio has no time signature setting: the ruler numbers a bar every four
-// beats and the metronome accents every fourth, so a bar is four beats here
-// too. Pass something else once a time signature exists.
+//
+// The bar length is the caller's to supply, and `Project::songLoopEndBeats`
+// reads it out of the signature map: four beats is only the default because a
+// project with no signature in it is in 4/4. Positions here are quarter notes,
+// so a bar in 6/8 is three of them and not six. See Meter.h.
 //
 // No JUCE in here, so Tests/SongLengthTest.cpp builds it on its own.
 // ---------------------------------------------------------------------------

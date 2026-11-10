@@ -466,6 +466,111 @@ int main()
         checkEqual (Meter::roundUpToBar ({ 7, 8 }, 4.0, nan), 7.0, "a NaN tolerance is read as none");
     }
 
+    // -----------------------------------------------------------------------
+    // 7b. The snap sizes and the bar floor.
+    //
+    // The editors' snap tables are in display beats so their names stay true
+    // in every signature, and the one property that makes that change safe
+    // under every saved project is that 4/4 gives back exactly the numbers
+    // those tables used to hold.
+    // -----------------------------------------------------------------------
+    {
+        checkEqual (Meter::snapQuarters ({ 4, 4 }, Meter::kSnapWholeBar), 4.0,  "4/4: Bar is still four");
+        checkEqual (Meter::snapQuarters ({ 4, 4 }, 1.0),                  1.0,  "4/4: Beat is still one");
+        checkEqual (Meter::snapQuarters ({ 4, 4 }, 0.25),                 0.25, "4/4: Step is still a quarter");
+        checkEqual (Meter::snapQuarters ({ 4, 4 }, 1.0 / 24.0), 1.0 / 24.0,     "4/4: a sixth of a step is unchanged");
+        checkEqual (Meter::snapQuarters ({ 4, 4 }, 0.0),                  0.0,  "4/4: None is still none");
+
+        // And in 6/8 a beat is an eighth and a step a sixteenth, so the names
+        // still describe what the grid does.
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, Meter::kSnapWholeBar), 3.0,   "6/8: a bar is three quarters");
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, 1.0),                  0.5,   "6/8: a beat is an eighth");
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, 0.25),                 0.125, "6/8: a step is a sixteenth");
+        checkEqual (Meter::snapQuarters ({ 7, 8 }, Meter::kSnapWholeBar), 3.5,   "7/8: a bar is three and a half");
+
+        for (const auto& s : all)
+        {
+            // Every snap size divides a bar a whole number of times, or the
+            // grid drawn from it would not line up with the bar lines it is
+            // drawn next to.
+            const double bar = Meter::snapQuarters (s, Meter::kSnapWholeBar);
+            checkEqual (bar, Meter::barLengthQuarters (s), name (s) + ": the Bar snap is a bar");
+
+            const double beat = Meter::snapQuarters (s, 1.0);
+            checkEqual (bar / beat, (double) s.numerator, name (s) + ": a bar is numerator beats of snap");
+
+            check (Meter::snapQuarters (s, 0.0) == 0.0, name (s) + ": None snaps to nothing");
+
+            // The floor lands on a line at or before the position, every time.
+            for (double q : { 0.0, 0.5, 1.0, 7.3, 101.75 })
+            {
+                const double floored = Meter::barFloorQuarters (s, q);
+                check (floored <= q, name (s) + ": the bar floor is not after the position");
+                check (q - floored < bar, name (s) + ": and is less than a bar before it");
+                checkEqual (floored / bar, std::floor (floored / bar), name (s) + ": and is a bar line");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. What the studio will take from a keyboard.
+    //
+    // Strict on purpose: a field that read "4/3" as 4/4 would leave somebody
+    // looking at a signature they did not type, and one that read it as the 4
+    // and threw the rest away would be worse.
+    // -----------------------------------------------------------------------
+    {
+        Meter::Signature out { 9, 16 };
+        const Meter::Signature untouched = out;
+
+        const auto accepts = [&out] (const std::string& text, int numerator, int denominator)
+        {
+            Meter::Signature got { 0, 0 };
+            const bool ok = Meter::parse (text, got);
+            check (ok, "\"" + text + "\" is accepted");
+            check (ok && got == Meter::Signature { numerator, denominator },
+                   "\"" + text + "\" reads as " + std::to_string (numerator) + "/" + std::to_string (denominator));
+        };
+
+        const auto refuses = [&out, &untouched] (const std::string& text)
+        {
+            out = untouched;
+            check (! Meter::parse (text, out), "\"" + text + "\" is refused");
+            check (out == untouched, "\"" + text + "\" leaves the signature alone");
+        };
+
+        accepts ("4/4", 4, 4);
+        accepts ("7/8", 7, 8);
+        accepts (" 6 / 8 ", 6, 8);
+        accepts ("99/32", 99, 32);
+        accepts ("1/1", 1, 1);
+
+        refuses ("");
+        refuses ("4");
+        refuses ("4/");
+        refuses ("/4");
+        refuses ("4/4/4");
+        refuses ("4-4");
+        refuses ("four four");
+        refuses ("4/4 swing");
+        refuses ("4/3");          // not a power of two
+        refuses ("0/4");
+        refuses ("100/4");
+        refuses ("4/64");
+        refuses ("-4/4");
+        refuses ("4/4.0");
+        refuses ("1000/4");       // more digits than a numerator can have
+        refuses ("4/1000");
+
+        // And what it writes is what it reads, over every accepted signature.
+        for (const auto& s : all)
+        {
+            Meter::Signature got { 0, 0 };
+            check (Meter::parse (Meter::toString (s), got) && got == s,
+                   name (s) + ": what the control shows is what the control takes");
+        }
+    }
+
     // The 6/8 bar in seconds, which is the number the whole feature turns on.
     // Done here rather than in the engine because the engine cannot be
     // compiled in the sandbox, and this is the arithmetic the engine does.

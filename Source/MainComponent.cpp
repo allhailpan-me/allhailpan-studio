@@ -9,13 +9,22 @@
 
 namespace
 {
-    juce::String formatPosition (double beats)
+    // bar : beat : tick, where a beat is the denominator unit rather than a
+    // quarter note, so 6/8 reads 1:1 to 1:6. The same readout as the
+    // playlist's, and the tick is 96ths of a display beat for the same reason.
+    juce::String formatPosition (const Meter::Map& meter, double beats)
     {
         beats = std::max (0.0, beats);
-        const auto bar  = (int) (beats / 4.0) + 1;
-        const auto beat = (int) std::fmod (beats, 4.0) + 1;
-        const auto tick = (int) ((beats - std::floor (beats)) * 96.0);
-        return juce::String (bar) + ":" + juce::String (beat) + ":" + juce::String (tick).paddedLeft ('0', 2);
+        const auto at = meter.barBeatAt (beats);
+        return juce::String ((int) at.bar) + ":" + juce::String (at.beat) + ":"
+             + juce::String ((int) (at.fraction * 96.0)).paddedLeft ('0', 2);
+    }
+
+    /** A bar number for a message, counting from one and carrying the fraction
+        of a bar, which is what "replace bars 5.00 to 9.00" wants. */
+    juce::String barNumber (const Meter::Map& meter, double beats)
+    {
+        return juce::String (beats / std::max (1.0e-9, meter.barLengthQuartersAt (beats)) + 1.0, 2);
     }
 
     enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth, recInstrument, recInstrumentMidi };
@@ -152,8 +161,8 @@ MainComponent::MainComponent()
                        "playlist ruler and that becomes the punch in and punch out.");
         else if (project.punchEnabled)
             setStatus ("Punch is on. Recording will replace bars "
-                         + juce::String (project.loopStart / 4.0 + 1.0, 2) + " to "
-                         + juce::String (project.loopEnd / 4.0 + 1.0, 2)
+                         + barNumber (project.meter, project.loopStart) + " to "
+                         + barNumber (project.meter, project.loopEnd)
                          + " on the armed track and leave the rest of the take as it is.");
         else
             setStatus ("Punch is off. Recording lays down a new take as it always has.");
@@ -610,7 +619,10 @@ void MainComponent::toggleRecord()
     heldNotes.clear();
     takeLanes.clear();
 
-    const double countBeats = (countInBox.getSelectedId() - 1) * 4.0;
+    // Bars of the signature, not of four beats: a two bar count-in in 3/4 is
+    // six beats, which is what the player hears counted.
+    const double countBeats = (countInBox.getSelectedId() - 1)
+                                * project.meter.barLengthQuartersAt (project.loopStart);
 
     // Recording over a loop starts at the loop, not wherever the playhead
     // happened to be. Otherwise the first pass would be the odd one out: it
@@ -777,7 +789,13 @@ void MainComponent::finishRecording()
             clip.channel = midiChannel;
             clip.track   = midiTrack;
             clip.start   = start;
-            clip.length  = std::max (4.0, std::ceil (std::max (stopBeat - start, pattern->lastBeat()) / 4.0 - 1e-9) * 4.0);
+            // At least one bar, and a whole number of bars past the last
+            // note, so a part recorded live sits on the grid.
+            {
+                const double needed = std::max (stopBeat - start, pattern->lastBeat());
+                const double bar    = project.meter.barLengthQuartersAt (start);
+                clip.length = std::max (bar, project.meter.roundUpToBarAt (needed, 1.0e-9));
+            }
             const int id = project.addClip (clip);
             project.selection = { id };
             pianoRoll.setClip (id);
@@ -1061,8 +1079,8 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
             case Project::PunchRefusal::none:
             {
                 msg = "Punched in over bars "
-                        + juce::String (punchArmed.inBeat  / 4.0 + 1.0, 2) + " to "
-                        + juce::String (punchArmed.outBeat / 4.0 + 1.0, 2) + " on "
+                        + barNumber (project.meter, punchArmed.inBeat) + " to "
+                        + barNumber (project.meter, punchArmed.outBeat) + " on "
                         + project.tracks[(size_t) track].name
                         + ". The rest of the take is untouched: drag across a lane to move the "
                           "join, or back over the whole clip to put the original performance "
@@ -2372,7 +2390,7 @@ void MainComponent::timerCallback()
     }
     else
     {
-        clock.setText (formatPosition (engine.getBeatPosition()), juce::dontSendNotification);
+        clock.setText (formatPosition (project.meter, engine.getBeatPosition()), juce::dontSendNotification);
         clock.setColour (juce::Label::textColourId, Ahp::bone);
     }
     recordButton.setToggleState (recordingAudio || recordingMidi, juce::dontSendNotification);
