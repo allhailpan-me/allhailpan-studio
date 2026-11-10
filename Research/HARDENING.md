@@ -7,6 +7,38 @@ Newest first.
 
 ---
 
+## 2026-11-10: selecting more than one note, and the group edit that must not deform
+
+### What was looked at
+
+`Source/NoteSelection.h`, 972 lines with no JUCE in it, and
+`Tests/NoteSelectionTest.cpp`, 1387 lines, which covers it. Merged on
+2026-11-05 in pull request #67 and never hardened since.
+
+Priority 1 in the brief's ordering is exhausted: every JUCE-free header in
+`Source` has a test except `Fx/Unit.h`, which four nights have now set aside
+as unreferenced scaffolding alongside an `Fx/Plugin.h` that still does not
+exist, and nothing in `Source` or `Tests` includes it. So this is priority 2
+and 3 together: the thinnest cover of any recently merged work, at 1.42 lines
+of test per line of source, over arithmetic whose failure is silent and
+audible. A group drag that clamps each note on its own flattens the top of a
+chord into a unison, and whoever did it finds out later, by ear, with no idea
+which gesture did it.
+
+Not `Fx/Svf.h`, `Envelope.h`, `Fx/BellMatch.h`, `Spectrogram.h` or
+`LatencyGraph.h`, which open pull requests #55, #65, #66, #68 and #72 are
+changing, and not `AudioEngine.*`, `MainComponent.*`, `Meter.h`,
+`MidiFileIO.*`, `ModulatorPanel.h`, `PianoRollComponent.cpp`,
+`PlaylistComponent.*`, `Project.h`, `ProjectIO.cpp` or `SongLength.h`, which
+open pull request #74 is changing.
+
+### Status
+
+In progress. This note is committed before the work so that an interrupted
+run leaves a record of what was being audited.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
