@@ -243,6 +243,46 @@ int main()
         }
     }
 
+    // The free functions take a Signature, whose fields are public, so a
+    // caller can hand them one the studio would never accept. They have to
+    // stay total over those too, and the beat index clamp is what keeps them
+    // so: with a denominator that is not a power of two a display beat is not
+    // exactly representable, and the division at a bar line can land a hair
+    // past the numerator. 11/13 at quarter 192.923... reads 11.000000000000007
+    // beats into an eleven beat bar, which unclamped is beat 12 of 11.
+    //
+    // Found by deliberately removing the clamp and looking for a position that
+    // noticed. It is not reachable through the Map, which refuses these, and
+    // that is not a reason to let a public function wander.
+    {
+        const Meter::Signature unaccepted[] { { 4, 3 }, { 5, 7 }, { 9, 6 }, { 3, 5 }, { 11, 13 } };
+
+        std::mt19937 rng (0xbad513);
+        std::uniform_real_distribution<double> position (0.0, 5000.0);
+
+        for (const auto& s : unaccepted)
+        {
+            check (! Meter::isValid (s), name (s) + " is not a signature the studio accepts");
+
+            for (int trial = 0; trial < 20000; ++trial)
+            {
+                double q = position (rng);
+                const double bar = Meter::barLengthQuarters (s);
+
+                // On a bar line and a hair either side of one, which is where
+                // the inexact division lands past the end of the bar.
+                if (trial % 3 == 1) q = std::floor (q / bar) * bar;
+                if (trial % 3 == 2) q = std::nextafter (std::floor (q / bar) * bar, 1.0e18);
+
+                const auto bb = Meter::barBeatAt (s, q);
+                check (bb.beat >= 1 && bb.beat <= s.numerator,
+                       name (s) + ": an unaccepted signature still reports a beat in range");
+                check (bb.fraction >= 0.0 && bb.fraction < 1.0,
+                       name (s) + ": and a fraction in [0, 1)");
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 4. The click and the accent.
     //
@@ -341,6 +381,16 @@ int main()
 
         // A reader must not be talked into an impossible signature by a file.
         check (Meter::fromMetaEventBytes (6, 6)   == Meter::kDefault, "a denominator byte of 6 is refused");
+
+        // The bound on the byte is there for the shift and not only for the
+        // range: a denominator byte of 64 would be `1 << 64`, which is
+        // undefined behaviour, and a file is free to carry one. Bytes 6 to 8
+        // are refused either way, by the validation a line later, so these are
+        // the values that make the bound load bearing.
+        check (Meter::fromMetaEventBytes (4, 31)  == Meter::kDefault, "a denominator byte of 31 is refused");
+        check (Meter::fromMetaEventBytes (4, 32)  == Meter::kDefault, "a denominator byte of 32 is refused");
+        check (Meter::fromMetaEventBytes (4, 64)  == Meter::kDefault, "a denominator byte of 64 is refused");
+        check (Meter::fromMetaEventBytes (4, 255) == Meter::kDefault, "a denominator byte of 255 is refused");
         check (Meter::fromMetaEventBytes (6, -1)  == Meter::kDefault, "a negative denominator byte is refused");
         check (Meter::fromMetaEventBytes (0, 2)   == Meter::kDefault, "a numerator of zero is refused");
         check (Meter::fromMetaEventBytes (200, 2) == Meter::kDefault, "a numerator of 200 is refused");
@@ -551,6 +601,7 @@ int main()
         refuses ("/4");
         refuses ("4/4/4");
         refuses ("4-4");
+        refuses ("4 4");          // the slash is not optional
         refuses ("four four");
         refuses ("4/4 swing");
         refuses ("4/3");          // not a power of two
@@ -561,6 +612,9 @@ int main()
         refuses ("4/4.0");
         refuses ("1000/4");       // more digits than a numerator can have
         refuses ("4/1000");
+        refuses ("99999999999/4");  // more digits than an int holds, let alone a numerator
+        refuses ("4/99999999999");
+        refuses ("999999999999999999999999/4");
 
         // And what it writes is what it reads, over every accepted signature.
         for (const auto& s : all)

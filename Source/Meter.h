@@ -249,14 +249,29 @@ inline BarBeat barBeatAt (const Signature& s, double quarters) noexcept
     BarBeat r;
     r.bar = barOf (s, quarters);
 
-    const double into = (quarters - barStartQuarters (s, r.bar)) / beatLengthQuarters (s);
+    const double raw = (quarters - barStartQuarters (s, r.bar)) / beatLengthQuarters (s);
 
-    // The clamp is unreachable for a finite position, because the bar was
-    // found by flooring the same exact division. It is here because "beat is
-    // in 1 .. numerator" is a promise the readout and the accent both rely on,
-    // and a promise kept by argument alone is one nobody can check.
-    const double beats = std::floor (into);
-    const long long index = (long long) std::max (0.0, std::min ((double) (s.numerator - 1), beats));
+    // Held inside the bar before it is split into a beat and a fraction, so
+    // that both come out in range rather than only one of them.
+    //
+    // It is unreachable for a signature the studio accepts, because every
+    // accepted display beat length is a power of two and the bar was found by
+    // flooring the same exact division, so the clamp is an identity there and
+    // the round trip stays exact. It is reachable for a signature nobody
+    // validated, and these are free functions taking a struct with public
+    // fields, so a caller can build 11/13: a display beat is then not exactly
+    // representable, and at quarter 192.923... the division reads
+    // 11.000000000000007 beats into an eleven beat bar.
+    //
+    // Clamping only the index, which is what this did first, left the fraction
+    // at 1.000000000000007: a beat in range and a fraction out of it, which is
+    // worse than either, because the beat looks right. `MeterTest` sweeps the
+    // unaccepted signatures and found exactly that.
+    const double span = (double) std::max (1, s.numerator);
+    const double into = std::max (0.0, std::min (std::nextafter (span, 0.0), raw));
+
+    // Now provably in 0 .. numerator - 1, since `into` is below `span`.
+    const long long index = (long long) std::floor (into);
 
     r.beat     = (int) index + 1;
     r.fraction = into - (double) index;
