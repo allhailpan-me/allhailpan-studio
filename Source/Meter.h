@@ -1,0 +1,525 @@
+#pragma once
+#include <algorithm>
+#include <array>
+#include <cmath>
+
+//==============================================================================
+/** The time signature: how many beats are in a bar and which note is a beat.
+
+    The studio was 4/4 everywhere and hard coded, and the hard coding was the
+    smaller half of the problem. `SongLength.h` carried `kBeatsPerBar = 4.0`,
+    the MIDI export wrote a fixed 4/4, and roughly twenty call sites divided or
+    multiplied by a literal `4.0` to get from a beat to a bar. A song in 3/4 or
+    6/8 played, because playback never asks what a bar is, and could not be
+    written, because every bar line, click, snap and position readout was
+    wrong.
+
+    ## The one rule everything else follows from
+
+    **The denominator does not touch the tempo.** The tempo is quarter notes
+    per minute whatever the signature says, so in 6/8 at 120 bpm a bar is three
+    quarter notes and 1.5 seconds, not 3.0. Apple states it outright, which is
+    the only explicit manufacturer statement there turned out to be:
+
+        "The tempo indicator in the LCD always relates to quarter notes, even
+         if eighth notes are chosen as the denominator for the time signature."
+
+        "Changing the time signature does not affect project playback, but does
+         determine the time grid in the Tracks area and MIDI editors."
+
+    (Logic Pro User Guide, *Set the project time signature*.) Steinberg's own
+    VST 3 `ProcessContext` expresses every musical quantity in quarter notes
+    and carries the signature beside them as separate information, and Ardour's
+    `Temporal::Tempo` holds a note type independent of the meter denominator
+    whose documented default is "Note Type (default '4': quarter note)".
+
+    So: **the denominator may not appear in any conversion to seconds.**
+    Seconds per stored beat stays `60 / bpm` with nothing else in it. If the
+    denominator turns up in a seconds conversion anywhere, that code is wrong,
+    and `MeterTest.cpp` sweeps every accepted signature asserting it has not.
+
+    Two studios do something else and neither is a counterexample. Pro Tools
+    has a per tempo event "Tempo Resolution (BPM Rate)" which, following a
+    dotted quarter click in 6/8, makes 120 bpm mean 120 dotted quarters: a
+    display and entry reference rather than a different time base. Ardour
+    counted denominator units before 2008, in Paul Davis' own words on their
+    forum, and changed it. Cubase, Reaper and Live publish no answer to the
+    question at all, which is recorded here so nobody re-reads three manuals
+    looking for one.
+
+    ## Two things are called a beat and they are different
+
+    This is where the feature goes wrong if it goes wrong, so the words are
+    kept apart throughout this header:
+
+    - A **quarter** is the unit the project stores every position in. Linear,
+      signature independent, and what the tempo counts.
+    - A **display beat** is the denominator unit, which is what a bar|beat
+      readout counts and what the metronome clicks. Logic, again explicitly:
+      "A beat corresponds to the denominator in the time signature." So 6/8
+      reads 1.1 to 1.6, 7/8 reads 1.1 to 1.7, and 5/4 reads 1.1 to 1.5.
+
+    Ardour names both coordinates in `temporal/tempo.h` and keeps them apart
+    deliberately, with the warning that matters:
+
+        "BEAT : a fraction of a PULSE. Defined by the meter in effect, so
+         requires meter (time signature) information to convert to/from PULSE
+         or QUARTER NOTES. In a 5/8 time, a BEAT is 1/8th note. In a 4/4 time,
+         a beat is quarter note. This means that measuring time in BEATS is
+         potentially non-linear (if the time signature changes, there will be a
+         different number of BEATS corresponding to a given time in any other
+         unit)."
+
+    Storing positions in quarters rather than in display beats is what makes a
+    mid song signature change an overlay on the file rather than a migration of
+    it: inserting one changes no stored number. Nothing in here, and nothing
+    that calls it, may store a position in display beats.
+
+    ## Nothing in here has a no-argument accessor, on purpose
+
+    Every studio looked at lets the signature change mid song, with a primary
+    citation for each, so one signature for the whole project is not the
+    finished feature. The map is the next night's work, and the expensive part
+    of this one is the call sites, which are the same call sites either way.
+
+    So `Map` is a signature map that today holds one entry, and everything on
+    it takes a position in quarters and ignores it. The argument costs nothing
+    now and is the whole migration later: a `barLengthQuarters()` with no
+    argument would make every call site a site that has to be found again, and
+    the ones that were missed would be silently wrong rather than failing to
+    compile.
+
+    The entry itself is fixed at bar 1, which is Cubase's shape: "The first
+    signature event is always positioned at bar 1. You cannot change this."
+
+    ## What is accepted
+
+    Denominators 1, 2, 4, 8, 16 and 32, numerators 1 to 99. That is the set
+    Ableton publishes ("a denominator (beat value) of 1, 2, 4, 8 or 16"),
+    widened by 32 because Ardour's manual uses 27/32 as an example, and the
+    numerator bound Ableton and Avid both publish.
+
+    Non powers of two are refused, and the reason is external rather than a
+    preference: the Standard MIDI File denominator byte is a base two
+    logarithm, so a 4/3 meter has no byte to write. Accepting one in the
+    project would mean exporting a file that said something else, which is the
+    worst outcome available.
+
+    No JUCE in here, so Tests/MeterTest.cpp builds it on its own.
+*/
+namespace Meter
+{
+
+/** The numerator bounds Ableton and Avid both publish. */
+static constexpr int kMinNumerator = 1;
+static constexpr int kMaxNumerator = 99;
+
+/** MIDI's timing clock rate, from the MIDI 1.0 specification: "TIMING CLOCK:
+    Clock-based MIDI systems are synchronized with this message, which is sent
+    at a rate of 24 per quarter note." The time signature meta event's third
+    byte is in these units always, whatever the file's own tick division is.
+*/
+static constexpr int kMidiClocksPerQuarter = 24;
+
+/** The time signature meta event's fourth byte: "the number of notated
+    32nd-notes in a MIDI quarter-note". Eight is the truthful answer whenever a
+    MIDI quarter note is notated as a quarter note, which here it always is.
+
+    The byte exists so that a file can say otherwise: "This was added because
+    there are already multiple programs which allow a user to specify that what
+    MIDI thinks of as a quarter-note (24 clocks) is to be notated as, or
+    related to in terms of, something else." Nothing here does that.
+*/
+static constexpr int kMidiNotated32ndsPerQuarter = 8;
+
+/** Which denominators can be accepted. Powers of two from a whole note to a
+    thirty second, which is the range the MIDI byte can express and the range
+    the studios publish.
+*/
+inline bool isDenominatorAllowed (int denominator) noexcept
+{
+    return denominator == 1 || denominator == 2 || denominator == 4
+        || denominator == 8 || denominator == 16 || denominator == 32;
+}
+
+//==============================================================================
+/** One signature, as it would be notated. */
+struct Signature
+{
+    int numerator   = 4;
+    int denominator = 4;
+
+    bool operator== (const Signature& o) const noexcept
+    {
+        return numerator == o.numerator && denominator == o.denominator;
+    }
+    bool operator!= (const Signature& o) const noexcept { return ! (*this == o); }
+};
+
+/** Four four, which is also what a MIDI file with no signature event means. */
+static constexpr Signature kDefault { 4, 4 };
+
+inline bool isValid (const Signature& s) noexcept
+{
+    return s.numerator >= kMinNumerator && s.numerator <= kMaxNumerator
+        && isDenominatorAllowed (s.denominator);
+}
+
+/** Anything that cannot be accepted becomes 4/4 rather than being clamped.
+
+    Clamping would turn 4/3 into 4/2 or 4/4 depending on which way it rounded,
+    and either is a signature the person did not ask for arriving without a
+    word. Falling back to the default is just as wrong and is at least the one
+    wrong answer that is obvious on sight, and it is what a loaded project with
+    a corrupt field should show. Edits are refused at the boundary instead, so
+    this is the file format's fallback rather than the editor's.
+*/
+inline Signature validated (const Signature& s) noexcept
+{
+    return isValid (s) ? s : kDefault;
+}
+
+//==============================================================================
+/** How long one display beat is, in quarters: a quarter in 4/4, an eighth in
+    6/8, a whole note in 4/1.
+*/
+inline double beatLengthQuarters (const Signature& s) noexcept
+{
+    return 4.0 / (double) s.denominator;
+}
+
+/** How long a bar is, in quarters.
+
+    Exact for everything accepted: the denominator is a power of two so
+    `4 / denominator` is exact in binary, and a numerator up to 99 times it
+    is exact too. Nothing downstream needs a tolerance to land on a bar line,
+    which is why `barOf` and `barBeatAt` can use plain floors.
+*/
+inline double barLengthQuarters (const Signature& s) noexcept
+{
+    return (double) s.numerator * beatLengthQuarters (s);
+}
+
+//==============================================================================
+/** A position as a bar|beat readout, with the fraction kept so that the round
+    trip back to quarters is exact.
+
+    `bar` is one based, so quarter 0 is bar 1 beat 1. It can go below one: the
+    count-in locates the transport before the start of the song, and a bar
+    before bar 1 is bar 0.
+
+    `beat` is one based and in `1 .. numerator`, counting display beats, which
+    is the denominator unit. `fraction` is how far through that beat the
+    position is, in `[0, 1)`.
+
+    What the third field of a position readout should be has no common
+    convention: Logic uses a user chosen division note value with ticks below
+    it, Live uses sixteenths, Ardour uses ticks referenced to the quarter note.
+    So this carries the fraction and leaves the choice of what to show of it to
+    whoever is drawing it.
+*/
+struct BarBeat
+{
+    long long bar  = 1;
+    int       beat = 1;
+    double    fraction = 0.0;
+};
+
+/** Bar number at a position, one based, floored. */
+inline long long barOf (const Signature& s, double quarters) noexcept
+{
+    if (! std::isfinite (quarters))
+        return 1;
+
+    return (long long) std::floor (quarters / barLengthQuarters (s)) + 1;
+}
+
+/** The position, in quarters, where a bar begins. Bar 1 begins at zero. */
+inline double barStartQuarters (const Signature& s, long long bar) noexcept
+{
+    return (double) (bar - 1) * barLengthQuarters (s);
+}
+
+inline BarBeat barBeatAt (const Signature& s, double quarters) noexcept
+{
+    if (! std::isfinite (quarters))
+        return {};
+
+    BarBeat r;
+    r.bar = barOf (s, quarters);
+
+    const double into = (quarters - barStartQuarters (s, r.bar)) / beatLengthQuarters (s);
+
+    // The clamp is unreachable for a finite position, because the bar was
+    // found by flooring the same exact division. It is here because "beat is
+    // in 1 .. numerator" is a promise the readout and the accent both rely on,
+    // and a promise kept by argument alone is one nobody can check.
+    const double beats = std::floor (into);
+    const long long index = (long long) std::max (0.0, std::min ((double) (s.numerator - 1), beats));
+
+    r.beat     = (int) index + 1;
+    r.fraction = into - (double) index;
+    return r;
+}
+
+/** The inverse. Out of range fields are brought into range rather than
+    refused, because this is what a position field's text becomes and "bar 2
+    beat 9" in 4/4 is a typo rather than a position.
+*/
+inline double quartersAt (const Signature& s, const BarBeat& p) noexcept
+{
+    const int beat = std::max (1, std::min (s.numerator, p.beat));
+    const double fraction = std::isfinite (p.fraction) ? std::max (0.0, std::min (1.0, p.fraction)) : 0.0;
+
+    return barStartQuarters (s, p.bar)
+         + ((double) (beat - 1) + fraction) * beatLengthQuarters (s);
+}
+
+//==============================================================================
+/** The metronome.
+
+    One click per display beat, with the first beat of the bar accented and
+    nothing else. **No manufacturer publishes a default click pattern for a
+    compound meter**, so this is a choice rather than a standard, and it is the
+    choice with the most published company: Cubase's documented 4/4 default is
+    one click per numerator unit where "the click level of the first click is
+    high, while the level of the other beats is low", and Pro Tools states
+    generally that "the accented note sounds on the first beat of each
+    measure" with a single accented and unaccented pair and no per beat
+    pattern at all.
+
+    What this deliberately is not: the compound pulse. In 6/8 the click here
+    sounds six times a bar, not twice on the dotted quarters. Logic's answer is
+    the one to copy when somebody wants that, and the shape of it is the
+    important part: its `Group` checkbox "For compound and composite
+    signatures, generates note events for each group" is a **separate,
+    additional** click layer with its own note and velocity, not a different
+    click rate. Adding it later must not change this rate.
+*/
+inline long long clickIndexAt (const Signature& s, double quarters) noexcept
+{
+    if (! std::isfinite (quarters))
+        return 0;
+
+    return (long long) std::floor (quarters / beatLengthQuarters (s));
+}
+
+/** Whether the click at an index is the accented one.
+
+    A click index is a multiple of the numerator exactly at a bar line, going
+    backwards as well: the count-in runs at negative positions, and bar 0 of a
+    7/8 project begins at click -7. Testing against zero rather than comparing
+    a remainder is what makes that work without a floored modulo, since C++
+    gives `-7 % 7 == 0`.
+*/
+inline bool isAccentedClick (const Signature& s, long long clickIndex) noexcept
+{
+    return clickIndex % (long long) std::max (1, s.numerator) == 0;
+}
+
+//==============================================================================
+/** Rounds a position up to a bar line, within a tolerance.
+
+    `tolerance`, in quarters, is how far past a line a position may sit and
+    still count as being on it. A clip's length in beats is its source length
+    in seconds times the tempo, so a one bar loop rarely lands exactly on the
+    line, and without a tolerance a loop cut to length would gain a whole bar
+    of silence.
+
+    There is no published specification for this and no published tolerance.
+    What is published and does constrain it: Pro Tools rounds meter change
+    ranges to the "nearest whole bar number" and inserts time "in whole bar
+    increments", and Ableton allows a signature marker to fall mid bar and then
+    offers to "delete" or "complete" the resulting fragmentary bar. Up rather
+    than nearest is the choice here, because the caller is finding the end of
+    something and rounding down would cut it off.
+*/
+inline double roundUpToBar (const Signature& s, double quarters, double tolerance) noexcept
+{
+    if (! std::isfinite (quarters))
+        return 0.0;
+
+    const double bar = barLengthQuarters (s);
+    const double tol = std::isfinite (tolerance) ? std::max (0.0, tolerance) : 0.0;
+
+    return std::ceil (quarters / bar - tol / bar) * bar;
+}
+
+//==============================================================================
+/** The Standard MIDI File time signature meta event, as seven bytes.
+
+    `FF 58 04 nn dd cc bb`, where:
+
+    - `nn` is the numerator as notated, literally.
+    - `dd` is a base two logarithm: "The denominator is a negative power of
+      two: 2 represents a quarter-note, 3 represents an eighth-note, etc."
+    - `cc` is "the number of MIDI clocks in a metronome click", in units of a
+      twenty fourth of a quarter note.
+    - `bb` is "the number of notated 32nd-notes in a MIDI quarter-note (24 MIDI
+      Clocks)".
+
+    Assembled here rather than taken from `juce::MidiMessage`, because JUCE's
+    own `timeSignatureMetaEvent` returns
+    `{ 0xff, 0x58, 0x04, numerator, powerOfTwo, 1, 96 }`: a click every twenty
+    fourth of a quarter note, and a quarter note notated as twelve whole notes.
+    Both are wrong against the specification, which wants 24 and 8 for 4/4 with
+    a quarter note click, and every MIDI file this studio exported before
+    tonight carried them. Nothing reads those two bytes in practice, which is
+    why it went unnoticed and is not a reason to keep writing them.
+
+    `cc` here follows the click this studio actually sounds, which is one per
+    display beat: 24 in 4/4, 12 in 6/8. The specification's own worked example
+    is a 6/8 file whose metronome clicks every three eighths, so its `cc` is 36
+    and the whole event is `FF 58 04 06 03 24 08`. Worth knowing that the
+    widely mirrored jglatt copy of that example gives `cc` as `18`, which is 24
+    decimal, one quarter note, two eighths, contradicting its own prose. That
+    page is the first thing anybody checking a 6/8 event will find.
+*/
+inline int midiDenominatorByte (const Signature& s) noexcept
+{
+    int byte = 0;
+    for (int n = 1; n < s.denominator; n <<= 1)
+        ++byte;
+    return byte;
+}
+
+/** MIDI clocks in a click of the given length. Exposed separately from the
+    signature so that the specification's own 6/8 example, a click of a dotted
+    quarter, can be checked against this rather than against a retyped 36.
+*/
+inline int midiClocksForQuarters (double clickLengthQuarters) noexcept
+{
+    if (! std::isfinite (clickLengthQuarters) || clickLengthQuarters <= 0.0)
+        return kMidiClocksPerQuarter;
+
+    const double clocks = clickLengthQuarters * (double) kMidiClocksPerQuarter;
+    return (int) std::max (1.0, std::min (255.0, std::floor (clocks + 0.5)));
+}
+
+inline int midiClocksPerClick (const Signature& s) noexcept
+{
+    return midiClocksForQuarters (beatLengthQuarters (s));
+}
+
+/** The whole event. Signatures this studio refuses never reach here, so an
+    invalid one becomes 4/4 rather than writing a byte that says something
+    else.
+*/
+inline std::array<int, 7> metaEventBytes (const Signature& signature) noexcept
+{
+    const Signature s = validated (signature);
+
+    return { 0xff, 0x58, 0x04, s.numerator, midiDenominatorByte (s),
+             midiClocksPerClick (s), kMidiNotated32ndsPerQuarter };
+}
+
+/** Reads a signature out of the two bytes that carry one.
+
+    The two clock bytes are deliberately ignored. `cc` is the writer's own
+    click rate, which is a property of the file's metronome rather than of the
+    music, and `bb` is "always set as 8" in every file anybody has looked at.
+    Reading either would be adopting somebody else's metronome preference as
+    this project's time signature.
+
+    Anything out of range comes back as 4/4, which is what the format says an
+    absent signature means anyway.
+*/
+inline Signature fromMetaEventBytes (int numeratorByte, int denominatorByte) noexcept
+{
+    if (denominatorByte < 0 || denominatorByte > 5)
+        return kDefault;
+
+    return validated ({ numeratorByte, 1 << denominatorByte });
+}
+
+//==============================================================================
+/** The signature map.
+
+    Today it holds one entry, fixed at bar 1, and every accessor takes a
+    position in quarters and ignores it. See the note at the top of this file
+    for why the argument is there from the first commit rather than from the
+    night the map arrives.
+
+    When it does arrive, the properties to keep are the ones `MeterTest.cpp`
+    already asserts: `at` is total over every finite position, the entry at bar
+    1 cannot be moved or removed, and the bar number is monotonic
+    non-decreasing in the position. Ardour's warning is worth carrying across
+    with them: "Beats increase monotonically throughout the tempo map (BBT may
+    not)."
+*/
+struct Map
+{
+    /** The signature in force at a position. */
+    Signature at (double quarters) const noexcept
+    {
+        (void) quarters;     // one entry, so every position has the same answer
+        return first;
+    }
+
+    double barLengthQuartersAt (double quarters) const noexcept
+    {
+        return barLengthQuarters (at (quarters));
+    }
+
+    double beatLengthQuartersAt (double quarters) const noexcept
+    {
+        return beatLengthQuarters (at (quarters));
+    }
+
+    BarBeat barBeatAt (double quarters) const noexcept
+    {
+        return Meter::barBeatAt (at (quarters), quarters);
+    }
+
+    /** Where a bar|beat readout points. Reads the signature at the bar rather
+        than at the answer, which is the same thing today and is the right one
+        of the two once it is not.
+    */
+    double quartersAt (const BarBeat& p) const noexcept
+    {
+        const double atBar = (double) (p.bar - 1) * barLengthQuarters (first);
+        return Meter::quartersAt (at (atBar), p);
+    }
+
+    long long clickIndexAt (double quarters) const noexcept
+    {
+        return Meter::clickIndexAt (at (quarters), quarters);
+    }
+
+    bool isAccentedClick (double quarters, long long clickIndex) const noexcept
+    {
+        return Meter::isAccentedClick (at (quarters), clickIndex);
+    }
+
+    double roundUpToBarAt (double quarters, double tolerance) const noexcept
+    {
+        return roundUpToBar (at (quarters), quarters, tolerance);
+    }
+
+    /** Refuses anything out of range rather than clamping it, so a bad edit
+        leaves the project on the signature it had. Returns whether it took.
+    */
+    bool setFirst (const Signature& s) noexcept
+    {
+        if (! isValid (s))
+            return false;
+
+        first = s;
+        return true;
+    }
+
+    const Signature& firstSignature() const noexcept { return first; }
+
+    bool operator== (const Map& o) const noexcept { return first == o.first; }
+    bool operator!= (const Map& o) const noexcept { return ! (*this == o); }
+
+private:
+    // Private so that nothing can put a signature the MIDI file cannot
+    // express into the project: the only way in is `setFirst`, which refuses.
+    // Fixed at bar 1, which is Cubase's shape for its own first entry: "The
+    // first signature event is always positioned at bar 1. You cannot change
+    // this."
+    Signature first = kDefault;
+};
+
+} // namespace Meter
