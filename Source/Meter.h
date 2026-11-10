@@ -451,10 +451,13 @@ inline double gridStepQuarters (const Signature& signature, double pixelsPerQuar
     if (wideEnough (spacing))
         return spacing;
 
-    // Whole bars, however many it takes. The ceiling is at least one, so this
-    // always returns something at least a bar wide and the caller's loop over
-    // it always terminates.
-    return bar * std::max (1.0, std::ceil (want / (bar * zoom)));
+    // Whole bars, however many it takes. This line is reached only when a
+    // single bar is itself too narrow, so `want / (bar * zoom)` is above one
+    // and the ceiling of it is at least two: there is no `max (1.0, ...)` here
+    // and that is deliberate. It would be reachable only for a zoom that is
+    // not a number, which the guard above has already dealt with, and two
+    // guards for one hazard is one guard nobody can check.
+    return bar * std::ceil (want / (bar * zoom));
 }
 
 //==============================================================================

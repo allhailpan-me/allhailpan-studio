@@ -42,7 +42,7 @@ blindly. Newest first.
 
 ## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
 
-### Status: in progress
+### Status: open, pull request #74
 
 The 11-03 entry called this "the biggest single gap found tonight" and deferred
 it because two of the files it reaches were open in another pull request. They
@@ -145,10 +145,20 @@ The trap the researcher named is worth quoting, because it is the whole reason
 the interface looks the way it does: a no argument `beatsPerBar()` makes every
 call site a site that has to be found again when the map arrives, and the ones
 that are missed are silently wrong rather than failing to compile. So
-`Meter.h` ships `meterAt (double quarterNotes)` and
-`barLengthQuarters (double quarterNotes)` from the first commit, with an
-implementation that ignores its argument. The argument is free now and is the
-whole migration later.
+`Meter::Map` ships `at (double quarters)`, `barLengthQuartersAt`,
+`beatLengthQuartersAt`, `barBeatAt`, `roundUpToBarAt`, `barFloorQuartersAt`,
+`snapQuartersAt` and `gridStepQuartersAt` from the first commit, each taking a
+position and ignoring it. The argument is free now and is the whole migration
+later. The free functions beside them take a `Signature` instead and are what
+the arithmetic actually lives in.
+
+**One call site that argument does not cover, and it is the hard one.** The
+audio thread cannot read a map at all: no allocation, no lock, no pointer the
+message thread could be rewriting. `audioDeviceIOCallbackWithContext` latches
+one signature from two atomics at the top of each block and uses the free
+functions. A mid song map needs a lock free handoff of its own, the way the
+arrangement already gets one. Written down because an argument that quietly
+does not cover its hardest case is worse than no argument.
 
 Cubase's first signature event is the shape copied for the entry itself: "The
 first signature event is always positioned at bar 1. You cannot change this."
@@ -185,10 +195,99 @@ else.
   the transport means, and the one thing every source here agrees on is that the
   stored time base is quarter notes.
 
-### What is left to do
+### What was built
 
-Everything below the research. Written down now so the pull request can be
-picked up if this run is cut off.
+`Source/Meter.h`, no JUCE, with `Tests/MeterTest.cpp` over all 594 accepted
+signatures. The signature reaches: both editors' bar lines, beat lines, rulers
+and snap grids; the metronome's rate and accent; the play head's signature and
+bar start, on the live path and in `renderOffline` both; the song loop end; the
+count-in length; the punch lead in; a recorded clip's length and the three
+places the piano roll grows one; the position readouts; the duplicate offset; a
+modulator's rate labels; the MIDI file's meta event on the way out and its
+signature on the way in; and the project file, at format version 9.
+
+### The audits, and what they changed
+
+Two rounds, each by a session that had seen neither the change nor the previous
+round's fixes. Neither could break the central claim: the denominator reaches
+no conversion to seconds or samples, enumerated over all ninety call sites.
+
+The first round found that the feature had changed what a bar is and that three
+things downstream of a bar had not been followed through, and that the test did
+not touch the `Map` layer that every call site in the studio goes through:
+nine mutations to it survived, including one that would put every bar line in
+the studio on the eighth note in 6/8 with the suite green.
+
+The second round found that the fix for the worst of the first round's findings
+was itself wrong in three ways. Both rounds are worth the space because they
+are the same lesson twice: the arithmetic that was in a tested header was
+right both times, and everything that was wrong was in a file JUCE stops this
+sandbox from compiling or testing.
+
+### Deliberately left for later, with the reproductions
+
+**The channel rack does not follow the signature.** It is still in bars of four
+quarters. Making it follow reaches three things at once and getting any of them
+wrong loses a pattern, which is why it was attempted, reverted and written down
+rather than attempted twice:
+
+- `Project::rackClip` finds its clip by an exact length match, so a window that
+  moves with the signature makes the rack find nothing: the grid repaints empty
+  with the pattern still on the playlist and still playing, and the next click
+  adds a second clip over the first. Loosening the match to the same start on
+  the same channel adopts clips the rack must not touch. Every automation clip
+  carries `channel == 0` and no pattern, so a project with automation at bar 1
+  had its first rack row silently refuse to program, and `rackClipFor` then
+  lengthened that automation clip with no undo step, no dirty flag and no
+  `pushArrangement`. A clip trimmed from the left carries an `offset` that the
+  rack does not write for, so every step drawn into one is a note
+  `pushArrangement` drops while the rack paints it lit.
+- A bar that is not a whole number of steps makes the window longer than the
+  bars it covers. 175 of the signature and resolution pairs the controls can
+  reach are such a bar, 3/16 and 7/32 among them. `<` and `>` then move by a
+  bar while the window is longer, so consecutive rack patterns overlap and
+  their notes collide.
+- `Groove::place` counts its swing pairs from the clip's own origin, so a bar
+  holding an odd number of steps, which 7/8 and 5/8 do at an eighth note,
+  swings the steps the next bar leaves straight. Landing on the groove grid and
+  landing on the right parity of it are different claims and only the first was
+  checked.
+
+The shape of the fix is named rather than guessed: `rackStepBeats`,
+`rackStepsInBar`, `rackStepCount` and `rackLengthBeats` are pure functions of
+the signature, the step resolution and the bar count, and belong in a JUCE-free
+`RackGrid.h` beside `SongLength.h` with a test asserting 4/4 agreement with
+today's formulas, that the window tiles, and the groove parity from the song's
+origin rather than the clip's.
+
+Two adjacent things found on the way and not introduced by any of this:
+`Groove::base` is only written in the rack's swing box handler, so changing the
+step resolution afterwards leaves a stale base and the swing silently stops
+doing anything; and `rackClip`'s exact length match already orphaned a pattern
+when the bar count changed, for one rack setting, before tonight.
+
+**A full meter map.** Three things to decide first, all from the research:
+whether a change may fall mid bar (Pro Tools refuses, Ableton allows and then
+offers to repair the "fragmentary bar"), that bar numbering is monotonic while
+BBT is not, and that the map wants `WarpMap.h`'s normalisation discipline
+rather than a second shape. Plus the audio thread handoff above.
+
+**Logic's `Group` click layer**, the separate dotted quarter pulse in a
+compound meter. It is an additional click generator rather than a different
+click rate. Worth knowing before building it: `Meter::midiClocksForQuarters`
+clamps to a byte, and a click longer than a dotted whole note would be clamped
+into a lie rather than refused, because `FF 58`'s `cc` byte cannot say it.
+
+**PAN One's own sync divisions.** `PanOneParams.h` has the same table a
+modulator had, with "1bar" as four quarters. The instrument receives the
+signature on the play head now and ignores it. The same relabel the modulator
+panel got would do, and it is 240 controls away from anything else tonight
+touched.
+
+**A bar|beat position field somebody can type into.** `Meter::quartersAt` and
+`Map::quartersAt` exist and are tested and have no caller: the readouts are one
+way today. The inverse is written so that the field can be built without
+anybody having to work out what "2|1" means in 7/8 again.
 
 ---
 

@@ -683,12 +683,42 @@ int main()
                    name (s) + ": a step too narrow to read is not drawn");
         }
 
-        // Nothing that is not a zoom may reach it either.
+        // Nothing that is not a zoom may reach it either, and the answer has
+        // to be a number and not only a positive one: a NaN spacing makes the
+        // loop that steps along it draw nothing at all, silently, which is
+        // worse than a grid that is too dense.
         const double nan = std::numeric_limits<double>::quiet_NaN();
-        check (Meter::gridStepQuarters ({ 4, 4 }, nan, 6.0, 1.0) > 0.0, "a NaN zoom still gives a spacing");
-        check (Meter::gridStepQuarters ({ 4, 4 }, 8.0, nan, 1.0) > 0.0, "a NaN minimum still gives a spacing");
-        check (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, nan) > 0.0, "a NaN finest still gives a spacing");
-        check (Meter::gridStepQuarters ({ 4, 4 }, 0.0, 6.0, 1.0) > 0.0, "a zoom of zero still gives a spacing");
+        const double inf = std::numeric_limits<double>::infinity();
+
+        const auto usable = [] (double step, const std::string& what)
+        {
+            check (step > 0.0 && std::isfinite (step), what);
+        };
+
+        usable (Meter::gridStepQuarters ({ 4, 4 }, nan, 6.0, 1.0), "a NaN zoom gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 4 }, inf, 6.0, 1.0), "an infinite zoom gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 4 }, 8.0, nan, 1.0), "a NaN minimum gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, nan), "a NaN finest gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 4 }, 0.0, 6.0, 1.0), "a zoom of zero gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 4 }, -8.0, 6.0, 1.0), "a negative zoom gives a usable spacing");
+        usable (Meter::gridStepQuarters ({ 4, 3 }, 8.0, 6.0, 1.0), "an unaccepted signature gives a usable spacing");
+
+        // A caller asking for a finest spacing coarser than a display beat is
+        // held to a display beat, because a coarser one need not divide the
+        // bar and the promise is the bar line. No caller does this today; the
+        // bound is what lets the next one not have to know.
+        for (const auto& s : all)
+        {
+            const double beat = Meter::beatLengthQuarters (s);
+            const double bar  = Meter::barLengthQuarters (s);
+            const double step = Meter::gridStepQuarters (s, 1000.0, 6.0, 3.0 * beat);
+
+            check (step <= beat + 1.0e-9, name (s) + ": a finest coarser than a beat is held to a beat");
+
+            const double stepsPerBar = bar / step;
+            check (std::abs (stepsPerBar - std::round (stepsPerBar)) < 1.0e-9,
+                   name (s) + ": so it still divides the bar");
+        }
 
         // The 4/4 answers, pinned, because these are what the editors drew
         // before the signature existed and nothing should have moved.
