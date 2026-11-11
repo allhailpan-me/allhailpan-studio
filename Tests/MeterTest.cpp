@@ -637,8 +637,13 @@ int main()
     // -----------------------------------------------------------------------
     {
         const double zooms[] { 2.0, 2.5, 3.0, 4.0, 7.0, 8.0, 50.0, 137.0, 400.0 };
-        const double wanted = 6.0;
 
+        // The minimum is swept rather than fixed at the six pixels both
+        // editors ask for today. An audit mutated the accessor to hardcode
+        // that six and to raise anything smaller to it, and both survived a
+        // sweep that only ever passed six: the one argument never varied is
+        // the one that can be ignored without the suite noticing.
+        for (double wanted : { 2.0, 6.0, 10.0, 25.0 })
         for (const auto& s : all)
         {
             const double bar  = Meter::barLengthQuarters (s);
@@ -703,6 +708,45 @@ int main()
         usable (Meter::gridStepQuarters ({ 4, 4 }, -8.0, 6.0, 1.0), "a negative zoom gives a usable spacing");
         usable (Meter::gridStepQuarters ({ 4, 3 }, 8.0, 6.0, 1.0), "an unaccepted signature gives a usable spacing");
 
+        // Usable is not enough: dropping `validated` from the top of the
+        // function left every one of these giving an answer that is positive
+        // and finite and wrong, so the check that was meant to pin it did not.
+        // Unvalidated, 0/4 gives a NaN, which makes the draw loop draw
+        // nothing, and -4/4 gives zero, which makes it loop forever on the
+        // message thread. The answer has to be the 4/4 answer.
+        for (double zoom : { 2.0, 8.0, 60.0 })
+            for (const auto& bad : { Meter::Signature { 4, 3 }, Meter::Signature { 0, 4 },
+                                     Meter::Signature { -4, 4 }, Meter::Signature { 4, 0 },
+                                     Meter::Signature { 100, 4 } })
+                checkEqual (Meter::gridStepQuarters (bad, zoom, 6.0, 1.0),
+                            Meter::gridStepQuarters (Meter::kDefault, zoom, 6.0, 1.0),
+                            "an unaccepted signature gives exactly the 4/4 grid");
+
+        // The threshold is "at least this wide", and exactly this wide counts.
+        // Turning the >= into a > skips a rung at a zoom where one lands on
+        // the minimum exactly, which fit-to-width reaches routinely because it
+        // divides a pixel width by a song length. None of the property checks
+        // above can see it: the coarser answer is still wide enough, still
+        // divides the bar and is still no coarser than a bar.
+        //
+        // The second half is the same boundary from below, and is why the
+        // minimum may not be quietly relaxed either: a thousandth off it, in
+        // the direction of accepting a narrower rung, was a surviving mutation
+        // until this was here. Written as a fraction of the boundary rather
+        // than with a chosen zoom, so it holds for every signature.
+        for (const auto& s : all)
+        {
+            const double beat = Meter::beatLengthQuarters (s);
+            const double onTheNose = 6.0 / beat;      // a display beat is exactly 6 px
+
+            checkEqual (Meter::gridStepQuarters (s, onTheNose, 6.0, beat), beat,
+                        name (s) + ": a beat exactly as wide as asked is drawn");
+
+            if (s.numerator >= 2)
+                check (Meter::gridStepQuarters (s, onTheNose * 0.9995, 6.0, beat) > beat + 1.0e-12,
+                       name (s) + ": and a beat a twentieth of a percent too narrow is not");
+        }
+
         // A caller asking for a finest spacing coarser than a display beat is
         // held to a display beat, because a coarser one need not divide the
         // bar and the promise is the bar line. No caller does this today; the
@@ -727,17 +771,38 @@ int main()
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 0.5, 6.0, 1.0), 12.0, "4/4 at half a pixel draws three bars");
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 30.0, 6.0, 0.25), 0.25, "4/4 at 30 px a quarter draws steps");
 
-        // One zoom where 4/4 did move, pinned so that it is recorded rather
-        // than discovered. The playlist used to choose between a beat and a
-        // whole bar on `ppb >= 6`, so from three to six pixels a quarter it
-        // drew bar lines and nothing between them. The ladder climbs to the
-        // narrowest spacing that is at least six pixels and still divides the
-        // bar, which here is the half bar, so those zooms gain a line. That is
-        // the behaviour asked for, and it is the only 4/4 zoom that changed.
+        // Two bands where 4/4 did move, pinned so that they are recorded
+        // rather than discovered, because the two editors did not fall back on
+        // the same thing before this and one of them changed much more.
+        //
+        // The playlist chose between a beat and a whole bar on `ppb >= 6`, so
+        // from three to six pixels a quarter it drew bar lines and nothing
+        // between them. The ladder climbs to the narrowest spacing that is at
+        // least six pixels and still divides the bar, which there is the half
+        // bar, so that band gains a line. Its zoom is clamped to [2, 400].
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 4.0, 6.0, 1.0), 2.0,
                     "4/4 at 4 px a quarter draws half bars, where it used to draw bars");
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 2.9, 6.0, 1.0), 4.0,
                     "and is back to bars as soon as the half bar is too narrow");
+
+        // The piano roll drew a flat quarter of a beat at every zoom, down to
+        // its own floor of eight pixels a quarter, where sixteenth lines are
+        // two pixels apart and read as a smear rather than as a grid. It now
+        // holds the quarter note until the sixteenth is six pixels wide, which
+        // is twenty four pixels a quarter, so a sixteen pixel wide band of its
+        // zoom loses the step lines and keeps the beat lines. That is the
+        // change somebody will see, and it is the larger of the two.
+        //
+        // Deliberate, for the reason the two pixels gives, and it costs
+        // nothing anybody was using: the snap branch is untouched in both
+        // editors, so a sixteenth snap still draws sixteenths exactly where it
+        // drew them before, at every zoom where six pixels fit.
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, 0.25), 1.0,
+                    "4/4 at the piano roll's zoom floor draws quarters, where it used to draw steps");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 23.9, 6.0, 0.25), 1.0,
+                    "and still does just below where a step is six pixels");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 24.0, 6.0, 0.25), 0.25,
+                    "and draws steps from exactly there, which is the boundary being inclusive");
         // 99/32's bar is 12.375 quarters, and the only spacings that divide it
         // are the divisors of 99 times a thirty second: 3, 9, 11, 33 and 99 of
         // them. At four pixels a quarter the first one wide enough is 33, a
@@ -866,16 +931,35 @@ int main()
                 // zoom: lines at 0, 2, 4, 6 against bars at 0, 3.5, 7, and
                 // every bar after the first with no line on it at all.
                 //
-                // The zooms span what `ppb` is clamped to, and both finest
-                // values are the ones the two editors actually pass: the
-                // playlist asks for a display beat, the piano roll for a
-                // quarter of one.
+                // The zooms span both editors' clamps, which are not the
+                // same: the playlist holds `ppb` to [2, 400] and the piano
+                // roll to [8, 800]. Both finest values are the ones the two
+                // actually pass, a display beat and a quarter of one.
+                //
+                // The minimum is swept as well, even though both callers pass
+                // six pixels today. Hardcoding it to six in this one line, and
+                // raising anything smaller to six, were both surviving
+                // mutations while the sweep only ever passed six: a later
+                // caller asking for ten would silently have got six.
+                // One of the swept minimums is below the six both callers
+                // pass and one is above, because raising anything smaller to
+                // six is a mutation that two values on the same side of six
+                // cannot see. And the last zoom is a twentieth of a percent
+                // inside the boundary where a display beat is exactly the
+                // minimum, which is the only place a minimum relaxed by a
+                // thousandth changes which rung comes back: without it, that
+                // relaxation is invisible here however many round numbers are
+                // swept.
                 const double displayBeat = Meter::beatLengthQuarters (s);
-                for (double zoom : { 2.0, 4.0, 13.0, 400.0 })
+                const double zooms[] { 2.0, 4.0, 13.0, 24.0, 800.0,
+                                       0.9995 * 6.0 / displayBeat };
+
+                for (double zoom : zooms)
                     for (double finest : { displayBeat, 0.25 * displayBeat })
-                        checkEqual (map.gridStepQuartersAt (q, zoom, 6.0, finest),
-                                    Meter::gridStepQuarters (s, zoom, 6.0, finest),
-                                    name (s) + ": the map's grid step is the signature's");
+                        for (double wanted : { 2.0, 6.0, 11.0 })
+                            checkEqual (map.gridStepQuartersAt (q, zoom, wanted, finest),
+                                        Meter::gridStepQuarters (s, zoom, wanted, finest),
+                                        name (s) + ": the map's grid step is the signature's");
             }
 
             // The tolerance in particular: dropping it, or rounding down,

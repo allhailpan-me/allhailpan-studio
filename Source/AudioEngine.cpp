@@ -1492,10 +1492,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     // the phase and the level, so a click arriving before the
                     // last has finished replaces it instead of summing with it.
                     // Shortening the burst to fit the gap instead, which this
-                    // did for a while, stops the decay partway and puts a step
-                    // where the old code had none: a 5/32 bar at 400 bpm leaves
-                    // 9.4 ms between clicks, and against the 8 ms decay the
-                    // level is still at a third of the burst when the gap ends.
+                    // did for a while, cuts the decay three times higher up.
+                    // The click is one per display beat, so a thirty second
+                    // note click at 400 bpm puts them 18.75 ms apart: a fixed
+                    // fifty is replaced at exp(-18.75/8) of its level against
+                    // the 8 ms decay, a tenth, while half the gap cuts it at
+                    // exp(-9.4/8), a third. Neither is a clean zero and the
+                    // quieter one is what the studio has always shipped.
                     clickSamplesLeft = (int) (sampleRate * 0.05);
                     clickPhase = 0.0;
                     clickFreq  = Meter::isAccentedClick (signature, clickIndex) ? 1760.0 : 1320.0;

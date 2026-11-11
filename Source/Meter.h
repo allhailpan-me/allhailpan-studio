@@ -43,14 +43,15 @@
     `MeterTest.cpp` pins the number the whole feature turns on, that a 6/8 bar
     at 120 bpm is 1.5 seconds.
 
-    The denominator may legitimately decide how far apart two things are and
-    have that distance converted afterwards, which is a different thing and
-    reads almost the same on the page. Two places do it: the metronome works
-    out the interval to the next click, and the playlist guesses a loop's tempo
-    from its length in bars. Both multiply a denominator derived number of
-    quarters by `60 / bpm`, and both are right. What would be wrong is a
-    denominator inside the `60 / bpm` itself, which is what would make a 6/8
-    bar at 120 bpm anything other than 1.5 seconds.
+    The denominator may legitimately say how many quarters something is and
+    have that meet a time afterwards, which is a different thing and reads
+    almost the same on the page. One place in the studio does: the playlist
+    guesses an imported loop's tempo by turning its length in bars into
+    quarters and dividing by its length in seconds. That is this conversion run
+    backwards, with the tempo as the answer rather than a factor, and it is
+    right. What would be wrong is a denominator inside the `60 / bpm` factor
+    itself, which is what would make a 6/8 bar at 120 bpm anything other than
+    1.5 seconds.
 
     Two studios do something else and neither is a counterexample. Pro Tools
     has a per tempo event "Tempo Resolution (BPM Rate)" which, following a
