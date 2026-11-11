@@ -89,7 +89,20 @@ namespace
     // things depending on which build opened the file is worse than one that
     // says the file is too new. Every bump from 2 onward has been
     // unconditional and this one follows them.
-    constexpr int formatVersion = 8;
+    // 9 adds the time signature. A file with no signature in it is 4/4, which
+    // is what every version up to 8 was everywhere, so old projects open
+    // unchanged.
+    //
+    // Bumped unconditionally, like every bump from 2 onward, and the reasoning
+    // is worth the paragraph because nothing moves if it is ignored. Positions
+    // are stored in quarter notes, so an older build opening a 7/8 project
+    // plays it correctly and puts every note where it belongs. What it gets
+    // wrong is everything around the notes: bar lines in fours, a click
+    // accenting every fourth beat, the song looping at the end of a bar that
+    // is not a bar, and a MIDI export that tells the next studio the piece is
+    // in 4/4. That is a project which looks subtly wrong and plays right,
+    // which is harder to diagnose than one that refuses to open.
+    constexpr int formatVersion = 9;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -354,6 +367,12 @@ void ProjectIO::resetEngine (AudioEngine& engine)
     // the same session sound different depending on what was loaded before it.
     engine.setPanLaw (PanLaw::defaultLaw);
 
+    // And the signature, for the same reason: the engine holds its own copy
+    // for the click and the play head, so one left behind would click a new
+    // project in the last one's meter. Both callers happen to set it from the
+    // project a moment later, so nothing leaks today. The third will.
+    engine.setTimeSignature (Meter::kDefault);
+
     for (int c = 0; c < kNumChannels; ++c)
     {
         engine.setChannelPlugin (c, nullptr);
@@ -411,6 +430,13 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("app", JUCE_APPLICATION_VERSION_STRING);
     root.setAttribute ("bpm", engine.getBpm());
     root.setAttribute ("songStart", engine.getSongStart());
+
+    // ---- time signature ----
+    // Written as the two numbers as notated rather than as the MIDI
+    // denominator byte, which is a logarithm: a file somebody opens in a text
+    // editor should say 6 and 8 rather than 6 and 3.
+    root.setAttribute ("timeSigNumerator", project.meter.firstSignature().numerator);
+    root.setAttribute ("timeSigDenominator", project.meter.firstSignature().denominator);
 
     // ---- loop range ----
     // Where you were working. Not part of the undo history, for the same
@@ -746,6 +772,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.clearAll();
 
     report.bpm       = root->getDoubleAttribute ("bpm", 128.0);
+
+    // A missing signature is 4/4, which is what the MIDI file format says an
+    // absent signature means and what every version up to 8 of this one was.
+    // Anything out of range falls back to 4/4 rather than being clamped: see
+    // Meter::validated for why a 4/3 that arrived as 4/4 is better than one
+    // that arrived as 4/2.
+    project.meter.setFirst (Meter::validated ({ root->getIntAttribute ("timeSigNumerator", 4),
+                                                root->getIntAttribute ("timeSigDenominator", 4) }));
 
     project.setLoopRange (root->getDoubleAttribute ("loopStart", 0.0),
                           root->getDoubleAttribute ("loopEnd", 0.0));

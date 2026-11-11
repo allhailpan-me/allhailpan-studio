@@ -40,6 +40,344 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
+
+### Status: open, pull request #74
+
+The 11-03 entry called this "the biggest single gap found tonight" and deferred
+it because two of the files it reaches were open in another pull request. They
+are both merged now and the engine is free, so this is the night.
+
+What was there before tonight: nothing. `SongLength.h` carried
+`kBeatsPerBar = 4.0` as a constant, `MidiFileIO.cpp` wrote a fixed
+`timeSignatureMetaEvent (4, 4)`, the play head handed to every hosted plugin
+was a default constructed `juce::AudioPlayHead::TimeSignature`, and twenty odd
+call sites across the playlist, the piano roll, the rack and the transport
+divided or multiplied by a literal `4.0` to get from beats to bars. A song in
+3/4 or 6/8 could be played, because playback never asks what a bar is, and
+could not be written, because every bar line, every click, every snap and every
+position readout was wrong.
+
+### What was looked at
+
+The `dsp-researcher` agent was sent at seven questions, and came back with five
+answered from primary sources and two marked unknown, which is the right shape
+for an answer. The full report is summarised here because two of its findings
+changed the design and one of them found a bug that is already shipped.
+
+**The denominator does not touch the tempo.** This was the question that
+decides every conversion in the feature, and the answer is quarter notes per
+minute, always. Apple states it outright: "The tempo indicator in the LCD
+always relates to quarter notes, even if eighth notes are chosen as the
+denominator for the time signature", and on the same page, "Changing the time
+signature does not affect project playback, but does determine the time grid in
+the Tracks area and MIDI editors." (Logic Pro User Guide, *Set the project time
+signature*.) Steinberg's own VST 3 `ProcessContext` expresses every musical
+quantity in quarter notes and carries the signature as separate information.
+Ardour's `Temporal::Tempo` carries a note type independent of the meter
+denominator and documents its default as "Note Type (default '4': quarter
+note)".
+
+So in 6/8 at 120 bpm a bar is 3 quarter notes and 1.5 seconds, not 3.0. The
+rule that falls out of it, and the one the test exists to defend: **the
+denominator may not appear in any conversion to seconds.** Seconds per stored
+beat stays `60 / bpm` with nothing else in it.
+
+Two studios do something else and neither is a counterexample. Pro Tools has a
+per tempo event "Tempo Resolution (BPM Rate)" which, following a dotted quarter
+click in 6/8, makes 120 bpm mean 120 dotted quarters: a display and entry
+reference rather than a different time base. Ardour did count denominator units
+before 2008, in Paul Davis' own words on their forum, and changed it.
+
+Cubase, Reaper and Live publish no answer to this question at all, and the
+researcher marked them unknown rather than inferring from three manuals that do
+not say. Recorded so nobody re-reads those three looking for it.
+
+**The bar|beat display counts denominator units, so the storage and the display
+disagree on the word "beat" and that is correct.** Logic, again explicitly: "A
+beat corresponds to the denominator in the time signature." Ardour's
+`temporal/tempo.h` names both coordinates and keeps them apart deliberately:
+QUARTER NOTES, linear, and BEAT, "a fraction of a PULSE. Defined by the meter in
+effect ... This means that measuring time in BEATS is potentially non-linear".
+So 6/8 reads 1.1 to 1.6 and 7/8 reads 1.1 to 1.7.
+
+That naming collision is where this feature goes wrong, so `Meter.h` never uses
+the bare word: everything it computes is in quarter notes or in display beats,
+named as such.
+
+**A bug already shipped, found by reading JUCE rather than by looking for it.**
+`juce::MidiMessage::timeSignatureMetaEvent` returns
+`{ 0xff, 0x58, 0x04, numerator, powerOfTwo, 1, 96 }`. The specification says the
+last two bytes are "the number of MIDI clocks in a metronome click" and "the
+number of notated 32nd-notes in a MIDI quarter-note (24 MIDI Clocks)", which for
+4/4 with a quarter note click are 24 and 8. JUCE writes 1 and 96: a click every
+twenty fourth of a quarter note, and a quarter note notated as twelve whole
+notes. Every MIDI file this studio has ever exported carries those two bytes.
+Nothing reads them in practice, which is why it has gone unnoticed, and that is
+not a reason to keep writing them. The event is assembled by hand now.
+
+The spec's own 6/8 example is `FF 58 04 06 03 24 08`, and the widely mirrored
+jglatt copy of that example gives the cc byte as `18`, which is 24 decimal, one
+quarter note, contradicting its own prose. The spec's `0x24` is 36 decimal, a
+dotted quarter, three eighths, which is what the prose says. Noted because that
+page is the first hit for anybody checking a 6/8 meta event.
+
+**Nobody publishes a default click pattern for a compound meter.** Cubase
+publishes its 4/4 default and only that ("the click level of the first click is
+high, while the level of the other beats is low"); Logic, Pro Tools and Reaper
+publish the controls and no defaults; Ableton and Ardour could not be sourced at
+all. Pro Tools is explicit that it accents beat 1 and nothing else. So the click
+here sounds once per denominator unit with beat 1 accented, and the comment says
+in as many words that this is a choice rather than a standard, with Logic's
+separate `Group` click layer named as the way to add the compound pulse later.
+
+### What was chosen, and why
+
+**One signature for the project, stored as a map with one entry, reached
+through accessors that take a position.** Every studio looked at allows the
+signature to change mid song, with a primary citation for each, so a single
+signature is not the finished feature and nobody will mistake it for one. The
+reason to ship it anyway is that the map is the smaller half of the work: the
+expensive part is the twenty odd call sites, and they are the same call sites
+either way.
+
+The trap the researcher named is worth quoting, because it is the whole reason
+the interface looks the way it does: a no argument `beatsPerBar()` makes every
+call site a site that has to be found again when the map arrives, and the ones
+that are missed are silently wrong rather than failing to compile. So
+`Meter::Map` ships `at (double quarters)`, `barLengthQuartersAt`,
+`beatLengthQuartersAt`, `barBeatAt`, `roundUpToBarAt`, `barFloorQuartersAt`,
+`snapQuartersAt` and `gridStepQuartersAt` from the first commit, each taking a
+position and ignoring it. The argument is free now and is the whole migration
+later. The free functions beside them take a `Signature` instead and are what
+the arithmetic actually lives in.
+
+**One call site that argument does not cover, and it is the hard one.** The
+audio thread cannot read a map at all: no allocation, no lock, no pointer the
+message thread could be rewriting. `audioDeviceIOCallbackWithContext` latches
+one signature from two atomics at the top of each block and uses the free
+functions. A mid song map needs a lock free handoff of its own, the way the
+arrangement already gets one. Written down because an argument that quietly
+does not cover its hardest case is worse than no argument.
+
+Cubase's first signature event is the shape copied for the entry itself: "The
+first signature event is always positioned at bar 1. You cannot change this."
+
+**Denominators 1, 2, 4, 8, 16 and 32, and numerators 1 to 99.** That is
+Ableton's published denominator set widened by 32, which Ardour's manual uses
+as an example ("complex time signatures such as 11/8 or 27/32"), and the
+numerator bound that Ableton and Avid both publish. Non powers of two are
+refused, and the reason to cite is external rather than a preference: the
+Standard MIDI File `dd` byte is a log, so a 4/3 meter has no byte, and
+accepting it in the project would mean exporting a file that says something
+else.
+
+### What was rejected, or deliberately left for later
+
+- **A full meter map.** The map is the next night's work and the interface is
+  already shaped for it. Three things to decide before writing it, all from the
+  research: whether a change may fall mid bar (Pro Tools refuses, Ableton allows
+  and then offers to repair the "fragmentary bar"), that bar numbering is
+  monotonic while BBT is not, and that the map wants `WarpMap.h`'s
+  normalisation discipline rather than a second shape.
+- **Logic's `Group` click layer**, the separate dotted quarter pulse in a
+  compound meter. It is an additional click generator rather than a different
+  click rate, which is the thing to get right, and it wants a preference and a
+  second click voice.
+- **Pro Tools' per meter click note value**, and Cubase's per beat accent
+  levels. Both are real published controls and both want a click pattern editor
+  rather than an arithmetic change.
+- **Composite signatures**, Cubase's "3+3+2". Worth knowing before anybody
+  reaches for it that in Cubase these are notation only: "This does not affect
+  the metronome or anything else, only beams and ties."
+- **Tempo referenced to anything but the quarter note**, which is Pro Tools'
+  Tempo Resolution. Rejected rather than deferred: it changes what the number in
+  the transport means, and the one thing every source here agrees on is that the
+  stored time base is quarter notes.
+
+### What was built
+
+`Source/Meter.h`, no JUCE, with `Tests/MeterTest.cpp` over all 594 accepted
+signatures. The signature reaches: both editors' bar lines, beat lines, rulers
+and snap grids; the metronome's rate and accent; the play head's signature and
+bar start, on the live path and in `renderOffline` both; the song loop end; the
+count-in length; the punch lead in; a recorded clip's length and the three
+places the piano roll grows one; the position readouts; the duplicate offset; a
+modulator's rate labels; the MIDI file's meta event on the way out and its
+signature on the way in; and the project file, at format version 9.
+
+### The audits, and what they changed
+
+Three rounds, each by a session that had seen neither the change nor any
+previous round's fixes. None could break the central claim: the denominator
+reaches no conversion to seconds or samples, enumerated over all ninety call
+sites that read the signature.
+
+The first round found that the feature had changed what a bar is and that three
+things downstream of a bar had not been followed through, and that the test did
+not touch the `Map` layer that every call site in the studio goes through:
+nine mutations to it survived, including one that would put every bar line in
+the studio on the eighth note in 6/8 with the suite green.
+
+The second round found that the fix for the worst of the first round's findings
+was itself wrong in three ways.
+
+The third round reviewed the second round's fixes, which nobody had, and that
+is where the live risk was. It found the same gap as round one put back by
+round two's fix: the commit that moved the grid spacing into a tested free
+function added `Map::gridStepQuartersAt` beside the nine accessors and outside
+the loop that checks them, and three mutations of its one line survived.
+Handing the free function `kDefault` rather than the signature draws a 7/8
+project's grid on the even quarters at four pixels a quarter, so bar lines sit
+at 0, 2, 4, 6 against bars at 0, 3.5, 7 and every bar after the first has no
+line on it. It also found that the new signature field was blank on every
+launch because nothing ever wrote to it, and that the click's burst had been
+shortened to prevent a buzz the oscillator cannot produce: it is written with
+`=` and a retrigger resets its phase and level, so a fast click replaces the
+last rather than summing with it, and capping the burst instead stopped the
+decay partway and put a step where the old code had none.
+
+The fourth round reviewed the third's fixes, which had gone in unreviewed, and
+the pattern held a third time: the arithmetic was right and the comments
+claimed more than the code did. The paragraph the third round rewrote to stop
+claiming a test that does not exist went on to name the metronome's interval to
+the next click as one of two legitimate exceptions, and the same commit had
+deleted that line, so one of the two did not exist. The metronome's own new
+comment had the gap wrong, 9.4 ms being the burst length the deleted code chose
+rather than the 18.75 ms between clicks, and claimed the fixed burst puts no
+step where the truncating one put a step, when it puts one three times quieter.
+And the pinned grid values claimed one band of 4/4 zoom had moved and that it
+was the only one: the piano roll's fallback was a flat quarter of a beat at
+every zoom, not the playlist's beat-or-bar, so a sixteen pixel wide band of its
+zoom lost the step lines, which is the larger change and the one somebody would
+have reported. It also found five surviving mutations, four of them in the
+minimum spacing argument that the sweep passed as a literal six in every single
+case, and one that drops `validated` from the grid function, where the only
+check asked whether the answer was positive and finite while unvalidated inputs
+give a NaN that draws nothing and a zero that loops forever on the message
+thread.
+
+**The lesson these four rounds are really recording is about where the faults
+were, not how many there were.** Every round found the arithmetic in the tested
+header correct, and every fault in all four rounds was one of two things: in a
+file JUCE stops this sandbox from compiling, or in a line of a tested header
+that the test did not reach. Two shapes are worth carrying forward:
+
+- **A new accessor beside a tested one gets no attention.** Rounds one, three
+  and four all found this in `Meter::Map`: the free function gets the sweep and
+  the delegating line gets none. Worth a look whenever `Map` grows a method.
+- **The argument a sweep never varies is the one that can be ignored without
+  the suite noticing.** Four of round four's five surviving mutations were in
+  the minimum pixel spacing, which every call passed as a literal six, so
+  hardcoding six inside the function was invisible. Two swept values on the
+  same side of a default cannot see a clamp to it either, and a threshold
+  relaxed by a thousandth is invisible unless something lands within a
+  thousandth of a rung boundary, which is now swept deliberately rather than
+  hoped for.
+
+And one piece of method, because it cost a round to learn: `MeterTest.cpp`
+includes `Meter.h` with quotes, so a stale copy of the header left beside the
+test is found before the one on the include path, the mutant is silently
+ignored, and every mutation reports as surviving. Build a mutation harness in
+an empty directory and prove it bites on a deliberate break before trusting a
+run of it. The fourth audit hit this and said so, and it very nearly produced a
+fifth round chasing mutations that were never applied.
+
+A fourth thing round three found is a comment fault of the kind this project
+keeps meeting. The header said `MeterTest.cpp` sweeps every accepted signature
+asserting that the denominator reaches no conversion to seconds. It does not
+and it cannot, because there is no seconds conversion in `Meter.h` to sweep.
+The real guarantee is structural, that the header holds no time base at all,
+plus the one pinned number the feature turns on. The rule was also written as
+"any conversion to seconds", which two sites this feature added break in letter
+while being perfectly right: the metronome's interval to the next click and the
+playlist's tempo guess from a length in bars both multiply a denominator
+derived number of quarters by sixty over the tempo. The rule now names the
+factor it is about, because one stated with unmarked exceptions on the day it
+is written is one the next person routes around.
+
+### Deliberately left for later, with the reproductions
+
+**The channel rack does not follow the signature.** It is still in bars of four
+quarters. Making it follow reaches three things at once and getting any of them
+wrong loses a pattern, which is why it was attempted, reverted and written down
+rather than attempted twice:
+
+- `Project::rackClip` finds its clip by an exact length match, so a window that
+  moves with the signature makes the rack find nothing: the grid repaints empty
+  with the pattern still on the playlist and still playing, and the next click
+  adds a second clip over the first. Loosening the match to the same start on
+  the same channel adopts clips the rack must not touch. Every automation clip
+  carries `channel == 0` and no pattern, so a project with automation at bar 1
+  had its first rack row silently refuse to program, and `rackClipFor` then
+  lengthened that automation clip with no undo step, no dirty flag and no
+  `pushArrangement`. A clip trimmed from the left carries an `offset` that the
+  rack does not write for, so every step drawn into one is a note
+  `pushArrangement` drops while the rack paints it lit.
+- A bar that is not a whole number of steps makes the window longer than the
+  bars it covers. 175 of the signature and resolution pairs the controls can
+  reach are such a bar, 3/16 and 7/32 among them. `<` and `>` then move by a
+  bar while the window is longer, so consecutive rack patterns overlap and
+  their notes collide.
+- `Groove::place` counts its swing pairs from the clip's own origin, so a bar
+  holding an odd number of steps, which 7/8 and 5/8 do at an eighth note,
+  swings the steps the next bar leaves straight. Landing on the groove grid and
+  landing on the right parity of it are different claims and only the first was
+  checked.
+
+The shape of the fix is named rather than guessed: `rackStepBeats`,
+`rackStepsInBar`, `rackStepCount` and `rackLengthBeats` are pure functions of
+the signature, the step resolution and the bar count, and belong in a JUCE-free
+`RackGrid.h` beside `SongLength.h` with a test asserting 4/4 agreement with
+today's formulas, that the window tiles, and the groove parity from the song's
+origin rather than the clip's.
+
+Two adjacent things found on the way and not introduced by any of this:
+`Groove::base` is only written in the rack's swing box handler, so changing the
+step resolution afterwards leaves a stale base and the swing silently stops
+doing anything; and `rackClip`'s exact length match already orphaned a pattern
+when the bar count changed, for one rack setting, before tonight.
+
+**A full meter map.** Three things to decide first, all from the research:
+whether a change may fall mid bar (Pro Tools refuses, Ableton allows and then
+offers to repair the "fragmentary bar"), that bar numbering is monotonic while
+BBT is not, and that the map wants `WarpMap.h`'s normalisation discipline
+rather than a second shape. Plus the audio thread handoff above.
+
+**Logic's `Group` click layer**, the separate dotted quarter pulse in a
+compound meter. It is an additional click generator rather than a different
+click rate. Worth knowing before building it: `Meter::midiClocksForQuarters`
+clamps to a byte, and a click longer than a dotted whole note would be clamped
+into a lie rather than refused, because `FF 58`'s `cc` byte cannot say it.
+
+**PAN One's own sync divisions.** `PanOneParams.h` has the same table a
+modulator had, with "1bar" as four quarters. The instrument receives the
+signature on the play head now and ignores it. The same relabel the modulator
+panel got would do, and it is 240 controls away from anything else tonight
+touched.
+
+**Two things round three found, both reachable and neither worth a fix in this
+change.** A multi-file MIDI import sizes a clip with the bar the project is in
+when the loop reaches that file, and the signature is adopted from the first
+file that carries one, so dropping a 4/4 file and a 7/8 file in together rounds
+the 4/4 file's clips to multiples of four quarters while the project ends up in
+7/8 and they sit across bar lines. The tempo in the same loop has always
+behaved this way, so it is pre-existing in shape and the comment on those lines
+is honest about reading "the signature the project is about to be in"; the fix
+is two passes, one to settle the signature and one to size the clips. And the
+playlist's ruler and bar shading iterate once per bar across the visible range,
+which a 1/32 project makes about 1100 `fillRect` calls a repaint instead of 35,
+with the bar numbers overlapping because the label thinning tops out at 16.
+Both are exotic, neither is a correctness fault, and both are reachable because
+the signature is accepted.
+
+**A bar|beat position field somebody can type into.** `Meter::quartersAt` and
+`Map::quartersAt` exist and are tested and have no caller: the readouts are one
+way today. The inverse is written so that the field can be built without
+anybody having to work out what "2|1" means in 7/8 again.
+
+---
+
 ## 2026-11-07: punch recording, and the crossfade that must not touch the punch
 
 ### Status: merged

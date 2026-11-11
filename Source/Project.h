@@ -7,6 +7,7 @@
 #include "Punch.h"
 #include "ClipFade.h"
 #include "Groove.h"
+#include "Meter.h"
 #include "SongLength.h"
 #include <set>
 #include <array>
@@ -622,6 +623,21 @@ public:
     Groove                   groove;
     double bpm = kDefaultBpm;
 
+    // The time signature, as a map that today holds one entry at bar 1. See
+    // Meter.h for the whole of it, including why every accessor on the map
+    // takes a position and ignores it.
+    //
+    // Three of the four things CLAUDE.md asks of new state, not four, and the
+    // same three the tempo takes: saved, loaded, reset by clearAll, and
+    // deliberately outside the undo history. The argument is the tempo's. A
+    // signature is a property of the piece rather than an edit to the
+    // arrangement, it moves no note (Apple: "Changing the time signature does
+    // not affect project playback"), and nobody pressing Ctrl+Z after drawing
+    // a note expects the bar lines to move. Groove is inside the history for
+    // the opposite reason, which is worth holding next to this one: a shuffle
+    // changes what every pattern in the song sounds like.
+    Meter::Map meter;
+
     // The automatic de-click fade every clip edge gets that has no fade of its
     // own, in seconds. Zero turns it off, which is Reaper's own convention for
     // the same field. Ableton's published figure is the default: see
@@ -755,6 +771,34 @@ public:
     int    rackBars      = 1;
     int    rackStepsPerBar = 16;
 
+    // The rack is still in bars of four quarters whatever the signature says,
+    // and that is a gap rather than a decision. What it looks like from
+    // outside, since this is what a bug report will describe: in 7/8 the < and
+    // > buttons walk the window in four quarter steps over three and a half
+    // quarter bars, so the second rack pattern starts at quarter 4, which the
+    // playlist draws as bar 2 beat 2, and runs four quarters across a bar
+    // line. The rack is self consistent and disagrees with every other view.
+    //
+    // It was made to follow the signature and taken back out, because
+    // following it properly reaches three things at once and getting one of
+    // them wrong loses a pattern:
+    //
+    //  - `rackClip` finds its clip by an exact length match, so a window that
+    //    moves with the signature makes the rack find nothing, repaint empty
+    //    with the pattern still playing, and add a duplicate over it on the
+    //    next click. Loosening the match to the same start on the same channel
+    //    then adopts automation clips, which all carry channel 0, and trimmed
+    //    clips, whose `offset` the rack does not write for.
+    //  - A bar that is not a whole number of steps makes the window longer
+    //    than the bars it covers, so consecutive windows overlap and the `<`
+    //    and `>` buttons no longer tile them.
+    //  - `Groove::place` counts its swing pairs from the clip's own origin, so
+    //    a bar holding an odd number of steps, which 7/8 and 5/8 do, swings
+    //    the steps the next bar leaves straight.
+    //
+    // All three are in `Research/BACKLOG.md` with the reproduction. The right
+    // shape for the fix is this arithmetic in a JUCE-free header of its own
+    // where it can be tested, which is why it is not being guessed at here.
     double rackStepBeats() const noexcept { return 4.0 / std::max (1, rackStepsPerBar); }
     int    rackStepCount() const noexcept { return std::max (1, rackBars) * std::max (1, rackStepsPerBar); }
     double rackLengthBeats() const noexcept { return std::max (1, rackBars) * 4.0; }
@@ -789,6 +833,12 @@ public:
         // startingBpm, not kDefaultBpm: the tempo a new project opens at is a
         // preference now, and startingBpm is not itself reset here.
         bpm = startingBpm;
+
+        // The signature too, and of the four things new state needs this is
+        // the reset that matters most: a project left in 7/8 and then File >
+        // New would otherwise open an empty project whose bar lines were still
+        // in sevens, with nothing on the timeline to explain why.
+        meter = {};
 
         loopStart = loopEnd = 0.0;
         punchEnabled = false;
@@ -1760,7 +1810,12 @@ public:
 
         double first = 1e12, last = 0.0;
         for (auto& c : picked) { first = std::min (first, c.start); last = std::max (last, c.endBeat (bpm)); }
-        const double span = std::ceil ((last - first) * 4.0 - 1e-9) / 4.0;   // round up to a step
+        // Round up to a step, where a step is a quarter of a display beat, so
+        // the copy lands on the same grid the editors snap to: a sixteenth
+        // note in 4/4 and in 6/8 alike, because a display beat is an eighth
+        // there.
+        const double step = 0.25 * meter.beatLengthQuartersAt (first);
+        const double span = std::ceil ((last - first) / step - 1.0e-9) * step;
 
         selection.clear();
         for (auto& c : picked)
@@ -1894,7 +1949,16 @@ public:
     // Where playback loops with no loop range set: the end of the bar the
     // last clip finishes in, so a short sound plays once a bar rather than
     // back to back. See SongLength.h.
-    double songLoopEndBeats() const { return SongLength::loopEndBeats (songEndBeats()); }
+    double songLoopEndBeats() const
+    {
+        const double end = songEndBeats();
+
+        // The bar the signature says, not four beats. Read at the end rather
+        // than at the start, because the bar a clip finishes in is the bar
+        // whose length decides where the next line is, and that is the right
+        // one of the two once the signature can change mid song.
+        return SongLength::loopEndBeats (end, meter.barLengthQuartersAt (end));
+    }
 
     int firstArmedTrack() const
     {

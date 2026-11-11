@@ -281,6 +281,22 @@ private:
     juce::Slider     tempo;
     juce::Label      tempoLabel { {}, "Tempo" }, clock;
 
+    /** The time signature, as a field somebody types "7/8" into.
+
+        A field rather than two spin boxes or a menu, because the range the
+        studio accepts is 99 numerators by six denominators and no menu of 594
+        entries is usable. Meter::parse is what decides whether what was typed
+        is a signature, so what the studio will take from a keyboard is tested
+        rather than assumed, and anything it refuses puts the old text back.
+    */
+    juce::Label      timeSigLabel { {}, "Sig" }, timeSigField;
+
+    /** Puts the signature into the project, the engine and the field at once,
+        and refreshes everything the bar lines are drawn on. The one path in,
+        which is what the tempo control is for the tempo. */
+    void applyTimeSignature (const Meter::Signature&);
+    void showTimeSignature();
+
     // channel bar
     juce::Label      channelLabel { {}, "Channel" }, insertLabel { {}, "Mixer" }, typingLabel;
     juce::ComboBox   channelBox, instrumentBox, insertBox;
@@ -321,7 +337,16 @@ private:
     // the punch has something of the new pass to fade from and the player
     // hears what they are playing into. One bar, which is Logic's published
     // figure for exactly this. See Punch.h and startRecording.
-    static constexpr double kPunchLeadInBeats = 4.0;
+    //
+    // A bar of the signature, read at the punch in, so it is one bar and not
+    // four quarters: in 12/8 four quarters is two thirds of a bar and in 7/8
+    // it rolls in from the middle of one. The comment said "one bar" and the
+    // constant said four, which is the shape of fault this project keeps
+    // meeting, so there is no constant any more.
+    double punchLeadInBeats (double atBeat) const
+    {
+        return project.meter.barLengthQuartersAt (atBeat);
+    }
     juce::uint32 ignoreEditsUntil = 0;
     int autosaveTicks = 0;
 

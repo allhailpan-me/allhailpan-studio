@@ -9,13 +9,22 @@
 
 namespace
 {
-    juce::String formatPosition (double beats)
+    // bar : beat : tick, where a beat is the denominator unit rather than a
+    // quarter note, so 6/8 reads 1:1 to 1:6. The same readout as the
+    // playlist's, and the tick is 96ths of a display beat for the same reason.
+    juce::String formatPosition (const Meter::Map& meter, double beats)
     {
         beats = std::max (0.0, beats);
-        const auto bar  = (int) (beats / 4.0) + 1;
-        const auto beat = (int) std::fmod (beats, 4.0) + 1;
-        const auto tick = (int) ((beats - std::floor (beats)) * 96.0);
-        return juce::String (bar) + ":" + juce::String (beat) + ":" + juce::String (tick).paddedLeft ('0', 2);
+        const auto at = meter.barBeatAt (beats);
+        return juce::String ((int) at.bar) + ":" + juce::String (at.beat) + ":"
+             + juce::String ((int) (at.fraction * 96.0)).paddedLeft ('0', 2);
+    }
+
+    /** A bar number for a message, counting from one and carrying the fraction
+        of a bar, which is what "replace bars 5.00 to 9.00" wants. */
+    juce::String barNumber (const Meter::Map& meter, double beats)
+    {
+        return juce::String (beats / std::max (1.0e-9, meter.barLengthQuartersAt (beats)) + 1.0, 2);
     }
 
     enum RecordModeId { recAuto = 1, recAudio, recMidi, recBoth, recInstrument, recInstrumentMidi };
@@ -152,8 +161,8 @@ MainComponent::MainComponent()
                        "playlist ruler and that becomes the punch in and punch out.");
         else if (project.punchEnabled)
             setStatus ("Punch is on. Recording will replace bars "
-                         + juce::String (project.loopStart / 4.0 + 1.0, 2) + " to "
-                         + juce::String (project.loopEnd / 4.0 + 1.0, 2)
+                         + barNumber (project.meter, project.loopStart) + " to "
+                         + barNumber (project.meter, project.loopEnd)
                          + " on the armed track and leave the rest of the take as it is.");
         else
             setStatus ("Punch is off. Recording lays down a new take as it always has.");
@@ -224,6 +233,40 @@ MainComponent::MainComponent()
         markDirty();
     };
     engine.setBpm (tempo.getValue());
+
+    timeSigLabel.setColour (juce::Label::textColourId, Ahp::muted);
+    timeSigField.setEditable (false, true, false);
+    timeSigField.setJustificationType (juce::Justification::centred);
+    timeSigField.setColour (juce::Label::outlineColourId, Ahp::line);
+    timeSigField.setTooltip ("The time signature, as beats per bar over the note that is a beat: "
+                             "4/4, 3/4, 6/8, 7/8, 12/8. The tempo is quarter notes per minute "
+                             "whatever this says, so changing it moves the bar lines, the click "
+                             "and the grid and does not move a note.");
+    timeSigField.onTextChange = [this]
+    {
+        Meter::Signature typed;
+        if (Meter::parse (timeSigField.getText().toStdString(), typed))
+        {
+            applyTimeSignature (typed);
+        }
+        else
+        {
+            // Put back what was there rather than guessing at what was meant.
+            // "4/3" read as 4/4 would leave somebody looking at a signature
+            // they did not type.
+            showTimeSignature();
+            setStatus ("A time signature is beats per bar over the note that is a beat, like 4/4 "
+                       "or 6/8. The beat has to be a whole, half, quarter, eighth, sixteenth or "
+                       "thirty second note, because those are the only ones a MIDI file can say.");
+        }
+    };
+
+    // The same thing the tempo slider gets from storedPreference above: a
+    // control that has never been written to is empty, and juce::Label fires
+    // onTextChange only on a change, so clicking into the empty box and out of
+    // it again leaves it empty. Without this the studio launches showing a
+    // blank signature and keeps it until a project is opened.
+    showTimeSignature();
 
     tempoLabel.setColour (juce::Label::textColourId, Ahp::muted);
     clock.setJustificationType (juce::Justification::centred);
@@ -323,6 +366,9 @@ MainComponent::MainComponent()
         tempo.setValue (bpm, juce::sendNotificationSync);
     };
 
+    // And its signature, through the one path in, for the same reason.
+    playlist.onSetTimeSignature = [this] (Meter::Signature s) { applyTimeSignature (s); };
+
     pianoRoll.onInteraction = [this] { grabKeyboardFocus(); };
     pianoRoll.onSetPosition = [this] (double b) { setPosition (b); };
 
@@ -363,6 +409,7 @@ MainComponent::MainComponent()
                      static_cast<juce::Component*> (&undoButton), static_cast<juce::Component*> (&redoButton),
                      static_cast<juce::Component*> (&fileButton),
                      static_cast<juce::Component*> (&tempo), static_cast<juce::Component*> (&tempoLabel),
+                     static_cast<juce::Component*> (&timeSigField), static_cast<juce::Component*> (&timeSigLabel),
                      static_cast<juce::Component*> (&clock), static_cast<juce::Component*> (&channelLabel),
                      static_cast<juce::Component*> (&channelBox), static_cast<juce::Component*> (&instrumentBox),
                      static_cast<juce::Component*> (&insertLabel), static_cast<juce::Component*> (&insertBox),
@@ -505,6 +552,42 @@ void MainComponent::playFrom (double beat)
     playlist.repaint();
 }
 
+void MainComponent::showTimeSignature()
+{
+    // dontSendNotification, or setting the text would re-enter onTextChange
+    // and apply the signature a second time.
+    timeSigField.setText (juce::String (Meter::toString (project.meter.at (0.0))),
+                          juce::dontSendNotification);
+}
+
+void MainComponent::applyTimeSignature (const Meter::Signature& signature)
+{
+    if (! project.meter.setFirst (signature))
+        return;
+
+    // The engine holds its own copy for the click and the play head, read
+    // once a block on the audio thread. Both halves of this have to move
+    // together or the click is in one signature and the grid in another.
+    engine.setTimeSignature (project.meter.at (0.0));
+    showTimeSignature();
+
+    // The song end is where the last clip's bar finishes, so it moves with the
+    // signature: pushArrangement is what hands the new figure to the engine,
+    // and without it the transport would keep looping on the old bar line.
+    pushArrangement (true);
+
+    playlist.refresh();
+    pianoRoll.repaint();
+
+    // refresh rather than repaint, because the modulator panel's rate menu is
+    // built there and a label in it reads "1 bar" only in a signature whose
+    // bar is that many quarters. The rack is deliberately not refreshed: it
+    // does not follow the signature at all, and the note on rackLengthBeats
+    // in Project.h says why that is tonight's answer.
+    modPanel.refresh();
+    markDirty();
+}
+
 void MainComponent::setPosition (double beat)
 {
     if (recordingAudio || recordingMidi)
@@ -610,7 +693,10 @@ void MainComponent::toggleRecord()
     heldNotes.clear();
     takeLanes.clear();
 
-    const double countBeats = (countInBox.getSelectedId() - 1) * 4.0;
+    // Bars of the signature, not of four beats: a two bar count-in in 3/4 is
+    // six beats, which is what the player hears counted.
+    const double countBeats = (countInBox.getSelectedId() - 1)
+                                * project.meter.barLengthQuartersAt (project.loopStart);
 
     // Recording over a loop starts at the loop, not wherever the playhead
     // happened to be. Otherwise the first pass would be the odd one out: it
@@ -630,7 +716,8 @@ void MainComponent::toggleRecord()
     // it buys there is the same thing it buys here, that "the start point of
     // the region [can] be adjusted later". A bar rather than a number of
     // seconds because every other range in this transport is in beats and a
-    // musician counts themselves in in bars.
+    // musician counts themselves in in bars, and a bar of the signature rather
+    // than four quarters, which are the same thing only in 4/4.
     //
     // The range is latched here and read nowhere else for the rest of the
     // take, which is the discipline `CLAUDE.md` already states for the record
@@ -643,7 +730,7 @@ void MainComponent::toggleRecord()
     punchArmed = project.punchRange();
 
     if (Punch::isUsable (punchArmed))
-        engine.setSongStart (std::max (0.0, project.loopStart - kPunchLeadInBeats));
+        engine.setSongStart (std::max (0.0, project.loopStart - punchLeadInBeats (project.loopStart)));
     else if (project.hasLoopRange())
         engine.setSongStart (project.loopStart);
 
@@ -777,7 +864,13 @@ void MainComponent::finishRecording()
             clip.channel = midiChannel;
             clip.track   = midiTrack;
             clip.start   = start;
-            clip.length  = std::max (4.0, std::ceil (std::max (stopBeat - start, pattern->lastBeat()) / 4.0 - 1e-9) * 4.0);
+            // At least one bar, and a whole number of bars past the last
+            // note, so a part recorded live sits on the grid.
+            {
+                const double needed = std::max (stopBeat - start, pattern->lastBeat());
+                const double bar    = project.meter.barLengthQuartersAt (start);
+                clip.length = std::max (bar, project.meter.roundUpToBarAt (needed, 1.0e-9));
+            }
             const int id = project.addClip (clip);
             project.selection = { id };
             pianoRoll.setClip (id);
@@ -1061,8 +1154,8 @@ void MainComponent::finishAudioRecording (std::vector<Recorder::Take> passes,
             case Project::PunchRefusal::none:
             {
                 msg = "Punched in over bars "
-                        + juce::String (punchArmed.inBeat  / 4.0 + 1.0, 2) + " to "
-                        + juce::String (punchArmed.outBeat / 4.0 + 1.0, 2) + " on "
+                        + barNumber (project.meter, punchArmed.inBeat) + " to "
+                        + barNumber (project.meter, punchArmed.outBeat) + " on "
                         + project.tracks[(size_t) track].name
                         + ". The rest of the take is untouched: drag across a lane to move the "
                           "join, or back over the whole clip to put the original performance "
@@ -2207,6 +2300,8 @@ void MainComponent::resized()
     clock       .setBounds (bar.removeFromLeft (80));  bar.removeFromLeft (8);
     tempoLabel  .setBounds (bar.removeFromLeft (42));
     tempo       .setBounds (bar.removeFromLeft (72));  bar.removeFromLeft (6);
+    timeSigLabel.setBounds (bar.removeFromLeft (26));
+    timeSigField.setBounds (bar.removeFromLeft (52));  bar.removeFromLeft (6);
     clickButton .setBounds (bar.removeFromLeft (48));  bar.removeFromLeft (4);
     punchButton .setBounds (bar.removeFromLeft (58));  bar.removeFromLeft (14);
     playlistTab .setBounds (bar.removeFromLeft (72));
@@ -2372,7 +2467,7 @@ void MainComponent::timerCallback()
     }
     else
     {
-        clock.setText (formatPosition (engine.getBeatPosition()), juce::dontSendNotification);
+        clock.setText (formatPosition (project.meter, engine.getBeatPosition()), juce::dontSendNotification);
         clock.setColour (juce::Label::textColourId, Ahp::bone);
     }
     recordButton.setToggleState (recordingAudio || recordingMidi, juce::dontSendNotification);
@@ -2574,6 +2669,12 @@ void MainComponent::newProject()
         // clip, the same way a tempo change typed in by hand does.
         self.tempo.setValue (self.project.bpm, juce::sendNotificationSync);
 
+        // And the signature, which clearAll put back to 4/4. The engine has
+        // its own copy for the click and the play head, so a new project left
+        // on the engine's old signature would click in sevens over an empty
+        // 4/4 timeline.
+        self.applyTimeSignature (self.project.meter.at (0.0));
+
         self.engine.setSongStart (0.0);
         self.engine.stopAndRewind();
 
@@ -2623,6 +2724,19 @@ bool MainComponent::loadProject (const juce::File& file, bool recovered)
 
     ignoreEditsForAWhile();
     tempo.setValue (report.bpm, juce::dontSendNotification);
+
+    // ProjectIO::load put the signature into the project; this is what carries
+    // it to the engine and the field. Not through applyTimeSignature, which
+    // marks the project dirty, and opening a file is not an edit to it.
+    engine.setTimeSignature (project.meter.at (0.0));
+    showTimeSignature();
+
+    // The rate menu's labels are built per row from the bar length, so a 12/8
+    // project opened while the Modulators view is the one on screen would keep
+    // the previous project's "1 bar" against four quarters. Switching views
+    // refreshes it, which is why this hides until somebody is looking at it.
+    modPanel.refresh();
+
     engine.stopAndRewind();
 
     if (result.failed())
@@ -2928,7 +3042,8 @@ void MainComponent::exportMidi (bool onlySelected)
         if (chosen.getFileExtension().isEmpty())
             chosen = chosen.withFileExtension (".mid");
 
-        const auto result = MidiFileIO::write (chosen, tracks, self.project.bpm, songName, hadAutomation);
+        const auto result = MidiFileIO::write (chosen, tracks, self.project.bpm,
+                                               self.project.meter.at (0.0), songName, hadAutomation);
 
         if (! result.ok)
         {

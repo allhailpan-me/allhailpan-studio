@@ -127,6 +127,56 @@ ImportResult read (const juce::File& file)
         }
     }
 
+    // The time signature, read the same way and for the same reason: the
+    // project has one, so the first event is the one that counts, and a file
+    // carrying several is read as its opening signature with the caller told.
+    // Without this a 7/8 file arrived with its notes in the right places and
+    // the bar lines in fours, which is a grid that disagrees with the music.
+    // findAllTimeSigEvents rather than a loop over the tracks, which is what
+    // the tempo above uses and the reason matters: it merges every track into
+    // one sequence sorted by time, where walking the tracks takes the first
+    // event in track order. A type 1 file whose second track carries 7/8 at
+    // tick 0 and whose first carries 4/4 later would have had its "opening
+    // signature" read as the 4/4.
+    juce::MidiMessageSequence signatureEvents;
+    midi.findAllTimeSigEvents (signatureEvents);
+
+    for (int i = 0; i < signatureEvents.getNumEvents(); ++i)
+    {
+        const auto& m = signatureEvents.getEventPointer (i)->message;
+        if (! m.isTimeSignatureMetaEvent())
+            continue;
+
+        // Read from the raw bytes rather than through
+        // juce::MidiMessage::getTimeSignatureInfo, which computes the
+        // denominator as `1 << d[1]` with no bound on the shift: a file
+        // carrying a denominator byte of 200, which nothing stops it from
+        // carrying, is undefined behaviour before any validation of ours could
+        // see it.
+        //
+        // Meter::fromMetaEventBytes undoes the logarithm itself, refuses a
+        // byte out of range, and gives 4/4 instead, which is what the format
+        // says an absent signature means anyway.
+        //
+        // isTimeSignatureMetaEvent does not check the length, so the guard is
+        // needed rather than decorative.
+        if (m.getMetaEventLength() < 2)
+            continue;
+
+        const auto* data = m.getMetaEventData();
+        const auto read = Meter::fromMetaEventBytes (data[0], data[1]);
+
+        if (! result.hasSignature)
+        {
+            result.signature    = read;
+            result.hasSignature = true;
+        }
+        else if (read != result.signature)
+        {
+            result.hasSignatureChanges = true;
+        }
+    }
+
     // Several different tempos is a tempo map, which this project cannot
     // follow yet. The opening tempo is used and the caller says so, because
     // flattening the rest silently would put everything after the first
@@ -282,7 +332,8 @@ ImportResult read (const juce::File& file)
 // Export
 
 ExportResult write (const juce::File& file, const std::vector<ExportTrack>& tracks,
-                    double bpm, const juce::String& sequenceName, bool hadAutomation)
+                    double bpm, const Meter::Signature& signature,
+                    const juce::String& sequenceName, bool hadAutomation)
 {
     ExportResult result;
     result.hadAutomation = hadAutomation;
@@ -307,10 +358,20 @@ ExportResult write (const juce::File& file, const std::vector<ExportTrack>& trac
 
         tempoTrack.addEvent (juce::MidiMessage::tempoMetaEvent (midiMicrosecondsPerQuarterNote (bpm)), 0.0);
 
-        // Four four, because that is the only time signature this studio has.
-        // Saying so is better than leaving it out: a reader that finds no time
-        // signature is entitled to assume anything.
-        tempoTrack.addEvent (juce::MidiMessage::timeSignatureMetaEvent (4, 4), 0.0);
+        // The project's signature, assembled from Meter.h's own bytes rather
+        // than from juce::MidiMessage::timeSignatureMetaEvent, which returns
+        // `{ 0xff, 0x58, 0x04, numerator, powerOfTwo, 1, 96 }`. The
+        // specification defines those last two bytes as "the number of MIDI
+        // clocks in a metronome click" and "the number of notated 32nd-notes
+        // in a MIDI quarter-note (24 MIDI Clocks)", which for 4/4 with a
+        // quarter note click are 24 and 8. A click every twenty fourth of a
+        // quarter note, and a quarter note notated as twelve whole notes, is
+        // what every file this studio exported before tonight said.
+        //
+        // Saying it at all is better than leaving it out: a reader that finds
+        // no time signature is entitled to assume anything.
+        const auto sig = Meter::metaEventBytes (signature);
+        tempoTrack.addEvent (juce::MidiMessage (sig[0], sig[1], sig[2], sig[3], sig[4], sig[5], sig[6]), 0.0);
         tempoTrack.addEvent (juce::MidiMessage::endOfTrack(), 0.0);
 
         midi.addTrack (tempoTrack);

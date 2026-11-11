@@ -3,6 +3,7 @@
 #include "Project.h"
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
+#include <cmath>
 
 //==============================================================================
 /** The modulators panel.
@@ -126,12 +127,34 @@ private:
             addAndMakeVisible (shape);
 
             // Rates are musical divisions rather than hertz, so everything
-            // stays locked to the tempo.
+            // stays locked to the tempo. Note values, in quarter notes, which
+            // is the unit `Modulator::rateBeats` is saved in.
+            //
+            // The **labels** follow the signature and the values do not, which
+            // is the opposite way round from what looks natural and is the
+            // right one. Four of these used to be labelled "1 bar" through "8
+            // bars", which was true only while four quarters was a bar: in
+            // 12/8 a four quarter cycle is two thirds of a bar and the label
+            // said one. Making the values bars instead would have been worse,
+            // because a rate is saved: a modulator stored at 4.0 would then
+            // show as "1 bar" in 12/8 while cycling every four quarters, and
+            // choosing the already selected item would not correct it, since
+            // juce::ComboBox sends no change when the id does not change. So
+            // the values stay put, nothing saved moves, and a label says
+            // "1 bar" only where it is one.
+            const double bar = owner.project.meter.barLengthQuartersAt (0.0);
             const double beats[] { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0 };
-            const char*  names[] { "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bars", "4 bars", "8 bars" };
+            const char*  notes[] { "1/16", "1/8", "1/4", "1/2", "1/1", "2/1", "4/1", "8/1" };
+
             for (int i = 0; i < 8; ++i)
             {
-                rate.addItem (names[i], i + 1);
+                const double bars = beats[i] / std::max (1.0e-9, bar);
+                const bool wholeBars = std::abs (bars - std::round (bars)) < 1.0e-9 && bars >= 1.0;
+
+                rate.addItem (wholeBars ? (juce::String ((int) std::round (bars))
+                                            + (std::round (bars) == 1.0 ? " bar" : " bars"))
+                                        : juce::String (notes[i]),
+                              i + 1);
                 rateBeats[i] = beats[i];
             }
             rate.setSelectedId (nearestRate (mod != nullptr ? mod->rateBeats : 4.0), juce::dontSendNotification);
