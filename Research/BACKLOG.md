@@ -237,14 +237,51 @@ shortened to prevent a buzz the oscillator cannot produce: it is written with
 last rather than summing with it, and capping the burst instead stopped the
 decay partway and put a step where the old code had none.
 
-**The lesson these three rounds are really recording is about where the faults
+The fourth round reviewed the third's fixes, which had gone in unreviewed, and
+the pattern held a third time: the arithmetic was right and the comments
+claimed more than the code did. The paragraph the third round rewrote to stop
+claiming a test that does not exist went on to name the metronome's interval to
+the next click as one of two legitimate exceptions, and the same commit had
+deleted that line, so one of the two did not exist. The metronome's own new
+comment had the gap wrong, 9.4 ms being the burst length the deleted code chose
+rather than the 18.75 ms between clicks, and claimed the fixed burst puts no
+step where the truncating one put a step, when it puts one three times quieter.
+And the pinned grid values claimed one band of 4/4 zoom had moved and that it
+was the only one: the piano roll's fallback was a flat quarter of a beat at
+every zoom, not the playlist's beat-or-bar, so a sixteen pixel wide band of its
+zoom lost the step lines, which is the larger change and the one somebody would
+have reported. It also found five surviving mutations, four of them in the
+minimum spacing argument that the sweep passed as a literal six in every single
+case, and one that drops `validated` from the grid function, where the only
+check asked whether the answer was positive and finite while unvalidated inputs
+give a NaN that draws nothing and a zero that loops forever on the message
+thread.
+
+**The lesson these four rounds are really recording is about where the faults
 were, not how many there were.** Every round found the arithmetic in the tested
-header correct, and every fault in all three rounds was either in a file JUCE
-stops this sandbox from compiling, or in a line of a tested header that the
-test did not reach. Rounds one and three both found the second kind in the same
-accessor layer. A new accessor beside a tested one is the gap this change made
-twice, so it is worth a look whenever `Meter::Map` grows a method: the free
-function gets the attention and the delegating line gets none.
+header correct, and every fault in all four rounds was one of two things: in a
+file JUCE stops this sandbox from compiling, or in a line of a tested header
+that the test did not reach. Two shapes are worth carrying forward:
+
+- **A new accessor beside a tested one gets no attention.** Rounds one, three
+  and four all found this in `Meter::Map`: the free function gets the sweep and
+  the delegating line gets none. Worth a look whenever `Map` grows a method.
+- **The argument a sweep never varies is the one that can be ignored without
+  the suite noticing.** Four of round four's five surviving mutations were in
+  the minimum pixel spacing, which every call passed as a literal six, so
+  hardcoding six inside the function was invisible. Two swept values on the
+  same side of a default cannot see a clamp to it either, and a threshold
+  relaxed by a thousandth is invisible unless something lands within a
+  thousandth of a rung boundary, which is now swept deliberately rather than
+  hoped for.
+
+And one piece of method, because it cost a round to learn: `MeterTest.cpp`
+includes `Meter.h` with quotes, so a stale copy of the header left beside the
+test is found before the one on the include path, the mutant is silently
+ignored, and every mutation reports as surviving. Build a mutation harness in
+an empty directory and prove it bites on a deliberate break before trusting a
+run of it. The fourth audit hit this and said so, and it very nearly produced a
+fifth round chasing mutations that were never applied.
 
 A fourth thing round three found is a comment fault of the kind this project
 keeps meeting. The header said `MeterTest.cpp` sweeps every accepted signature
