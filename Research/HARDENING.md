@@ -7,6 +7,36 @@ Newest first.
 
 ---
 
+## 2026-11-11: the time signature, audited the night after it merged
+
+### What is being looked at
+
+`Source/Meter.h`, 781 lines added by pull request #74 on 2026-11-11, and
+`Tests/MeterTest.cpp`, 1001 lines, plus the wiring that change made into
+`AudioEngine`, `MainComponent`, `PlaylistComponent`, `PianoRollComponent`,
+`Project`, `ProjectIO`, `MidiFileIO`, `ModulatorPanel` and `SongLength`.
+
+A priority 3 target in the brief's ordering: an audit of recently merged work.
+It is the right one for three reasons. It is the most recent thing to merge and
+nothing has audited it, where CLAUDE.md says anything touching timing should be
+audited before it merges. It is timing, which is the one thing in this studio
+that is wrong everywhere at once. And the numerator and denominator are new
+state, which is the four-things rule this project has broken before.
+
+Not `Fx/Unit.h`, the one JUCE-free header in `Source` with no test, which the
+nights of 2026-10-21, 10-23 and 10-27 all set aside as unreferenced
+scaffolding: nothing in `Source` or `Tests` includes it still, and the
+`Fx/Plugin.h` its comment describes does not exist yet. Not `NoteSelection.h`,
+`LatencyGraph.h`, `Spectrogram.h`, `Fx/BellMatch.h`, `Envelope.h` or `Fx/Svf.h`,
+which open pull requests #75, #72, #68, #66, #65 and #55 are changing.
+
+### What is left to do
+
+Everything: read the change against the auditor's list, mutation test
+`Meter.h` with the sanitizers on, and write whatever the survivors ask for.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
