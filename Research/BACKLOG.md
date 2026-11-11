@@ -208,9 +208,10 @@ signature on the way in; and the project file, at format version 9.
 
 ### The audits, and what they changed
 
-Two rounds, each by a session that had seen neither the change nor the previous
-round's fixes. Neither could break the central claim: the denominator reaches
-no conversion to seconds or samples, enumerated over all ninety call sites.
+Three rounds, each by a session that had seen neither the change nor any
+previous round's fixes. None could break the central claim: the denominator
+reaches no conversion to seconds or samples, enumerated over all ninety call
+sites that read the signature.
 
 The first round found that the feature had changed what a bar is and that three
 things downstream of a bar had not been followed through, and that the test did
@@ -219,10 +220,44 @@ nine mutations to it survived, including one that would put every bar line in
 the studio on the eighth note in 6/8 with the suite green.
 
 The second round found that the fix for the worst of the first round's findings
-was itself wrong in three ways. Both rounds are worth the space because they
-are the same lesson twice: the arithmetic that was in a tested header was
-right both times, and everything that was wrong was in a file JUCE stops this
-sandbox from compiling or testing.
+was itself wrong in three ways.
+
+The third round reviewed the second round's fixes, which nobody had, and that
+is where the live risk was. It found the same gap as round one put back by
+round two's fix: the commit that moved the grid spacing into a tested free
+function added `Map::gridStepQuartersAt` beside the nine accessors and outside
+the loop that checks them, and three mutations of its one line survived.
+Handing the free function `kDefault` rather than the signature draws a 7/8
+project's grid on the even quarters at four pixels a quarter, so bar lines sit
+at 0, 2, 4, 6 against bars at 0, 3.5, 7 and every bar after the first has no
+line on it. It also found that the new signature field was blank on every
+launch because nothing ever wrote to it, and that the click's burst had been
+shortened to prevent a buzz the oscillator cannot produce: it is written with
+`=` and a retrigger resets its phase and level, so a fast click replaces the
+last rather than summing with it, and capping the burst instead stopped the
+decay partway and put a step where the old code had none.
+
+**The lesson these three rounds are really recording is about where the faults
+were, not how many there were.** Every round found the arithmetic in the tested
+header correct, and every fault in all three rounds was either in a file JUCE
+stops this sandbox from compiling, or in a line of a tested header that the
+test did not reach. Rounds one and three both found the second kind in the same
+accessor layer. A new accessor beside a tested one is the gap this change made
+twice, so it is worth a look whenever `Meter::Map` grows a method: the free
+function gets the attention and the delegating line gets none.
+
+A fourth thing round three found is a comment fault of the kind this project
+keeps meeting. The header said `MeterTest.cpp` sweeps every accepted signature
+asserting that the denominator reaches no conversion to seconds. It does not
+and it cannot, because there is no seconds conversion in `Meter.h` to sweep.
+The real guarantee is structural, that the header holds no time base at all,
+plus the one pinned number the feature turns on. The rule was also written as
+"any conversion to seconds", which two sites this feature added break in letter
+while being perfectly right: the metronome's interval to the next click and the
+playlist's tempo guess from a length in bars both multiply a denominator
+derived number of quarters by sixty over the tempo. The rule now names the
+factor it is about, because one stated with unmarked exceptions on the day it
+is written is one the next person routes around.
 
 ### Deliberately left for later, with the reproductions
 
@@ -283,6 +318,21 @@ modulator had, with "1bar" as four quarters. The instrument receives the
 signature on the play head now and ignores it. The same relabel the modulator
 panel got would do, and it is 240 controls away from anything else tonight
 touched.
+
+**Two things round three found, both reachable and neither worth a fix in this
+change.** A multi-file MIDI import sizes a clip with the bar the project is in
+when the loop reaches that file, and the signature is adopted from the first
+file that carries one, so dropping a 4/4 file and a 7/8 file in together rounds
+the 4/4 file's clips to multiples of four quarters while the project ends up in
+7/8 and they sit across bar lines. The tempo in the same loop has always
+behaved this way, so it is pre-existing in shape and the comment on those lines
+is honest about reading "the signature the project is about to be in"; the fix
+is two passes, one to settle the signature and one to size the clips. And the
+playlist's ruler and bar shading iterate once per bar across the visible range,
+which a 1/32 project makes about 1100 `fillRect` calls a repaint instead of 35,
+with the bar numbers overlapping because the label thinning tops out at 16.
+Both are exotic, neither is a correctness fault, and both are reachable because
+the signature is accepted.
 
 **A bar|beat position field somebody can type into.** `Meter::quartersAt` and
 `Map::quartersAt` exist and are tested and have no caller: the readouts are one
