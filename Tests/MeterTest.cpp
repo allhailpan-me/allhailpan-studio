@@ -191,6 +191,66 @@ int main()
         checkEqualInt (at ({ 3, 4 }, -1.0).beat, 3, "3/4: and its last beat is the third");
     }
 
+    // The third field of that readout, which is 96ths of a display beat.
+    //
+    // There were two copies of this arithmetic, one in the transport clock and
+    // one in the playlist's position label, and they had drifted: one
+    // truncated the product and the other added a tolerance and took a
+    // remainder. So the two fields on screen read a tick apart at a position a
+    // hair under a tick boundary, which is where a position worked out in
+    // floating point usually sits. One function now, and these are the two
+    // halves that had gone missing from one copy.
+    {
+        checkEqualInt (Meter::tickOfFraction (0.0),       0,  "the start of a beat is tick 0");
+        checkEqualInt (Meter::tickOfFraction (0.5),       48, "half way is tick 48");
+        checkEqualInt (Meter::tickOfFraction (0.25),      24, "a quarter of the way is tick 24");
+        checkEqualInt (Meter::tickOfFraction (1.0 / 3.0), 32, "a triplet is tick 32, a round number");
+        checkEqualInt (Meter::tickOfFraction (2.0 / 3.0), 64, "and the second of them is 64");
+
+        // A hair under a tick boundary reads as the boundary, which is the
+        // half the transport clock did not have.
+        checkEqualInt (Meter::tickOfFraction (0.5 - 1.0e-12), 48,
+                       "a hair under half way is still tick 48, not 47");
+        checkEqualInt (Meter::tickOfFraction (std::nextafter (1.0 / 96.0, 0.0)), 1,
+                       "and a hair under the first tick is still tick 1");
+
+        // A fraction near enough to one multiplies up to 96 itself, which is a
+        // tick past the end of a beat that has 96 of them and prints three
+        // characters into a two character field. That is the other half.
+        checkEqualInt (Meter::tickOfFraction (std::nextafter (1.0, 0.0)), 0,
+                       "a fraction a hair under one wraps to tick 0, not to 96");
+        checkEqualInt (Meter::tickOfFraction (1.0), 0, "and so does one exactly");
+
+        // And the property rather than the expression: a tick is the 96th of
+        // the beat the fraction is in, so its own position is at or before
+        // the fraction and the next one is after it, and it never goes
+        // backwards as the fraction moves forward. Asserted that way round so
+        // this is a check and not a second copy of the line above.
+        int previous = 0;
+
+        for (int i = 0; i < 20000; ++i)
+        {
+            const double f = (double) i / 20000.0;
+            const int tick = Meter::tickOfFraction (f);
+            const double width = 1.0 / (double) Meter::kTicksPerDisplayBeat;
+
+            check (tick >= 0 && tick < Meter::kTicksPerDisplayBeat,
+                   "every tick is in 0 .. 95");
+            check ((double) tick * width <= f + Meter::kTickRounding,
+                   "a tick does not start after the position it describes");
+            check (f - Meter::kTickRounding < (double) (tick + 1) * width,
+                   "and the one after it starts later than the position");
+            check (tick >= previous, "and the count does not go backwards");
+
+            previous = tick;
+        }
+
+        checkEqualInt (Meter::tickOfFraction (std::numeric_limits<double>::quiet_NaN()), 0,
+                       "a fraction that is not a number is tick 0");
+        checkEqualInt (Meter::tickOfFraction (-0.5), 0, "and so is one below the beat");
+        checkEqualInt (Meter::tickOfFraction (7.0),  0, "and one past the end of it");
+    }
+
     // Then the sweep: round trip exactly, stay in range, and stay monotonic.
     //
     // Exact equality rather than a tolerance, and that is a claim worth

@@ -21,18 +21,15 @@ namespace
     // bar : beat : tick, where a beat is the denominator unit and not a
     // quarter note. Logic: "A beat corresponds to the denominator in the time
     // signature", so 6/8 reads 1:1 to 1:6. The third field is 96ths of a
-    // display beat, which is a choice: Logic uses a user chosen division with
-    // ticks under it, Live uses sixteenths and Ardour uses ticks referenced to
-    // the quarter, so there is no convention to follow. 96 is what this field
-    // has always shown and divides by two, three and four, which is what makes
-    // a triplet read as a round number.
+    // display beat and the arithmetic for it is in `Meter`, with the reasons,
+    // because the transport clock draws the same readout and the two copies
+    // of this line had drifted apart by a tick.
     juce::String formatPosition (const Meter::Map& meter, double beats)
     {
         beats = std::max (0.0, beats);
         const auto at = meter.barBeatAt (beats);
-        const auto tick = (int) (at.fraction * 96.0 + 1.0e-6) % 96;
         return juce::String ((int) at.bar) + ":" + juce::String (at.beat) + ":"
-             + juce::String (tick).paddedLeft ('0', 2);
+             + juce::String (Meter::tickOfFraction (at.fraction)).paddedLeft ('0', 2);
     }
 
     void quiet (juce::Component& c)

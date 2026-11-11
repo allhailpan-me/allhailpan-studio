@@ -10,14 +10,16 @@
 namespace
 {
     // bar : beat : tick, where a beat is the denominator unit rather than a
-    // quarter note, so 6/8 reads 1:1 to 1:6. The same readout as the
-    // playlist's, and the tick is 96ths of a display beat for the same reason.
+    // quarter note, so 6/8 reads 1:1 to 1:6. The tick is `Meter`'s, which is
+    // what makes this the same readout as the playlist's rather than a second
+    // one that looks like it: the two copies of this line had drifted, and
+    // this one truncated where the other rounded.
     juce::String formatPosition (const Meter::Map& meter, double beats)
     {
         beats = std::max (0.0, beats);
         const auto at = meter.barBeatAt (beats);
         return juce::String ((int) at.bar) + ":" + juce::String (at.beat) + ":"
-             + juce::String ((int) (at.fraction * 96.0)).paddedLeft ('0', 2);
+             + juce::String (Meter::tickOfFraction (at.fraction)).paddedLeft ('0', 2);
     }
 
     /** A bar number for a message, counting from one and carrying the fraction
@@ -562,6 +564,17 @@ void MainComponent::showTimeSignature()
 
 void MainComponent::applyTimeSignature (const Meter::Signature& signature)
 {
+    // Typing the signature the project is already in is not an edit. The
+    // field is still put back, so "04/4" normalises to "4/4", but nothing
+    // else moves: without this, re-typing 4/4 in a 4/4 project re-pushed the
+    // whole arrangement and marked the project dirty, so closing it offered
+    // to save a project nothing had happened to.
+    if (signature == project.meter.at (0.0))
+    {
+        showTimeSignature();
+        return;
+    }
+
     if (! project.meter.setFirst (signature))
         return;
 

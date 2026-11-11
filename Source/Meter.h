@@ -358,6 +358,50 @@ inline double quartersAt (const Signature& s, const BarBeat& p) noexcept
 }
 
 //==============================================================================
+/** The third field of a bar|beat readout: 96ths of a display beat.
+
+    96 is a choice rather than a convention, and the choice was made before
+    the signature existed: Logic shows a user chosen division with ticks under
+    it, Live shows sixteenths and Ardour shows ticks referenced to the quarter
+    note, so there is nothing to follow. 96 is what this field has always
+    shown and it divides by two, three and four, which is what makes a triplet
+    read as a round number rather than as 33.
+
+    In here, and not in the two windows that draw it, because there were two
+    copies of this line and they had drifted: the transport clock truncated
+    the product and the playlist's position label added a tolerance first and
+    took a remainder afterwards, so at a position a hair under a tick boundary
+    the two fields on screen read one tick apart. Both needed both halves. The
+    tolerance is because a position is worked out in floating point and lands
+    a few parts in 10^16 either side of a boundary, and the remainder is
+    because a fraction near enough to one then multiplies up to 96 itself,
+    which is a tick past the end of a beat with 96 of them and prints three
+    characters into a two character field.
+*/
+inline constexpr int kTicksPerDisplayBeat = 96;
+inline constexpr double kTickRounding = 1.0e-6;
+
+inline int tickOfFraction (double fraction) noexcept
+{
+    if (! std::isfinite (fraction))
+        return 0;
+
+    // `std::min (1.0, fraction)` and not the other way round, the way
+    // `roundUpToBar` writes its own clamp: `std::min` returns its first
+    // argument when the comparison is false and every comparison with a NaN
+    // is, so a NaN reads as the top of the beat rather than passing through
+    // to the cast. That makes the guard above belt and braces rather than
+    // load bearing, which is worth knowing before anybody tidies either one:
+    // removing the guard leaves the right answer, and reversing the clamp
+    // casts a NaN to an `int`, which is undefined behaviour that neither
+    // sanitizer here reports.
+    const double into = std::max (0.0, std::min (1.0, fraction));
+    const int tick = (int) (into * (double) kTicksPerDisplayBeat + kTickRounding);
+
+    return tick % kTicksPerDisplayBeat;
+}
+
+//==============================================================================
 /** The metronome.
 
     One click per display beat, with the first beat of the bar accented and
