@@ -1,8 +1,24 @@
 # Research backlog
 
-## Standing question: the unreleased work keeps growing, and now includes a tuner
+## Standing question: the unreleased work keeps growing, and now includes a time signature
 
-The last tag is still **v0.7.1**, cut on 2026-10-13. Since the figure below was
+The last tag is still **v0.7.1**, cut on 2026-10-13, and the pile grew again on
+11-11: the time signature is now the largest user visible thing in it. Somebody
+who writes in 3/4 or 6/8 could not use this studio at all before it, and still
+cannot use the version they can download, which is the sharpest form this
+question has taken.
+
+The night that merged it did not cut the release, and the reason is the one
+written below rather than an oversight: a release spans several nights by
+several sessions, six hardening pull requests were open as this was written, and
+settling the span is the `release-manager` agent's job over the whole of it
+rather than part of building one improvement. So it is deferred again, with the
+reason, for the third entry running, and that repetition is itself the argument
+for somebody making the call.
+
+What was written when the tuner was the newest thing in the pile:
+
+Since the figure below was
 written, quantise, multiple note selection and the tuner have all merged, and
 the tuner is the first of them somebody would notice the absence of: it is on a
 keyboard shortcut and in a menu, and a musician who records guitar has no
