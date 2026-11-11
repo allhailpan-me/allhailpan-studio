@@ -30,10 +30,69 @@ scaffolding: nothing in `Source` or `Tests` includes it still, and the
 `LatencyGraph.h`, `Spectrogram.h`, `Fx/BellMatch.h`, `Envelope.h` or `Fx/Svf.h`,
 which open pull requests #75, #72, #68, #66, #65 and #55 are changing.
 
+### Mutation testing: 55 breakages, 47 caught
+
+`Source/Meter.h` copied into a scratch directory, broken one way at a time,
+and `Tests/MeterTest.cpp` compiled against the broken copy with
+`-fsanitize=address,undefined -fno-sanitize-recover=undefined`, exactly as
+`Tests/run.sh` has them. The breakages were aimed at what would be a real
+mistake rather than at syntax: the denominator dropped out of a display beat,
+a bar measured in display beats, the bar numbering off by one, a floor turned
+into a truncation so the count-in's negative positions land wrong, the accent
+moved to the second beat, the snap read as a fraction of a bar, the grid's
+divisibility test dropped, the MIDI bytes put back the way JUCE writes them,
+the validation removed from every door.
+
+47 were caught, most of them by several checks at once. The eight survivors
+are below with the judgement on each. The test is strong: it catches every
+breakage of the arithmetic a project or a MIDI file can reach, and every
+survivor is either a genuine no-op or input no validated signature can carry.
+
+#### Three genuine no-ops
+
+- **`gridStepQuarters`'s loop stopping one short**, `k < s.numerator` for
+  `k <= s.numerator`. The last rung of that loop is a whole bar, and the line
+  after the loop is `bar * ceil (want / (bar * zoom))`, whose ceiling is 1
+  whenever a single bar is wide enough. So dropping the rung lands on the same
+  number by the other route, exactly, for every numerator. Not a gap, and
+  worth knowing before anybody simplifies either one: the two overlap by one
+  case on purpose.
+- **The same loop starting at `k = 1`.** `numerator % 1` is always zero and
+  `1 * beat` is the spacing the loop starts from, so the first pass is an
+  identity.
+- **The three digit cap in `parse` raised to nine.** The cap is there so that
+  a field somebody leant on cannot overflow before the range check sees it,
+  and nine digits cannot overflow an `int` either. Every number it lets
+  through that three digits would not is refused by `isValid` a few lines
+  later, so the behaviour is identical. Removing the cap altogether is a
+  different breakage and is tested below.
+
+#### Five gaps, all of them now closed
+
+- **`isAccentedClick`'s `std::max (1, s.numerator)`**, removed, and the suite
+  stayed green. It is load bearing: with a numerator of zero the modulus is a
+  division by zero. This is the thread that led to the fault in the next
+  section, because three of its neighbours have no such guard at all.
+- **`midiClocksForQuarters` truncating instead of rounding.** Every click
+  length a signature can produce is a whole number of clocks (96, 48, 24, 12,
+  6 or 3), so the two agree on everything the studio asks. The function is
+  exposed separately for the caller that does not exist yet, and for that
+  caller the difference is real.
+- **The 255 clamp in the same function narrowed to 127.** Nothing asked for a
+  click longer than 96 clocks, so the bound was untested, and the comment's own
+  worked example of a click that does fit, a dotted whole note in 4/1 at 144
+  clocks, was a claim nothing produced.
+- **The fall back when `finest` is not a number**, a display beat, changed to
+  a whole bar. Nothing passed a NaN, so the guard's answer was untested.
+- **A negative snap fraction that is not the sentinel.** `kSnapWholeBar` is
+  -1.0 compared with `==`, and the whole safety of comparing a double that way
+  rests on nothing else negative meaning anything. Nothing checked that.
+
 ### What is left to do
 
-Everything: read the change against the auditor's list, mutation test
-`Meter.h` with the sanitizers on, and write whatever the survivors ask for.
+Write the five checks the gaps ask for, decide what to do about the
+unguarded division the first of them found, and fix the readout fault the
+wiring audit turned up.
 
 ---
 
