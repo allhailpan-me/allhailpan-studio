@@ -9,7 +9,7 @@ Newest first.
 
 ## 2026-11-11: the time signature, audited the night after it merged
 
-### What is being looked at
+### What was looked at
 
 `Source/Meter.h`, 781 lines added by pull request #74 on 2026-11-11, and
 `Tests/MeterTest.cpp`, 1001 lines, plus the wiring that change made into
@@ -30,7 +30,7 @@ scaffolding: nothing in `Source` or `Tests` includes it still, and the
 `LatencyGraph.h`, `Spectrogram.h`, `Fx/BellMatch.h`, `Envelope.h` or `Fx/Svf.h`,
 which open pull requests #75, #72, #68, #66, #65 and #55 are changing.
 
-### Mutation testing: 55 breakages, 47 caught
+### Mutation testing: 70 breakages, 55 against the code as it merged
 
 `Source/Meter.h` copied into a scratch directory, broken one way at a time,
 and `Tests/MeterTest.cpp` compiled against the broken copy with
@@ -88,11 +88,228 @@ survivor is either a genuine no-op or input no validated signature can carry.
   -1.0 compared with `==`, and the whole safety of comparing a double that way
   rests on nothing else negative meaning anything. Nothing checked that.
 
-### What is left to do
+#### And then the same breakages again, against the new test
 
-Write the five checks the gaps ask for, decide what to do about the
-unguarded division the first of them found, and fix the readout fault the
-wiring audit turned up.
+All five gaps were re-run once the checks were written and all five now fail,
+including the guard whose removal is a division by zero that the sanitizers do
+report once something calls it with a numerator of zero. Fifteen further
+breakages were aimed at tonight's own new code, the count-in's click count and
+the readout's tick, and fourteen of them fail: a count-in counting quarters
+rather than clicks, counting bars, rounding down, rounding to the nearest, off
+by one, a tick that truncates, one that does not wrap, one counting hundredths
+instead of 96ths, one that does not clamp. The one survivor is a genuine no-op
+and is written down in `Meter.h` beside the line that makes it one: the clamp
+is written `std::min (1.0, fraction)` rather than the other way round, so a
+NaN reads as the top of the beat and the explicit guard above it is belt and
+braces. Reversing that clamp is the breakage to watch for, because it casts a
+NaN to an `int` and neither sanitizer here says so.
+
+70 distinct breakages in all, 75 runs counting the five re-runs.
+
+### One real fault, and a player would have seen it rather than heard it
+
+**The count-in counted quarter notes while the metronome counted display
+beats.** `MainComponent.cpp:2464` showed `ceil (engine.countInBeatsLeft())`,
+and `countInBeatsLeft` is `countInEnd - beatPosition`, which is in quarters
+like every other position in the project. The change converted the count-in's
+length to bars of the signature and the click to one per display beat, and
+left the readout counting quarters, so in any signature whose denominator is
+not four the number on screen disagreed with the clicks in the player's ears:
+
+- **6/8, a two bar count-in.** Twelve eighth note clicks sound, accented at
+  the top of each bar, which is right. The clock reads 6, 5, 4, 3, 2, 1,
+  advancing once every second click.
+- **7/8, a one bar count-in.** Seven clicks sound. The clock reads 4, 3, 2, 1.
+  Four is the number of quarters in the bar, rounded up, and is not the count
+  of anything the player can hear.
+- **4/1, a one bar count-in.** Four clicks sound and the clock counts down
+  from sixteen.
+- 4/4 and 3/4 were right, which is why nobody saw it: there a quarter is a
+  display beat.
+
+A count-in has one job, which is to tell a player where in the bar they are
+before they start playing, so a readout that disagrees with the click is the
+whole feature wrong rather than a cosmetic slip. It is also exactly the shape
+`RecordAlign.h` exists to remember: the figure was worked out in the window,
+where nothing tests it.
+
+The conversion is now `Meter::clicksRemaining`, and `MeterTest` asserts the
+property over all 594 accepted signatures and every count-in from one to three
+bars: at the moment each click sounds the number shown is the clicks still to
+come including that one, counting down to one on the last, and it holds that
+number until the next click rather than changing between them. Breaking the
+new function the way the window was broken fails the 6/8 literal immediately.
+
+### One latent fault of the kind this file keeps recording
+
+**A numerator of zero made four functions return a number that is not a
+number, and one of them undefined behaviour that neither sanitizer reports.**
+`barOf`, `barBeatAt`, `barFloorQuarters` and `roundUpToBar` all divide by
+`barLengthQuarters`, which was `numerator * beatLengthQuarters` with nothing
+to stop the numerator being zero. Compiled exactly as `Tests/run.sh` compiles
+it, with address and undefined behaviour sanitizers and
+`-fno-sanitize-recover=undefined`:
+
+```
+barLengthQuarters {0,4} = 0.000000
+barFloorQuarters        = -nan
+roundUpToBar            = -nan
+barOf                   = -9223372036854775807
+barBeatAt               = bar -9223372036854775807 beat 1
+exit=0
+```
+
+The cast of an infinity to a `long long` is undefined behaviour rather than a
+large number, and GCC's `-fsanitize=undefined` does not include
+`float-cast-overflow`, so it passes in silence. Worth knowing on its own: this
+suite cannot be relied on to catch that particular class of fault, only the
+wrong answers around it.
+
+No project and no MIDI file can carry such a signature. `Map::first` is
+private, `setFirst` and `AudioEngine::setTimeSignature` both refuse what
+`isValid` rejects, `getTimeSignature` re-validates on top of that, `ProjectIO`
+loads through `validated`, and `fromMetaEventBytes` returns `validated`. So
+this is unreachable today, and it is fixed anyway for the reason the file
+itself gives above `barOf`'s own 2^53 guard: a function that can be handed
+something has to say what it does with it. Two of these functions,
+`isAccentedClick` and `quartersAt`, already read a numerator below one as one;
+that reading now lives in `barLengthQuarters`, which the other four inherit
+it from, and `beatLengthQuarters` reads a denominator below one the same way.
+The test sweeps eight degenerate signatures and asserts the property the four
+of them rest on: no `Signature` a caller can build has a length that is zero,
+negative, infinite or not a number.
+
+### Two readouts of the same position that had drifted apart
+
+The transport clock and the playlist's position label both draw
+bar:beat:tick, from two copies of one line, and the copies were no longer the
+same. `MainComponent` had `(int) (at.fraction * 96.0)`; `PlaylistComponent`
+had `(int) (at.fraction * 96.0 + 1.0e-6) % 96`. Both halves of the second one
+are needed and the first had neither: a position is worked out in floating
+point and sits a few parts in 10^16 either side of a tick boundary, which is
+exactly where the two print a different tick for the same place in the song,
+and a fraction near enough to one multiplies up to 96 itself, which is a tick
+past the end of a beat that has 96 of them and three characters into a two
+character field.
+
+This predates the time signature, which only moved both copies and added a
+comment to one claiming it was the same readout as the other. It is one
+function now, `Meter::tickOfFraction`, and the test asserts the property
+rather than the expression: a tick starts at or before the position it
+describes, the next one starts after it, and the count never goes backwards as
+the position moves forward.
+
+### Four claims that were wrong rather than unproven
+
+- **A step in 6/8 is a thirty second note, not a sixteenth.** Said in
+  `Meter.h`'s snap section, in `Project.h:1813` and in
+  `PianoRollComponent.cpp:661`, and in one of `MeterTest`'s own check labels,
+  where the number beside it was right. A step is a quarter of a display beat
+  and a display beat in 6/8 is an eighth, so each comment's own "because"
+  clause is what disproves it. `Meter.h`'s was wrong twice over: it also said
+  a step is "a sixteenth of the bar", which is true only when the numerator is
+  four. The harm is the ordinary one: somebody measures 0.125, reads
+  "sixteenth", and corrects the code to match the comment, which halves the
+  resolution of the quantise fallback and of the default snap.
+- **The MIDI import report said the file's opening signature "was used" when
+  nothing had been taken from it.** Adopting one needs the project to still be
+  in 4/4 and the file not to be, while the sentence about a file that changes
+  signature part way through was printed unconditionally. Drop a file that
+  opens in 4/4 and changes at bar 9 into a project already in 7/8 and the
+  status bar said its opening signature is what was used, sending the producer
+  to look for a 4/4 grid they had not been given. The sentence now has a
+  second half for the case where the project kept what it had.
+- **The release notes said snapping was untouched "if you have snap set to a
+  sixteenth you still get sixteenth lines wherever you got them before".** The
+  two sentences before it describe the opposite as the deliberate change, and
+  the code agrees with them: the piano roll's fallback was a flat 0.25
+  quarters at every zoom and is now `gridStepQuartersAt (0.0, ppb, 6.0, ...)`,
+  whose snap branch needs `snapSize * ppb >= 6.0`, so between the zoom floor
+  of 8 pixels a quarter and 24 a sixteenth grid now draws beats. Where the
+  notes land is what is untouched; the lines are what changed.
+- **`midiClocksForQuarters`'s own worked example.** Its comment offers a
+  dotted whole note click in 4/1 at 144 clocks as the case that fits the byte,
+  and nothing produced the number: narrowing the clamp from 255 to 127 passed
+  the whole suite.
+
+### One hazard removed rather than fixed
+
+`SongLength::loopEndBeats` took its bar length as a defaulted argument,
+`kBeatsPerBar = 4.0`. It was the last place in the studio where a bar is four
+beats unless somebody says otherwise, and `Meter.h`'s own design argument is
+that an argument which can be left out is a call site that has to be found
+again later rather than one that fails to compile. There is one caller and it
+passes the signature's bar; the default is now gone, the constant with it, and
+`SongLengthTest` names the 4.0 it means at each of its sixteen call sites.
+
+### One thing that is an annoyance rather than a fault
+
+`MainComponent::applyTimeSignature` early returned only when `setFirst`
+refused, and `setFirst` accepts any valid signature including the one the
+project is already in. So typing 4/4 into a 4/4 project re-pushed the whole
+arrangement, rebuilt the modulator panel's menu and marked the project dirty,
+and closing it offered to save a project nothing had happened to. It now
+returns early for an unchanged signature while still putting the field back,
+so "04/4" still normalises to "4/4".
+
+### Checked and found sound
+
+Audited by `auditor` over the wiring, every finding above reproduced here
+before it was acted on, and the following reported clean with the reasoning
+checked:
+
+- **The signature reaching the audio thread.** `Meter.h`'s claim that the
+  device callback "latches one signature from two atomics at the top of each
+  block" is accurate: `getTimeSignature()` is called once, before the sample
+  loop, and the click path calls only `clickIndexAt` and `isAccentedClick`,
+  neither of which allocates, locks, logs or follows a pointer the message
+  thread can rewrite. A torn read between the two atomics is harmless and the
+  comment's reasoning for that is right: every numerator in 1..99 pairs with
+  every accepted denominator, so a half updated pair is still a signature, and
+  the worst case is one block clicked with the wrong accent.
+- **New state, all four things.** Saved as the two notated numbers, loaded
+  through `setFirst (validated (...))` so a hand edited file carrying `4/3`
+  or a zero opens as 4/4, reset in `Project::clearAll`, and deliberately
+  outside `capture`/`restore` with the tempo, which is how `bpm` and the loop
+  range are already handled.
+- **Playback against export.** Both paths set the play head's signature from
+  the same accessor and report the same quarter position, neither renders the
+  click, and `renderOffline` saves and restores `lastClickIndex`. The song end
+  and the loop end are not read by the export path at all, so the signature
+  cannot move the length of a bounce.
+- **The one rule everything follows from.** Every `60.0` in `Source` was
+  walked: the only site that combines a meter derived quantity with one is the
+  playlist's tempo guess for an imported loop, which is this conversion run
+  backwards with the tempo as the answer and is the documented legitimate
+  case. `beatsPerSample = bpm / 60 / sampleRate` carries no denominator on
+  either path.
+- **Every literal 4.0 that meant a bar**, by diffing the pre-change copies of
+  all nine wired files and walking each occurrence. The ones that remain are
+  the deliberate "four bars" of a new automation lane, the channel rack and
+  PanOne's sync table, which the change records as gaps with reproductions,
+  and `SongLength`'s default, which is now gone.
+- **Every JUCE signature the change uses**, against a sparse 9.0.3 clone
+  rather than from memory.
+
+### Left alone deliberately
+
+- **The piano roll's ruler has no label thinning**, where the playlist's has.
+  Before the signature a bar was always four quarters, which at the zoom floor
+  of 8 pixels a quarter is 32 pixels, so there was nothing to thin. In a 1/32
+  project a bar is 0.125 quarters and bar lines are a pixel apart, so the
+  ruler draws about one bar number per pixel of its width per repaint, each
+  over the last. It is slow and illegible rather than wrong, it is finite, and
+  the fix is a drawing change with nothing to test it against, so it is
+  recorded here rather than made tonight.
+- **`Fx/Unit.h`**, for the fourth night running and for the same reason:
+  nothing in `Source` or `Tests` includes it, and the `Fx/Plugin.h` its
+  comment describes still does not exist.
+- **The channel rack and PanOne's sync table**, which still read a bar as four
+  quarters. Both are recorded as gaps with reproductions in the change that
+  merged, and both are decisions about what a step and a synced rate should
+  mean in an odd meter rather than arithmetic that is wrong.
+- **The signature map's second entry**, which is the next night's work. The
+  invariants `MeterTest` already asserts for it were left as they are.
 
 ---
 

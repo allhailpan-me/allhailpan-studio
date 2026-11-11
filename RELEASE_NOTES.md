@@ -41,8 +41,11 @@ roll used to draw its step grid however far out you zoomed, which meant that
 past a certain point the lines were two pixels apart and read as a grey wash
 rather than as a grid. It now stops drawing them when they get that close and
 leaves the beat lines, so zoomed well out you see beats instead of a smear.
-Snapping is untouched: if you have snap set to a sixteenth you still get
-sixteenth lines wherever you got them before.
+Where the notes land is untouched: snapping does exactly what it did, and if
+you had snap set to a sixteenth you still snap to sixteenths at every zoom. It
+is the lines that changed, which is the whole point of the change, so zoomed
+well out a sixteenth grid now reads as beats until you zoom back in far enough
+for the sixteenths to be worth drawing.
 
 **It also fixed something that had quietly been wrong in every MIDI file this
 studio has ever written.** Two bytes of the time signature message, the ones
