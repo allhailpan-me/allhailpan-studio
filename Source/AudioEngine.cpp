@@ -1421,7 +1421,6 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     // about it: the signature moves bar lines and nothing else, so
     // beatsPerSample stays the tempo over sixty with no denominator in it.
     const Meter::Signature signature = getTimeSignature();
-    const double quartersPerClick    = Meter::beatLengthQuarters (signature);
     // isRecordingAudio rather than recorder.isActive: the input takes live in
     // inputRecorders now, and reading only the instrument recorder here meant
     // the transport looped at the end of the last clip during an input
@@ -1487,13 +1486,17 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 lastClickIndex = clickIndex;
                 if (clickOn)
                 {
-                    // Fifty milliseconds, or half the time until the next
-                    // click, whichever is shorter. A display beat can be a
-                    // thirty second note, which at 400 bpm is 18.75 ms, so a
-                    // fixed 50 ms would retrigger a click that was still
-                    // sounding and the metronome would buzz rather than tick.
-                    const double untilNext = quartersPerClick * 60.0 / std::max (1.0, currentBpm);
-                    clickSamplesLeft = (int) (sampleRate * std::min (0.05, untilNext * 0.5));
+                    // Fifty milliseconds whatever the signature, because a
+                    // fast click cannot buzz: the burst is written into the
+                    // buffer with = rather than +=, and a retrigger resets both
+                    // the phase and the level, so a click arriving before the
+                    // last has finished replaces it instead of summing with it.
+                    // Shortening the burst to fit the gap instead, which this
+                    // did for a while, stops the decay partway and puts a step
+                    // where the old code had none: a 5/32 bar at 400 bpm leaves
+                    // 9.4 ms between clicks, and against the 8 ms decay the
+                    // level is still at a third of the burst when the gap ends.
+                    clickSamplesLeft = (int) (sampleRate * 0.05);
                     clickPhase = 0.0;
                     clickFreq  = Meter::isAccentedClick (signature, clickIndex) ? 1760.0 : 1320.0;
 

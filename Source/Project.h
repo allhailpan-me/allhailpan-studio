@@ -772,9 +772,16 @@ public:
     int    rackStepsPerBar = 16;
 
     // The rack is still in bars of four quarters whatever the signature says,
-    // and that is a gap rather than a decision. It was made to follow the
-    // signature and taken back out, because following it properly reaches
-    // three things at once and getting one of them wrong loses a pattern:
+    // and that is a gap rather than a decision. What it looks like from
+    // outside, since this is what a bug report will describe: in 7/8 the < and
+    // > buttons walk the window in four quarter steps over three and a half
+    // quarter bars, so the second rack pattern starts at quarter 4, which the
+    // playlist draws as bar 2 beat 2, and runs four quarters across a bar
+    // line. The rack is self consistent and disagrees with every other view.
+    //
+    // It was made to follow the signature and taken back out, because
+    // following it properly reaches three things at once and getting one of
+    // them wrong loses a pattern:
     //
     //  - `rackClip` finds its clip by an exact length match, so a window that
     //    moves with the signature makes the rack find nothing, repaint empty

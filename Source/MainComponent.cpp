@@ -261,6 +261,13 @@ MainComponent::MainComponent()
         }
     };
 
+    // The same thing the tempo slider gets from storedPreference above: a
+    // control that has never been written to is empty, and juce::Label fires
+    // onTextChange only on a change, so clicking into the empty box and out of
+    // it again leaves it empty. Without this the studio launches showing a
+    // blank signature and keeps it until a project is opened.
+    showTimeSignature();
+
     tempoLabel.setColour (juce::Label::textColourId, Ahp::muted);
     clock.setJustificationType (juce::Justification::centred);
     clock.setFont (juce::FontOptions (20.0f));
@@ -2723,6 +2730,12 @@ bool MainComponent::loadProject (const juce::File& file, bool recovered)
     // marks the project dirty, and opening a file is not an edit to it.
     engine.setTimeSignature (project.meter.at (0.0));
     showTimeSignature();
+
+    // The rate menu's labels are built per row from the bar length, so a 12/8
+    // project opened while the Modulators view is the one on screen would keep
+    // the previous project's "1 bar" against four quarters. Switching views
+    // refreshes it, which is why this hides until somebody is looking at it.
+    modPanel.refresh();
 
     engine.stopAndRewind();
 

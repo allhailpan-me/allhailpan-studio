@@ -721,11 +721,23 @@ int main()
         }
 
         // The 4/4 answers, pinned, because these are what the editors drew
-        // before the signature existed and nothing should have moved.
+        // before the signature existed.
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 8.0, 6.0, 1.0), 1.0, "4/4 at 8 px a quarter draws beats");
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 2.0, 6.0, 1.0), 4.0, "4/4 at 2 px a quarter draws bars");
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 0.5, 6.0, 1.0), 12.0, "4/4 at half a pixel draws three bars");
         checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 30.0, 6.0, 0.25), 0.25, "4/4 at 30 px a quarter draws steps");
+
+        // One zoom where 4/4 did move, pinned so that it is recorded rather
+        // than discovered. The playlist used to choose between a beat and a
+        // whole bar on `ppb >= 6`, so from three to six pixels a quarter it
+        // drew bar lines and nothing between them. The ladder climbs to the
+        // narrowest spacing that is at least six pixels and still divides the
+        // bar, which here is the half bar, so those zooms gain a line. That is
+        // the behaviour asked for, and it is the only 4/4 zoom that changed.
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 4.0, 6.0, 1.0), 2.0,
+                    "4/4 at 4 px a quarter draws half bars, where it used to draw bars");
+        checkEqual (Meter::gridStepQuarters ({ 4, 4 }, 2.9, 6.0, 1.0), 4.0,
+                    "and is back to bars as soon as the half bar is too narrow");
         // 99/32's bar is 12.375 quarters, and the only spacings that divide it
         // are the divisors of 99 times a thirty second: 3, 9, 11, 33 and 99 of
         // them. At four pixels a quarter the first one wide enough is 33, a
@@ -842,6 +854,28 @@ int main()
                 for (double fraction : { Meter::kSnapWholeBar, 1.0, 0.5, 0.25, 1.0 / 24.0, 0.0 })
                     checkEqual (map.snapQuartersAt (q, fraction), Meter::snapQuarters (s, fraction),
                                 name (s) + ": the map's snap size is the signature's");
+
+                // The accessor this section missed the first time, and the one
+                // added by the same commit that made the free function
+                // testable. Three mutations of its single line survived the
+                // suite: handing the free function kDefault rather than the
+                // signature, swapping the two pixel arguments, and returning
+                // the raw unaligned spacing the function exists to avoid. The
+                // first of those draws a 7/8 project's grid on the even
+                // quarters at four pixels a quarter, which is an ordinary
+                // zoom: lines at 0, 2, 4, 6 against bars at 0, 3.5, 7, and
+                // every bar after the first with no line on it at all.
+                //
+                // The zooms span what `ppb` is clamped to, and both finest
+                // values are the ones the two editors actually pass: the
+                // playlist asks for a display beat, the piano roll for a
+                // quarter of one.
+                const double displayBeat = Meter::beatLengthQuarters (s);
+                for (double zoom : { 2.0, 4.0, 13.0, 400.0 })
+                    for (double finest : { displayBeat, 0.25 * displayBeat })
+                        checkEqual (map.gridStepQuartersAt (q, zoom, 6.0, finest),
+                                    Meter::gridStepQuarters (s, zoom, 6.0, finest),
+                                    name (s) + ": the map's grid step is the signature's");
             }
 
             // The tolerance in particular: dropping it, or rounding down,

@@ -367,6 +367,12 @@ void ProjectIO::resetEngine (AudioEngine& engine)
     // the same session sound different depending on what was loaded before it.
     engine.setPanLaw (PanLaw::defaultLaw);
 
+    // And the signature, for the same reason: the engine holds its own copy
+    // for the click and the play head, so one left behind would click a new
+    // project in the last one's meter. Both callers happen to set it from the
+    // project a moment later, so nothing leaks today. The third will.
+    engine.setTimeSignature (Meter::kDefault);
+
     for (int c = 0; c < kNumChannels; ++c)
     {
         engine.setChannelPlugin (c, nullptr);

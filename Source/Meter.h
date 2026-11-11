@@ -34,10 +34,23 @@
     `Temporal::Tempo` holds a note type independent of the meter denominator
     whose documented default is "Note Type (default '4': quarter note)".
 
-    So: **the denominator may not appear in any conversion to seconds.**
-    Seconds per stored beat stays `60 / bpm` with nothing else in it. If the
-    denominator turns up in a seconds conversion anywhere, that code is wrong,
-    and `MeterTest.cpp` sweeps every accepted signature asserting it has not.
+    So: **the denominator may not appear in the factor that turns a stored
+    position into seconds.** That factor stays `60 / bpm` with nothing else in
+    it. Half of that guarantee is structural and is the reason this header is
+    shaped the way it is: there is no sample rate and no sixty anywhere in it,
+    so there is no time base here to get wrong, and the engine's own
+    `beatsPerSample = bpm / 60 / sampleRate` is signature free.
+    `MeterTest.cpp` pins the number the whole feature turns on, that a 6/8 bar
+    at 120 bpm is 1.5 seconds.
+
+    The denominator may legitimately decide how far apart two things are and
+    have that distance converted afterwards, which is a different thing and
+    reads almost the same on the page. Two places do it: the metronome works
+    out the interval to the next click, and the playlist guesses a loop's tempo
+    from its length in bars. Both multiply a denominator derived number of
+    quarters by `60 / bpm`, and both are right. What would be wrong is a
+    denominator inside the `60 / bpm` itself, which is what would make a 6/8
+    bar at 120 bpm anything other than 1.5 seconds.
 
     Two studios do something else and neither is a counterexample. Pro Tools
     has a per tempo event "Tempo Resolution (BPM Rate)" which, following a
