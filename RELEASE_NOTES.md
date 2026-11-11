@@ -36,6 +36,14 @@ that lost a pattern you had already drawn, and took it back out rather than
 ship any of them. And if you drop two MIDI files in together that are in
 different signatures, the clips from the first one get sized to the wrong bar.
 
+**One thing changed in 4/4 as well, so it is worth knowing about.** The piano
+roll used to draw its step grid however far out you zoomed, which meant that
+past a certain point the lines were two pixels apart and read as a grey wash
+rather than as a grid. It now stops drawing them when they get that close and
+leaves the beat lines, so zoomed well out you see beats instead of a smear.
+Snapping is untouched: if you have snap set to a sixteenth you still get
+sixteenth lines wherever you got them before.
+
 **It also fixed something that had quietly been wrong in every MIDI file this
 studio has ever written.** Two bytes of the time signature message, the ones
 that say how often the metronome clicks and how a quarter note is notated, were
