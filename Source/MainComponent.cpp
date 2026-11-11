@@ -2461,8 +2461,17 @@ void MainComponent::timerCallback()
 
     if (engine.isCountingIn())
     {
-        const int beatsLeft = (int) std::ceil (engine.countInBeatsLeft() - 1.0e-6);
-        clock.setText (juce::String (std::max (1, beatsLeft)), juce::dontSendNotification);
+        // The transport counts quarters and the metronome counts display
+        // beats, so the number the player is hearing is neither: a two bar
+        // count-in in 6/8 is six quarters and twelve clicks. `Meter` does the
+        // conversion and `MeterTest` pins it, because a figure worked out
+        // here is a figure nothing tests. Read at the loop start, which is
+        // where the count-in's own length was measured, so the two cannot
+        // disagree the night a signature can change part way through a song.
+        const long long clicksLeft = Meter::clicksRemaining (project.meter.at (project.loopStart),
+                                                             engine.countInBeatsLeft());
+        clock.setText (juce::String (std::max<long long> (1, clicksLeft)),
+                       juce::dontSendNotification);
         clock.setColour (juce::Label::textColourId, Ahp::rec);
     }
     else

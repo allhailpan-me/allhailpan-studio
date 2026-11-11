@@ -1812,8 +1812,8 @@ public:
         for (auto& c : picked) { first = std::min (first, c.start); last = std::max (last, c.endBeat (bpm)); }
         // Round up to a step, where a step is a quarter of a display beat, so
         // the copy lands on the same grid the editors snap to: a sixteenth
-        // note in 4/4 and in 6/8 alike, because a display beat is an eighth
-        // there.
+        // note in 4/4 and a thirty second in 6/8, because a display beat is
+        // an eighth there.
         const double step = 0.25 * meter.beatLengthQuartersAt (first);
         const double span = std::ceil ((last - first) / step - 1.0e-9) * step;
 

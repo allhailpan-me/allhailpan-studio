@@ -283,6 +283,79 @@ int main()
         }
     }
 
+    // The same argument taken to the end of its range, which is where it had
+    // not been taken. A numerator of zero is the one unaccepted signature
+    // that is not merely inexact: four functions here divide by the bar
+    // length, and a bar of no quarters makes `barOf` cast an infinity to a
+    // `long long`. That is undefined behaviour, and it does not announce
+    // itself under the sanitizers this suite runs. Before the guard in
+    // `barLengthQuarters`, `barOf ({ 0, 4 }, 7.0)` returned
+    // -9223372036854775807 and exited zero, while `barFloorQuarters` and
+    // `roundUpToBar` returned a NaN that then spread into whatever asked for
+    // a bar line.
+    //
+    // So the property asserted is the one those four rest on: no `Signature`
+    // a caller can build has a length that is zero, negative, infinite or not
+    // a number. Found by removing the `std::max (1, s.numerator)` from
+    // `isAccentedClick`, the only one of these that had a guard, and watching
+    // the whole suite stay green.
+    {
+        const Meter::Signature degenerate[] {
+            { 0, 4 }, { 0, 8 }, { 0, 0 }, { -3, 4 }, { 4, 0 }, { 1, 0 },
+            { 4, -4 }, { -1, -1 } };
+
+        for (const auto& s : degenerate)
+        {
+            check (! Meter::isValid (s), name (s) + " is not a signature the studio accepts");
+
+            const double beat = Meter::beatLengthQuarters (s);
+            const double bar  = Meter::barLengthQuarters (s);
+
+            check (std::isfinite (beat) && beat > 0.0,
+                   name (s) + ": a display beat is still a positive length");
+            check (std::isfinite (bar) && bar > 0.0,
+                   name (s) + ": and a bar is still a positive length");
+
+            for (double q : { -193.3, -7.0, -0.5, 0.0, 1.0, 7.0, 193.3 })
+            {
+                // A bar number cast from an infinity reads as a number, so
+                // this pins the range a position of a few hundred quarters
+                // can honestly produce rather than only checking for a NaN.
+                const long long bars = Meter::barOf (s, q);
+                check (bars > -100000 && bars < 100000,
+                       name (s) + ": and a bar number a position that size could have");
+
+                const auto bb = Meter::barBeatAt (s, q);
+                check (bb.beat >= 1, name (s) + ": a display beat of at least one");
+                check (bb.fraction >= 0.0 && bb.fraction < 1.0,
+                       name (s) + ": and a fraction in [0, 1)");
+
+                check (std::isfinite (Meter::quartersAt (s, bb)),
+                       name (s) + ": the round trip comes back a position");
+                check (std::isfinite (Meter::barFloorQuarters (s, q)),
+                       name (s) + ": the bar floor is a position, not a NaN");
+                check (std::isfinite (Meter::roundUpToBar (s, q, 1.0e-3)),
+                       name (s) + ": and so is the bar above it");
+                check (std::isfinite (Meter::snapQuarters (s, 0.25)),
+                       name (s) + ": and so is a step of snap");
+                check (std::isfinite (Meter::gridStepQuarters (s, 32.0, 6.0, 0.25)),
+                       name (s) + ": and so is a grid spacing");
+
+                // Reached rather than asserted about for its own sake: with a
+                // numerator below one the modulus is `% 0` unless something
+                // reads it as one, which is a division by zero the sanitizers
+                // do catch, and this is the call that makes them.
+                const long long index = Meter::clickIndexAt (s, q);
+                if (s.numerator < 1)
+                    check (Meter::isAccentedClick (s, index),
+                           name (s) + ": a bar read as one beat accents every click");
+
+                check (std::isfinite (Meter::clicksRemaining (s, 4.0) * 1.0),
+                       name (s) + ": and a count-in has a number of clicks");
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // 4. The click and the accent.
     //
@@ -327,6 +400,90 @@ int main()
     }
 
     // -----------------------------------------------------------------------
+    // 4b. The count-in, which is where the two things called a beat meet in
+    //     the same readout.
+    //
+    // Its length is bars of the signature, the transport counts the quarters
+    // every position is stored in, and the metronome clicks display beats, so
+    // the number to show the player is the third of those and not either of
+    // the first two. The property asserted is that the readout agrees with
+    // what the player is hearing: at the moment each click sounds, the number
+    // shown is how many clicks are still to come including that one, counting
+    // down to one on the last of them, and it holds that number until the
+    // next click rather than changing between them.
+    //
+    // This is the fault the readout shipped with on 2026-11-11. It showed the
+    // quarters the transport gives it, so a two bar count-in in 6/8 sounded
+    // twelve clicks and counted down from six, changing the number on every
+    // other one, and a one bar count-in in 7/8 sounded seven clicks and
+    // counted down from four. 4/4 and 3/4 were right, which is why it was not
+    // noticed: there a quarter is a display beat.
+    // -----------------------------------------------------------------------
+    {
+        // The literals, which are what a player watching the screen counts.
+        checkEqualInt (Meter::clicksRemaining ({ 4, 4 }, 4.0),  4,
+                       "4/4: a one bar count-in counts four");
+        checkEqualInt (Meter::clicksRemaining ({ 3, 4 }, 6.0),  6,
+                       "3/4: a two bar count-in counts six");
+        checkEqualInt (Meter::clicksRemaining ({ 6, 8 }, 6.0),  12,
+                       "6/8: a two bar count-in counts twelve, not the six quarters it lasts");
+        checkEqualInt (Meter::clicksRemaining ({ 7, 8 }, 3.5),  7,
+                       "7/8: a one bar count-in counts seven, not four");
+        checkEqualInt (Meter::clicksRemaining ({ 4, 1 }, 16.0), 4,
+                       "4/1: a one bar count-in counts four, not sixteen");
+
+        checkEqualInt (Meter::clicksRemaining ({ 4, 4 }, 0.0),  0,
+                       "a count-in that has run out counts nothing");
+        checkEqualInt (Meter::clicksRemaining ({ 4, 4 }, -1.0), 0,
+                       "and so does one the transport has already passed");
+        checkEqualInt (Meter::clicksRemaining ({ 4, 4 }, std::numeric_limits<double>::quiet_NaN()), 0,
+                       "and a length that is not a number");
+        checkEqualInt (Meter::clicksRemaining ({ 4, 4 }, std::numeric_limits<double>::infinity()), 0,
+                       "and an infinite one");
+
+        for (const auto& s : all)
+        {
+            const double beatLength = Meter::beatLengthQuarters (s);
+
+            for (int bars = 1; bars <= 3; ++bars)
+            {
+                const double length = (double) bars * Meter::barLengthQuarters (s);
+                const long long clicks = (long long) bars * (long long) s.numerator;
+
+                for (long long k = 0; k < clicks; ++k)
+                {
+                    const double left = length - (double) k * beatLength;
+
+                    checkEqualInt (Meter::clicksRemaining (s, left), clicks - k,
+                                   name (s) + ": the readout is the clicks still to sound");
+
+                    checkEqualInt (Meter::clicksRemaining (s, left - 0.5 * beatLength),
+                                   clicks - k,
+                                   name (s) + ": and holds between one click and the next");
+
+                    // And the tolerance's own purpose, which is the other
+                    // direction: a position a hair short of the next click
+                    // counts as having reached it, because the transport
+                    // works its position out in floating point and lands a
+                    // few parts in 10^16 either side of a boundary. Without
+                    // that, the number before it would show twice.
+                    checkEqualInt (Meter::clicksRemaining (s, std::nextafter (left - beatLength, length)),
+                                   clicks - k - 1,
+                                   name (s) + ": a hair short of the next click is already at it");
+                }
+
+                // And the whole count-in is as long as the clicks it sounds,
+                // which is the agreement the window got wrong: the first
+                // number shown is the number of clicks, not of quarters.
+                checkEqualInt (Meter::clicksRemaining (s, length), clicks,
+                               name (s) + ": the first number shown is the click count");
+                check (clicks == (long long) bars * (long long) s.numerator,
+                       name (s) + ": which is bars of numerator clicks");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // 5. The MIDI meta event.
     // -----------------------------------------------------------------------
     {
@@ -344,6 +501,29 @@ int main()
         // contradicts its own prose. Pinned so nobody "corrects" this to it.
         check (Meter::midiClocksForQuarters (1.5) != 0x18,
                "the dotted quarter click is not 0x18, whatever the jglatt page says");
+
+        // A click that is not a whole number of clocks rounds to the nearest
+        // one rather than always early. Nothing in the studio asks for one:
+        // every display beat is 96, 48, 24, 12, 6 or 3 clocks, so truncating
+        // instead of rounding passed every check here. The function is
+        // exposed apart from the signature for the caller that does not exist
+        // yet, which is the additional click on the groups of a compound
+        // meter, and the rounding is the contract that caller will get.
+        checkEqualInt (Meter::midiClocksForQuarters (0.9), 22,
+                       "21.6 clocks rounds to the nearest, 22, not down to 21");
+        checkEqualInt (Meter::midiClocksForQuarters (0.1), 2,
+                       "and 2.4 clocks rounds to 2");
+
+        // Both ends of the byte, which the comment above the function claims
+        // and nothing produced. A dotted whole note click in 4/1 is six
+        // quarters, which is 144 clocks and fits; anything longer is clamped,
+        // which is the lie that future caller has to know about.
+        checkEqualInt (Meter::midiClocksForQuarters (6.0), 144,
+                       "a dotted whole note click is 144 clocks, which the byte holds");
+        checkEqualInt (Meter::midiClocksForQuarters (20.0), 255,
+                       "and a click past the byte is clamped into it");
+        checkEqualInt (Meter::midiClocksForQuarters (0.0), Meter::kMidiClocksPerQuarter,
+                       "a click of no length reads as a quarter note, not as none");
 
         const auto bytes = Meter::metaEventBytes ({ 6, 8 });
         checkEqualInt (bytes[0], 0xff, "meta prefix");
@@ -591,12 +771,23 @@ int main()
         checkEqual (Meter::snapQuarters ({ 4, 4 }, 1.0 / 24.0), 1.0 / 24.0,     "4/4: a sixth of a step is unchanged");
         checkEqual (Meter::snapQuarters ({ 4, 4 }, 0.0),                  0.0,  "4/4: None is still none");
 
-        // And in 6/8 a beat is an eighth and a step a sixteenth, so the names
-        // still describe what the grid does.
+        // And in 6/8 a beat is an eighth and a step a thirty second, so the
+        // names still describe what the grid does: they are relative to a
+        // display beat, which is the whole reason they are stored that way.
         checkEqual (Meter::snapQuarters ({ 6, 8 }, Meter::kSnapWholeBar), 3.0,   "6/8: a bar is three quarters");
         checkEqual (Meter::snapQuarters ({ 6, 8 }, 1.0),                  0.5,   "6/8: a beat is an eighth");
-        checkEqual (Meter::snapQuarters ({ 6, 8 }, 0.25),                 0.125, "6/8: a step is a sixteenth");
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, 0.25),                 0.125, "6/8: a step is a thirty second");
         checkEqual (Meter::snapQuarters ({ 7, 8 }, Meter::kSnapWholeBar), 3.5,   "7/8: a bar is three and a half");
+
+        // Only the sentinel means a bar. It is -1.0 compared with `==`, and
+        // that is safe only because nothing else negative means anything, so
+        // this asserts it rather than assuming it.
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, -0.5), 0.0,
+                    "6/8: a negative that is not the sentinel is no snap");
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, -2.0), 0.0,
+                    "and so is one past the sentinel");
+        checkEqual (Meter::snapQuarters ({ 6, 8 }, std::nextafter (Meter::kSnapWholeBar, 0.0)), 0.0,
+                    "and so is a hair off it");
 
         for (const auto& s : all)
         {
@@ -637,6 +828,21 @@ int main()
     // -----------------------------------------------------------------------
     {
         const double zooms[] { 2.0, 2.5, 3.0, 4.0, 7.0, 8.0, 50.0, 137.0, 400.0 };
+
+        // A `finest` that is not a number falls back to a display beat and not
+        // to a bar. The guard was there and its answer was untested, and the
+        // two differ by the numerator: in 7/8 at a zoom where everything is
+        // wide enough a bar is seven times the grid that was asked for.
+        for (const auto& s : all)
+        {
+            const double notANumber = std::numeric_limits<double>::quiet_NaN();
+            checkEqual (Meter::gridStepQuarters (s, 1000.0, 6.0, notANumber),
+                        Meter::beatLengthQuarters (s),
+                        name (s) + ": a finest that is not a number draws display beats");
+            checkEqual (Meter::gridStepQuarters (s, 1000.0, 6.0, 0.0),
+                        Meter::beatLengthQuarters (s),
+                        name (s) + ": and so does a finest of nothing");
+        }
 
         // The minimum is swept rather than fixed at the six pixels both
         // editors ask for today. An audit mutated the accessor to hardcode

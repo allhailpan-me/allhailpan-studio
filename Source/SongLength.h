@@ -25,8 +25,6 @@
 namespace SongLength
 {
 
-static constexpr double kBeatsPerBar = 4.0;
-
 /** How far past a bar line a clip may end and still count as ending on it.
 
     An audio clip's length is its source length in seconds times the tempo, so
@@ -45,8 +43,15 @@ static constexpr double kBarLineTolerance = 1.0e-3;
     engine reads as "do not loop". Anything else gives a whole number of bars
     that is at least one bar and never earlier than the last clip ends, less
     the tolerance above.
+
+    `beatsPerBar` has no default, deliberately. It had one, `kBeatsPerBar =
+    4.0`, and the time signature took it away: this was the last place in the
+    studio where a bar was four beats unless somebody said otherwise, and a
+    caller that leaves the argument out is a caller that silently means 4/4
+    rather than one that fails to compile. `Meter.h` makes the same argument
+    for taking a position everywhere, and for the same reason.
 */
-inline double loopEndBeats (double lastClipEnd, double beatsPerBar = kBeatsPerBar) noexcept
+inline double loopEndBeats (double lastClipEnd, double beatsPerBar) noexcept
 {
     if (! std::isfinite (lastClipEnd) || lastClipEnd <= 0.0
         || ! std::isfinite (beatsPerBar) || beatsPerBar <= 0.0)

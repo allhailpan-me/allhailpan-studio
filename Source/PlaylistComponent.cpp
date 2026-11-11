@@ -2933,8 +2933,19 @@ juce::String PlaylistComponent::importMidiFiles (const juce::StringArray& paths,
         report << ", in the file's " << juce::String (Meter::toString (adoptedSignature));
 
     if (sawSignatureChanges)
+    {
+        // Which half of this sentence is true depends on whether the opening
+        // signature was actually taken, and it often is not: adopting one
+        // needs the project to still be in 4/4 and the file not to be. Said
+        // unconditionally, a 7/8 project told the producer that the file's
+        // 4/4 "is what was used" and sent them looking for a grid they had
+        // not been given.
         report << ". The file changes time signature part way through, and this studio has "
-                  "one signature for the whole project, so its opening one is what was used";
+                  "one signature for the whole project";
+        report << (adoptSignature && clipsMade > 0
+                       ? ", so its opening one is what was used"
+                       : ", so the project kept the signature it already had");
+    }
 
     report << ".";
 
