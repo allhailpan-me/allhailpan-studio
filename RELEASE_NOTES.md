@@ -1,6 +1,47 @@
-You can punch in now: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**The studio has a time signature.** There is a Sig field next to the tempo in
+the transport bar: type 3/4, or 6/8, or 7/8, or 12/8, and the whole studio
+follows it. Bar lines move to where the bars actually are, in the playlist and
+in the piano roll. The click counts the bar properly and accents the first beat
+of it. Snapping to a bar snaps to a bar. The position readout counts beats the
+way the signature does, so 6/8 reads 1:1 through 1:6. The song loops at the end
+of a real bar. A count-in of two bars counts two bars. A MIDI file you export
+says what the piece is in, and one you drop in brings its own signature with it.
+
+Before this, a song in anything but 4/4 would play, because playing never asks
+what a bar is, and could not be written: every bar line was four beats apart,
+the click accented every fourth beat, and the ruler numbered bars that were not
+there. If you write in 3/4 or 6/8, the studio was no use to you.
+
+**The tempo still means quarter notes per minute, and that is the whole thing
+this turns on.** In 6/8 at 120, a bar is a second and a half, not three
+seconds. That is what Logic says in as many words, it is what Steinberg's own
+plugin interface assumes, and it is what Ardour's tempo defaults to. The useful
+consequence for you: **changing the signature does not move a single note.** It
+moves the lines you see and the clicks you hear, and nothing else. So you can
+try 6/8 on something you wrote in 4/4 and change your mind, and nothing has
+happened to the music.
+
+**One signature for the whole project for now.** Every other studio lets it
+change part way through a song, and this one will, but that wants a night of its
+own. What is here is the part that was missing entirely.
+
+**Two things that are not finished, and I would rather say so.** The channel
+rack still works in bars of four beats, so in 6/8 its grid will not line up with
+the playlist's. I built it to follow the signature, found three separate ways
+that lost a pattern you had already drawn, and took it back out rather than
+ship any of them. And if you drop two MIDI files in together that are in
+different signatures, the clips from the first one get sized to the wrong bar.
+
+**It also fixed something that had quietly been wrong in every MIDI file this
+studio has ever written.** Two bytes of the time signature message, the ones
+that say how often the metronome clicks and how a quarter note is notated, were
+coming out as nonsense because that is what JUCE's own helper puts there. Nothing
+reads them in practice, which is why nobody noticed, and that is not a reason to
+keep writing them.
 
 **You can punch in now.** Drag a loop range over the line you want to redo,
 press Punch next to the Click button, arm the track the part is on, and record.
