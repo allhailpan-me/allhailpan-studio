@@ -42,7 +42,12 @@ blindly. Newest first.
 
 ## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
 
-### Status: open, pull request #74
+### Status: merged
+
+Pull request **#74**, squash merged as `8233b88` on 2026-11-11. All four checks
+were green on the head that merged: the `tests` job and all three platform
+builds. The release notes went in with it rather than behind it, which is what
+`CLAUDE.md` asks for and is a change from the last few nights.
 
 The 11-03 entry called this "the biggest single gap found tonight" and deferred
 it because two of the files it reaches were open in another pull request. They
