@@ -1305,3 +1305,22 @@ so nobody goes looking for the test that should have caught them:
   one computes an output that is thrown away, so each is exactly twice the
   work it needs to be. That is a performance change, not a hardening one, and
   it would want its own night and its own before and after measurement.
+
+## 2026-11-12: the punch, whose joins sit where nobody can hear them go wrong
+
+Auditing `Source/Punch.h`, merged on 2026-11-07 in #73 and never hardened. It
+is the newest substantive feature in the tree, it is free of JUCE, and what it
+decides is where the two joins either side of a punch land. The whole header
+exists because a centred crossfade would attenuate the first milliseconds of
+the take that was just punched in, which is usually the attack that was the
+reason for punching, and nothing about that announces itself: the punch is
+there, in the right place, quietly ramped at its front.
+
+The claim to be proved is the one the header states and nothing currently
+measures end to end: after `applyTo`, the new take is at full gain across
+every sample of the punch, and the old take is at full gain everywhere outside
+the punch plus a crossfade width. Measured through the real `buildCompSpans`
+rather than through a restatement of it.
+
+In progress. Mutation results and findings to follow in this section.
+
