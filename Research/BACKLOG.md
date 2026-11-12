@@ -56,6 +56,205 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-12: measuring the round trip instead of guessing at it
+
+### What was looked at
+
+Candidates, judged against daily recording, editing, arranging and mixing of
+guitar and vocals through a UMC1820, and against what the open pull requests
+left free. Six hardening branches were open, which between them hold
+`MainComponent.cpp`, `Project.h`, both the playlist and the piano roll,
+`Meter.h`, `SongLength.h`, `LatencyGraph.h`, `Spectrogram.h`, `Envelope.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`. That rules out anything whose state lives in
+the project file or whose wiring lives in the window.
+
+| Candidate | Verdict |
+|---|---|
+| **Measuring the real round trip with a loopback cable** | **Chosen.** Named on 2026-10-08 as "a night's work on its own", and it is the one thing the record alignment built that night still cannot do for itself. |
+| Stem export | Deferred. `renderOffline` is free now, but the names the stems would be written under live in `Project.h`, which #77 holds. |
+| Clip gain on audio clips | Deferred for the same reason: the gain is a field on `Clip`. |
+| MIDI record alignment | Deferred an eighth time, same reason as the seven before it: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| Noise shaping on export | Deferred, not re-rejected. Still wants the paper itself. |
+
+### What was chosen, and why
+
+**The trim the studio offers for a lying driver is a figure somebody has to
+guess.** `RecordAlign.h` compensates a take by `input + output + engine +
+trim`, where the first two are what the driver claims. It also says, in its own
+words, why there is a trim at all: the claim is only a claim, JUCE's ASIO
+backend reports zero for both when the driver will not answer, and Ardour's
+manual puts it plainly, "the only way to accurately learn about the total
+(additional) latency is to measure it".
+
+So the studio already has the right arithmetic and the wrong input to it. What
+the trim slider's own tooltip told somebody to do, before tonight, was this:
+
+> Record a click through a cable from an output back into an input, look at
+> where the recorded clicks sit against the metronome, and dial this until
+> they line up.
+
+That is a real method and it is the method of last resort. It asks a musician
+to eyeball a waveform against a grid line, at whatever zoom they happen to be
+at, and then convert what they see into milliseconds. Every other studio that
+takes this seriously measures it instead.
+
+### Where the behaviour came from
+
+The reference implementation is **Fons Adriaensen's MTDM**, which is what
+`jack_delay` and `jack_iodelay` are, and what Ardour and Harrison Mixbus both
+use for their own calibration. Read from his code rather than from anybody's
+description of it: `jack2/tests/iodelay.cpp`, "Copyright (C) 2003-2008 Fons
+Adriaensen", and the same algorithm as a class in Ardour's
+`libs/ardour/mtdm.cc`. It is GPL-2 or later, so it may be taken at GPL-3,
+which AGPL-3.0 may combine with through section 13 of each: the same argument
+`CLAUDE.md` already records for the ASIO SDK.
+
+**It is not an impulse and not a chirp**, which is the first thing worth
+knowing, because an impulse is what anybody would reach for. It plays
+**thirteen steady sine tones at once** and reads the phase of each by
+quadrature demodulation. The fundamental's phase gives the delay to within one
+of its own cycles; each of the other twelve contributes exactly **one bit** of
+the whole number of cycles on top of that.
+
+The whole design is in the frequency table, and the property that makes it work
+is not stated in the source, so it was checked arithmetically rather than
+taken on trust. With the increments Fons uses, every one of the twelve
+satisfies
+
+```
+f_i / f_0 = odd / 2^(i+1)
+```
+
+exactly: 1/2, 3/4, 5/8, 9/16, 17/32, 17/64, 41/128, 97/256, 225/512, 833/1024,
+1793/2048, 3841/4096. A change of 2^i cycles in the delay therefore moves tone
+i's phase by an odd multiple of half a cycle, which flips a bit that nothing
+else can flip. Which odd numerator is used at each step is free, and that
+freedom is spent keeping all thirteen tones inside one mid band, between
+`fs/60` and `fs/16`: 732 Hz to 2.8 kHz at 44.1 kHz. The frequencies are
+proportional to the sample rate rather than fixed in hertz.
+
+Twelve bits of sixteen samples each is **65536 samples of unambiguous range**,
+and sub-sample precision inside it. A faithful transcription of his code,
+driven by an analytically exact fractional delay, recovers a known delay to
+better than 2e-5 samples.
+
+What Ardour does with the figure, from `gtk2_ardour/engine_dialog.cc` and
+`libs/ardour/audioengine.cc`: it subtracts the backend's own buffering from
+the measurement and stores the remainder as "systemic latency". On its Windows
+and PortAudio path what it subtracts is `Pa_GetStreamInfo`'s input and output
+latency, which is **the driver's own claim**, so what Ardour stores there is
+exactly measured-minus-claimed. That is the same quantity this studio's trim
+already is, which is why the measurement can feed the control that exists
+rather than needing one of its own.
+
+The rejection rules are published too, in Ardour's
+`check_audio_latency_measurement` and in `jack_iodelay`'s own output, and they
+are taken as they are rather than invented:
+
+- nothing came back: the fundamental's magnitude under 0.001, which works out
+  at a received loop gain of -64 dB.
+- too hot: Ardour refuses a result whose input peak is above **-3 dBFS**.
+- inconsistent: the worst of the twelve bit decisions off by more than
+  **0.2** of a half cycle makes the result unusable, and more than **0.3**
+  means try it inverted.
+- a reversed cable gives a worst residual of **exactly 0.5**, which is a
+  signature rather than a failure, and inverting the demodulation recovers the
+  right answer from it.
+
+### Rejected, on the research
+
+- **A click, or an impulse, and a correlation peak.** It is the obvious design
+  and it is worse at this job. A correlation peak for a flat-spectrum probe is
+  a sinc, and the three-point parabolic interpolation everybody reaches for to
+  get a sub-sample answer out of it is **biased by up to 0.119 samples**,
+  measured, with the error an S-shape against the true fractional delay that
+  is zero at 0 and 0.5 and worst near 0.2. It does not average away over
+  repeated measurements. Julius Smith's formula for it is exact for a
+  **Gaussian** peak interpolated on a **log** scale, which is a spectral-peak
+  context and not this one. MTDM's narrowband demodulation also survives noise
+  that a single impulse would not: correct to 0.05 samples at +3 dB SNR, and
+  **rejected rather than wrong** at -17 dB.
+- **An exponentially swept sine, after Farina.** The right tool for an impulse
+  response and more than is needed for one number. Worth recording why it was
+  not built from the paper: the 2000 AES paper is paywalled, the repository
+  record for it has no file attached, and the equation as recovered from
+  Farina's own 2007 restatement came through a garbled PDF text layer. The
+  inverse filter's slope is also in dispute in the secondary literature, +3
+  against -6 dB per octave, from two different normalisations. Building from
+  that would be building from a transcription, which is the thing this project
+  does not do.
+- **Splitting the answer into an input and an output figure.** Ardour and
+  `jack_iodelay` both do, and both do it by halving: Fons's man page says to
+  divide by two "if you believe that the latency is equally distributed
+  between the input and output parts of your audio hardware (extremely
+  likely)". Here there is nothing to split it for. The two figures are only
+  ever added together, in `captureOffsetSamples`, so halving a number and then
+  adding the halves back up would be arithmetic with a belief in the middle of
+  it for no gain.
+- **Any check that the signal came through a cable rather than through the
+  air.** Neither reference has one and MTDM cannot have one in principle: it
+  measures the phase of whatever arrives, by whatever path. Ardour offers a
+  speaker and a microphone as a deliberate mode, not as a failure. What is
+  here instead is a plausibility ceiling, and the comment says it is this
+  studio's own rule rather than anybody's specification.
+
+### Faults in the references, found before copying them
+
+- **Ardour's peak tracker is broken**, in the four lines that feed its own
+  -3 dBFS check. `mtdm.cc` tests `fabsf (vip) > peak` and then stores the
+  **signed** `vip`, so one negative excursion sets the running peak negative
+  and it loses every comparison after that; and the hold afterwards assigns
+  `vip`, the last sample of the block, rather than `peak`. `get_peak()`
+  therefore returns close to an arbitrary sample. Fons's own code has no peak
+  tracking at all, so this is Ardour's addition. Written from scratch here,
+  and tested.
+- **The phase accumulator overflows.** Fons's `Freq::p` is an `int` advanced
+  by up to 4096 a sample and then masked with `& 65535`. That is signed
+  overflow after about eleven seconds at 48 kHz, which is undefined behaviour
+  rather than a wrong answer, and a calibration left running reaches it. An
+  unsigned accumulator masked to sixteen bits is the same arithmetic without
+  the fault, and the sanitizers in `Tests/run.sh` would have found it.
+- **`jack_iodelay`'s man page is wrong about its own program**, twice: it
+  says the value is printed every 0.5 seconds and the no-signal line every
+  second, and the source sleeps 250 ms. Recorded only so nobody takes the man
+  page as the specification for the timing.
+- **MTDM wraps silently past its range.** A true delay of 70000 samples reads
+  as 4464 with a clean residual: the one failure mode that produces a
+  confident wrong answer. That is what the plausibility ceiling is for.
+
+### What is being built
+
+- `Source/LatencyProbe.h`, with no JUCE in it: the thirteen tones, the
+  demodulator, the bit ladder, an honest peak tracker, the rejection rules,
+  and the arithmetic that turns a measured round trip into the trim
+  `RecordAlign` already takes.
+- `Tests/LatencyProbeTest.cpp`, driving all of it through an analytically
+  exact fractional delay, which needs no interpolator because the probe is a
+  sum of sinusoids.
+- `Source/LatencyCalibration.h`: the JUCE side, which is a device callback and
+  nothing else.
+- The button and the readout in `Source/AudioSettingsPanel.h`.
+
+The property worth asserting, which is the one a studio gets wrong: **the
+total offset is independent of how honest the driver was.** A device whose
+claim is right must produce a trim of zero, and a device claiming nothing must
+produce a trim of the whole round trip, and `captureOffsetSamples` must land
+on the same total either way.
+
+### Left for later
+
+- The measurement is of the device as it is configured now. Change the buffer
+  size and it should be taken again. Storing the difference rather than the
+  absolute is what makes that mostly harmless, since the claim moves with the
+  buffer size and so does the real round trip, but "mostly" is not "exactly"
+  and nothing says so yet.
+- Nothing here measures the **MIDI** round trip. Ardour has a second
+  algorithm for it, `MIDIDM`, and it is the one of the two that publishes a
+  numeric quality figure. If a MIDI alignment night ever happens, that is the
+  reference.
+
+---
+
 ## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
 
 ### Status: merged
