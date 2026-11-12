@@ -1143,6 +1143,119 @@ int main()
     }
 
     //==========================================================================
+    // 15. The reading survives being squeezed into one word.
+    //
+    // This is how the audio thread hands a reading to the panel, and it is the
+    // one piece of this that sits between two threads, so it gets to be
+    // arithmetic rather than cleverness. What has to survive is not the exact
+    // number, which is deliberately quantised, but every decision anybody
+    // makes from it: the status, whether the cable is reversed, and which side
+    // of the peak ceiling the input was on.
+    {
+        std::mt19937 rng (31415u);
+        std::uniform_real_distribution<double> samples (0.0, (double) unambiguousSamples);
+        std::uniform_real_distribution<double> residual (0.0, 0.5);
+        std::uniform_real_distribution<double> peak (0.0, 1.5);
+        std::uniform_int_distribution<int> status (0, 4);
+        std::uniform_int_distribution<int> flag (0, 1);
+
+        for (int trial = 0; trial < 20000; ++trial)
+        {
+            Reading r;
+            r.status           = (Status) status (rng);
+            r.roundTripSamples = samples (rng);
+            r.worstResidual    = residual (rng);
+            r.inputPeak        = (float) peak (rng);
+            r.inverted         = flag (rng) != 0;
+
+            const auto back = unpack (pack (r));
+
+            check (back.status == r.status, "the status survives packing");
+            check (back.inverted == r.inverted, "the polarity survives packing");
+
+            // Finer than the measurement can resolve, which is the whole
+            // argument for quantising it at all.
+            checkClose (back.roundTripSamples, r.roundTripSamples, 1.0 / 256.0,
+                        "the round trip survives packing to a 256th of a sample");
+            checkClose (back.worstResidual, r.worstResidual, 1.0 / 1024.0,
+                        "the residual survives packing");
+
+            // The peak is only ever compared against the ceiling, so what has
+            // to survive is which side of it the input was on.
+            check ((back.inputPeak > peakCeiling) == (r.inputPeak > peakCeiling)
+                   || std::fabs ((double) r.inputPeak - (double) peakCeiling) < 1.0 / 512.0,
+                   "the peak survives packing on the side of the ceiling it was on");
+        }
+
+        // Saturation rather than wrapping, because a figure that wrapped would
+        // come back small and believable. A driver handing back something
+        // absurd must not turn into a plausible round trip.
+        {
+            Reading r;
+            r.status           = Status::ok;
+            r.roundTripSamples = 1.0e9;
+            r.inputPeak        = 1.0e6f;
+            r.worstResidual    = 50.0;
+
+            const auto back = unpack (pack (r));
+
+            check (back.roundTripSamples > (double) unambiguousSamples,
+                   "an absurd round trip saturates rather than wrapping to something small");
+            check (back.inputPeak > peakCeiling, "an absurd peak stays above the ceiling");
+            check (back.worstResidual > unusableResidual,
+                   "an absurd residual stays outside the threshold");
+        }
+
+        // The degenerate ones a reading can genuinely hold, and an empty word,
+        // which is what the panel reads before the first resolve has happened.
+        {
+            Reading none;
+            const auto back = unpack (pack (none));
+            check (back.status == Status::noSignal, "a default reading packs as no signal");
+
+            const auto empty = unpack (0u);
+            check (empty.status == Status::noSignal, "an unwritten word reads as no signal");
+            checkClose (empty.roundTripSamples, 0.0, 0.0, "and offers no round trip");
+
+            Reading negative;
+            negative.status           = Status::ok;
+            negative.roundTripSamples = -5.0;
+            negative.worstResidual    = -1.0;
+            negative.inputPeak        = -2.0f;
+
+            const auto clamped = unpack (pack (negative));
+            check (clamped.roundTripSamples == 0.0 && clamped.worstResidual == 0.0
+                   && clamped.inputPeak == 0.0f,
+                   "negatives pack as nothing rather than as something large");
+
+            Reading nan;
+            nan.status           = Status::ok;
+            nan.roundTripSamples = std::nan ("");
+            nan.worstResidual    = std::nan ("");
+            nan.inputPeak        = std::nanf ("");
+
+            const auto fromNan = unpack (pack (nan));
+            check (fromNan.roundTripSamples == 0.0 && fromNan.worstResidual == 0.0
+                   && fromNan.inputPeak == 0.0f,
+                   "a NaN packs as nothing rather than as undefined behaviour");
+        }
+
+        // And the one that would be invisible: a packed reading must not use
+        // the top bits, because the word is handed over as one atomic and
+        // anything above what is written here is room the next field would
+        // silently take.
+        {
+            Reading loud;
+            loud.status           = Status::implausible;
+            loud.roundTripSamples = 1.0e9;
+            loud.worstResidual    = 50.0;
+            loud.inputPeak        = 1.0e6f;
+
+            check ((pack (loud) >> 59) == 0u, "the packed reading fits in 59 bits");
+        }
+    }
+
+    //==========================================================================
     if (failures == 0)
         std::printf ("  all checks passed\n");
     else

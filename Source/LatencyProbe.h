@@ -213,14 +213,28 @@ namespace LatencyProbe
     //==========================================================================
     /** Why a reading cannot be used, or that it can.
 
-        Ordered so that `ok` is zero and anything else is a refusal, and the
-        checks are applied in Ardour's own order: nothing came back, then too
-        hot, then inconsistent after an inversion has been tried.
+        **`noSignal` is zero, and that is not an accident.** The first version
+        of this put `ok` there, on the grounds that zero meaning success reads
+        well, and the test for the packing below caught what that costs: the
+        word the panel reads before the first resolve has happened is zero, and
+        it came back as a perfectly good reading of a round trip of nothing. A
+        studio would have offered to apply a trim cancelling the whole of the
+        driver's claim, with nothing about it looking wrong.
+
+        So the safe answer is the one an unwritten or unrecognised value lands
+        on, which is the same discipline PanOneParams.h already uses for every
+        choice list in the instrument: the first entry is the one it is safe to
+        fall back to. Here that is "nothing came back", which offers no number
+        and asks somebody to check the cable.
+
+        The checks themselves are applied in Ardour's own order: nothing came
+        back, then too hot, then inconsistent after an inversion has been
+        tried.
     */
     enum class Status
     {
-        ok = 0,
-        noSignal,     /**< nothing came back: no cable, or nothing patched */
+        noSignal = 0, /**< nothing came back: no cable, or nothing patched */
+        ok,
         tooHot,       /**< the returned probe is above -3 dBFS */
         unreliable,   /**< the twelve bit decisions do not agree with each other */
         implausible   /**< resolved, but the number cannot be a round trip */
@@ -601,6 +615,84 @@ namespace LatencyProbe
         const double claimed = (double) RecordAlign::claimedRoundTripSamples (figures);
 
         return 1000.0 * (measuredRoundTripSamples - claimed) / figures.sampleRate;
+    }
+
+    //==========================================================================
+    /** A reading squeezed into one 64 bit word, and back.
+
+        This exists for one reason: the probe runs on the audio thread and the
+        panel reads it from the message thread, and there is no safe way to
+        hand a 32 byte struct between the two. An atomic of that size is not
+        lock free on any platform here, so it would take a lock on the audio
+        thread, which is the one thing that must not happen. A sequence
+        counter around a plain copy is the usual trick and it is a data race in
+        the memory model however carefully it is written.
+
+        One word is a race nobody has to reason about: a single relaxed store
+        and a single relaxed load, atomic by construction, and the reader
+        always sees a whole reading rather than half of two. The cost is
+        quantisation, and it is set so far below what the measurement can
+        resolve that it cannot matter: a 256th of a sample against a
+        measurement good to a hundredth, and the trim is rounded to whole
+        samples after it anyway.
+
+        It is here rather than in LatencyCalibration.h because it is
+        arithmetic, and arithmetic in the JUCE side is arithmetic nothing
+        tests. A packing that lost the status, or saturated the round trip, or
+        rounded the peak to the wrong side of the ceiling, would be invisible:
+        the panel would simply report something slightly wrong, which is the
+        shape of fault this whole file is about.
+    */
+    inline constexpr int roundTripFractionBits = 8;     /**< a 256th of a sample */
+    inline constexpr int residualScale         = 1024;
+    inline constexpr int peakScale             = 512;   /**< so a peak up to 15.998 fits */
+
+    inline std::uint64_t pack (const Reading& r) noexcept
+    {
+        auto quantise = [] (double v, double scale, std::uint64_t limit) -> std::uint64_t
+        {
+            if (! std::isfinite (v) || v <= 0.0)
+                return 0;
+
+            const double scaled = std::floor (v * scale + 0.5);
+
+            // Saturating rather than wrapping, because a figure that wrapped
+            // would come back small and believable. Everything saturates well
+            // above anything meaningful: see the field widths.
+            return scaled >= (double) limit ? limit : (std::uint64_t) scaled;
+        };
+
+        const std::uint64_t status   = (std::uint64_t) r.status & 0x7u;
+        const std::uint64_t inverted = r.inverted ? 1u : 0u;
+        const std::uint64_t samples  = quantise (r.roundTripSamples,
+                                                 (double) (1 << roundTripFractionBits),
+                                                 0xffffffffu);
+        const std::uint64_t residual = quantise (r.worstResidual, residualScale, 0x3ffu);
+        const std::uint64_t peak     = quantise ((double) r.inputPeak, peakScale, 0x1fffu);
+
+        return status | (inverted << 3) | (samples << 4) | (residual << 36) | (peak << 46);
+    }
+
+    inline Reading unpack (std::uint64_t word) noexcept
+    {
+        Reading r;
+
+        const std::uint64_t status = word & 0x7u;
+
+        // A status nobody wrote is treated as nothing having come back, which
+        // is the one answer that cannot mislead: it offers no number and asks
+        // somebody to check the cable.
+        r.status = status <= (std::uint64_t) Status::implausible
+                       ? (Status) status
+                       : Status::noSignal;
+
+        r.inverted         = ((word >> 3) & 1u) != 0u;
+        r.roundTripSamples = (double) ((word >> 4) & 0xffffffffu)
+                             / (double) (1 << roundTripFractionBits);
+        r.worstResidual    = (double) ((word >> 36) & 0x3ffu) / (double) residualScale;
+        r.inputPeak        = (float) ((double) ((word >> 46) & 0x1fffu) / (double) peakScale);
+
+        return r;
     }
 
     /** Whether that trim is one the control can actually hold.
