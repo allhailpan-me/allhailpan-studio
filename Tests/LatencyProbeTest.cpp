@@ -34,8 +34,15 @@
 //   7. A delay past the ceiling is refused, and the silent wrap past the range
 //      is pinned so nobody believes the range is unlimited.
 //   8. Noise: right where it can be, refused rather than wrong where it
-//      cannot.
+//      cannot, and a reversed cable recovered wherever a straight one is.
 //   9. The trim: the total offset is the same whatever the driver claimed.
+//  10. A loop that comes back twice is refused rather than answered with a
+//      number that belongs to neither path. That is the only thing in here
+//      that makes the residual threshold the reason a reading is refused.
+//  11. A calibration left running for longer than Fons's phase accumulator
+//      survives keeps measuring. The fault that would be is undefined
+//      behaviour, so this one is reported by the sanitizers rather than by a
+//      comparison.
 //
 // LatencyProbe.h has no JUCE in it, so this builds and runs on its own with
 // sanitizers in a few seconds. See the header for where the algorithm came
@@ -112,6 +119,20 @@ struct Loop
     double gain       = 1.0;
     double noiseRms   = 0.0;
     double dcOffset   = 0.0;
+
+    /** A second path back, at its own delay and level, which is what a
+        loopback taken through a speaker and a microphone, or through anything
+        with a reflection in it, really gives. Zero gain is the ordinary single
+        path. */
+    double echoDelay  = 0.0;
+    double echoGain   = 0.0;
+
+    /** Where the input stage runs out of room. Zero is an input stage with
+        headroom to spare, and anything else clips, which is the difference
+        between a loop that is merely loud and a loop being measured through a
+        nonlinearity. */
+    double clipAt     = 0.0;
+
     bool   inverted   = false;
     bool   openInput  = true;
 };
@@ -158,6 +179,10 @@ static LatencyProbe::Reading measure (const Loop& loop, double sampleRate, doubl
             double v = loop.gain
                        * LatencyProbe::Probe::idealSample ((double) (n + i) - loop.delay);
 
+            if (loop.echoGain != 0.0)
+                v += loop.echoGain
+                     * LatencyProbe::Probe::idealSample ((double) (n + i) - loop.echoDelay);
+
             if (loop.inverted)
                 v = -v;
 
@@ -165,6 +190,12 @@ static LatencyProbe::Reading measure (const Loop& loop, double sampleRate, doubl
                 v += noise (rng);
 
             v += loop.dcOffset;
+
+            // Last, because an input stage clips what reaches it rather than
+            // what was sent, and the whole point of the hot cases is that what
+            // comes back is no longer a sum of thirteen sinusoids.
+            if (loop.clipAt > 0.0)
+                v = std::max (-loop.clipAt, std::min (loop.clipAt, v));
 
             in[(size_t) i] = (float) v;
         }
@@ -331,6 +362,31 @@ int main()
                      "a loop gain of -60 dB still resolves");
         checkStatus (measure ({ 480.0, 0.0001 }, bulkRate, 2.0).status, Status::noSignal,
                      "a loop gain of -80 dB is below the threshold");
+
+        // Those two are twenty decibels apart, which is room for the floor to
+        // move by a factor of two and still pass, and the floor moves with
+        // anything that changes the demodulator's gain rather than its
+        // threshold. So the floor is bracketed to about a decibel either side
+        // of where the header publishes it: a received fundamental of 1.25e-4,
+        // which is a loop gain of -64 dB.
+        //
+        // The quiet side is given two seconds because the threshold is on the
+        // settled magnitude, and the loud side only half of one, because a
+        // loop the probe claims to work at has to be recognised while somebody
+        // is still looking at the panel. That half second is what times the
+        // averaging: 80 ms a stage reaches the threshold from a loop this
+        // quiet in about three tenths of a second, and twice that does not
+        // reach it at all.
+        {
+            const auto above = measure ({ 480.0, 7.0e-4 }, bulkRate, 0.5);
+            checkStatus (above.status, Status::ok,
+                         "a loop a decibel above the published floor is recognised, and quickly");
+            checkClose (above.roundTripSamples, 480.0, 1.0e-2,
+                        "and measures correctly at the floor");
+
+            checkStatus (measure ({ 480.0, 5.5e-4 }, bulkRate, 2.0).status, Status::noSignal,
+                         "a loop a decibel below the published floor is refused");
+        }
     }
 
     //==========================================================================
@@ -342,7 +398,15 @@ int main()
     // reversed: silently correcting it would leave somebody with a cable they
     // do not know is wired backwards, which will bite them somewhere else.
     {
-        for (double d : { 0.0, 97.5, 1024.0 })
+        // The last three are shorter than two fundamental cycles, and that is
+        // where the bit ladder has nothing to borrow from. Anywhere else, an
+        // error of a whole number of cycles in the fractional part is absorbed
+        // as a borrow out of the resolved cycle count, with every bit's
+        // residual left exactly where it was, so the answer comes out right
+        // anyway. A reversed cable on a very short loopback is therefore the
+        // only place several ways of getting that fractional part wrong can be
+        // seen at all.
+        for (double d : { 0.0, 97.5, 1024.0, 9.0, 12.5, 15.75 })
         {
             Loop loop;
             loop.delay    = d;
@@ -353,6 +417,49 @@ int main()
             checkStatus (r.status, Status::ok, "an inverted loop resolves");
             checkClose (r.roundTripSamples, d, 1.0e-3, "an inverted loop measures correctly");
             check (r.inverted, "an inverted loop is reported as inverted");
+        }
+
+        // Randomised, and the six above are not enough on their own, which is
+        // worth writing down because it is not visible from the code.
+        //
+        // Correcting the polarity adds half a cycle to the fundamental's
+        // phase, and that is the only path that can push it past half a cycle,
+        // so it is the only path that reaches the fold at all. Which side of
+        // the fold a delay lands on is set by its remainder modulo sixteen
+        // samples, and the three delays this check started with all landed in
+        // the lower half, so the fold was never once evaluated: folding the
+        // wrong way passed every check in the file.
+        //
+        // Removing the fold altogether still passes, and that is not a gap:
+        // by the borrow above, a fractional part one whole cycle out resolves
+        // one cycle fewer and comes to the same answer, with every residual
+        // unchanged. The fold is defensive, and the delays below are what says
+        // so rather than anybody's reasoning about it.
+        {
+            std::mt19937 rng (9091u);
+            std::uniform_real_distribution<double> delay (0.0, 2000.0);
+
+            double worst = 0.0;
+
+            for (int trial = 0; trial < 64; ++trial)
+            {
+                Loop loop;
+                loop.delay    = delay (rng);
+                loop.inverted = true;
+
+                const auto r = measure (loop, bulkRate, 0.5, (unsigned) (trial + 7000));
+
+                checkStatus (r.status, Status::ok,
+                             "a reversed cable resolves at any delay  ("
+                             + std::to_string (loop.delay) + ")");
+                check (r.inverted, "a reversed cable says so at any delay");
+
+                if (r.status == Status::ok)
+                    worst = std::max (worst, std::fabs (r.roundTripSamples - loop.delay));
+            }
+
+            checkClose (worst, 0.0, 0.01,
+                        "64 reversed cables all come back within a hundredth of a sample");
         }
     }
 
@@ -450,6 +557,52 @@ int main()
         checkStatus (ok.status, Status::ok, "a hot but unclipped loopback still resolves");
         checkClose (ok.roundTripSamples, 512.0, 1.0e-3, "and measures correctly");
 
+        // Those two are a factor of two apart, so the ceiling can be moved
+        // most of the way to full scale and still pass both. It is bracketed
+        // instead: the published ceiling is -3 dBFS, so a loop peaking just
+        // under it is measured and a loop peaking just over it is refused.
+        // Raising the ceiling is the direction that costs something real,
+        // because what it then accepts is a reading taken through the input
+        // stage's own nonlinearity.
+        {
+            Loop under;
+            under.delay = 512.0;
+            under.gain  = 2.4;                   // peak 0.704, a whisker under
+
+            const auto justOk = measure (under, bulkRate, 1.0);
+            checkStatus (justOk.status, Status::ok, "a loop peaking just under -3 dBFS is measured");
+            check (justOk.inputPeak < peakCeiling, "and it really was under the ceiling");
+
+            Loop over;
+            over.delay = 512.0;
+            over.gain  = 2.6;                    // peak 0.763, a whisker over
+
+            const auto justNot = measure (over, bulkRate, 1.0);
+            checkStatus (justNot.status, Status::tooHot,
+                         "a loop peaking just over -3 dBFS is refused");
+        }
+
+        // A loopback that is actually clipping, rather than one that is merely
+        // loud, because the loops above are clean sinusoids at a high level and
+        // the ceiling exists for the nonlinearity, not for the level.
+        //
+        // It is not the case that shows the two checks are applied in the right
+        // order, which is worth writing down because it looks like it should
+        // be: hard clipping is memoryless and odd, so it leaves every tone's
+        // phase where it was and the bits still agree to within a twentieth of
+        // a half cycle. Loud noise is what tells the order apart, and check 8
+        // does that.
+        {
+            Loop clipped;
+            clipped.delay  = 512.0;
+            clipped.gain   = 4.0;
+            clipped.clipAt = 0.75;               // over the ceiling, and really clipping
+
+            const auto r = measure (clipped, bulkRate, 1.0);
+            checkStatus (r.status, Status::tooHot,
+                         "a clipping loopback is reported as too hot, not as unreliable");
+        }
+
         // The peak tracker is a magnitude and it holds. Ardour's compares a
         // magnitude and stores the signed value, so one negative excursion
         // poisons every comparison after it, and then holds the last sample of
@@ -489,6 +642,26 @@ int main()
 
             check (! (probe.read().inputPeak > peakCeiling),
                    "a NaN on the input does not become the peak");
+        }
+
+        // And the same for an infinite one, which is the half of that guard a
+        // NaN cannot test: a NaN loses every comparison it is in, so the peak
+        // survives one with or without the test, while an infinity wins them
+        // all and sticks. The consequence is the one the line above is about,
+        // every measurement afterwards refused as too hot with nothing to say
+        // why, and it is only reachable through this case.
+        {
+            Probe probe;
+            probe.reset (48000.0);
+
+            std::vector<float> in (32, 0.0f);
+            std::vector<float> out (32, 0.0f);
+
+            in[1] = std::numeric_limits<float>::infinity();
+            probe.process (in.data(), out.data(), 32);
+
+            check (! (probe.read().inputPeak > peakCeiling),
+                   "an infinity on the input does not become the peak either");
         }
     }
 
@@ -532,12 +705,20 @@ int main()
 
         // The probe's own RMS is 0.1435, so 0.1 is about +3 dB of signal to
         // noise. The two loud cases are expected to be refused rather than
-        // resolved, and for two different reasons worth keeping apart: at an
-        // RMS of 0.3 the noise alone crosses the -3 dBFS peak ceiling, which
-        // is the clipping check doing its job on an input that really is too
-        // hot, and at 1.0 the demodulator cannot agree with itself. Either way
-        // the requirement is the same and it is the one that matters: refused,
-        // not wrong.
+        // resolved, and the requirement that matters is that one: refused, not
+        // wrong.
+        //
+        // They also have to be refused for the right reason, which is what
+        // pins the order the two checks are applied in. Noise this loud fails
+        // both tests at once, with a peak well over the ceiling and bits that
+        // do not agree, and the order decides which of the two the panel
+        // shows. Too hot is the one somebody can act on, because the input
+        // gain is a knob in front of them, where an unreliable reading is a
+        // dead end. The other order passes everything else in this file: a
+        // loopback that is clipping, oddly, is not a case that tells them
+        // apart, because hard clipping is memoryless and leaves each tone's
+        // phase where it was, so a clipped loop demodulates perfectly well and
+        // is refused on its level alone.
         for (Case c : { Case { 0.001, true }, Case { 0.01, true }, Case { 0.05, true },
                         Case { 0.1, true },   Case { 0.3, false }, Case { 1.0, false } })
         {
@@ -559,6 +740,9 @@ int main()
             {
                 check (r.status != Status::ok,
                        "noise at " + std::to_string (c.rms) + " is refused rather than guessed");
+                checkStatus (r.status, Status::tooHot,
+                             "noise at " + std::to_string (c.rms) + " is refused for the reason"
+                             " somebody can do something about");
             }
         }
 
@@ -583,6 +767,48 @@ int main()
                        "an accepted reading's residual is inside the threshold");
                 checkClose (r.roundTripSamples, loop.delay, 1.0,
                             "an accepted reading is within a sample of the truth");
+            }
+        }
+
+        // A reversed cable has to be recovered wherever a straight one would
+        // have been accepted, which is a stronger statement than the clean
+        // case in check 4 and is the one that pins where the retry is
+        // triggered.
+        //
+        // The signature a reversed cable leaves is half a cycle on the worst
+        // bit, and noise moves that signature down towards the threshold that
+        // decides whether to try the inversion at all. So a threshold set too
+        // close to half a cycle goes on recovering the clean cases and stops
+        // recovering exactly the marginal ones, which are the ones somebody
+        // with a long cable in a room full of equipment actually has. Stated
+        // as a comparison rather than as a level, because what counts as
+        // marginal is not ours to pick: whatever the straight loop managed,
+        // the reversed one has to manage too.
+        for (double rms : { 0.05, 0.1 })
+        {
+            for (unsigned seed = 1; seed <= 6; ++seed)
+            {
+                Loop straight;
+                straight.delay    = 307.25;
+                straight.noiseRms = rms;
+
+                Loop reversed = straight;
+                reversed.inverted = true;
+
+                // Short on purpose: a reading taken before the averaging has
+                // settled is where the two thresholds are closest together.
+                const auto s = measure (straight, 48000.0, 0.1, seed);
+
+                if (s.status != Status::ok)
+                    continue;                   // nothing to hold the reversed one to
+
+                const auto t = measure (reversed, 48000.0, 0.1, seed);
+
+                checkStatus (t.status, Status::ok,
+                             "a reversed cable is recovered wherever a straight one is accepted");
+                check (t.inverted, "and is still reported as reversed");
+                checkClose (t.roundTripSamples, 307.25, 1.0,
+                            "and measures what the straight one measured");
             }
         }
     }
@@ -761,6 +987,32 @@ int main()
         check (! trimFits (std::nan ("")), "a NaN trim does not fit");
         check (! trimFits (std::numeric_limits<double>::infinity()),
                "an infinite trim does not fit");
+
+        // Both ends of the range are inside it. A correction of exactly what
+        // the control holds is a correction the control holds, and refusing it
+        // would throw away a measurement for being exactly at the limit rather
+        // than past it, which is the same fault as clamping in the other
+        // direction: the studio would refuse and the user would have no way to
+        // tell why. Constructed so the arithmetic lands on the bound exactly
+        // rather than near it, because near it is what every other case here
+        // already covers.
+        {
+            RecordAlign::Figures exact;
+            exact.bufferSize = 256;
+            exact.sampleRate = 48000.0;
+
+            exact.inputLatency  = 400;
+            exact.outputLatency = 400;        // a claim of 800, clear of the floor
+            const double up = trimMsFor (800.0 + 2400.0, exact);
+            checkClose (up, RecordAlign::maxTrimMs, 0.0, "2400 samples at 48 kHz is 50 ms");
+            check (trimFits (up), "a trim of exactly the control's travel fits");
+
+            exact.inputLatency  = 2000;
+            exact.outputLatency = 2000;       // a claim of 4000
+            const double down = trimMsFor (4000.0 - 2400.0, exact);
+            checkClose (down, RecordAlign::minTrimMs, 0.0, "and the same the other way");
+            check (trimFits (down), "a trim of exactly the control's travel the other way fits too");
+        }
     }
 
     //==========================================================================
@@ -789,6 +1041,105 @@ int main()
         check (f.trimMs > 0.0, "an under-reporting driver gives a positive trim");
         checkClose ((double) (after - before), 480.0, 1.0,
                     "and the take is pulled earlier by exactly what was missing");
+    }
+
+    //==========================================================================
+    // 13. A loopback that is not one round trip.
+    //
+    // The residual is the only thing standing between the demodulator and a
+    // confident wrong number, and until this check existed nothing in the file
+    // ever made it the reason a reading was refused: every other refusal here
+    // is for silence, for being too hot, or for a delay past the plausibility
+    // ceiling, so the residual threshold could be moved most of the way to
+    // half a cycle, or deleted outright, and the whole file still passed.
+    //
+    // What exercises it is a loop that comes back twice at different delays,
+    // which is what a loopback taken through a speaker and a microphone gives,
+    // and what any path with a reflection in it gives. The thirteen phases are
+    // then not consistent with any single delay, so the bits stop agreeing with
+    // each other while the level stays modest. The answer that would come out
+    // sits between the two paths and belongs to neither, so the requirement is
+    // refusal, not accuracy.
+    {
+        for (double echoAt : { 530.0, 560.0, 600.0, 700.0, 1024.0 })
+        {
+            Loop twoPaths;
+            twoPaths.delay     = 512.0;
+            twoPaths.echoDelay = echoAt;
+            twoPaths.echoGain  = 0.8;
+
+            const auto r = measure (twoPaths, bulkRate, 1.0);
+
+            check (r.status != Status::ok,
+                   "a loop that comes back twice is refused rather than averaged  ("
+                   + std::to_string (echoAt) + " gave " + name (r.status) + ", "
+                   + std::to_string (r.roundTripSamples) + ")");
+
+            // And it is the bits disagreeing that refuses it, not the level:
+            // a check that passed because the input was too hot would be
+            // testing the ceiling over again.
+            check (r.inputPeak <= peakCeiling,
+                   "and it is refused for disagreeing with itself, not for being loud");
+        }
+
+        // One path and a quiet reflection is still one round trip, so this has
+        // to stay a measurement rather than becoming a refusal. Otherwise the
+        // threshold could be tightened until nothing passed and the check above
+        // would be satisfied by a probe that never measures anything.
+        {
+            Loop faintEcho;
+            faintEcho.delay     = 512.0;
+            faintEcho.echoDelay = 600.0;
+            faintEcho.echoGain  = 0.02;
+
+            const auto r = measure (faintEcho, bulkRate, 1.0);
+            checkStatus (r.status, Status::ok, "a faint reflection is still one round trip");
+            checkClose (r.roundTripSamples, 512.0, 1.0,
+                        "and the round trip is the path the probe came back on");
+        }
+    }
+
+    //==========================================================================
+    // 14. A calibration left running.
+    //
+    // The header names this as one of the three faults in the references it
+    // does not copy: Fons advances a signed int by up to 4096 a sample and
+    // masks only where he reads it, which is signed overflow after about eleven
+    // seconds at 48 kHz. That is undefined behaviour rather than a wrong
+    // answer, so what it does is the compiler's business and not something a
+    // comparison of readings can see. Nothing else in this file runs long
+    // enough to reach it: the longest measurement here is two seconds.
+    //
+    // Twelve seconds of it, with nothing patched for the first twelve and the
+    // cable plugged in afterwards, which is also the ordinary way somebody uses
+    // the panel. The sanitizers are what report the fault, which is why this
+    // has to run under them to mean anything.
+    {
+        Probe probe;
+        probe.reset (48000.0);
+
+        const int block = 512;               // divides the run, so the phase stays known
+        std::vector<float> in  ((size_t) block, 0.0f);
+        std::vector<float> out ((size_t) block, 0.0f);
+
+        const long long waiting = 48000 * 12;
+
+        for (long long n = 0; n < waiting; n += block)
+            probe.process (nullptr, out.data(), block);
+
+        check (probe.elapsedSamples() == waiting, "the probe counted the whole wait");
+
+        for (long long n = waiting; n < waiting + 24000; n += block)
+        {
+            for (int i = 0; i < block; ++i)
+                in[(size_t) i] = (float) (0.5 * Probe::idealSample ((double) (n + i) - 311.5));
+
+            probe.process (in.data(), out.data(), block);
+        }
+
+        const auto r = probe.read();
+        checkStatus (r.status, Status::ok, "a probe left running still measures when the cable arrives");
+        checkClose (r.roundTripSamples, 311.5, 1.0e-2, "and measures the right round trip");
     }
 
     //==========================================================================

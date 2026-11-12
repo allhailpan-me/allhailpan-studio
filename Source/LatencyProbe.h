@@ -392,9 +392,17 @@ namespace LatencyProbe
             if (std::hypot (tones[0].x2, tones[0].y2) < signalThreshold)
                 return r;                                  // noSignal
 
-            // Before the residual, because a clipping loopback is being
-            // measured through a nonlinearity and the residual it produces
-            // means nothing. Ardour tests it in this order too.
+            // Before the residual, and the reason is not the one that looks
+            // obvious. Hard clipping is memoryless and odd, so it leaves every
+            // tone's phase where it was: a loop driven 12 dB into a clip
+            // demodulates with a residual of 0.03 to 0.08 and is reported as
+            // too hot whichever order these two are tested in. What the order
+            // actually decides is loud noise, which fails both tests at once,
+            // and then this order reports the one with a knob in front of it.
+            // "Turn the input gain down" is something somebody can act on;
+            // "the measurement disagreed with itself" is not. Ardour tests
+            // them in this order too. Mutation testing established this:
+            // swapping the order is caught only by the noise case.
             if (! (peak <= peakCeiling))
                 { r.status = Status::tooHot; return r; }
 
@@ -405,6 +413,20 @@ namespace LatencyProbe
                 // The fractional part, in cycles of the fundamental, folded
                 // into plus or minus half a cycle. That fold is why a delay
                 // of nothing can read slightly negative.
+                //
+                // The fold below is defensive rather than load bearing, which
+                // is worth saying so nobody spends an afternoon deciding it is
+                // wrong. It is reachable only through the inversion, since
+                // atan2 already returns a half cycle either side, and when it
+                // is reachable the bit ladder absorbs the extra cycle exactly
+                // as a binary borrow: an error of 2^(i-1) cycles at step i
+                // shifts that tone by an odd number of half cycles, flipping
+                // its bit without touching its residual, and the flipped bits
+                // subtract the cycle back off. Removing it changes no reading
+                // in 2880 generated cases. It stays because the borrow needs
+                // something to borrow from, and relying on the only path here
+                // always providing it is a coupling nobody should have to
+                // notice.
                 double d = std::atan2 (tones[0].y2, tones[0].x2) / (2.0 * pi);
 
                 if (invert)
