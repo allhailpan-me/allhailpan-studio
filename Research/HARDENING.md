@@ -1421,3 +1421,66 @@ Fixed by moving the arithmetic into `Punch::passReach`, where it is tested,
 and leaving one line at the call site, which is the same answer this project
 reached for `placePass`.
 
+### What was added to the test, and the second mutation run over it
+
+Three blocks in `Tests/PunchTest.cpp`.
+
+**Four thousand randomised punches into a folder that grows.** The existing
+generator always set `material.folderSeconds` to the clip's own length, so in
+every one of its four thousand trials the folder was exactly as long as the
+clip and never grew. That is the blind spot the fault lived in, and it is why
+a test this strong missed it. The new block derives the folder's length from
+the takes, with the pass allowed to run past the end of the clip, which it
+does in about half of the trials.
+
+`longestSeconds` is written out in the test rather than called, deliberately.
+Working out what to expect by calling the thing under test would prove only
+that it equals itself, which is the trap `test-author.md` warns about and
+which this case invites, because the function and the expectation are one
+line each.
+
+**A negative requested crossfade width**, which closes the one real gap the
+first mutation run found.
+
+**The header's own figure for widening a punched folder afterwards.** It said
+the fade walking back into the punch "measures 1.8 dB off the attack at 50 ms
+where 10 was asked for", and nothing reproduced it. It now does, at
+`-1.84 dB`, printed by the test.
+
+Then the mutations again, over the new function and the closed gap:
+
+| Mutation | Before | After |
+|---|---|---|
+| `passReach` returns the pass's length alone, the fault exactly as it shipped | n/a | caught |
+| `passReach` forgets to floor a negative position | n/a | caught |
+| `passReach` floors the length instead of the position | n/a | caught |
+| `passReach` floors both | n/a | caught |
+| `passReach` multiplies instead of adding | n/a | caught |
+| a negative requested width is no longer floored | survived | caught |
+| the four no-ops above | survived | survive, as they should |
+
+The two floor breakages are worth recording, because they survived the first
+version of the new check. It fed `passReach` only the positive positions and
+lengths the scene generator produces, so neither floor was ever exercised, and
+a function whose entire job is to agree with `longestSeconds` was being
+compared against it only over the easy half of its domain. It is now compared
+over both signs of both arguments. The same lesson as the sawtooth built from
+alternating cosines: a test signal that does not reach the fragile part proves
+nothing about it.
+
+### Verdict
+
+`Punch.h` itself is sound. Its geometry is right, it is well tested, and 36 of
+41 mutations of it were caught by the test that was already there; of the five
+that were not, four are guards something else enforces. The fault was one
+level up, in the one file in this path that cannot be compiled without JUCE,
+in a figure handed to `Punch.h` rather than in anything `Punch.h` does with
+it. Which is the second time this feature has had exactly that fault in
+exactly that place.
+
+Worth a thought for whoever picks the next target: `Project::punchTake` still
+decides two other figures by hand before calling into tested arithmetic, the
+pass that counts as the punched one and the refusal conditions, and
+`MainComponent.cpp` assembles the takes. Both are off limits tonight because
+open pull requests touch them, and neither has a test.
+
