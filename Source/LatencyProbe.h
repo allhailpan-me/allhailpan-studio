@@ -83,14 +83,25 @@
     Worth writing down, because the obvious way to build this is to transcribe
     one of them.
 
-    Ardour's peak tracker, which feeds its own clipping check, tests
-    `fabsf (vip) > peak` and then stores the signed `vip`, so one negative
-    excursion sets the running peak negative and it loses every comparison
-    after that; and the hold afterwards assigns `vip`, the last sample of the
-    block, rather than `peak`. `get_peak()` therefore returns close to an
-    arbitrary sample value. Fons's own code has no peak tracking at all, so
+    Ardour's peak tracker, which feeds its own clipping check, is wrong in two
+    ways in four lines. Its block local `peak` tests `fabsf (vip) > peak` and
+    then stores the signed `vip`, so a block whose loudest sample is negative
+    records a negative peak; and the hold afterwards assigns `vip`, the last
+    sample of the block, rather than `peak`, so `get_peak()` returns close to
+    an arbitrary sample value. Fons's own code has no peak tracking at all, so
     this is Ardour's addition. The one below is written from scratch and
     tested.
+
+    What Ardour gets right about it, and the first version here did not, is
+    that `get_peak()` **clears** the peak as it reads it, so its check is on
+    the peak since the last poll. That is what makes "turn the gain down and
+    it recovers" true, and this header said that to somebody while latching
+    the peak for the whole measurement: one jack plugged in while the probe
+    was running, which is the ordinary way to use this, and the measurement
+    was dead with a message promising it was not. An audit found it. The
+    reading itself still takes a moment to come back after a real clip,
+    because the demodulator averages over about 160 ms and has to forget it,
+    which is the second that message can honestly promise.
 
     Fons's phase accumulator is a signed `int` advanced by up to 4096 a sample
     and then masked with `& 65535`. That is signed overflow after about eleven
@@ -155,8 +166,15 @@ namespace LatencyProbe
 
     /** The probe's levels. The fundamental carries the fractional part of the
         answer and the other twelve only have to carry one bit each, so they
-        are twenty six decibels quieter, which keeps the whole probe's peak
-        under -9.9 dBFS. Fons's figures. */
+        are twenty six decibels quieter, which keeps the whole probe quiet
+        enough that nothing it is measured through has to work hard. Fons's
+        figures.
+
+        Two numbers, kept apart because they get confused: the amplitudes sum
+        to 0.32, which is -9.9 dBFS and is the bound the probe cannot exceed,
+        and the peak it actually reaches over a whole period of the thirteen
+        tones is 0.293, which is -10.6 dBFS. The bound is the one to reason
+        with and the peak is the one to quote. */
     inline constexpr float fundamentalAmplitude = 0.20f;
     inline constexpr float bitToneAmplitude     = 0.01f;
 
@@ -201,12 +219,29 @@ namespace LatencyProbe
         A reading can be slightly negative without anything being wrong: the
         fundamental's phase is folded into plus or minus half a cycle, so a
         true delay of nothing reads as a hair either side of it. One whole
-        fundamental cycle of slack covers that and still refuses the case
-        worth refusing, which is a measurement well under the driver's own
-        claim. Focusrite's own article gives the direction: "Some interfaces
-        do report the true latency, but many under-report the actual value".
-        Under-reporting is what this exists to fix; over-reporting by more
-        than a cycle is a different fault.
+        fundamental cycle of slack covers that, which is all this is for.
+
+        **It is not a check against the driver's claim**, and an earlier
+        version of this comment said it was, which would have sent somebody
+        looking for a cross-check that is not here. The probe never sees the
+        claim: `read()` has no `Figures` in scope and cannot have, because the
+        measurement is of the device and the claim is a separate thing said
+        about it. So a driver overstating its latency resolves perfectly
+        happily and produces a negative trim, and the only thing that refuses
+        that is `trimFits`, once it overstates by more than the control's
+        whole range.
+
+        Deliberate rather than merely unfinished. No reference publishes a
+        tolerance against the claim: Ardour's only rule is to clamp a
+        measurement below its own buffering to zero, silently, which is worse
+        than reporting it. Focusrite's own article gives the direction the
+        error usually takes, "Some interfaces do report the true latency, but
+        many under-report the actual value", and under-reporting is what this
+        exists to fix. Refusing the other direction on a bound nobody has
+        published would be inventing a specification, which this project does
+        not do. What it does instead is say in the panel which way the driver
+        was wrong and by how much, and leave the decision with somebody who
+        can see their own cable.
     */
     inline constexpr double minBelievableSamples = -(double) samplesPerFundamentalCycle;
 
@@ -253,8 +288,10 @@ namespace LatencyProbe
         /** The worst of the twelve bit decisions, in half cycles, so 0 is
             perfect and 0.5 is as wrong as it can be. It falls as the
             measurement settles, so it is a progress indicator as much as a
-            quality one: it passes 0.2 after about two blocks and keeps
-            improving for half a second after that. */
+            quality one. Measured on a clean loopback at 48 kHz, the first
+            reading accepted arrives at 48 ms and the figure keeps improving
+            for about half a second after that, taking the answer from a
+            hundredth of a sample to a thousandth. */
         double worstResidual = 0.5;
 
         /** The loudest thing seen on the input since the measurement started,
@@ -266,7 +303,18 @@ namespace LatencyProbe
             which means the cable has its polarity reversed somewhere. The
             reading is still correct. Ardour warns and accepts for the same
             reason, with a comment in its source pointing at the pull request
-            that established it. */
+            that established it.
+
+            Like `worstResidual`, this means nothing unless the status is `ok`,
+            and the test measures why: the recovery tries the other polarity
+            whenever a reading disagrees with itself, which an unsettled
+            reading always does, and on unsettled data the wrong polarity can
+            come back with the lower residual by luck. About seven reads in a
+            thousand of a perfectly straight cable claim to be reversed while
+            settling. An accepted reading cannot, because an unnecessary
+            inversion puts the first bit exactly half a cycle out and half a
+            cycle is a residual of 0.5. So anything that shows this to somebody
+            must check the status first, which is what the panel does. */
         bool inverted = false;
     };
 
@@ -373,6 +421,16 @@ namespace LatencyProbe
                     for (auto& t : tones)
                     {
                         // Two cascaded one poles, 80 ms a stage at any rate.
+                        //
+                        // Fons adds 1e-20 to each of these to keep the state
+                        // out of the denormal range, and it is deliberately
+                        // not copied: his state is float and this is double,
+                        // which takes about a minute of silence after a loud
+                        // reading to decay that far and about three seconds to
+                        // pass through it, at a few denormal operations a
+                        // sample. Recorded rather than quietly dropped,
+                        // because a guard somebody put there on purpose is
+                        // worth a sentence either way.
                         t.x1 += averaging * (t.xa - t.x1);
                         t.y1 += averaging * (t.ya - t.y1);
                         t.x2 += averaging * (t.x1 - t.x2);
@@ -398,7 +456,15 @@ namespace LatencyProbe
         Reading read() noexcept
         {
             Reading r;
+
+            // Taken and cleared, so what the clipping check below sees is the
+            // peak since the last read rather than since the measurement
+            // started. That is Ardour's behaviour, and the reason its own
+            // advice to turn the gain down is honest: latched, one jack
+            // plugged in with the probe running would refuse every reading
+            // afterwards. See the note at the top of this file.
             r.inputPeak = peak;
+            peak        = 0.0f;
 
             if (sampleRate <= 0.0)
                 return r;
@@ -417,7 +483,11 @@ namespace LatencyProbe
             // "the measurement disagreed with itself" is not. Ardour tests
             // them in this order too. Mutation testing established this:
             // swapping the order is caught only by the noise case.
-            if (! (peak <= peakCeiling))
+            // r.inputPeak and not `peak`, which the line above has already
+            // cleared. Reading the member here instead made this check always
+            // pass, which is the whole clipping guard gone, and the test found
+            // it on the first run after the clear was added.
+            if (! (r.inputPeak <= peakCeiling))
                 { r.status = Status::tooHot; return r; }
 
             auto attempt = [this]
@@ -693,6 +763,53 @@ namespace LatencyProbe
         r.inputPeak        = (float) ((double) ((word >> 46) & 0x1fffu) / (double) peakScale);
 
         return r;
+    }
+
+    /** Whether a measurement taken under one set of device figures may still
+        be applied under another.
+
+        The fault this exists to refuse, which an audit found in the panel
+        before this function existed. A reading is deliberately kept after the
+        measurement is stopped, because the useful way to use this is to watch
+        it settle, stop, and then decide. Nothing was checking that the device
+        it was taken on was still the device open when somebody decided.
+
+        The scenario, with figures that are all real ones: measure an ASIO
+        interface whose driver will not report its latency, so the claim falls
+        back to two 128 sample buffers and a measured round trip of 1024
+        samples offers a correction of +16 ms. Stop. Change driver, or press
+        Find the fastest device, and land on a shared Windows mode at a 480
+        sample buffer that reports 480 in and 960 out, a claim of 1440. Press
+        Use this measurement. The trim becomes (1024 - 1440) / 48, which is
+        -8.67 ms, it is inside the control's range so nothing refuses it, and
+        every take on a device that was already compensated correctly is now
+        pushed 8.67 ms late. The panel reports it with a straight face.
+
+        The buffer size alone does it, with no device change at all: measure
+        at 128, stop, change the buffer to 1024, apply.
+
+        So the test is on everything the measurement is of: the sample rate it
+        was taken at, the buffer size it was taken at, and the claim it is a
+        correction to. The engine's own latency is deliberately not in it,
+        because the probe never went through the mixer and a plugin loaded
+        since does not make the measurement stale.
+
+        It cannot see the one thing that is not in `Figures`, which is which
+        device this is. Two different devices that happen to report the same
+        rate, buffer and latencies would pass. The panel closes that
+        separately, by dropping the reading whenever the device it is looking
+        at changes at all, and this is the check that catches everything else.
+        Both, rather than either: the panel's is the one that knows about
+        devices and this is the one that can be tested.
+    */
+    inline bool stillApplicable (const RecordAlign::Figures& measuredUnder,
+                                 const RecordAlign::Figures& now) noexcept
+    {
+        return now.sampleRate > 0.0
+            && measuredUnder.sampleRate == now.sampleRate
+            && measuredUnder.bufferSize == now.bufferSize
+            && RecordAlign::claimedRoundTripSamples (measuredUnder)
+                   == RecordAlign::claimedRoundTripSamples (now);
     }
 
     /** Whether that trim is one the control can actually hold.

@@ -73,6 +73,12 @@ static void check (bool ok, const std::string& what)
         fail (what);
 }
 
+static void checkEqualInt (int a, int b, const std::string& what)
+{
+    if (a != b)
+        fail (what + "  (" + std::to_string (a) + " vs " + std::to_string (b) + ")");
+}
+
 static void checkClose (double a, double b, double tol, const std::string& what)
 {
     if (! (std::fabs (a - b) <= tol))
@@ -464,6 +470,87 @@ int main()
     }
 
     //==========================================================================
+    // 4b. And the polarity is reported for the cable that is actually there.
+    //
+    // Being right about the delay is not the same as being right about the
+    // wiring, and the wiring is the half somebody acts on: told the cable is
+    // reversed, they go and change a cable that was fine. The recovery works
+    // by trying the other polarity and keeping whichever attempt agreed with
+    // itself better, so what has to hold is that a straight cable never comes
+    // back claiming to be reversed, including when the reading is marginal
+    // enough for that retry to be fired and thrown away.
+    //
+    // Read the way the panel reads it, which is repeatedly from a probe that
+    // is still running, because that is where this goes wrong. A reading taken
+    // before the demodulator has settled has a large residual, which fires the
+    // recovery, and the recovery then has to put the polarity back when the
+    // other way round was not better. Left flipped, a straight cable is
+    // announced as reversed for as long as it takes to settle, and it
+    // flickers, because the next read tries both again.
+    {
+        std::mt19937 rng (8191u);
+        std::uniform_real_distribution<double> delay (0.0, 2000.0);
+
+        int straightClaimingReversed = 0;
+        int reversedClaimingStraight = 0;
+        int readings = 0;
+
+        for (int trial = 0; trial < 24; ++trial)
+        {
+            const double d = delay (rng);
+            const bool   reversedCable = (trial % 2) != 0;
+
+            Probe probe;
+            probe.reset (48000.0);
+
+            const int block = 256;
+            std::vector<float> in  ((size_t) block, 0.0f);
+            std::vector<float> out ((size_t) block, 0.0f);
+
+            for (long long n = 0; n < 24000; n += block)
+            {
+                for (int i = 0; i < block; ++i)
+                {
+                    double v = Probe::idealSample ((double) (n + i) - d);
+                    in[(size_t) i] = (float) (reversedCable ? -v : v);
+                }
+
+                probe.process (in.data(), out.data(), block);
+
+                const auto r = probe.read();
+                ++readings;
+
+                // Only accepted readings, and that is a finding rather than a
+                // convenience. A reading taken before the demodulator has
+                // settled fires the recovery, and on unsettled data the other
+                // polarity can come back with the lower residual by luck, so
+                // the flag on a refused reading says nothing: measured, that
+                // happens about seven times in a thousand reads of a perfectly
+                // straight cable. Which is why the panel shows the flag only
+                // on an accepted reading, and why Reading now says that the
+                // field means nothing otherwise. What cannot happen, and is
+                // what this asserts, is an accepted reading getting it wrong:
+                // an unnecessary inversion puts the first bit half a cycle out,
+                // which is a residual of 0.5 and cannot pass the threshold.
+                if (! reversedCable && r.status == Status::ok && r.inverted)
+                    ++straightClaimingReversed;
+
+                if (reversedCable && r.status == Status::ok && ! r.inverted)
+                    ++reversedClaimingStraight;
+            }
+        }
+
+        check (readings > 1000, "enough readings to mean something  ("
+                                + std::to_string (readings) + ")");
+        check (straightClaimingReversed == 0,
+               "a straight cable that resolves is never reported as reversed  ("
+               + std::to_string (straightClaimingReversed) + " readings did)");
+        check (reversedClaimingStraight == 0,
+               "a reversed cable that resolves always says it is reversed  ("
+               + std::to_string (reversedClaimingStraight) + " readings did not)");
+    }
+
+    //==========================================================================
     // 5. Nothing patched.
     {
         checkStatus (measure ({ 0.0, 0.0 }, bulkRate, 1.0).status, Status::noSignal,
@@ -618,6 +705,9 @@ int main()
             in[3] = -0.9f;                   // the only loud thing, and negative
             probe.process (in.data(), out.data(), 64);
 
+            // Held across blocks within one read, and a magnitude rather than
+            // a signed value, which is the half of Ardour's fault that loses
+            // a loud negative excursion.
             std::fill (in.begin(), in.end(), 0.01f);
 
             for (int i = 0; i < 100; ++i)
@@ -625,6 +715,18 @@ int main()
 
             check (probe.read().inputPeak >= 0.9f,
                    "a negative peak is held as a magnitude, not lost");
+
+            // And cleared by the read, which is the other half and the one
+            // that matters to somebody holding a cable. Latched, a single
+            // click while the probe is running refuses every reading
+            // afterwards, and the panel promises the opposite: turn the gain
+            // down and it comes back. Ardour's get_peak clears as it reads for
+            // exactly this reason.
+            for (int i = 0; i < 100; ++i)
+                probe.process (in.data(), out.data(), 64);
+
+            check (probe.read().inputPeak < 0.1f,
+                   "the peak is cleared by reading it, so a clip can be recovered from");
         }
 
         // And a sample that is not a number must not become the peak, or one
@@ -691,6 +793,23 @@ int main()
         const auto none = measure ({ 0.0 }, bulkRate, 1.0);
         checkStatus (none.status, Status::ok, "a delay of nothing resolves");
         check (none.roundTripSamples >= 0.0, "and is never reported as negative");
+
+        // The clamp has to be made to do something, or it passes for the wrong
+        // reason: a true delay of nothing lands either side of the fold, and
+        // which side is luck. A signal arriving a little before it was played
+        // cannot happen through a cable and can be written down exactly, which
+        // puts the reading definitely below zero and leaves the clamp as the
+        // only thing that can produce the answer. Without it the panel would
+        // offer "a round trip of -0.2 samples", which is not a thing.
+        for (double early : { -0.5, -2.0, -8.0 })
+        {
+            const auto before = measure ({ early }, bulkRate, 1.0);
+
+            checkStatus (before.status, Status::ok,
+                         "a reading inside the fold's slack is still accepted");
+            checkClose (before.roundTripSamples, 0.0, 0.0,
+                        "and is reported as no round trip rather than as a negative one");
+        }
     }
 
     //==========================================================================
@@ -1240,6 +1359,18 @@ int main()
                    "a NaN packs as nothing rather than as undefined behaviour");
         }
 
+        // A status nobody wrote. Only pack writes this word today and it
+        // cannot emit anything above implausible, so this is insurance rather
+        // than a live case, and it is worth having tested because the day a
+        // sixth status is added is the day it goes live. What it must not do
+        // is land on ok, which is what a bare cast would do for a 1.
+        for (std::uint64_t spare : { 5u, 6u, 7u })
+        {
+            const auto back = unpack (spare);
+            checkStatus (back.status, Status::noSignal,
+                         "an unrecognised status falls back to nothing having come back");
+        }
+
         // And the one that would be invisible: a packed reading must not use
         // the top bits, because the word is handed over as one atomic and
         // anything above what is written here is room the next field would
@@ -1252,6 +1383,119 @@ int main()
             loud.inputPeak        = 1.0e6f;
 
             check ((pack (loud) >> 59) == 0u, "the packed reading fits in 59 bits");
+        }
+    }
+
+    //==========================================================================
+    // 16. A measurement belongs to the device it was taken on.
+    //
+    // The reading is deliberately kept after the measurement is stopped, so
+    // that somebody can watch it settle, stop, and then decide. That makes it
+    // possible to decide about a device that is no longer there, which an
+    // audit found: measure one driver, change to another, press apply, and a
+    // correction for the first is written against the second's claim. Nothing
+    // about the result looks wrong and every take on the new device is late.
+    {
+        auto figuresFor = [] (int in, int out, int buffer, double rate, int engine)
+        {
+            RecordAlign::Figures f;
+            f.inputLatency  = in;
+            f.outputLatency = out;
+            f.bufferSize    = buffer;
+            f.sampleRate    = rate;
+            f.engineLatency = engine;
+            return f;
+        };
+
+        const auto taken = figuresFor (0, 0, 128, 48000.0, 0);
+
+        // The buffer size needs a case of its own, and it has to be built on
+        // purpose: for most figures a change of buffer moves the two buffer
+        // floor and so moves the claim anyway, which would refuse it for the
+        // other reason. The case that needs this test is a driver whose
+        // reported latencies do not include the buffer at all, which ASIO
+        // allows because it passes the driver's own answer straight through.
+        // Then the claim is the same at any buffer size and the real round
+        // trip is not.
+        {
+            const auto small = figuresFor (3000, 3000, 128, 48000.0, 0);
+            const auto large = figuresFor (3000, 3000, 1024, 48000.0, 0);
+
+            checkEqualInt (RecordAlign::claimedRoundTripSamples (small),
+                           RecordAlign::claimedRoundTripSamples (large),
+                           "this driver claims the same thing at both buffer sizes");
+            check (! stillApplicable (small, large),
+                   "a measurement does not survive a buffer change the claim cannot see");
+        }
+
+        check (stillApplicable (taken, taken), "a measurement applies to the device it was taken on");
+
+        // The engine's latency is the one thing that may move. The probe never
+        // went through the mixer, so a plugin loaded since does not make the
+        // measurement stale, and refusing it for that would mean remeasuring
+        // every time somebody loads a reverb.
+        check (stillApplicable (taken, figuresFor (0, 0, 128, 48000.0, 4096)),
+               "a plugin loaded since does not make a measurement stale");
+
+        // Everything the measurement is actually of.
+        check (! stillApplicable (taken, figuresFor (0, 0, 128, 44100.0, 0)),
+               "a measurement does not survive a change of sample rate");
+        check (! stillApplicable (taken, figuresFor (0, 0, 1024, 48000.0, 0)),
+               "a measurement does not survive a change of buffer size");
+        check (! stillApplicable (taken, figuresFor (480, 960, 128, 48000.0, 0)),
+               "a measurement does not survive the driver claiming something else");
+        check (! stillApplicable (taken, figuresFor (0, 0, 128, 0.0, 0)),
+               "and nothing applies when there is no device open");
+
+        // The scenario from the audit, in the figures it used, asserted as the
+        // damage it would have done rather than as the rule that prevents it.
+        {
+            const auto onAsio    = figuresFor (0, 0, 128, 48000.0, 0);
+            const auto onShared  = figuresFor (480, 960, 480, 48000.0, 0);
+            const double measured = 1024.0;
+
+            check (! stillApplicable (onAsio, onShared),
+                   "the audit's own case is refused");
+
+            // What it would have cost: the trim fits, so nothing else would
+            // have stopped it.
+            const double wrong = trimMsFor (measured, onShared);
+            check (trimFits (wrong) && wrong < -8.0,
+                   "and it would have pushed every take about nine milliseconds late");
+        }
+
+        // Randomised, because the interesting cases are the ones where only
+        // one of the three things moved.
+        std::mt19937 rng (606u);
+        std::uniform_int_distribution<int> latency (0, 2400);
+        std::uniform_int_distribution<int> buffer (16, 2048);
+        const double rates[] = { 44100.0, 48000.0, 96000.0 };
+        std::uniform_int_distribution<int> rate (0, 2);
+
+        for (int trial = 0; trial < 4000; ++trial)
+        {
+            const auto a = figuresFor (latency (rng), latency (rng), buffer (rng),
+                                       rates[rate (rng)], latency (rng));
+            const auto b = figuresFor (latency (rng), latency (rng), buffer (rng),
+                                       rates[rate (rng)], latency (rng));
+
+            // The property, rather than the implementation: two sets of
+            // figures are interchangeable for this purpose exactly when the
+            // compensation they would produce from one measurement is the
+            // same.
+            if (stillApplicable (a, b))
+            {
+                const double trim = trimMsFor (900.0, a);
+
+                RecordAlign::Figures withA = a;
+                RecordAlign::Figures withB = b;
+                withA.trimMs = trim;
+                withB.trimMs = trim;
+
+                checkEqualInt (RecordAlign::captureOffsetSamples (withA) - a.engineLatency,
+                               RecordAlign::captureOffsetSamples (withB) - b.engineLatency,
+                               "figures that are interchangeable compensate identically");
+            }
         }
     }
 

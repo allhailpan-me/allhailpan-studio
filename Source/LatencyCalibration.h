@@ -209,15 +209,21 @@ private:
                                            int numSamples,
                                            const juce::AudioIODeviceCallbackContext&) override
     {
+        // Before the clear and not after it, which is where it was until an
+        // audit moved it. FloatVectorOperations::clear is zeromem of
+        // `num * sizeof (float)` bytes with no check of its own, so a block
+        // length of -4, which the probe's own test says a backend can hand
+        // over while shutting down, was a memset of eighteen exabytes. The
+        // guard that would have stopped it ran next.
+        if (numSamples <= 0)
+            return;
+
         // Every channel, because this callback is handed a scratch buffer that
         // nothing cleared and whatever is left in it is summed into the mix.
         // See the note at the top of this file.
         for (int channel = 0; channel < numOutputChannels; ++channel)
             if (auto* out = outputChannelData[channel])
                 juce::FloatVectorOperations::clear (out, numSamples);
-
-        if (numSamples <= 0)
-            return;
 
         const float* in = (inputIndex >= 0 && inputIndex < numInputChannels)
                               ? inputChannelData[inputIndex]

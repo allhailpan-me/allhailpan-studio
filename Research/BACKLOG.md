@@ -241,8 +241,88 @@ claim is right must produce a trim of zero, and a device claiming nothing must
 produce a trim of the whole round trip, and `captureOffsetSamples` must land
 on the same total either way.
 
+### What the audit found
+
+Nine findings, four of them real. The two that mattered were both in the JUCE
+side, which is the part nothing tests, and that is the shape `CLAUDE.md`
+already records about the old record alignment: "the fourth thing wrong with it
+is why: the figure was in the window, where nothing tests it."
+
+1. **A measurement could be applied to a device that was never measured.** The
+   reading is kept after the measurement is stopped on purpose, because the
+   useful way to use this is to watch it settle, stop and then decide. Nothing
+   checked that the device decided about was the device measured. Measure an
+   ASIO interface whose driver will not report its latency, stop, press Find
+   the fastest device, land on a shared Windows mode, press Use this
+   measurement, and a correction computed against a claim of 256 samples is
+   applied against a claim of 1440: every take on a device that was already
+   right is pushed 8.67 ms late, and nothing about it looks wrong. The buffer
+   size alone does it with no device change at all. The fix put the decision in
+   the header where it can be tested, as `LatencyProbe::stillApplicable`, and
+   the panel drops the reading whenever the device changes at all, since which
+   device this is cannot be seen from `Figures`.
+2. **The input peak latched for the whole measurement while the panel promised
+   it did not.** Once anything crossed -3 dBFS for one sample the reading was
+   refused for the rest of the run, under a message saying to turn the gain
+   down and it would settle again in a second. It never would. The trigger is
+   the ordinary workflow: press Measure, then plug the jack in, and the
+   contacts making is a full scale click. This is a divergence from the
+   reference that had not been noticed: Ardour's `get_peak()` **clears** the
+   peak as it reads it, so its check is on the peak since the last poll, which
+   is what makes its own advice honest. The threshold had been copied and the
+   reset had not. Worse, the test pinned the latch, so it would have held the
+   bug in place.
+3. **A memset of eighteen exabytes.** The output clear ran before the
+   `numSamples <= 0` guard, and `FloatVectorOperations::clear` is `zeromem` of
+   `num * sizeof (float)` bytes with no check of its own. The probe's own test
+   already feeds it a block length of -4, with a comment saying a backend can
+   hand that over while shutting down, and the tested header handles it
+   correctly. The untested wrapper in front of it did not.
+4. **The channel pickers went stale in two ways.** Repointed mid-measurement
+   they were ignored, so the probe stayed on the old channels while the report
+   named the new ones, which is the fault `activeChannels` exists to prevent
+   arrived at from the other side. And the signature that noticed a device
+   change counted channels rather than naming them, so swapping input 1 for
+   input 5 was invisible, which on JACK can happen without anybody touching
+   the chooser.
+
+And a fourth misleading comment, after the three the mutation testing had
+already found. `minBelievableSamples` said it refused "a measurement well under
+the driver's own claim". It does not and cannot: `read()` has no `Figures` in
+scope. A driver overstating its latency resolves perfectly happily and only
+`trimFits` eventually refuses it. The comment now says so, and says why
+refusing it on a tighter bound would be inventing a specification that no
+reference publishes.
+
+Two things the audit raised that were left as they are, with the reason
+written into the code rather than fixed:
+
+- **`inverted` means nothing unless the status is `ok`.** The recovery tries
+  the other polarity whenever a reading disagrees with itself, which an
+  unsettled reading always does, and on unsettled data the wrong polarity can
+  come back with the lower residual by luck: measured, about seven reads in a
+  thousand of a perfectly straight cable claim to be reversed while settling.
+  An accepted reading cannot, because an unnecessary inversion puts the first
+  bit exactly half a cycle out. So the field is documented as meaningful only
+  when the status is `ok`, which is what the panel already relied on, and the
+  test asserts it for accepted readings only.
+- **Fons's denormal guard is not copied.** He adds 1e-20 to each filter line.
+  His state is float and this is double, which takes about a minute of silence
+  to decay that far and three seconds to pass through. Recorded in the code
+  rather than silently dropped.
+
 ### Left for later
 
+- **The panel builds its own `RecordAlign::Figures`, and the engine builds
+  another.** They already differ: the engine falls back to its own stored
+  sample rate when the device reports none and the panel does not. Today that
+  only decides which sentence the panel prints, so it is a maintenance fault
+  rather than a live one, but it is the exact shape of thing
+  `claimedRoundTripSamples` was extracted to prevent one level down. It
+  belongs in `PreferencesActions` next to `recordOffsetSamples`, which is
+  already a `std::function<int()>` from the engine for this kind of question.
+  Not done tonight because `PreferencesActions` is built in
+  `MainComponent.cpp`, which an open hardening branch holds.
 - The measurement is of the device as it is configured now. Change the buffer
   size and it should be taken again. Storing the difference rather than the
   absolute is what makes that mostly harmless, since the claim moves with the

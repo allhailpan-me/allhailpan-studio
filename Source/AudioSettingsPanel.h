@@ -143,6 +143,15 @@ public:
         addAndMakeVisible (toLabel);
         addAndMakeVisible (inputBox);
 
+        // Repointed while a measurement is running, the probe stays on the
+        // channels it was started with and the boxes show the ones it is not
+        // on, so the report then names a cable nobody patched. That is the
+        // exact fault LatencyCalibration::activeChannels exists to prevent,
+        // arrived at from the other side. Restarting is the honest answer: the
+        // demodulator has to be reset for new channels anyway.
+        outputBox.onChange = [this] { channelChoiceChanged(); };
+        inputBox .onChange = [this] { channelChoiceChanged(); };
+
         toLabel.setJustificationType (juce::Justification::centred);
         toLabel.setColour (juce::Label::textColourId, Ahp::muted);
         toLabel.setFont (juce::FontOptions (12.0f));
@@ -297,8 +306,85 @@ private:
         fill (outputBox, outputs);
         fill (inputBox, inputs);
 
-        knownChannelSignature = device->getName() + "/" + juce::String (outputs.size())
-                                + "/" + juce::String (inputs.size());
+        knownChannelSignature = deviceSignature();
+    }
+
+    /** What has to stay the same for the channel boxes and a kept measurement
+        to still be about this device.
+
+        The names rather than the counts, because a count cannot see a channel
+        set being changed for another of the same size: deselect input 1 and
+        select input 5 in the chooser above and the box still says "Input 1"
+        while callback index 0 is now input 5. An audit found that, and on
+        JACK it can happen without anybody touching the chooser, since
+        getActiveInputChannels there follows the port connections.
+
+        The rate and the buffer are in it because they are what a measurement
+        is of, and because the pickers are not the only thing that goes stale
+        when they move.
+    */
+    juce::String deviceSignature() const
+    {
+        auto* device = devices.getCurrentAudioDevice();
+
+        if (device == nullptr)
+            return {};
+
+        juce::String signature = device->getName()
+                                 + "/" + juce::String (device->getCurrentSampleRate(), 1)
+                                 + "/" + juce::String (device->getCurrentBufferSizeSamples());
+
+        for (bool input : { false, true })
+        {
+            signature << (input ? "/in" : "/out");
+
+            for (const auto& c : LatencyCalibration::activeChannels (*device, input))
+                signature << ":" << c.name;
+        }
+
+        return signature;
+    }
+
+    /** Drops the kept reading and with it the offer to apply it.
+
+        Called whenever anything the measurement was of might have moved. The
+        reading is kept across stopping on purpose, so that somebody can watch
+        it settle, stop, and then decide, and that is exactly what makes it
+        possible to decide about a device that has gone. See
+        LatencyProbe::stillApplicable for what it would have cost.
+    */
+    void forgetMeasurement()
+    {
+        lastMeasured  = {};
+        measuredUnder = {};
+        applyButton.setEnabled (false);
+    }
+
+    /** Whether the kept reading is still about the device that is open.
+
+        Two things, because neither covers the other. The figures are checked
+        by LatencyProbe::stillApplicable, which is where that decision is
+        testable, and it catches a change of rate, of buffer size or of what
+        the driver claims. It cannot see which device this is, because a device
+        is not in Figures, so the signature below drops the reading outright
+        whenever the device changes at all.
+    */
+    bool measurementStillApplies() const
+    {
+        return lastMeasured.status == LatencyProbe::Status::ok
+               && LatencyProbe::stillApplicable (measuredUnder, claimFigures());
+    }
+
+    void channelChoiceChanged()
+    {
+        // A cable on different channels is a different measurement, so the
+        // previous one is not an answer about it.
+        forgetMeasurement();
+
+        if (calibration.isRunning())
+            startMeasurement();
+        else
+            refresh();
     }
 
     void toggleMeasurement()
@@ -342,8 +428,7 @@ private:
 
         measureButton.setButtonText ("Stop measuring");
         findButton.setEnabled (false);
-        applyButton.setEnabled (false);
-        lastMeasured = {};
+        forgetMeasurement();
         refresh();
     }
 
@@ -375,6 +460,23 @@ private:
         a device callback and never went through the mixer, so there is none of
         it in what was measured, and captureOffsetSamples adds that part
         separately.
+
+        This is a second place that builds a Figures, which an audit raised and
+        which is worth writing down rather than leaving to be discovered. The
+        engine builds its own in AudioEngine::getRecordFigures, and the two
+        already differ in one respect: the engine falls back to its own stored
+        sample rate when the device reports none, and this does not, so this
+        reports no device open where the engine would still compensate. That
+        difference only changes which sentence the panel prints, because
+        nothing here is applied when there is no device.
+
+        The reason it is duplicated rather than asked for is that the window
+        reaches the engine only through PreferencesActions, and adding a member
+        to that means editing the file that builds it, which another branch
+        holds open. It belongs in PreferencesActions next to
+        recordOffsetSamples, which is already a std::function<int()> from the
+        engine for exactly this kind of question, and it is recorded in
+        Research/BACKLOG.md as the next thing to do here.
     */
     RecordAlign::Figures claimFigures() const
     {
@@ -393,8 +495,17 @@ private:
 
     void applyMeasurement()
     {
-        if (lastMeasured.status != LatencyProbe::Status::ok)
+        // Asked again here rather than trusted from the button's enabled
+        // state. The button is a picture of what was true when it was last
+        // drawn, and the device can change in the quarter second before
+        // somebody's finger arrives.
+        if (! measurementStillApplies())
+        {
+            forgetMeasurement();
+            outcome.setText ("That measurement was taken on a different setup, so it is not "
+                             "being applied. Measure again.", false);
             return;
+        }
 
         const double trim = LatencyProbe::trimMsFor (lastMeasured.roundTripSamples, claimFigures());
 
@@ -503,20 +614,25 @@ private:
         // The device can be changed from the chooser above without anything
         // telling this panel, and the channel boxes are indices into whatever
         // is open now. Pointing them at a device that has gone is how a
-        // measurement ends up being taken on a channel nobody patched.
+        // measurement ends up being taken on a channel nobody patched, and
+        // keeping a reading across it is how a correction for one device gets
+        // applied to another.
+        if (deviceSignature() != knownChannelSignature)
         {
-            const juce::String signature = device != nullptr
-                ? device->getName()
-                  + "/" + juce::String (LatencyCalibration::activeChannels (*device, false).size())
-                  + "/" + juce::String (LatencyCalibration::activeChannels (*device, true).size())
-                : juce::String();
-
-            if (signature != knownChannelSignature)
-            {
-                stopMeasurement();
-                refreshChannelLists();
-            }
+            stopMeasurement();
+            forgetMeasurement();
+            refreshChannelLists();
         }
+
+        // Outside the branch below, and that is the point: the offer to apply
+        // a kept reading has to be withdrawn by whatever makes it
+        // inapplicable, not only refreshed while a measurement happens to be
+        // running. It was inside, which is how a measurement from one device
+        // stayed on offer for the next one.
+        applyButton.setEnabled (measurementStillApplies()
+                                && LatencyProbe::trimFits (
+                                       LatencyProbe::trimMsFor (lastMeasured.roundTripSamples,
+                                                                claimFigures())));
 
         if (device == nullptr)
         {
@@ -615,20 +731,33 @@ private:
             const auto reading = calibration.latest();
 
             if (reading.status == LatencyProbe::Status::ok)
-                lastMeasured = reading;
+            {
+                // Kept together, because a reading without the figures it was
+                // taken under cannot be checked against anything later.
+                lastMeasured  = reading;
+                measuredUnder = figures;
+            }
 
             outcome.setText (measurementText (figures), false);
 
-            const bool usable = lastMeasured.status == LatencyProbe::Status::ok
-                                && LatencyProbe::trimFits (
-                                       LatencyProbe::trimMsFor (lastMeasured.roundTripSamples,
-                                                                figures));
-
-            applyButton.setEnabled (usable);
+            applyButton.setEnabled (measurementStillApplies()
+                                    && LatencyProbe::trimFits (
+                                           LatencyProbe::trimMsFor (lastMeasured.roundTripSamples,
+                                                                    figures)));
         }
     }
 
     juce::AudioDeviceManager& devices;
+
+    // Immediately after the reference it is built from, and before every
+    // control, so that it is destroyed after all of them. findButton's
+    // onClick, trimSlider's onValueChange and the device chooser all reach it,
+    // and a member declared before it would be destroyed after it. Nothing
+    // reachable actually calls into it from a destructor, but an audit pointed
+    // out that the comment claiming this used to sit under a declaration that
+    // did not have the property, which is worse than no comment.
+    LatencyCalibration calibration { devices };
+
     juce::AudioDeviceSelectorComponent selector;
     juce::Label      readout;
     juce::TextEditor outcome;
@@ -641,10 +770,6 @@ private:
     juce::Label  trimLabel { {}, "Record offset correction" };
     juce::Slider trimSlider;
 
-    // Declared after `devices` so the reference it is built from is already
-    // bound, and before the controls so it outlives nothing that calls into it.
-    LatencyCalibration calibration { devices };
-
     static constexpr const char* measureButtonText = "Measure the round trip";
 
     juce::Label      loopLabel { {}, "Loopback cable, from" };
@@ -654,8 +779,11 @@ private:
     juce::TextButton applyButton   { "Use this measurement" };
 
     /** The last reading good enough to be used, kept so that stopping the
-        measurement does not throw away the answer it was taken for. */
+        measurement does not throw away the answer it was taken for, and the
+        figures it was taken under, so that it can be refused once they have
+        moved. */
     LatencyProbe::Reading lastMeasured;
+    RecordAlign::Figures  measuredUnder;
 
     /** What the channel boxes were built from, so a device change is noticed
         without asking the device manager for a callback this panel does not

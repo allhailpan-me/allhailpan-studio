@@ -186,15 +186,6 @@ namespace RecordAlign
     inline constexpr double minTrimMs = -50.0;
     inline constexpr double maxTrimMs =  50.0;
 
-    /** How many samples of the capture belong before the record point, which
-        is therefore how many to drop off the front of it.
-
-        Negative is legal and means the opposite: the driver claimed more than
-        it should have and the take belongs later than it was captured. Only a
-        trim big enough to overcome a real round trip can produce it, and it is
-        handled rather than clamped away, because a studio that silently
-        ignores half of a control's range is a studio that looks broken.
-    */
     /** The round trip the device claims, with the floor applied: everything
         the offset is made of except the engine and the trim.
 
@@ -231,6 +222,15 @@ namespace RecordAlign
                                          AudioDefaults::maxLatencySamples));
     }
 
+    /** How many samples of the capture belong before the record point, which
+        is therefore how many to drop off the front of it.
+
+        Negative is legal and means the opposite: the driver claimed more than
+        it should have and the take belongs later than it was captured. Only a
+        trim big enough to overcome a real round trip can produce it, and it is
+        handled rather than clamped away, because a studio that silently
+        ignores half of a control's range is a studio that looks broken.
+    */
     inline int captureOffsetSamples (const Figures& f) noexcept
     {
         const int roundTrip = claimedRoundTripSamples (f);
