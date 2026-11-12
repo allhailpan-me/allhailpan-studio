@@ -1322,5 +1322,102 @@ every sample of the punch, and the old take is at full gain everywhere outside
 the punch plus a crossfade width. Measured through the real `buildCompSpans`
 rather than through a restatement of it.
 
-In progress. Mutation results and findings to follow in this section.
+### The mutations: 41 tried, 36 caught
+
+Each one a copy of `Source/Punch.h` broken a single way and compiled against
+the real `PunchTest.cpp` with address and undefined behaviour sanitizers, the
+flags `Tests/run.sh` uses. The existing test is strong: it drives the real
+`buildCompSpans` and measures the gain each take is read at, which is what
+catches the geometry faults rather than restating the formulas.
+
+Caught, among others: both shifts inverted, either shift removed so the fade
+becomes centred on the punch (the fault the header exists to avoid), a shift
+of a whole width instead of half, a shift of a quarter, the two boundaries
+swapped, each of the three width limits removed, the reach no longer clamped
+to the pass or to the folder, the folder carrying the requested width rather
+than the realised one, `applyTo` no longer setting the folder's crossfade at
+all, the crossfade set in seconds where milliseconds were wanted, every one of
+the six ways `placePass` can be broken, and the half open punch range made
+closed at either end.
+
+### The five survivors, and which is which
+
+One is a gap in the test. Four are genuine no-ops, and saying so is a real
+result: each is a guard that something else already enforces.
+
+**A gap: a negative requested crossfade is no longer floored at nothing.**
+`regionFor` takes its width as a parameter with a default, so a caller can
+pass anything. Replacing `std::max (0.0, requested)` with `requested` lets a
+negative width through, `half` goes negative, and the two boundaries are then
+shifted *into* the punch rather than out of it: the take that was there plays
+at full gain for half a width at each end of the punch, with no fade to
+explain it. Nothing passed a negative width, so nothing noticed. Closed.
+
+**A no-op: the refusal of a punch shorter than the minimum.** Removing
+`if (outSec - inSec < kMinPunchSeconds) return out;` changes nothing, because
+`reachFrom >= inSec` and `reachTo <= outSec` by construction, so
+`reachTo - reachFrom <= outSec - inSec` and the refusal three lines further
+down catches strictly more. The first one is an early out and not a guard.
+
+**Two no-ops: both of the one sided fallbacks.** An absent out point falls back
+to `m.folderSeconds` and an absent in point to `0.0`. Changing them to `m.to`
+and `m.from` makes no difference at all, because the clamps immediately below
+take `min (outSec, m.folderSeconds, m.to)` and
+`max (inSec, 0.0, m.from)`: both expressions are already in the clamp. The
+choice of fallback is therefore cosmetic, which is worth knowing before
+somebody changes one and expects an effect.
+
+**A no-op: the comp region set back to front.** Swapping the two arguments to
+`setCompRegion` changes nothing, because `setCompRegion` opens with
+`if (toSeconds < fromSeconds) std::swap (...)`. Defended one layer down.
+
+### The fault: the folder a punch is worked out against is not the folder it
+### lands in
+
+Found by reading the caller rather than by a mutation, and it is the same
+shape as the fault `Punch::placePass` was extracted to prevent, one level up
+and in the one file that again cannot be tested.
+
+`Project::punchTake` works out how long the folder will be once the passes are
+in it, and hands that figure to `Punch::regionFor` as `m.folderSeconds`, which
+is what clamps the punch to the clip. It computed it as
+
+    for (const auto& t : passes)
+        folderSeconds = std::max (folderSeconds, t.length);
+
+A pass's reach into the folder is its position plus its length, not its length
+alone, and `TakeFolder::longestSeconds`, which is what `tidyFolder` actually
+sizes the folder to, uses `std::max (0.0, t.start) + t.length`. A punch pass
+always starts somewhere after the folder's start, because the transport rolls
+in a bar or two before the punch and the clip began earlier still, so the two
+rules disagree whenever the pass runs past the end of the clip that was there,
+which is the ordinary case of punching the last line of a phrase and playing
+on.
+
+Measured, on a ten second clip punched from nine to twelve seconds with a pass
+occupying folder seconds 8 to 13:
+
+    folder length: punchTake said 10.000, tidyFolder made it 13.000
+
+    told 10.000 (as shipped): region [8.9950, 10.0050]
+       at  9.50 s  punched take=1.0000  original=0.0000
+       at 10.50 s  punched take=0.0000  original=0.0000
+       at 11.00 s  punched take=0.0000  original=0.0000
+       at 11.90 s  punched take=0.0000  original=0.0000
+
+    told 13.000 (fixed):      region [8.9950, 12.0050]
+       at  9.50 s  punched take=1.0000  original=0.0000
+       at 10.50 s  punched take=1.0000  original=0.0000
+       at 11.00 s  punched take=1.0000  original=0.0000
+       at 11.90 s  punched take=1.0000  original=0.0000
+
+So the punch was clipped at the end of the clip that was there, and the two
+seconds past it were handed back to a take with no audio in them: silent, in
+playback and in the bounce alike, while the punch reported that it had
+happened and the pass sat in the folder holding the performance nobody could
+hear. Nothing errors.
+
+Fixed by moving the arithmetic into `Punch::passReach`, where it is tested,
+and leaving one line at the call site, which is the same answer this project
+reached for `placePass`.
 
