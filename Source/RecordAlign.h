@@ -195,7 +195,17 @@ namespace RecordAlign
         handled rather than clamped away, because a studio that silently
         ignores half of a control's range is a studio that looks broken.
     */
-    inline int captureOffsetSamples (const Figures& f) noexcept
+    /** The round trip the device claims, with the floor applied: everything
+        the offset is made of except the engine and the trim.
+
+        Pulled out of captureOffsetSamples rather than left inside it because
+        LatencyProbe::trimMsFor has to subtract exactly this quantity to turn a
+        measurement into a trim, and two definitions of it would be free to
+        drift apart. A trim computed against a slightly different claim than
+        the one the compensation then adds back is a studio that is out by the
+        difference, with nothing to say so.
+    */
+    inline int claimedRoundTripSamples (const Figures& f) noexcept
     {
         // Two buffers is the floor, applied here even when the driver did say
         // something. A driver that answers for one direction and not the other
@@ -214,11 +224,16 @@ namespace RecordAlign
         // Deliberately not pushed back into the driver search's own ranking:
         // that would change which device a first run picks, on hardware that
         // cannot be tried from here.
-        const int roundTrip = std::max (AudioDefaults::roundTripSamples (f.inputLatency,
-                                                                         f.outputLatency,
-                                                                         f.bufferSize),
-                                        2 * std::clamp (f.bufferSize, 0,
-                                                        AudioDefaults::maxLatencySamples));
+        return std::max (AudioDefaults::roundTripSamples (f.inputLatency,
+                                                          f.outputLatency,
+                                                          f.bufferSize),
+                         2 * std::clamp (f.bufferSize, 0,
+                                         AudioDefaults::maxLatencySamples));
+    }
+
+    inline int captureOffsetSamples (const Figures& f) noexcept
+    {
+        const int roundTrip = claimedRoundTripSamples (f);
 
         const int engine = std::clamp (f.engineLatency, 0, AudioDefaults::maxLatencySamples);
 
