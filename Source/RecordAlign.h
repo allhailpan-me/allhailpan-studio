@@ -186,16 +186,17 @@ namespace RecordAlign
     inline constexpr double minTrimMs = -50.0;
     inline constexpr double maxTrimMs =  50.0;
 
-    /** How many samples of the capture belong before the record point, which
-        is therefore how many to drop off the front of it.
+    /** The round trip the device claims, with the floor applied: everything
+        the offset is made of except the engine and the trim.
 
-        Negative is legal and means the opposite: the driver claimed more than
-        it should have and the take belongs later than it was captured. Only a
-        trim big enough to overcome a real round trip can produce it, and it is
-        handled rather than clamped away, because a studio that silently
-        ignores half of a control's range is a studio that looks broken.
+        Pulled out of captureOffsetSamples rather than left inside it because
+        LatencyProbe::trimMsFor has to subtract exactly this quantity to turn a
+        measurement into a trim, and two definitions of it would be free to
+        drift apart. A trim computed against a slightly different claim than
+        the one the compensation then adds back is a studio that is out by the
+        difference, with nothing to say so.
     */
-    inline int captureOffsetSamples (const Figures& f) noexcept
+    inline int claimedRoundTripSamples (const Figures& f) noexcept
     {
         // Two buffers is the floor, applied here even when the driver did say
         // something. A driver that answers for one direction and not the other
@@ -214,11 +215,25 @@ namespace RecordAlign
         // Deliberately not pushed back into the driver search's own ranking:
         // that would change which device a first run picks, on hardware that
         // cannot be tried from here.
-        const int roundTrip = std::max (AudioDefaults::roundTripSamples (f.inputLatency,
-                                                                         f.outputLatency,
-                                                                         f.bufferSize),
-                                        2 * std::clamp (f.bufferSize, 0,
-                                                        AudioDefaults::maxLatencySamples));
+        return std::max (AudioDefaults::roundTripSamples (f.inputLatency,
+                                                          f.outputLatency,
+                                                          f.bufferSize),
+                         2 * std::clamp (f.bufferSize, 0,
+                                         AudioDefaults::maxLatencySamples));
+    }
+
+    /** How many samples of the capture belong before the record point, which
+        is therefore how many to drop off the front of it.
+
+        Negative is legal and means the opposite: the driver claimed more than
+        it should have and the take belongs later than it was captured. Only a
+        trim big enough to overcome a real round trip can produce it, and it is
+        handled rather than clamped away, because a studio that silently
+        ignores half of a control's range is a studio that looks broken.
+    */
+    inline int captureOffsetSamples (const Figures& f) noexcept
+    {
+        const int roundTrip = claimedRoundTripSamples (f);
 
         const int engine = std::clamp (f.engineLatency, 0, AudioDefaults::maxLatencySamples);
 
