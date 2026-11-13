@@ -3,10 +3,11 @@
 //
 // A true-peak reading is only worth having if it agrees with every other
 // meter that claims to measure one, so this does not check that the number
-// looks sensible. It checks the two things that make it a true-peak reading
-// at all: that the filter is the one ITU-R BS.1770-4 Annex 2 tabulates,
-// coefficient for coefficient, and that the detector returns what EBU Tech
-// 3341 says a conforming meter must return for its test signals.
+// looks sensible. It checks three things: that the coefficients are the ones
+// ITU-R BS.1770-4 Annex 2 prints, digit for digit; that the reading obeys the
+// one bound it can be held to without reference to any standard, which is
+// that it is never below the largest sample in the signal; and that the
+// detector returns what EBU Tech 3341 says a conforming meter must.
 //
 // Those test signals exist because this measurement has one failure mode that
 // looks like success. A sample peak meter reports a number, the number is
@@ -14,11 +15,25 @@
 // matters. Cases 16 and 19 are built to catch it: the samples sit either side
 // of the crest, so the stored values never reach what the waveform does.
 //
+// The bound is the other half of the same idea and this file used not to
+// check it. The waveform a converter reconstructs passes through the stored
+// samples, so the true peak is at least the sample peak, always. The
+// standard's example coefficients put all four of their phases strictly
+// between input samples, so a meter built from them alone reads below that
+// bound: a lone full scale sample came out at -0.245 dBTP. See
+// `theReadingIsNeverBelowTheSamplePeak`, which is run against a
+// reconstruction-only reading first and has to catch it.
+//
 //   ./Tests/run.sh
 //
 // Sources:
-//   ITU-R BS.1770-4, Annex 2, Table 3 (the 48 tap, 4 phase interpolator)
-//   EBU Tech 3341, Table 1, cases 15 to 19
+//   ITU-R BS.1770-4, Annex 2: the unnumbered "Phase 0..Phase 3" table of the
+//     order 48, 4 phase FIR interpolating filter. Not Table 3, which is the
+//     channel weightings in Annex 1.
+//   EBU Tech 3341 v4.0 (November 2023), Table 1 in section 2.9. The true-peak
+//     cases are 15 to 23, not 15 to 19 as this file used to say. 15 to 19 are
+//     tones and are run here; 20 to 23 need the EBU's own published audio and
+//     are not, which `Source/TruePeak.h` records as a known gap.
 // ---------------------------------------------------------------------------
 
 #include "TruePeak.h"
@@ -52,7 +67,14 @@ static double toDb (double linear)
 //==============================================================================
 /** The table as ITU-R BS.1770-4 Annex 2 prints it: twelve rows, one column per
     phase. Written out in the document's own layout rather than the header's,
-    so that comparing the two is a real check and not a copy of a copy. */
+    so that comparing the two is a real check and not a copy of a copy.
+
+    This reference can be mistyped too, and then it and a mistyped header
+    would agree. So it is held to three structural properties of its own
+    before it is used to judge anything: every value an exact multiple of
+    1/8192 with the numerator pinned, the interleaved filter exactly
+    symmetric, and the four phase sums exact. A wrong digit survives none of
+    them. */
 static const double publishedTable[12][4] =
 {
     {  0.0017089843750, -0.0291748046875, -0.0189208984375, -0.0083007812500 },
@@ -77,7 +99,7 @@ static const double publishedTable[12][4] =
     exactly the kind of thing that is easy to get subtly wrong and impossible
     to see by reading, so it is checked against this, which has no
     rearrangement in it at all. */
-static double referenceTruePeak (const std::vector<float>& signal, size_t upTo)
+static double referenceReconstructionOnly (const std::vector<float>& signal, size_t upTo)
 {
     double peak = 0.0;
 
@@ -96,6 +118,18 @@ static double referenceTruePeak (const std::vector<float>& signal, size_t upTo)
             peak = std::max (peak, std::abs (acc));
         }
     }
+
+    return peak;
+}
+
+/** What the detector must produce: the reconstruction and the samples
+    themselves, because the reconstruction passes through them. */
+static double referenceTruePeak (const std::vector<float>& signal, size_t upTo)
+{
+    double peak = referenceReconstructionOnly (signal, upTo);
+
+    for (size_t n = 0; n < upTo; ++n)
+        peak = std::max (peak, (double) std::abs (signal[n]));
 
     return peak;
 }
@@ -121,62 +155,158 @@ static void filterMatchesTheStandard()
     TruePeakDetector detector;
     detector.reset();
 
-    double running = 0.0;
-    size_t worstAt = 0;
-    double worstGap = 0.0;
+    float  running = 0.0f;
+    size_t mismatches = 0;
+    size_t firstAt = 0;
 
     for (size_t n = 0; n < signal.size(); ++n)
     {
-        running = std::max (running, (double) detector.process (signal[n]));
+        running = std::max (running, detector.process (signal[n]));
 
-        const double want = referenceTruePeak (signal, n + 1);
-        const double gap  = std::abs (running - want);
-
-        if (gap > worstGap)
+        // Exactly equal, not close. Every coefficient is a multiple of
+        // 1/8192 and every sample is a float, so each product needs 37 of
+        // double's 53 bits and is exact, and twelve of them at audio
+        // magnitudes still are. The only rounding anywhere is the single cast
+        // to float on the way out, and rounding commutes with a maximum, so
+        // the detector's float has to be the correctly rounded form of the
+        // reference's double. That is what makes this a check on the
+        // arithmetic the header says it does rather than a check with a
+        // tolerance somebody can widen: accumulating the same sum in single
+        // precision disagrees on 4495 samples of 8192, and rounding only the
+        // products to single precision disagrees on 493.
+        if (running != (float) referenceTruePeak (signal, n + 1))
         {
-            worstGap = gap;
-            worstAt  = n;
+            if (mismatches == 0)
+                firstAt = n;
+
+            ++mismatches;
         }
     }
 
-    // Single precision history against double precision reference, so this is
-    // a tight tolerance rather than an exact one.
-    check (worstGap < 1e-6,
-           "the detector and the published table disagree by " + std::to_string (worstGap)
-           + ", first worst at sample " + std::to_string (worstAt));
+    check (mismatches == 0,
+           "the detector and the published table disagree on "
+           + std::to_string (mismatches) + " samples, first at "
+           + std::to_string (firstAt));
 }
 
-/** Properties of the published table that a transcription error breaks. */
+/** Properties of the published table that a transcription error breaks.
+
+    What this used to assert, and could not: that interleaving the phases back
+    into one 48 tap filter must give something symmetric, because "a phase
+    column swapped or reversed during transcription breaks this and almost
+    nothing else". It breaks neither. The table is symmetric in both
+    directions at once, so reversing every row, or reversing the order of the
+    four phases, leaves the interleaved filter exactly symmetric and turns
+    phase p into phase 3 - p, which a maximum over all four phases cannot see.
+    Both were tried against the whole of this file and neither moved a
+    reading. The symmetry check is kept because it is a real property of the
+    document's table, but what actually pins the values is
+    `theHeaderHoldsThePublishedTable` below. */
 static void theTableIsSelfConsistent()
 {
-    std::printf ("the published table has the shape a linear phase interpolator must\n");
+    std::printf ("the published table has the shape the document's own does\n");
 
-    // Each phase is a fractional delay of the same signal, so each must pass
-    // a constant through unchanged. The standard's values are quantised for
-    // integer arithmetic, so this is near one rather than exactly one, and
-    // that small ripple is the meter's own noise floor.
+    // Every value is an exact multiple of 1/8192, because the standard means
+    // the filter to be usable in integer arithmetic. The numerators are
+    // pinned, which is the one check a single mistyped digit cannot pass:
+    // nothing else here would notice 0.0017089843750 becoming
+    // 0.0017098843750, a change of nine parts in ten million.
+    static const int numerators[12][4] =
+    {
+        {   14,  -239,  -155,   -68 },
+        {   90,   240,   271,   122 },
+        { -161,  -424,  -477,  -218 },
+        {  272,   730,   832,   390 },
+        { -487, -1364, -1641,  -838 },
+        { 1125,  3810,  6388,  7964 },
+        { 7964,  6388,  3810,  1125 },
+        { -838, -1641, -1364,  -487 },
+        {  390,   832,   730,   272 },
+        { -218,  -477,  -424,  -161 },
+        {  122,   271,   240,    90 },
+        {  -68,  -155,  -239,    14 }
+    };
+
+    for (int row = 0; row < 12; ++row)
+        for (int phase = 0; phase < 4; ++phase)
+            if (publishedTable[row][phase] * 8192.0 != (double) numerators[row][phase])
+                fail ("row " + std::to_string (row) + " phase " + std::to_string (phase)
+                      + " is " + std::to_string (publishedTable[row][phase] * 8192.0)
+                      + "/8192, the document has " + std::to_string (numerators[row][phase]));
+
+    // Each phase is a fractional delay of the same signal, so each ought to
+    // pass a constant through unchanged, and two of the four do not. These
+    // are pinned exactly rather than to a band. The old check allowed 0.03 of
+    // slack around one, and phases 1 and 2 sit 0.027 away from it: a tenth of
+    // a decibel of drift in the wrong direction and it would have gone red on
+    // coefficients that were perfectly correct.
+    const double expectedSum[4] =
+    {
+        1.0015869140625, 0.9730224609375, 0.9730224609375, 1.0015869140625
+    };
+
     for (int phase = 0; phase < 4; ++phase)
     {
         double sum = 0.0;
         for (int row = 0; row < 12; ++row)
             sum += publishedTable[row][phase];
 
-        if (std::abs (sum - 1.0) > 0.03)
+        if (sum != expectedSum[phase])
             fail ("phase " + std::to_string (phase) + " sums to " + std::to_string (sum)
-                  + ", which is not a unity gain interpolator");
+                  + ", the document's coefficients sum to "
+                  + std::to_string (expectedSum[phase]));
     }
 
-    // Interleaved back into one 48 tap filter it must be symmetric, which is
-    // what makes it linear phase. A phase column swapped or reversed during
-    // transcription breaks this and almost nothing else.
+    // That deficit is the meter's largest single error and it belongs to the
+    // standard, so it is stated rather than tolerated: 0.9730224609375 is
+    // 0.238 dB down, on two phases of the four.
+    std::printf ("    phase gains at DC: %+.4f %+.4f %+.4f %+.4f dB\n",
+                 20.0 * std::log10 (expectedSum[0]), 20.0 * std::log10 (expectedSum[1]),
+                 20.0 * std::log10 (expectedSum[2]), 20.0 * std::log10 (expectedSum[3]));
+
+    // Interleaved back into one 48 tap filter it is symmetric, which is what
+    // makes it linear phase, and the centre of that symmetry is why no phase
+    // of this filter ever lands on an input sample. An even number of taps
+    // puts the centre at 23.5 rather than on a tap, so the four phases sit an
+    // eighth, three eighths, five eighths and seven eighths of the way
+    // between one input sample and the next, and the filter never reproduces
+    // a stored value. That is the whole reason this meter has to take the
+    // sample's own magnitude into the maximum.
     double h[48];
     for (int row = 0; row < 12; ++row)
         for (int phase = 0; phase < 4; ++phase)
             h[row * 4 + phase] = publishedTable[row][phase];
 
     for (int i = 0; i < 24; ++i)
-        if (std::abs (h[i] - h[47 - i]) > 1e-12)
+        if (h[i] != h[47 - i])
             fail ("the interleaved filter is not symmetric at tap " + std::to_string (i));
+
+    check (h[23] == h[24] && h[23] == 0.97216796875,
+           "the centre of symmetry is not between taps 23 and 24, so the phase "
+           "grid is not where this file assumes");
+}
+
+/** The header against the document, value by value.
+
+    This is the only check that pins the table, and nothing that goes through
+    the filter's output can replace it. A digit mistyped in the smallest
+    coefficient moves a reading by under a millionth, which is below the floor
+    of any comparison of readings, and the header stores the table rearranged,
+    so the rearrangement has to be checked along with the values. */
+static void theHeaderHoldsThePublishedTable()
+{
+    std::printf ("the header's table is the document's, digit for digit\n");
+
+    for (int row = 0; row < 12; ++row)
+        for (int phase = 0; phase < 4; ++phase)
+        {
+            const double stored = (double) TruePeakDetector::published (row, phase);
+
+            if (stored != publishedTable[row][phase])
+                fail ("row " + std::to_string (row) + " phase " + std::to_string (phase)
+                      + ": the header has " + std::to_string (stored)
+                      + ", the document has " + std::to_string (publishedTable[row][phase]));
+        }
 }
 
 //==============================================================================
@@ -230,7 +360,7 @@ static double samplePeakDb (const std::vector<float>& signal)
 
 static void ebuComplianceCases()
 {
-    std::printf ("EBU Tech 3341 cases 15 to 19\n");
+    std::printf ("EBU Tech 3341 cases 15 to 19 of the true-peak cases 15 to 23\n");
 
     struct Case
     {
@@ -261,8 +391,16 @@ static void ebuComplianceCases()
 
         const bool ok = got <= c.expected + 0.2 && got >= c.expected - 0.4;
 
-        std::printf ("    %-30s sample peak %+6.2f dBFS   true peak %+6.2f dBTP   %s\n",
-                     c.name, samplePeakDb (signal), got, ok ? "ok" : "OUT OF TOLERANCE");
+        // The margin is printed because one of these is tight and it is
+        // worth seeing. Case 17's crest falls half an input sample from a
+        // sample, so the nearest grid points are 7.5 degrees away on the two
+        // phases that are 0.238 dB light, and the two together account for
+        // almost all of the standard's 0.4 dB allowance. There is no slack
+        // there to spend on an implementation shortcut.
+        std::printf ("    %-30s sample peak %+6.2f dBFS   true peak %+6.2f dBTP   "
+                     "%+.3f of %+0.1f/%+0.1f   %s\n",
+                     c.name, samplePeakDb (signal), got, got - c.expected, 0.2, -0.4,
+                     ok ? "ok" : "OUT OF TOLERANCE");
 
         if (! ok)
             fail (std::string (c.name) + ": read " + std::to_string (got)
@@ -290,6 +428,119 @@ static void findsWhatASamplePeakMeterCannot()
     check (actual - sampled > 2.5,
            "true peak should sit about 3 dB above sample peak here, the gap was "
            + std::to_string (actual - sampled));
+}
+
+/** The one bound this reading can be held to without any standard at all.
+
+    Reconstruction passes through the stored samples, so the true peak is at
+    least the sample peak. Not approximately, not usually: a lower bound. A
+    meter that reads below it is reporting less than the file plainly
+    contains, and `MixReportPanel` turns that number into "no headroom
+    problem" above minus one and a clipping warning above zero.
+
+    This is where the standard's own coefficients let the meter down, so the
+    check is run first against a reading built from the interpolator alone,
+    and has to catch it. If that reading ever stops violating the bound then
+    something about the filter has changed and this check has stopped meaning
+    anything. */
+static void theReadingIsNeverBelowTheSamplePeak()
+{
+    std::printf ("the reading is never below the largest sample\n");
+
+    // A single full scale sample with silence around it: a click, or the tip
+    // of a tight transient. The interpolator alone reads the centre tap,
+    // 0.97216796875, which is 0.245 dB below a sample the file contains.
+    {
+        std::vector<float> lone (64, 0.0f);
+        lone[20] = 1.0f;
+
+        const double interpolatorOnly = toDb (referenceReconstructionOnly (lone, lone.size()));
+        const double detector         = measure (lone);
+
+        check (interpolatorOnly < -0.2,
+               "the interpolator alone no longer under-reads a lone full scale sample, so "
+               "this check can no longer fail: it read " + std::to_string (interpolatorOnly));
+
+        check (std::abs (interpolatorOnly - toDb (0.97216796875)) < 1e-6,
+               "the interpolator alone read " + std::to_string (interpolatorOnly)
+               + " dBTP on a lone full scale sample, which should be the centre tap");
+
+        check (detector >= -1e-6,
+               "a lone full scale sample read " + std::to_string (detector)
+               + " dBTP, below the 0.0 dBFS the signal actually contains");
+
+        std::printf ("    lone full scale sample: interpolator alone %+.4f dBTP, "
+                     "detector %+.4f dBTP\n", interpolatorOnly, detector);
+    }
+
+    // The same fault on a steady tone. 16 kHz at 48 kHz is three samples a
+    // cycle, and starting at 90 degrees puts a sample exactly on every third
+    // crest, so the sample peak is full scale and the phase grid straddles
+    // it a quarter sample either side with the two phases that are 0.238 dB
+    // light.
+    {
+        const int N = 4800;
+        std::vector<float> tone ((size_t) N);
+        for (int i = 0; i < N; ++i)
+            tone[(size_t) i] = (float) std::sin (2.0 * pi * 16000.0 * i / 48000.0 + pi / 2.0);
+
+        const double interpolatorOnly = toDb (referenceReconstructionOnly (tone, tone.size()));
+        const double detector         = measure (tone);
+
+        check (interpolatorOnly < -0.2,
+               "the interpolator alone no longer under-reads a 16 kHz tone sampled on its "
+               "crests: it read " + std::to_string (interpolatorOnly));
+
+        check (detector >= samplePeakDb (tone) - 1e-6,
+               "a 16 kHz tone sampled on its crests read " + std::to_string (detector)
+               + " dBTP against a sample peak of " + std::to_string (samplePeakDb (tone)));
+
+        std::printf ("    16 kHz on its crests:   interpolator alone %+.4f dBTP, "
+                     "detector %+.4f dBTP\n", interpolatorOnly, detector);
+    }
+
+    // And then across the band, because the two cases above are chosen and
+    // the awkward ones are the ones nobody would think to write down. Every
+    // frequency against every start phase: the reading may never sit below
+    // the sample peak, and the detector may never read below the
+    // interpolator either, since it is a maximum over both.
+    {
+        double worstGap = 0.0;
+        double atFrequency = 0.0, atPhase = 0.0;
+
+        for (int f = 1; f <= 120; ++f)
+        {
+            const double frequency = f * 200.0;
+
+            for (int k = 0; k < 16; ++k)
+            {
+                const double startPhase = k * 2.0 * pi / 16.0;
+                const int N = 600;
+
+                std::vector<float> tone ((size_t) N);
+                for (int i = 0; i < N; ++i)
+                    tone[(size_t) i] = (float) std::sin (2.0 * pi * frequency * i / 48000.0
+                                                         + startPhase);
+
+                const double gap = measure (tone) - samplePeakDb (tone);
+
+                if (gap < worstGap)
+                {
+                    worstGap    = gap;
+                    atFrequency = frequency;
+                    atPhase     = startPhase * 180.0 / pi;
+                }
+            }
+        }
+
+        check (worstGap > -1e-6,
+               "over 1920 tones the reading sat " + std::to_string (-worstGap)
+               + " dB below the sample peak, worst at " + std::to_string (atFrequency)
+               + " Hz starting at " + std::to_string (atPhase) + " degrees");
+
+        std::printf ("    1920 tones across the band: worst reading below the sample "
+                     "peak %.6f dB\n", -worstGap);
+    }
 }
 
 static void steadySignalsAreNotInflated()
@@ -361,8 +612,10 @@ int main()
 
     filterMatchesTheStandard();
     theTableIsSelfConsistent();
+    theHeaderHoldsThePublishedTable();
     ebuComplianceCases();
     findsWhatASamplePeakMeterCannot();
+    theReadingIsNeverBelowTheSamplePeak();
     steadySignalsAreNotInflated();
     silenceAndResetBehave();
 
