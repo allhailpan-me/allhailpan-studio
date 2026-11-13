@@ -91,14 +91,6 @@ static const double publishedTable[12][4] =
     { -0.0083007812500, -0.0189208984375, -0.0291748046875,  0.0017089843750 }
 };
 
-/** A direct reading of the published table: the obvious, slow implementation,
-    written straight from the document's layout rather than from the header.
-
-    The header stores the same numbers reversed and grouped by phase, because
-    that is what makes its inner loop a forward walk. That rearrangement is
-    exactly the kind of thing that is easy to get subtly wrong and impossible
-    to see by reading, so it is checked against this, which has no
-    rearrangement in it at all. */
 /** What the interpolator alone reaches at one sample: the largest of its four
     phase outputs there. Written from the document's layout, with no
     rearrangement in it at all. */
@@ -170,14 +162,22 @@ static void filterMatchesTheStandard()
 
     for (size_t n = 0; n < signal.size(); ++n)
     {
-        // Compared sample by sample and not as a running maximum. A running
-        // maximum only changes when a record is set, so a phase that is
-        // never evaluated can go unnoticed for as long as some other phase
-        // happens to match or beat it: dropping one of the four passed the
-        // whole of this file when the comparison was written that way, on a
-        // four thousand sample signal, by luck of that signal. Every sample
-        // is now its own assertion and there are two hundred thousand of
-        // them.
+        // Compared sample by sample and not as a running maximum, and the
+        // reason is a lesson about this change rather than about the old
+        // test. A running maximum only moves when a record is set. Taking
+        // the sample's own magnitude into the reading raised the floor of
+        // both sides to the signal's sample peak, and on a full scale random
+        // signal that is most of the way to the largest reconstruction
+        // there is, so records that only one phase could set stopped being
+        // records. Dropping one of the four phases then passed, where the
+        // same comparison without the seed had caught all four by margins of
+        // 0.02 to 0.13. The fix made the test weaker, and nothing about the
+        // fix said so.
+        //
+        // Every sample is its own assertion now, and there are two hundred
+        // thousand rather than four thousand. It also costs less, because the
+        // reference is no longer recomputed from the start of the signal for
+        // every sample.
         //
         // Exactly equal, not close. Every coefficient is a multiple of
         // 1/8192 and every sample is a float, so each product needs 37 of
@@ -190,6 +190,16 @@ static void filterMatchesTheStandard()
         // accumulating in single precision disagrees on one sample in three,
         // and rounding only the products to single precision on one in six.
         // Under the old tolerance of a millionth both passed.
+        //
+        // What makes it exact is the cast, not the products. Exact products
+        // do not make an exact sum, and for arbitrary float windows the two
+        // summation orders here do differ in double about one time in twelve.
+        // The samples below are multiples of 2^-31 and the numerators are
+        // under 2^13, so every phase sum is a multiple of 2^-44 bounded by
+        // two and needs 46 of the 53 bits: no rounding happens at all, and
+        // the 29 bits of slack in the final cast to float would absorb it if
+        // it did. So changing the signal generator to something that is not
+        // a multiple of a power of two is safe, but only by that margin.
         if (detector.process (signal[n]) != (float) referenceAt (signal, n))
         {
             if (mismatches == 0)
@@ -489,16 +499,20 @@ static void theReadingIsNeverBelowTheSamplePeak()
                      "detector %+.4f dBTP\n", interpolatorOnly, detector);
     }
 
-    // The same fault on a steady tone. 16 kHz at 48 kHz is three samples a
-    // cycle, and starting at 90 degrees puts a sample exactly on every third
-    // crest, so the sample peak is full scale and the phase grid straddles
-    // it a quarter sample either side with the two phases that are 0.238 dB
-    // light.
+    // The same fault on a steady tone, and with the file's own taper on it,
+    // because without one the reading is the tone's switch-on step rather
+    // than the tone: untapered this read -0.236 and the tone itself is at
+    // -0.265.
+    //
+    // 16 kHz at 48 kHz is three samples a cycle, and starting at 90 degrees
+    // puts a sample exactly on every crest. The nearest grid points to a
+    // sample instant are an eighth of a sample either side, which at 16 kHz
+    // is 15 degrees of the wave, so cos 15 degrees is -0.30 dB and the
+    // passband gain of the phases that land there gives +0.02 of it back.
+    // Those are phases 0 and 3, the two whose gain is slightly over one: the
+    // 0.238 dB deficit on the other two plays no part here.
     {
-        const int N = 4800;
-        std::vector<float> tone ((size_t) N);
-        for (int i = 0; i < N; ++i)
-            tone[(size_t) i] = (float) std::sin (2.0 * pi * 16000.0 * i / 48000.0 + pi / 2.0);
+        const auto tone = taperedTone (1.0 / 3.0, 1.0, 90.0, 4800);
 
         const double interpolatorOnly = toDb (referenceReconstructionOnly (tone, tone.size()));
         const double detector         = measure (tone);
@@ -517,11 +531,20 @@ static void theReadingIsNeverBelowTheSamplePeak()
 
     // And then across the band, because the two cases above are chosen and
     // the awkward ones are the ones nobody would think to write down. Every
-    // frequency against every start phase: the reading may never sit below
-    // the sample peak, and the detector may never read below the
-    // interpolator either, since it is a maximum over both.
+    // frequency against every start phase, tapered for the same reason as
+    // above: untapered, the switch-on step put these readings up to 0.64 dB
+    // above the true peak and the sweep could say nothing about the upward
+    // direction at all.
+    //
+    // Both directions are asserted, and only one of them can fail. Below the
+    // sample peak is now arithmetically impossible, since the reading is a
+    // maximum that the sample peak is one of the terms of, so that half is
+    // here to fail if the seed is ever removed or damaged rather than to
+    // discover anything. Above the true peak is the half that is real, and it
+    // is the direction EBU Tech 3341 is strict in.
     {
-        double worstGap = 0.0;
+        double worstLow  = 0.0;
+        double worstHigh = -200.0;
         double atFrequency = 0.0, atPhase = 0.0;
 
         for (int f = 1; f <= 120; ++f)
@@ -530,33 +553,97 @@ static void theReadingIsNeverBelowTheSamplePeak()
 
             for (int k = 0; k < 16; ++k)
             {
-                const double startPhase = k * 2.0 * pi / 16.0;
-                const int N = 600;
+                const double startPhase = k * 360.0 / 16.0;
+                const auto tone = taperedTone (frequency / 48000.0, 1.0, startPhase, 1600);
 
-                std::vector<float> tone ((size_t) N);
-                for (int i = 0; i < N; ++i)
-                    tone[(size_t) i] = (float) std::sin (2.0 * pi * frequency * i / 48000.0
-                                                         + startPhase);
+                const double reading = measure (tone);
 
-                const double gap = measure (tone) - samplePeakDb (tone);
-
-                if (gap < worstGap)
+                // A full scale sine reaches exactly full scale between its
+                // samples whatever its phase, so its true peak is 0 dBTP and
+                // the reading against it is the error.
+                if (reading > worstHigh)
                 {
-                    worstGap    = gap;
+                    worstHigh   = reading;
                     atFrequency = frequency;
-                    atPhase     = startPhase * 180.0 / pi;
+                    atPhase     = startPhase;
                 }
+
+                worstLow = std::min (worstLow, reading - samplePeakDb (tone));
             }
         }
 
-        check (worstGap > -1e-6,
-               "over 1920 tones the reading sat " + std::to_string (-worstGap)
-               + " dB below the sample peak, worst at " + std::to_string (atFrequency)
-               + " Hz starting at " + std::to_string (atPhase) + " degrees");
+        check (worstLow > -1e-6,
+               "over 1920 tones the reading sat " + std::to_string (-worstLow)
+               + " dB below the sample peak");
 
-        std::printf ("    1920 tones across the band: worst reading below the sample "
-                     "peak %.6f dB\n", -worstGap);
+        // 0.222 dB is the standard's own passband ripple and nothing here may
+        // quietly exceed it. It is worth knowing that this is more than EBU
+        // Tech 3341's +0.2 dBTP allows, and that no test case of theirs lands
+        // near the frequency where it happens, so the suite passes and a
+        // steady tone at 12.2 kHz still reads high. That is a property of the
+        // coefficients the recommendation prints. The answer is not to
+        // rescale them, because then they stop being the ones every other
+        // meter uses.
+        check (worstHigh < 0.25,
+               "a full scale tone read " + std::to_string (worstHigh)
+               + " dBTP, above the 0.222 dB the standard's own ripple accounts for, at "
+               + std::to_string (atFrequency) + " Hz starting at "
+               + std::to_string (atPhase) + " degrees");
+
+        std::printf ("    1920 tones across the band: worst %.6f dB below the sample peak, "
+                     "worst %+.4f dBTP against a true peak of 0, at %.0f Hz\n",
+                     -worstLow, worstHigh, atFrequency);
     }
+}
+
+/** Where that ripple comes from, computed from the table rather than heard
+    through it.
+
+    The sweep above walks a 200 Hz grid and so lands near the worst frequency
+    without landing on it. This takes the magnitude response of each phase
+    straight from the document's coefficients, which pins the figure the
+    header quotes to the Hertz and would notice any change to the table that
+    the readings happened to step over. */
+static void thePerPhaseRippleIsTheStandardsOwn()
+{
+    std::printf ("the passband ripple is the one the published coefficients have\n");
+
+    double worst = -200.0;
+    int    atFrequency = 0;
+    int    onPhase = -1;
+
+    for (int f = 0; f <= 20000; ++f)
+    {
+        const double omega = 2.0 * pi * f / 48000.0;
+
+        for (int phase = 0; phase < 4; ++phase)
+        {
+            double re = 0.0, im = 0.0;
+
+            for (int k = 0; k < 12; ++k)
+            {
+                re += publishedTable[k][phase] * std::cos (-omega * k);
+                im += publishedTable[k][phase] * std::sin (-omega * k);
+            }
+
+            const double gain = toDb (std::sqrt (re * re + im * im));
+
+            if (gain > worst)
+            {
+                worst       = gain;
+                atFrequency = f;
+                onPhase     = phase;
+            }
+        }
+    }
+
+    check (std::abs (worst - 0.2220) < 0.0001 && atFrequency == 12146 && onPhase == 2,
+           "the largest per phase gain is " + std::to_string (worst) + " dB at "
+           + std::to_string (atFrequency) + " Hz on phase " + std::to_string (onPhase)
+           + ", not 0.2220 dB at 12146 Hz on phase 2");
+
+    std::printf ("    largest per phase gain %+.4f dB at %d Hz, on phase %d\n",
+                 worst, atFrequency, onPhase);
 }
 
 static void steadySignalsAreNotInflated()
@@ -632,6 +719,7 @@ int main()
     ebuComplianceCases();
     findsWhatASamplePeakMeterCannot();
     theReadingIsNeverBelowTheSamplePeak();
+    thePerPhaseRippleIsTheStandardsOwn();
     steadySignalsAreNotInflated();
     silenceAndResetBehave();
 

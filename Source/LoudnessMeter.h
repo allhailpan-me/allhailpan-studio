@@ -41,8 +41,9 @@
 
     Verified in `Tests/LoudnessMeterTest.cpp` against the K-weighting
     coefficients BS.1770-4 tabulates and against EBU Tech 3341 compliance
-    cases 1, 2, 3 and 9. Cases 15 to 19, which are the peak ones, are run
-    against the detector itself in `Tests/TruePeakTest.cpp`.
+    cases 1, 2, 3 and 9. The peak cases are 15 to 23, of which 15 to 19 are
+    run against the detector itself in `Tests/TruePeakTest.cpp`; 20 to 23 are
+    not, for the reason recorded there.
 */
 class LoudnessMeter
 {

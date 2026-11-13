@@ -37,9 +37,12 @@
     -0.265 dBTP. Both are below a peak the file plainly contains.
 
     That is the shape of fault this meter has had before, and it reached the
-    owner: `MixReportPanel` warns above 0 dBTP and cautions above minus one,
-    so a master limited to exactly full scale could be reported as having
-    headroom it does not have. Seeding the maximum with the sample's own
+    owner: `MixReportPanel` warns above 0 dBTP and cautions above minus one.
+    Being worth 0.265 dB, the under-read flipped that verdict for a master
+    whose samples peak between about -1.0 and -0.74 dBFS, which read as
+    under minus one and so as having headroom it did not have. It never hid a
+    master that was already over, which is the one mercy in it.
+    Seeding the maximum with the sample's own
     magnitude cannot ever push the reading above the true peak, because the
     sample peak is below it by the same theorem, so it removes an under-read
     and risks no over-read.
@@ -64,7 +67,8 @@
     needs proportionately less oversampling, so an unconditional 4x is right
     at 44.1 and 48 kHz and more than is needed above that. It is kept
     unconditional because a branch on sample rate is a branch that can be
-    wrong, and the cost of the extra phases is four multiply-accumulates.
+    wrong, and dropping to the 2x that would do above 48 kHz would save two
+    phases of four, which is 24 multiply-accumulates a sample a channel.
 
     No allocation and no branching on sample rate, so this is safe to run from
     the device callback.
@@ -96,8 +100,9 @@ public:
         // The reconstruction passes through the stored samples, so the true
         // peak is never below the sample peak. The standard's own phases all
         // land strictly between input samples and so never see this value;
-        // leaving it out is an under-read of up to 0.265 dB on exactly the
-        // material a mastering engineer is checking.
+        // leaving it out measured 0.265 dB low on a full scale tone sampled
+        // on its crests, which is the material a mastering engineer is
+        // checking.
         float peak = std::abs (x);
 
         for (int phase = 0; phase < phases; ++phase)
@@ -134,13 +139,21 @@ public:
     /** One coefficient, in the layout the recommendation prints: row 0 to 11
         down the page, phase 0 to 3 across it.
 
-        Public because the table is the specification, and the only check that
-        pins it is a comparison against the document value by value. Going
-        through the filter's output cannot do that: a digit mistyped in the
-        smallest coefficient moves a reading by less than a millionth, which
-        is under the floor any output comparison can have. Exposed in the
-        document's layout rather than the stored one so that the reversal is
-        checked along with the values. */
+        Public so that the test can compare the stored table against the
+        document in the document's own layout. What that catches, and nothing
+        else does, is the rearrangement: each row reversed, or the four rows
+        in another order, leaves every reading bit for bit identical for the
+        symmetry reason given below, so the output cannot see it. The values
+        themselves are pinned by the output comparison, which is exact, and
+        catches a single coefficient moved by one float ulp.
+
+        That makes this accessor the one check on the half of the table that
+        is a convention rather than a number, which is worth having precisely
+        because a convention nothing checks is where the next reader's
+        rearrangement goes wrong.
+
+        Rows run 0 to 11 and phases 0 to 3. Out of range is out of bounds:
+        only the test calls this, and it walks the table. */
     static constexpr float published (int row, int phase) noexcept
     {
         return coefficients[(size_t) phase][(size_t) (taps - 1 - row)];
@@ -157,8 +170,8 @@ private:
 
         The table is unnumbered and uncaptioned in the recommendation, named
         only by its four column headings. It is not Table 3, which is the
-        channel weightings in Annex 1, and three places in this repository
-        used to say it was.
+        channel weightings in Annex 1, and two places in this repository used
+        to say it was.
 
         Storing it reversed, and walking the history forwards, are two halves
         of one convention and neither is load bearing on its own. The 48 taps
