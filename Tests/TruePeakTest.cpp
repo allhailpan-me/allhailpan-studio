@@ -99,39 +99,49 @@ static const double publishedTable[12][4] =
     exactly the kind of thing that is easy to get subtly wrong and impossible
     to see by reading, so it is checked against this, which has no
     rearrangement in it at all. */
-static double referenceReconstructionOnly (const std::vector<float>& signal, size_t upTo)
+/** What the interpolator alone reaches at one sample: the largest of its four
+    phase outputs there. Written from the document's layout, with no
+    rearrangement in it at all. */
+static double referenceReconstructionAt (const std::vector<float>& signal, size_t n)
 {
     double peak = 0.0;
 
-    for (size_t n = 0; n < upTo; ++n)
+    for (int phase = 0; phase < 4; ++phase)
     {
-        for (int phase = 0; phase < 4; ++phase)
-        {
-            double acc = 0.0;
+        double acc = 0.0;
 
-            // y_p[n] = sum over k of h_p[k] * x[n - k], with h_p[k] the
-            // table's row k, column p.
-            for (int k = 0; k < 12; ++k)
-                if (n >= (size_t) k)
-                    acc += publishedTable[k][phase] * (double) signal[n - (size_t) k];
+        // y_p[n] = sum over k of h_p[k] * x[n - k], with h_p[k] the
+        // table's row k, column p.
+        for (int k = 0; k < 12; ++k)
+            if (n >= (size_t) k)
+                acc += publishedTable[k][phase] * (double) signal[n - (size_t) k];
 
-            peak = std::max (peak, std::abs (acc));
-        }
+        peak = std::max (peak, std::abs (acc));
     }
 
     return peak;
 }
 
-/** What the detector must produce: the reconstruction and the samples
-    themselves, because the reconstruction passes through them. */
-static double referenceTruePeak (const std::vector<float>& signal, size_t upTo)
+/** What a meter built from the interpolator alone would report over a whole
+    signal. Kept because it is the behaviour this meter used to have, and
+    `theReadingIsNeverBelowTheSamplePeak` needs something known to be wrong to
+    point itself at. */
+static double referenceReconstructionOnly (const std::vector<float>& signal, size_t upTo)
 {
-    double peak = referenceReconstructionOnly (signal, upTo);
+    double peak = 0.0;
 
     for (size_t n = 0; n < upTo; ++n)
-        peak = std::max (peak, (double) std::abs (signal[n]));
+        peak = std::max (peak, referenceReconstructionAt (signal, n));
 
     return peak;
+}
+
+/** What the detector must return for one sample: the reconstruction around it
+    and the sample's own magnitude, because the reconstruction passes through
+    the samples. */
+static double referenceAt (const std::vector<float>& signal, size_t n)
+{
+    return std::max (referenceReconstructionAt (signal, n), (double) std::abs (signal[n]));
 }
 
 static void filterMatchesTheStandard()
@@ -141,7 +151,7 @@ static void filterMatchesTheStandard()
     // A signal with content everywhere, so every tap and every phase is
     // exercised and nothing cancels by luck. Deterministic, so a failure is
     // reproducible.
-    std::vector<float> signal (4096);
+    std::vector<float> signal (200000);
     unsigned state = 2463534242u;
 
     for (auto& s : signal)
@@ -155,26 +165,32 @@ static void filterMatchesTheStandard()
     TruePeakDetector detector;
     detector.reset();
 
-    float  running = 0.0f;
     size_t mismatches = 0;
     size_t firstAt = 0;
 
     for (size_t n = 0; n < signal.size(); ++n)
     {
-        running = std::max (running, detector.process (signal[n]));
-
+        // Compared sample by sample and not as a running maximum. A running
+        // maximum only changes when a record is set, so a phase that is
+        // never evaluated can go unnoticed for as long as some other phase
+        // happens to match or beat it: dropping one of the four passed the
+        // whole of this file when the comparison was written that way, on a
+        // four thousand sample signal, by luck of that signal. Every sample
+        // is now its own assertion and there are two hundred thousand of
+        // them.
+        //
         // Exactly equal, not close. Every coefficient is a multiple of
         // 1/8192 and every sample is a float, so each product needs 37 of
         // double's 53 bits and is exact, and twelve of them at audio
         // magnitudes still are. The only rounding anywhere is the single cast
-        // to float on the way out, and rounding commutes with a maximum, so
-        // the detector's float has to be the correctly rounded form of the
-        // reference's double. That is what makes this a check on the
-        // arithmetic the header says it does rather than a check with a
-        // tolerance somebody can widen: accumulating the same sum in single
-        // precision disagrees on 4495 samples of 8192, and rounding only the
-        // products to single precision disagrees on 493.
-        if (running != (float) referenceTruePeak (signal, n + 1))
+        // to float on the way out, so the detector's float has to be the
+        // correctly rounded form of the reference's double. That is what
+        // makes this a check on the arithmetic the header says it does
+        // rather than a check with a tolerance somebody can widen:
+        // accumulating in single precision disagrees on one sample in three,
+        // and rounding only the products to single precision on one in six.
+        // Under the old tolerance of a millionth both passed.
+        if (detector.process (signal[n]) != (float) referenceAt (signal, n))
         {
             if (mismatches == 0)
                 firstAt = n;
@@ -185,8 +201,8 @@ static void filterMatchesTheStandard()
 
     check (mismatches == 0,
            "the detector and the published table disagree on "
-           + std::to_string (mismatches) + " samples, first at "
-           + std::to_string (firstAt));
+           + std::to_string (mismatches) + " of " + std::to_string (signal.size())
+           + " samples, first at " + std::to_string (firstAt));
 }
 
 /** Properties of the published table that a transcription error breaks.
