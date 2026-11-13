@@ -461,6 +461,18 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("grooveVelocity", project.groove.velocity);
     root.setAttribute ("grooveRandom", project.groove.random);
 
+    // A feel read out of a performance, if there is one. Written as its own
+    // attribute rather than as a bump of the format version, the way autoFade
+    // below is: a build that does not know about it ignores it and opens the
+    // project with the swing it does understand, where bumping the version
+    // would make that build refuse the file outright. Losing a feel is worse
+    // than keeping it and better than not opening the song at all.
+    //
+    // The text is built in GrooveTemplate.h rather than here, because that is
+    // where it can be round tripped by a test that runs in a second.
+    if (! project.groove.feel.isEmpty())
+        root.setAttribute ("grooveFeel", juce::String (project.groove.feel.toString()));
+
     // The automatic de-click fade length. What makes a project written by an
     // older build open sensibly is the default on the load side rather than
     // anything here, since an older build cannot write this attribute at all.
@@ -799,6 +811,12 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     project.groove.amount   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveAmount", 1.0));
     project.groove.velocity = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveVelocity", 0.0));
     project.groove.random   = juce::jlimit (0.0, 1.0, root->getDoubleAttribute ("grooveRandom", 0.0));
+
+    // Anything the parser does not like comes back empty, which leaves the
+    // project with the swing number it also saved rather than with a feel
+    // that is partly somebody else's.
+    project.groove.feel = GrooveTemplate::fromString (
+        root->getStringAttribute ("grooveFeel").toStdString());
 
     // A project written before fades existed has no attribute here and gets
     // the default, so every old project opens de-clicked. The upper bound is

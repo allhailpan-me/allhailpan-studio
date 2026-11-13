@@ -65,6 +65,12 @@ public:
         };
         addAndMakeVisible (feelBox);
 
+        addButton (feelFrom, "Feel from a part...",
+                   "Take the timing and the accents out of a part somebody played, "
+                   "and put them on the steps here. Reads the part at the step "
+                   "resolution above, so a feel read at sixteenths swings sixteenths.");
+        feelFrom.onClick = [this] { showFeelMenu(); };
+
         addButton (clearAll, "Clear", "Erase every step in this pattern");
         clearAll.onClick = [this]
         {
@@ -142,6 +148,15 @@ public:
 
         const int feelIndex = project.groove.random >= 0.3 ? 2 : project.groove.velocity > 0.0 ? 1 : 0;
         feelBox.setSelectedId (feelIndex + 1, juce::dontSendNotification);
+
+        // A loaded feel supplies the timing in place of the swing number, so
+        // leaving the swing control live would offer a choice that does
+        // nothing. It is switched off rather than hidden, so that what is
+        // going on is visible rather than mysterious.
+        const bool hasFeel = ! project.groove.feel.isEmpty();
+        feelFrom.setButtonText (hasFeel ? "Feel: from a part" : "Feel from a part...");
+        swingBox.setEnabled (! hasFeel);
+
         repaint();
     }
 
@@ -243,6 +258,8 @@ public:
         auto top = r.removeFromTop (30).reduced (6, 4);
 
         clearAll.setBounds (top.removeFromRight (64));
+        top.removeFromRight (6);
+        feelFrom.setBounds (top.removeFromRight (136));
         top.removeFromRight (6);
         feelBox.setBounds (top.removeFromRight (104));
         top.removeFromRight (6);
@@ -445,10 +462,132 @@ private:
         return juce::MidiMessage::getMidiNoteName (note, true, true, 4);
     }
 
+    /** Every MIDI clip in the song, as somewhere a feel could be read from.
+        Named by where it is rather than by an index, because an index means
+        nothing to somebody looking at an arrangement. */
+    void showFeelMenu()
+    {
+        // Out of the range the clip items can reach, and disabled anyway, but
+        // the bounds check below is what actually makes it unreachable.
+        static constexpr int kNothingToOffer = 1'000'000;
+
+        juce::PopupMenu menu;
+
+        if (! project.groove.feel.isEmpty())
+        {
+            menu.addItem (1, "No feel (go back to the swing)");
+            menu.addSeparator();
+        }
+
+        menu.addSectionHeader ("Take the feel from");
+
+        std::vector<int> offered;
+
+        for (int i = 0; i < (int) project.clips.size(); ++i)
+        {
+            const auto& c = project.clips[(std::size_t) i];
+
+            if (! c.isMidi() || c.pattern == nullptr || c.pattern->notes.empty())
+                continue;
+
+            juce::String what = "Bar " + juce::String ((int) (c.start / 4.0) + 1);
+
+            if (! project.channels.empty())
+            {
+                const int channel = juce::jlimit (0, (int) project.channels.size() - 1, c.channel);
+
+                if (project.channels[(std::size_t) channel].name.isNotEmpty())
+                    what += ", " + project.channels[(std::size_t) channel].name;
+            }
+
+            offered.push_back (i);
+            menu.addItem ((int) offered.size() + 1, what);
+        }
+
+        if (offered.empty())
+            menu.addItem (kNothingToOffer, "Nothing recorded yet", false, false);
+
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (feelFrom),
+                            [this, offered] (int choice)
+        {
+            if (choice == 0)
+                return;
+
+            Groove g = project.groove;
+
+            if (choice == 1)
+            {
+                g.feel = {};
+            }
+            else
+            {
+                const int which = choice - 2;
+
+                if (which < 0 || which >= (int) offered.size())
+                    return;
+
+                const int index = offered[(std::size_t) which];
+
+                // The clips can have moved while the menu was open, since it
+                // is asynchronous. Checking the index still points at a MIDI
+                // clip is cheaper than holding a reference that could dangle.
+                if (index < 0 || index >= (int) project.clips.size())
+                    return;
+
+                const auto& c = project.clips[(std::size_t) index];
+
+                if (! c.isMidi() || c.pattern == nullptr)
+                    return;
+
+                g.feel = feelOf (c);
+
+                if (g.feel.isEmpty())
+                    return;
+
+                // Reading a feel is asking for it, so it is switched on. The
+                // velocity and random knobs are left where they were: they
+                // mean the same thing with a feel loaded as without one.
+                g.enabled = true;
+            }
+
+            project.setGroove (g);
+            commit();
+        });
+    }
+
+    /** Reads a clip's feel at the resolution the rack is showing.
+
+        Only the stretch of the pattern this clip actually plays, which is
+        Ableton's rule for extraction: a groove "will only consider the
+        material in the playing portion of the clip". The template is as long
+        as the clip rather than as its last note, so a part that ends with a
+        rest still repeats on the bar instead of walking forward by that rest
+        every time round. */
+    GrooveTemplate feelOf (const Clip& c) const
+    {
+        const double slot = project.rackStepsPerBar >= 32 ? 0.125
+                          : project.rackStepsPerBar >= 16 ? 0.25
+                                                          : 0.5;
+
+        std::vector<GrooveTemplate::SourceNote> notes;
+
+        for (const auto& n : c.pattern->notes)
+        {
+            const double at = n.start - c.offset;
+
+            if (at < 0.0 || at >= c.length)
+                continue;
+
+            notes.push_back ({ at, n.velocity, n.note });
+        }
+
+        return GrooveTemplate::extract (std::move (notes), c.length, slot);
+    }
+
     Project&     project;
     AudioEngine& engine;
 
-    juce::TextButton clearAll, prevBar { "<" }, nextBar { ">" };
+    juce::TextButton clearAll, feelFrom, prevBar { "<" }, nextBar { ">" };
     juce::ComboBox   stepsBox, barsBox, swingBox, feelBox;
     juce::Label      positionLabel;
 
