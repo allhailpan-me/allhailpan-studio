@@ -7,6 +7,26 @@ Newest first.
 
 ---
 
+## 2026-11-13: the true peak meter, the number that says whether a master is safe
+
+### What is being audited
+
+`Source/TruePeak.h` and `Tests/TruePeakTest.cpp`. The meter is the one number
+in the mix report that decides whether the owner is told his master clips:
+`MixReportPanel.h` warns above 0 dBTP and cautions above minus one. CLAUDE.md
+records that this file once read the largest sample instead of oversampling,
+three decibels low on exactly the material where it matters, so it is already
+on the list of things that were present, plausible and wrong.
+
+Not audited before tonight. Nothing in the open pull requests touches either
+file.
+
+### In progress
+
+- The specification has been read rather than recalled: ITU-R BS.1770-4
+  Annex 2 and EBU Tech 3341 v4.0.
+- Next: verify the researcher's findings locally, then mutation test.
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
