@@ -56,6 +56,196 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-13: a groove taken from one performance and applied to another
+
+The roadmap has carried "groove taken from one performance and applied to
+another, which is the useful half of what a groove pool is for" for a while, and
+`CLAUDE.md` names the same thing: "the useful part is that a feel can be
+extracted from one performance and applied to another". The parametric half
+exists and is tested: `Groove.h` carries the MPC swing number, a base
+resolution, a timing amount, a velocity amount and a randomise amount. What it
+cannot do is the thing a groove pool is for. A pattern programmed on the grid
+can be swung by a percentage; it cannot be made to sit the way a part somebody
+actually played sits.
+
+Chosen over the alternatives mostly because of where the open pull requests
+were. Seven hardening branches were open against `Source/Project.h`,
+`MainComponent.cpp`, both editors, `Meter.h`, `RecordAlign.h`, `Punch.h`,
+`LatencyGraph.h`, `Envelope.h`, `Spectrogram.h` and two files in `Source/Fx`,
+and `Source/Synth` and `Source/Fx` are being built by hand. `Groove.h` is
+untouched by any of them, `Project.h` holds the groove by value so new fields
+inside `Groove` reach the undo history, `clearAll` and the equality check
+without `Project.h` changing a line, and `ProjectIO.cpp` and
+`ChannelRackComponent.h` are both clear. So the one roadmap item that could be
+built properly tonight is also the one the roadmap ranks highest among the
+things that are not screenshots or undo history.
+
+### What the research found, and the one place the studios disagree
+
+Full report from the `dsp-researcher` agent, from the manufacturers' own
+manuals rather than from memory. The sources are listed at the end of this
+entry. The useful findings:
+
+**The central disagreement is whether applying a groove is a quantisation
+toward the groove's own positions, or the groove's deviation added to the
+note's existing position.** Pro Tools, Cubase, Logic and Cakewalk are
+target based: the template is a grid, the note moves to it, and the percentage
+is how far along that journey it travels. Ableton is deviation based. The
+wording that settles Ableton, from the Live 12 manual section 14.1.1, is not
+the sentence about moving notes "proportionally towards the positions of the
+groove notes", which reads as target based; it is the one after it: "Notes in
+the groove that fall exactly on the grid aren't moved at all, so the
+corresponding notes in your clips will also not be moved." Under a target
+model a clip note sitting off the grid, with a groove note sitting on the grid,
+would be pulled to the grid. Live says it is not moved. That is only true if
+what the groove contributes is the groove note's own deviation from its nearest
+base grid point, which in that case is zero.
+
+The practical difference is the whole point of the feature. Target based
+tightens a loose part onto the donor's feel and destroys the recipient's own
+timing: that is a quantiser with a crooked grid. Deviation based keeps the
+recipient's timing and adds the donor's push and drag on top. They differ most
+on exactly the material a groove feature is for.
+
+**The two models are not exclusive.** A straight quantise to the base grid
+followed by the full deviation lands the note exactly on the groove's position,
+which is the target model exactly. Live exposes that first step as a separate
+Quantize amount and says outright that it is "applied before the groove is
+applied". So choosing deviation does not give up the other behaviour, it just
+requires the quantise to be asked for separately.
+
+**What a template is, as data.** Every published format that states what it
+stores, stores offsets rather than positions: the DNA templates store "offsets
+from the quantize points", and Live derives them from the live Base setting.
+DNA pins its own numbers: two bars, 4/4, sixteenths, 192 ticks per quarter,
+timing offsets plus a velocity map, no note lengths. Pro Tools' templates carry
+timing, duration and velocity; Live's carry timing and volume; whether Logic's
+carry velocity is not settled by Apple's own documentation, which describes the
+template as timing deviations and then describes Q-Velocity as reading a
+"template MIDI region", which may be a different mechanism.
+
+**Logic's collision rule is a specification and we need it.** When several
+notes fall at the same musical position, "only the first will be evaluated for
+the groove template". Without that rule a chord with a spread voicing makes the
+slot's timing depend on which voice the loop reached first, which is a template
+that is not a function of its input.
+
+**Cakewalk's documentation is the most explicit arithmetic anybody published**
+and answers two questions nobody else does. Its window geometry: "The window
+extends half the resolution distance before and after the quantization point",
+so a window is a percentage of half the resolution and 100 per cent exactly
+tiles the line. And its four "If Outside Window" options are the documented
+answer to what happens to a note that is not near a template point: leave it,
+quantise it to the plain grid, move it to the nearest template point, or scale
+time between the two bracketing points.
+
+**Wrapping and the anchor are documented by two manufacturers who disagree.**
+Pro Tools anchors to song start: "a two-bar groove template repeats starting at
+every odd-numbered bar". Cubase exposes the anchor as a control, Orig.
+Position. Ableton and Logic document neither.
+
+**The MPC agrees with us and gives a free test.** MPC swing is the special case
+of a template whose odd slots carry a deviation of `(swing - 0.5) * 2` in
+fractions of a slot. Note the factor of two: swing is a position within a pair
+of slots, so a swing of 0.62 is 0.12 of the pair and 0.24 of one slot. Getting
+that factor wrong gives something that looks like swing, sounds like swing and
+is half the swing it claims, which is the failure the swing paragraph in
+`CLAUDE.md` exists to prevent. Logic's Q-Swing uses the same convention.
+
+### What was chosen, and what it departs from
+
+- **Deviation, following Ableton**, for the reason above: a groove that
+  destroys the recipient's own timing is a quantiser, not a groove. The comment
+  says which studios disagree and that a straight quantise followed by a full
+  deviation is their behaviour exactly.
+- **The deviation is stored, in fractions of a slot, with the slot spacing
+  stored beside it.** Live stores note positions and re-measures them against
+  whatever Base is set now, which is a genuinely nice property and is not
+  copied: this studio's base follows the channel rack's step resolution, so
+  re-measuring would mean the feel of a pattern changing silently when somebody
+  changes the rack from sixteenths to thirty-seconds. Re-extracting is one
+  click. Fractions of a slot rather than ticks because every tick figure in the
+  field is an arbitrary integer grid belonging to one host, 192 for DNA, 480
+  for Cubase, 960 for Feel Injector, 3840 a bar for Logic, and this project is
+  beat-based doubles throughout.
+- **Velocity is stored absolute and applied as a deviation from the template's
+  own mean**, which is Live's model, so a template whose accents are flat
+  contributes nothing in the same way that a groove note on the grid moves
+  nothing. The mean is a cached member recomputed by the only two functions
+  that can change the slots, in the spirit of `WarpMap.h`'s normalisation
+  discipline, and the test asserts the invariant rather than trusting it.
+- **Live's negative velocity half is deliberately not implemented.** Live's
+  slider runs to -100, which reverses the accents. Nothing in this interface
+  would reach it, and a declared capability nothing reaches is the fault this
+  project keeps meeting.
+- **The anchor is the clip's own origin**, where `Groove::place` already counts
+  its swing pairs from, rather than Pro Tools' song start. A song-start anchor
+  means dragging a clip one bar changes its feel, which in a studio with a
+  draggable playlist is a bug report waiting to happen.
+- **An empty slot contributes no deviation**, which is Cakewalk's "Do Not
+  Change". Its "Scale Time", interpolating between the bracketing filled slots,
+  is the musically interesting option for a sparse donor and is not shipped:
+  giving a slot the donor never played a deviation is inventing data.
+- **The existing on-grid rule is kept for both halves rather than replaced by a
+  window parameter.** `Groove::place` already leaves anything more than 0.02 of
+  a step off the grid exactly where the performance put it. Keeping it means
+  the donor performance is not itself re-grooved, and a programmed pattern,
+  which is what the feature is for, is on the grid and gets the whole of it. It
+  also means this studio does not grow a second thing that straightens notes:
+  `Quantise.h` is the one that does that, and Live's Quantize amount is the
+  same step folded into the groove.
+- **No note lengths.** The least agreed dimension of the four: Live does not
+  carry them, DNA explicitly did not, Logic carries them only through a
+  separate mechanism.
+
+### What was rejected, or left for later
+
+- **Extracting a groove from audio.** Live, Cubase and Pro Tools all do it, and
+  Cubase documents no other source. It needs transient detection over a take,
+  which is a feature in its own right rather than part of this one, and the
+  tempo detection and warp machinery it would share is not currently shaped for
+  it.
+- **A groove pool**: named, saved, browsable grooves independent of the
+  project, Live's actual feature. The project file stores one groove, which is
+  where the parametric one already lives, and a pool is a browser, a file
+  format and a library before it is any arithmetic.
+- **A per-clip groove assignment.** Live assigns a groove per clip; this studio
+  has one groove for the song, which is where the swing already is. Changing
+  that is `Project.h` work, and `Project.h` is in two open pull requests.
+- **Live's Quantize amount**, for the reason above: `Quantise.h` exists.
+- **Live's Global Amount**, which scales timing, random and velocity but not
+  quantize, and goes to 130 per cent. One more multiplier over three knobs
+  that already have their own; worth revisiting only if a pool arrives, which
+  is what it is for.
+- **Cubase's Max. Move and its Non-Q safe zone**, and Cakewalk's window as a
+  parameter. The fixed on-grid rule above does the same job for the one case
+  this feature has.
+- **Note lengths, and Pro Tools' Duration percentage.** Rejected for now rather
+  than deferred without a reason: Avid's own published help does not define
+  what its Timing, Duration and Velocity percentages are percentages of, the
+  full Reference Guide was not reachable, and writing a Pro Tools percentage
+  from memory is exactly what the research rule forbids.
+
+### Sources
+
+- Ableton Reference Manual, Live 12, chapter 14 "Using Grooves", sections
+  14.1.1, 14.1.2, 14.2 and 14.2.1
+- Steinberg, "Options for Quantizing to a Groove" and "Options for Quantizing
+  to a Musical Grid" (Cubase Pro 12 / Nuendo 8), and "Creating Groove Quantize
+  Presets" (Cubase AI 13)
+- Apple, Logic Pro User Guide, "Create groove templates", and Logic Pro 10.4
+  help, advanced quantization parameters
+- Avid, Pro Tools Menus Guide 10.0; Pro Tools First help on Groove Quantize,
+  Groove Templates, Groove Quantize Settings, Applying and Mapping Groove
+  Templates; Beat Detective user guide
+- Cakewalk Documentation, "Quantizing"
+- WC Music Research, README.DNA and WC.TXT, the documentation shipped with the
+  DNA Groove Templates
+- Akai MPC software user guide and MPC3000 manual, Timing Correct
+- US 7,525,036 B2, "Groove mapping" (Sony), for the piecewise map model only
+
+---
+
 ## 2026-11-10: a time signature, and what the denominator must not be allowed to touch
 
 ### Status: merged
