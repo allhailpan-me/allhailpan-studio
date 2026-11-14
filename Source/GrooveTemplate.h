@@ -362,8 +362,24 @@ private:
             // next slot along, so it cannot arise from extraction and can only
             // arrive from a file. Clamped rather than rejected: the worst a
             // clamped deviation does is move a note to the slot boundary.
+            //
+            // This is the one gate for both numbers, which is why `extract`
+            // and `fromString` can both hand over whatever they read and why
+            // the bounds are asserted of a parsed template and not only of an
+            // extracted one.
             slot.timing = std::isfinite (slot.timing) ? std::clamp (slot.timing, -0.5, 0.5) : 0.0;
             slot.velocity = std::isfinite (slot.velocity) ? std::clamp (slot.velocity, 0.0f, 1.0f) : 0.0f;
+
+            // An empty slot carries no deviation and no accent, so that
+            // "the donor played nothing here" is one state rather than two.
+            // Everything reading a slot already asks `filled` first, and this
+            // is what makes forgetting to ask harmless rather than a note
+            // moved by a number nobody set.
+            if (! slot.filled)
+            {
+                slot.timing   = 0.0;
+                slot.velocity = 0.0f;
+            }
 
             if (slot.filled)
             {

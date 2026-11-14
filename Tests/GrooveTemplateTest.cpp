@@ -425,6 +425,108 @@ static void anEmptySlotDoesNothing()
     }
 
     check (moved == 2, "fourteen of sixteen notes are left exactly where they were");
+
+    // An empty slot carries no deviation and no accent at all, not merely a
+    // `filled` flag saying to ignore whatever it carries. Everything that
+    // reads a slot asks `filled` first, so this is what makes forgetting to
+    // ask harmless instead of a note moved by a number nobody set.
+    for (int k = 0; k < feel.numSlots(); ++k)
+        if (! feel.slotFor (k).filled)
+        {
+            check (feel.slotFor (k).timing == 0.0, "an empty slot carries no deviation");
+            check (feel.slotFor (k).velocity == 0.0f, "an empty slot carries no accent");
+        }
+}
+
+//=============================================================================
+// A part's length does not have to be a whole number of steps. The playlist
+// trims a clip wherever somebody drags it, and the clip's own length is what
+// is handed over, so the slot count has to be the nearest whole number of
+// steps rather than however many fit inside it.
+//
+// Dropping the partial slot instead makes the template shorter than the part
+// it came from, so it wraps early and the feel walks forward by that fraction
+// every time round, which on a long pattern ends up as a feel nobody played.
+//=============================================================================
+static void aPartThatIsNotAWholeNumberOfStepsStillFits()
+{
+    const double step = 0.25;
+
+    struct Case { double length; int slots; const char* what; };
+
+    const Case cases[]
+    {
+        { 4.0,   16, "a bar of sixteenths is sixteen slots" },
+        { 1.2,    5, "four point eight steps rounds up to five" },
+        { 1.1,    4, "four point four steps rounds down to four" },
+        { 0.3,    1, "one point two steps is one slot" },
+        { 0.2,    1, "four fifths of a step still makes one slot" },
+        { 2.625,  11, "ten and a half steps rounds up to eleven" },
+    };
+
+    for (const auto& c : cases)
+    {
+        const auto feel = GrooveTemplate::extract ({ srcNote (0.0) }, c.length, step);
+
+        check (! feel.isEmpty(), std::string ("a feel came out of it: ") + c.what);
+
+        if (feel.numSlots() != c.slots)
+            fail (std::string (c.what) + ": got " + std::to_string (feel.numSlots())
+                  + " slots, wanted " + std::to_string (c.slots));
+    }
+}
+
+//=============================================================================
+// A project file is text on a disk and nothing stops somebody editing it, so
+// the bounds a template promises have to be enforced on the way in and not
+// only assumed of an extracted one. `setSlots` is the single gate both paths
+// go through, and this is the check that says so.
+//=============================================================================
+static void aFileCannotPushASlotOutOfRange()
+{
+    // Three quarters of a slot late, and louder than full scale. Both are
+    // beyond what extraction can produce and both are one text editor away.
+    const auto feel = GrooveTemplate::fromString ("250000 750000:1800000 -900000:-400000");
+
+    check (! feel.isEmpty(), "a template with out of range numbers still loads");
+    check (feel.numSlots() == 2, "both slots are there");
+
+    check (feel.slotFor (0).timing <= 0.5 + 1.0e-12 && feel.slotFor (0).timing >= -0.5 - 1.0e-12,
+           "a deviation past the slot boundary is brought back to it");
+    checkClose (feel.slotFor (0).timing, 0.5, 1.0e-12, "and it is brought back to the near edge");
+    checkClose (feel.slotFor (1).timing, -0.5, 1.0e-12, "the other way round too");
+
+    check (feel.slotFor (0).velocity <= 1.0f, "a velocity past full scale is brought back");
+    checkClose (feel.slotFor (0).velocity, 1.0f, 1.0e-6, "to full scale exactly");
+    checkClose (feel.slotFor (1).velocity, 0.0f, 1.0e-6, "and a negative one to silence");
+
+    // The reference is the mean of what the slots now hold rather than of
+    // what the file asked for, which is the same invariant the extraction
+    // path has and the reason it is computed in one place.
+    checkClose (feel.velocityReference(), 0.5, 1.0e-6,
+                "the reference is the mean of the clamped velocities");
+
+    // And a note grooved by it still cannot be moved more than half a slot,
+    // which is what stops a hand edited file reordering a pattern.
+    Groove g;
+    g.enabled = true;
+    g.amount  = 1.0;
+    g.random  = 1.0;
+    g.feel    = feel;
+
+    double previous = -1.0e9;
+
+    for (int k = 0; k < 8; ++k)
+    {
+        const double at = feel.slotBeats() * k;
+        const double placed = g.place (at, 60);
+
+        check (std::abs (placed - at) <= feel.slotBeats() * 0.5 + 1.0e-12,
+               "a file cannot move a note further than half a slot");
+        check (placed >= previous - 1.0e-12, "nor reorder the pattern");
+
+        previous = placed;
+    }
 }
 
 //=============================================================================
@@ -893,6 +995,8 @@ int main()
 
     aSwungPartReadsBackAsThatSwing();
     aQuantisedPartHasNoFeelInIt();
+    aPartThatIsNotAWholeNumberOfStepsStillFits();
+    aFileCannotPushASlotOutOfRange();
     theFeelIsAddedRatherThanImposed();
     theAmountIsAffine();
     theFeelRepeatsFromTheRightPlace();
