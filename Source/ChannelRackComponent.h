@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <cmath>
 #include "Project.h"
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
@@ -31,11 +32,11 @@ public:
                              "Most records sit between 54 and 62.");
         swingBox.onChange = [this]
         {
-            const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
-            const int index = juce::jlimit (0, 4, swingBox.getSelectedId() - 1);
+            const int index = juce::jlimit (0, Groove::kNumOfferedSwings - 1,
+                                            swingBox.getSelectedId() - 1);
 
             Groove g = project.groove;
-            g.swing   = swings[index];
+            g.swing   = Groove::offeredSwing (index);
             g.enabled = index > 0;
             g.base    = project.rackStepsPerBar >= 32 ? Groove::Base::thirtySecond
                       : project.rackStepsPerBar >= 16 ? Groove::Base::sixteenth
@@ -64,6 +65,14 @@ public:
             commit();
         };
         addAndMakeVisible (feelBox);
+
+        addButton (feelFrom, "Feel from a part...",
+                   "Take the timing out of a part somebody played and put it on the "
+                   "steps here. Reads the part at the step resolution above, so a feel "
+                   "read at sixteenths swings sixteenths. The donor's accents come too, "
+                   "as far as the Feel control beside this is up: at Tight the timing "
+                   "is taken and the accents are not.");
+        feelFrom.onClick = [this] { showFeelMenu(); };
 
         addButton (clearAll, "Clear", "Erase every step in this pattern");
         clearAll.onClick = [this]
@@ -133,15 +142,21 @@ public:
         positionLabel.setText ("Bar " + juce::String ((int) (project.rackStart / 4.0) + 1),
                                juce::dontSendNotification);
 
-        const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
-        int swingIndex = 0;
-        for (int i = 1; i < 5; ++i)
-            if (project.groove.enabled && std::abs (project.groove.swing - swings[i]) < 0.005)
-                swingIndex = i;
+        const int swingIndex = project.groove.enabled
+                             ? Groove::nearestOfferedSwing (project.groove.swing) : 0;
         swingBox.setSelectedId (swingIndex + 1, juce::dontSendNotification);
 
         const int feelIndex = project.groove.random >= 0.3 ? 2 : project.groove.velocity > 0.0 ? 1 : 0;
         feelBox.setSelectedId (feelIndex + 1, juce::dontSendNotification);
+
+        // A loaded feel supplies the timing in place of the swing number, so
+        // leaving the swing control live would offer a choice that does
+        // nothing. It is switched off rather than hidden, so that what is
+        // going on is visible rather than mysterious.
+        const bool hasFeel = ! project.groove.feel.isEmpty();
+        feelFrom.setButtonText (hasFeel ? "Feel: from a part" : "Feel from a part...");
+        swingBox.setEnabled (! hasFeel);
+
         repaint();
     }
 
@@ -243,6 +258,8 @@ public:
         auto top = r.removeFromTop (30).reduced (6, 4);
 
         clearAll.setBounds (top.removeFromRight (64));
+        top.removeFromRight (6);
+        feelFrom.setBounds (top.removeFromRight (136));
         top.removeFromRight (6);
         feelBox.setBounds (top.removeFromRight (104));
         top.removeFromRight (6);
@@ -445,10 +462,164 @@ private:
         return juce::MidiMessage::getMidiNoteName (note, true, true, 4);
     }
 
+    /** Every MIDI clip in the song, as somewhere a feel could be read from.
+        Named by where it is rather than by an index, because an index means
+        nothing to somebody looking at an arrangement. */
+    void showFeelMenu()
+    {
+        // Out of the range the clip items can reach, and disabled anyway, but
+        // the bounds check below is what actually makes it unreachable.
+        static constexpr int kNothingToOffer = 1'000'000;
+
+        juce::PopupMenu menu;
+
+        if (! project.groove.feel.isEmpty())
+        {
+            menu.addItem (1, "No feel (go back to the swing)");
+            menu.addSeparator();
+        }
+
+        menu.addSectionHeader ("Take the feel from");
+
+        // The clips are named by id rather than by position in the vector.
+        // The menu is asynchronous, so by the time the callback runs an index
+        // can name a different clip than the one that was clicked, and
+        // `Project::find` is what everything else here uses for that reason.
+        std::vector<int> offered;
+
+        for (const auto& c : project.clips)
+        {
+            if (! c.isMidi() || c.pattern == nullptr || c.pattern->notes.empty())
+                continue;
+
+            // Offered only if a feel really comes out of it. A clip can hold
+            // a pattern with notes and play a stretch of it that has none,
+            // after a trim or a split, and offering that is a menu item that
+            // does nothing when it is picked with nothing to say why.
+            if (feelOf (c).isEmpty())
+                continue;
+
+            juce::String what = "Bar " + juce::String ((int) project.meter.barBeatAt (c.start).bar);
+
+            if (! project.channels.empty())
+            {
+                const int channel = juce::jlimit (0, (int) project.channels.size() - 1, c.channel);
+
+                if (project.channels[(std::size_t) channel].name.isNotEmpty())
+                    what += ", " + project.channels[(std::size_t) channel].name;
+            }
+
+            offered.push_back (c.id);
+            menu.addItem ((int) offered.size() + 1, what);
+        }
+
+        if (offered.empty())
+            menu.addItem (kNothingToOffer, "Nothing recorded yet", false, false);
+
+        // The menu outlives the click, and the rack is torn down with the
+        // window it sits in, so the component the callback is about to touch
+        // has to be checked rather than assumed. The three other places in
+        // the studio that open an asynchronous menu over project state all
+        // hold one of these across it.
+        juce::Component::SafePointer<ChannelRackComponent> safeThis (this);
+
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (feelFrom),
+                            [safeThis, offered] (int choice)
+        {
+            if (choice == 0 || safeThis == nullptr)
+                return;
+
+            Groove g = safeThis->project.groove;
+
+            if (choice == 1)
+            {
+                g.feel = {};
+
+                // Back to the swing, and to a swing the control can actually
+                // show. Leaving `enabled` alone left the groove switched on
+                // with the humanise running while the swing box read
+                // "Straight", and picking "Straight" sends no change because
+                // the item is already current, so no control in the window
+                // could turn it off again.
+                //
+                // Testing `swing != 0.5` is not enough, because the box reads
+                // Straight for any swing it does not recognise and a file can
+                // carry one: 0.6 would come back enabled, inaudibly swung and
+                // stuck all over again. So the swing is snapped to the nearest
+                // value the box offers and `enabled` follows that, which
+                // leaves the groove in a state the controls can represent and
+                // therefore undo. Snapping moves the swing by at most a
+                // fortieth, and only for a value this build never writes.
+                const int nearest = Groove::nearestOfferedSwing (g.swing);
+
+                g.swing   = Groove::offeredSwing (nearest);
+                g.enabled = nearest > 0;
+            }
+            else
+            {
+                const int which = choice - 2;
+
+                if (which < 0 || which >= (int) offered.size())
+                    return;
+
+                // By id, because the menu is asynchronous and the clip that
+                // was clicked may have been moved, deleted or replaced in the
+                // vector since. An index would quietly read a different clip.
+                const Clip* c = safeThis->project.find (offered[(std::size_t) which]);
+
+                if (c == nullptr || ! c->isMidi() || c->pattern == nullptr)
+                    return;
+
+                const auto read = safeThis->feelOf (*c);
+
+                if (read.isEmpty())
+                    return;
+
+                g.feel = read;
+
+                // Reading a feel is asking for it, so it is switched on. The
+                // velocity and random knobs are left where they were, which
+                // means the donor's accents are passed on only as far as the
+                // Feel control is up: at "tight" the timing is taken and the
+                // accents are not. That is what the control is for and the
+                // tooltip says so.
+                g.enabled = true;
+            }
+
+            safeThis->project.setGroove (g);
+            safeThis->commit();
+        });
+    }
+
+    /** Reads a clip's feel at the resolution the rack is showing.
+
+        Everything that decides what the feel is, including the anchor and
+        the window, is in `GrooveTemplate::fromClip` where it is tested. This
+        is only the marshalling: which notes, and at what spacing. */
+    GrooveTemplate feelOf (const Clip& c) const
+    {
+        if (c.pattern == nullptr)
+            return {};
+
+        // The rack's own step, rather than a second table of the same three
+        // numbers. They agree today and a fourth entry in the steps box would
+        // make them disagree silently, which is a feel read at the wrong
+        // resolution and nothing on screen to say so.
+        const double slot = project.rackStepBeats();
+
+        std::vector<GrooveTemplate::SourceNote> notes;
+        notes.reserve (c.pattern->notes.size());
+
+        for (const auto& n : c.pattern->notes)
+            notes.push_back ({ n.start, n.velocity, n.note });
+
+        return GrooveTemplate::fromClip (std::move (notes), c.offset, c.length, slot);
+    }
+
     Project&     project;
     AudioEngine& engine;
 
-    juce::TextButton clearAll, prevBar { "<" }, nextBar { ">" };
+    juce::TextButton clearAll, feelFrom, prevBar { "<" }, nextBar { ">" };
     juce::ComboBox   stepsBox, barsBox, swingBox, feelBox;
     juce::Label      positionLabel;
 
