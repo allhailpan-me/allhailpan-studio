@@ -7,6 +7,38 @@ Newest first.
 
 ---
 
+## 2026-11-14: the swing half of the groove, which is a number other studios own
+
+### What is being looked at
+
+`Source/Groove.h`, 351 lines, and `Tests/GrooveTest.cpp`, 414 lines, which
+covers it. A priority 2 target: a test suspected of being weaker than it looks.
+
+Picked for three reasons. It is now the thinnest cover of any arithmetic
+header here that no night has audited and no open pull request is changing:
+351 lines of source to 414 of test, where the ratio elsewhere runs from two to
+four. `Groove.h` grew by 264 lines in the feel merge and `Tests/GrooveTest.cpp`
+was not touched in that merge at all, so whatever it was missing before, it is
+missing over a larger header now. And a swing percentage is a claim about
+agreement with every other studio that reports one, which is the shape of
+number this project has been wrong about before.
+
+The feel half, `Source/GrooveTemplate.h` and `Tests/GrooveTemplateTest.cpp`,
+was mutation tested in its own merge and is not the target. Nothing in
+`Source/LoudnessMeter.h`, `Source/TruePeak.h`, `Source/Project.h`,
+`Source/Punch.h`, `Source/RecordAlign.h`, `Source/Meter.h`,
+`Source/SongLength.h`, `Source/NoteSelection.h`, `Source/LatencyGraph.h`,
+`Source/Spectrogram.h`, `Source/Fx/BellMatch.h`, `Source/Envelope.h` or
+`Source/Fx/Svf.h` is touched here, because open pull requests are changing all
+of them. `Source/Fx/Unit.h` is still the only JUCE-free header in `Source` with
+no test, and still nothing includes it, so it is still not worth one.
+
+### Still in progress
+
+Mutation run and findings to follow.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
