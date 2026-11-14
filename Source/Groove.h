@@ -81,9 +81,15 @@ struct Groove
         and no control able to turn it off.
 
         A stored swing need not be one of these: `ProjectIO` admits anything
-        from 0.3 to 0.8, so a file can carry 0.6, which the box can only show
-        as Straight. `nearestOffered` is what lets a caller put the groove
-        into a state the controls can represent, and therefore undo. */
+        from 0.3 to 0.8, so a file can carry 0.6, which the box shows as the
+        nearest it has, 0.58. An earlier version of this comment said such a
+        swing could only be shown as Straight, which was never what the code
+        did: only something within a hundredth of straight reads as straight,
+        and `GrooveTemplateTest` has asserted that 0.6 does not since the day
+        it was written. `nearestOfferedSwing` is what lets a caller put the
+        groove into a state the controls can represent, and therefore undo,
+        and on an exact tie it answers with the straighter of the two so that
+        the control never claims more swing than the file carries. */
     static constexpr int kNumOfferedSwings = 5;
 
     static double offeredSwing (int index) noexcept
@@ -261,19 +267,14 @@ struct Groove
             // is the one the suite asserts, which is over the notes the
             // groove is actually acting on.
             //
-            // The swing half is not bounded this way. At the shuffle the
-            // interface offers it moves the odd step of a pair by 0.33 of a
-            // step and the humanising fits in what is left, so a pair can
-            // meet and not cross. That argument is about what the interface
-            // offers: `ProjectIO` admits a swing up to 0.8 from a file, where
-            // a pair can cross by a tenth of a step. The crossing is
-            // `2 * swing - 1.5` steps, nothing at 0.75 and 0.1 at 0.8, and
-            // 0.75 is the last value `GrooveTest` sweeps, so that check
-            // cannot see it however many placements it makes. It predates this
-            // and
-            // is recorded in the backlog rather than changed here, because
-            // narrowing what a saved project may contain is not this
-            // feature's business.
+            // The swing half below is bounded the same way, at three
+            // quarters of a step rather than a half because what it moves is
+            // one note of a pair rather than every note. It used not to be,
+            // on the argument that at the shuffle the interface offers the
+            // shift is a third of a step and the humanising fits in what is
+            // left. That argument is about what the interface offers, and the
+            // crossing is `2 * swing - 1.5` steps, which is nothing at 0.75
+            // and a tenth of a step at the 0.8 a file may carry.
             //
             // Half a slot is also exactly the bound the test already asserts
             // for a feel on its own, so this makes that true with the
@@ -282,17 +283,40 @@ struct Groove
         }
         else
         {
+            double move = 0.0;
+
             if ((whole & 1) != 0)
             {
                 // The pair spans two steps, so the straight offbeat is at one
                 // half of it and the swung offbeat is at the swing fraction
                 // of it.
                 const double pair = step * 2.0;
-                shifted += (swing * pair - step) * amount;
+                move = (swing * pair - step) * amount;
             }
 
             if (random > 0.0)
-                shifted += jitter * random * step * 0.25;
+                move += jitter * random * step * 0.25;
+
+            // Bounded together, exactly as the feel half above is, so that
+            // two notes on this groove's own grid cannot change places.
+            //
+            // Three quarters of a step is what the neighbours leave, because
+            // each of them is humanised too: the downbeat behind this one may
+            // be drawn a quarter of a step late and the one in front a
+            // quarter early, so a note may travel three quarters of a step
+            // and meet one of them without passing it.
+            //
+            // It binds only above the swing the interface offers, so nothing
+            // the controls can ask for is changed by it. `ProjectIO` admits a
+            // swing to 0.8 from a file, where the shift alone is 0.6 of a
+            // step and the humanising then had nothing left to spend:
+            // measured over a hundred thousand placements at 0.8, a note
+            // landed up to 0.096 of a step behind the note in front of it,
+            // which plays a pattern's own notes in the wrong order and only
+            // on some patterns. The swing's own position is untouched by this
+            // whatever the file carries, since with the humanise knob down
+            // the shift is 0.6 of a step at the very worst.
+            shifted += std::clamp (move, -0.75 * step, 0.75 * step);
         }
 
         return std::max (0.0, shifted);

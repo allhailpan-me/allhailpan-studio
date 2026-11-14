@@ -47,6 +47,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -740,11 +741,15 @@ static void theVelocityAmountIsTheFractionItSays()
     std::printf ("    at the top of the knob an offbeat written at 1.00 plays at %.3f\n",
                  (double) full.shade (0.25, 1.0f));
 
-    // The ceiling is a guard rather than a live path: nothing upstream should
-    // hand this a velocity above full scale, and softening cannot raise one
-    // anyway. It is asserted because the floor beside it is, and because a
-    // velocity over one would be clamped somewhere further downstream where
-    // it is harder to see which stage did it.
+    // The ceiling is a guard rather than a live path, and the number it takes
+    // to reach it says why it is worth one line here. Softening only ever
+    // reduces a velocity, so the clamp can bind only on an input already
+    // above 1.67, which is why a velocity of 1.5 does not test it and no
+    // ordinary note could. Asserted anyway, with an input nothing upstream
+    // can produce, because the floor beside it is asserted and because a
+    // clamp nothing exercises is one somebody tidies away.
+    check (full.shade (0.25, 3.0f) <= 1.0f,
+           "a velocity far above full scale came back above full scale");
     check (full.shade (0.25, 1.5f) <= 1.0f,
            "a velocity above full scale came back above full scale");
 }
@@ -795,6 +800,104 @@ static void shadeLeavesAPlayedNoteAlone()
                             + std::to_string ((offbeat + off) * 0.25) + " was softened");
 }
 
+static void aSwingOutOfAFileCannotReorderThePattern()
+{
+    std::printf ("a swing from a file, humanised, still plays the notes in the order they were written\n");
+
+    // `ProjectIO` admits a swing from 0.3 to 0.8, and the interface offers
+    // nothing above a triplet shuffle at 0.667, so this is the band only a
+    // file can reach. It is the band where the shift and the humanising
+    // together used to run out of room: at 0.8 the odd step of a pair moves
+    // 0.6 of a step and the draw adds a quarter on top, which put a note up
+    // to 0.096 of a step behind the note in front of it. The check that was
+    // here swept to 0.75, where the crossing is exactly nothing, so it could
+    // not see it however many placements it made.
+    std::mt19937 rng (20261114);
+    std::uniform_int_distribution<int> noteDist (0, 127);
+
+    int cases = 0;
+
+    for (const auto& r : resolutions)
+        for (double swing : { 0.3, 0.45, 0.62, 2.0 / 3.0, 0.7, 0.75, 0.76, 0.78, 0.8 })
+            for (double random : { 0.0, 0.5, 1.0 })
+                for (double amount : { 0.5, 1.0 })
+                {
+                    auto g = swungAt (r.base, swing);
+                    g.random = random;
+                    g.amount = amount;
+
+                    double previous = -1.0;
+                    for (int step = 0; step < 256; ++step)
+                    {
+                        const double placed = g.place (step * r.step, noteDist (rng));
+                        if (! (placed > previous || step == 0))
+                            fail (std::string ("a swing of ") + std::to_string (swing)
+                                  + " at " + baseName (r.base) + ", humanise "
+                                  + std::to_string (random) + ", amount " + std::to_string (amount)
+                                  + " put step " + std::to_string (step) + " at "
+                                  + std::to_string (placed) + ", which is not after "
+                                  + std::to_string (previous));
+                        previous = placed;
+                        ++cases;
+                    }
+                }
+
+    std::printf ("    %d placements across the whole band a file may carry, all still in order\n", cases);
+
+    // What the bound must not do is move the swing itself. With the humanise
+    // knob down there is nothing to bound, so even the strongest swing a file
+    // can carry has to land exactly where the number says, which is the one
+    // thing somebody would notice.
+    for (const auto& r : resolutions)
+        for (double swing : { 0.75, 0.78, 0.8 })
+        {
+            auto g = swungAt (r.base, swing);
+            const double pair = r.step * 2.0;
+
+            for (int k = 0; k < 8; ++k)
+                checkClose (g.place (k * pair + r.step, 60), k * pair + swing * pair, 1.0e-9,
+                            std::string ("a swing of ") + std::to_string (swing)
+                                + " was pulled off its own position at " + baseName (r.base));
+        }
+}
+
+static void aDamagedNotePositionIsLeftWhereItIs()
+{
+    std::printf ("a note position no file should contain is left exactly where it is\n");
+
+    // A note position is loaded from a project file with no bound on it, so
+    // a damaged file reaches `place` with whatever it likes, and `llround`
+    // is undefined past the range of its return type.
+    //
+    // What this can see and what it cannot, since the difference was written
+    // down the other way round until tonight. An argument out of `llround`'s
+    // range gives an unspecified number rather than a trap, and whatever
+    // comes back then fails the on grid test and the note is left alone, so
+    // removing the guard is invisible for the huge finite positions. A NaN is
+    // different: every comparison against it is false, so it passes the on
+    // grid test, and with the guard removed the note is placed at 0.0 rather
+    // than left where it is. That is observable, and it is what this pins.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    auto g = swungAt (Groove::Base::sixteenth, 0.62);
+    g.random   = 1.0;
+    g.velocity = 0.5;
+
+    check (std::isnan (g.place (nan, 60)),
+           "a note at an unreadable position was moved to the start of the clip");
+
+    // Compared exactly rather than with a tolerance, since a difference of
+    // two infinities is not a number. A position inside the guard's range,
+    // negative or not, is an ordinary note and is not in this list: a
+    // negative one is clamped to the start of the clip by the line at the end
+    // of `place`, which `theOrderOfTheNotesSurvives` covers.
+    for (double at : { 1.0e16, 1.0e300, -1.0e300, inf, -inf })
+        check (g.place (at, 60) == at,
+               "a note at " + std::to_string (at) + " was moved to "
+                   + std::to_string (g.place (at, 60)));
+}
+
 int main()
 {
     std::printf ("groove\n");
@@ -811,6 +914,8 @@ int main()
     theHumanisingDrawIsADrawAndNotAShift();
     everyNoteAndEveryStepGetsItsOwnDraw();
     aSwingUnderStraightPushesTheOffbeatEarly();
+    aSwingOutOfAFileCannotReorderThePattern();
+    aDamagedNotePositionIsLeftWhereItIs();
     theOfferedSwingsAreWhatTheyClaim();
     velocityOnlySoftensOffbeats();
     theVelocityAmountIsTheFractionItSays();
