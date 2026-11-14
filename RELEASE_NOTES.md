@@ -27,10 +27,17 @@ puts you back on the swing you had.
 part onto it.** Ableton works this way and Pro Tools, Cubase, Logic and
 Cakewalk work the other way, where the part gets dragged onto the donor's
 positions. Theirs is a quantiser with a crooked grid: it throws away whatever
-timing the part already had, which is the one thing you would not want it to
-touch on something you played. If you do want that, quantise first and then
+timing the part already had. If you do want that, quantise first and then
 apply the feel, which comes to the same thing and is your decision rather than
 one made for you.
+
+I will be honest about how much of that you can hear today, because it reads
+as though a lot turns on it. For a note sitting exactly on the grid the two
+come to the same answer, so the difference only shows on a note that is off
+the grid, and the next paragraph but one explains that those are left alone
+anyway. So what actually keeps a part you played from being straightened is
+that rule, not this one. This is the arithmetic being right so that it stays
+right when that rule becomes a control.
 
 **It is read at the step resolution the rack is showing**, so a feel taken at
 sixteenths moves sixteenths. It is saved in the project, it is one undo, and it
