@@ -481,6 +481,43 @@ static void aPartThatIsNotAWholeNumberOfStepsStillFits()
 }
 
 //=============================================================================
+// Two notes at the same beat and the same pitch, which a stable sort leaves in
+// the order they arrived in.
+//
+// The collision rule is "the first note in a slot wins", and first is ordered
+// by beat, then pitch, then velocity. Pitch alone left this case to the input
+// order, so the same part gave one of two templates depending on which copy
+// of the doubled note came first, and `reference` moved with it. Reachable by
+// pasting a note onto itself or importing a MIDI file with a doubled note:
+// nothing deduplicates `MidiPattern::notes`.
+//
+// The chord in the order check below has five distinct pitches, so it cannot
+// see this.
+//=============================================================================
+static void aDoubledNoteGivesOneAnswer()
+{
+    const double step = 0.25;
+
+    const auto quiet = srcNote (step * 2.0, 0.2f, 60);
+    const auto loud  = srcNote (step * 2.0, 0.9f, 60);
+
+    const auto quietFirst = GrooveTemplate::extract ({ quiet, loud }, 1.0, step);
+    const auto loudFirst  = GrooveTemplate::extract ({ loud, quiet }, 1.0, step);
+
+    check (! quietFirst.isEmpty(), "a doubled note still makes a feel");
+    check (quietFirst == loudFirst,
+           "a doubled note gives the same template whichever copy came first");
+
+    // And it is the quieter one that wins, which is what "first" was extended
+    // to mean. Either copy would make the answer a function of the input;
+    // this pins which, so the rule stays the one the comment states.
+    checkClose (quietFirst.slotFor (2).velocity, 0.2f, 1.0e-6,
+                "the first of two identical positions is the quieter");
+    checkClose (quietFirst.velocityReference(), 0.2, 1.0e-6,
+                "and the reference follows it");
+}
+
+//=============================================================================
 // The humanise knob has to do something when a feel is loaded, and something
 // of the right size.
 //
@@ -1273,6 +1310,7 @@ int main()
     aPartThatIsNotAWholeNumberOfStepsStillFits();
     aFileCannotPushASlotOutOfRange();
     aFileCannotInventASlotSpacing();
+    aDoubledNoteGivesOneAnswer();
     aDonorLongerThanTheCapIsNotFoldedIntoItself();
     theHumaniseKnobReachesTheFeelPath();
     theAccentsAreReadAtTheFeelsOwnResolution();
