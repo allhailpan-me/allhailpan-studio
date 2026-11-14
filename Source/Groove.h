@@ -160,6 +160,29 @@ struct Groove
         // Only notes sitting on the grid are moved. Anything already played
         // off the grid is left where the performance put it, which is what
         // Base means in the studios this follows.
+        //
+        // This is Cakewalk's window at its narrowest and the MPC's Window,
+        // both of which leave a note outside it alone and both of which
+        // expose the width. It is not exposed here, and at 2 per cent of a
+        // step it is a test for "this note is on the grid" rather than
+        // anything musical. Two things follow, and the second is the reason
+        // it has not been widened.
+        //
+        // It is what makes a song-wide groove safe. The groove is one setting
+        // for the whole project rather than one per clip the way Live's is,
+        // so a feel read off a part somebody played would otherwise be
+        // applied to that same part again, on top of the timing it already
+        // has. A narrow window means a feel reaches programmed material,
+        // which is what it is for, and leaves performances alone.
+        //
+        // And it is a step rather than a fade: it decides whether to apply,
+        // and what is applied is the whole deviation. A played note that
+        // happens to land inside it takes the full shove while its
+        // neighbours take none, which on a part played by hand is a few notes
+        // in a bar moving and the rest not. The answer is the width as a
+        // control with the strength scaling the move, which is what Cakewalk
+        // and the MPC both ship and which wants an interface of its own.
+        // Recorded in Research/BACKLOG.md rather than half done here.
         if (std::abs (index - (double) whole) > 0.02)
             return beatFromOrigin;
 
@@ -196,10 +219,23 @@ struct Groove
         if (byFeel)
         {
             // The deviation the donor played, added to where this note
-            // already is. Which of the two models that is, and why this one,
-            // is in GrooveTemplate.h. A slot the donor never played
-            // contributes nothing: giving it one would be inventing a feel
-            // for a position there is no evidence about.
+            // already is, rather than the note being moved onto the donor's
+            // position. Which of the two models that is, and why this one, is
+            // in GrooveTemplate.h. A slot the donor never played contributes
+            // nothing: giving it one would be inventing a feel for a position
+            // there is no evidence about.
+            //
+            // Be clear about how much of that choice is audible here. For a
+            // note exactly on the grid the two models give the same answer,
+            // because adding the donor's offset to a note at the grid point
+            // lands it on the donor's position. They can differ only for a
+            // note off the grid, and the window above lets through nothing
+            // further off than 2 per cent of a step. So the difference is
+            // bounded at a couple of milliseconds, and the model is the shape
+            // of the arithmetic rather than something anybody can hear today.
+            // The test pins it with a recipient inside the window, which is
+            // the one case that separates the two: before that check existed
+            // a full target model passed the whole suite.
             const auto   slot      = feel.slotFor (whole);
             const double deviation = slot.filled ? slot.timing * amount : 0.0;
 

@@ -216,46 +216,96 @@ static void aQuantisedPartHasNoFeelInIt()
 }
 
 //=============================================================================
-// The model, asserted rather than commented.
+// The model, asserted by something that can fail.
 //
 // Deviation based means the donor's offset is ADDED to where the note already
 // is. Target based would mean the note is moved ONTO the donor's position.
-// The two differ by exactly the recipient's own offset, so a recipient that
-// is itself off the grid is where they part company.
+//
+// Finding the one case that separates them takes some care, and an earlier
+// version of this check did not. For a note exactly on the grid the two give
+// the same answer, by definition: adding the donor's offset to a note sitting
+// at the grid point lands it on the donor's position. And a note far off the
+// grid is returned untouched by the window in `place`, under either model. So
+// a check built on either of those cannot tell the two apart, and both of the
+// checks this function used to offer as its proof were built on the second.
+// Measured, a full target model passed every one of this file's checks.
+//
+// What separates them is a recipient INSIDE the window and not on the grid,
+// which is the only place where the arithmetic is reached and the recipient's
+// own offset is nonzero. The numbers there are far enough apart to name: with
+// a donor a quarter of a slot late and a recipient a hundredth of a slot
+// late, deviation gives 1.26 slots and target gives 1.25.
+//
+// Worth knowing what that implies about the decision itself, since the header
+// comments spend a page on it: the window bounds the difference between the
+// two models at 2 per cent of a step, a couple of milliseconds. The model is
+// the shape of the arithmetic, and the thing the feature would turn on if the
+// window ever became the control Cakewalk and the MPC both expose. It is
+// pinned here because a choice nobody can test is one somebody silently
+// reverses.
 //=============================================================================
 static void theFeelIsAddedRatherThanImposed()
 {
     // One donor note, a quarter of a slot late.
     const double step = 0.25;
-    const double donorOffset = 0.25;   // in fractions of a slot
+    const double donorOffset = 0.25;
 
     std::vector<GrooveTemplate::SourceNote> donor { srcNote (step * (1.0 + donorOffset)) };
     const auto feel = GrooveTemplate::extract (donor, step * 2.0, step);
+
+    checkClose (feel.slotFor (1).timing, donorOffset, 1.0e-12,
+                "the donor's own offset, or nothing below means anything");
 
     Groove g;
     g.enabled = true;
     g.amount  = 1.0;
     g.feel    = feel;
 
-    // A recipient note exactly on the grid: both models agree here.
+    // A recipient note exactly on the grid. Both models agree here, so this
+    // pins the amount and not the model.
     checkClose (g.place (step, 60), step + donorOffset * step, 1.0e-15,
                 "an on grid note takes the donor's deviation");
 
-    // A recipient note off the grid is left alone, because the studio's rule
-    // is that a part that was played is left where the performance put it,
-    // and Quantise.h is what straightens it if that is wanted. Under a target
-    // model it would instead be dragged to the donor's position, which is the
-    // behaviour this check exists to exclude.
+    // Inside the window and off the grid, which is the case that separates
+    // them.
+    const double inside    = step * 1.01;
+    const double deviation = inside + donorOffset * step;      // 1.26 steps
+    const double target    = (1.0 + donorOffset) * step;       // 1.25 steps
+
+    check (std::abs (deviation - target) > 1.0e-6,
+           "the two models differ at this recipient, or this check proves nothing");
+
+    checkClose (g.place (inside, 60), deviation, 1.0e-12,
+                "the donor's deviation is added to where the note already is");
+
+    check (std::abs (g.place (inside, 60) - target) > 1.0e-6,
+           "and the note is not moved onto the donor's position");
+
+    // Which makes a feel applied to its own donor a doubling rather than a
+    // fixed point, for a donor note inside the window. Under a target model
+    // this would come back unchanged, since the note is already there.
+    {
+        const double offset = 0.015;
+        const auto   tight  = GrooveTemplate::extract ({ srcNote (step * (1.0 + offset)) },
+                                                       step * 2.0, step);
+        Groove h;
+        h.enabled = true;
+        h.amount  = 1.0;
+        h.feel    = tight;
+
+        const double donorNote = step * (1.0 + offset);
+        checkClose (h.place (donorNote, 60), donorNote + offset * step, 1.0e-12,
+                    "a feel applied to its own donor doubles the deviation");
+    }
+
+    // Outside the window nothing happens at all, which is the studio's rule
+    // that a part played off the grid is left where the performance put it,
+    // and Quantise.h is what straightens it if that is wanted. This is not
+    // evidence about the model either way, which is what it used to be
+    // offered as.
     const double played = step * 1.1;
     checkClose (g.place (played, 60), played, 1.0e-15,
-                "a note played off the grid is not dragged onto the donor's position");
-
-    // And the same template applied to the donor itself changes nothing, for
-    // the same reason. Under a target model it would be a fixed point; under
-    // this one it is untouched, and both are "unchanged" for different
-    // reasons, so the check above is the one that separates them.
-    checkClose (g.place (step * (1.0 + donorOffset), 60), step * (1.0 + donorOffset), 1.0e-15,
-                "applying a feel to the part it came from changes nothing");
+                "a note well off the grid is left alone, whatever the model");
 }
 
 //=============================================================================

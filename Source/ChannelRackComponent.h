@@ -516,13 +516,20 @@ private:
         if (offered.empty())
             menu.addItem (kNothingToOffer, "Nothing recorded yet", false, false);
 
+        // The menu outlives the click, and the rack is torn down with the
+        // window it sits in, so the component the callback is about to touch
+        // has to be checked rather than assumed. The three other places in
+        // the studio that open an asynchronous menu over project state all
+        // hold one of these across it.
+        juce::Component::SafePointer<ChannelRackComponent> safeThis (this);
+
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (feelFrom),
-                            [this, offered] (int choice)
+                            [safeThis, offered] (int choice)
         {
-            if (choice == 0)
+            if (choice == 0 || safeThis == nullptr)
                 return;
 
-            Groove g = project.groove;
+            Groove g = safeThis->project.groove;
 
             if (choice == 1)
             {
@@ -558,12 +565,12 @@ private:
                 // By id, because the menu is asynchronous and the clip that
                 // was clicked may have been moved, deleted or replaced in the
                 // vector since. An index would quietly read a different clip.
-                const Clip* c = project.find (offered[(std::size_t) which]);
+                const Clip* c = safeThis->project.find (offered[(std::size_t) which]);
 
                 if (c == nullptr || ! c->isMidi() || c->pattern == nullptr)
                     return;
 
-                const auto read = feelOf (*c);
+                const auto read = safeThis->feelOf (*c);
 
                 if (read.isEmpty())
                     return;
@@ -579,8 +586,8 @@ private:
                 g.enabled = true;
             }
 
-            project.setGroove (g);
-            commit();
+            safeThis->project.setGroove (g);
+            safeThis->commit();
         });
     }
 

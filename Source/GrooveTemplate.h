@@ -54,6 +54,19 @@
 // Quantise.h, and asking for it is a separate decision rather than a second
 // thing in here that straightens notes.
 //
+// How much of that choice is audible, said plainly because the paragraphs
+// above read as though a great deal turns on it: for a note exactly on the
+// grid the two models are identical, since adding the donor's offset to a
+// note at the grid point puts it on the donor's position. They differ only
+// for a note that is itself off the grid, and `Groove::place` applies a feel
+// only to notes within 2 per cent of a step of the grid, for the reasons
+// written there. So in this studio today the difference is bounded at a
+// couple of milliseconds. It is written down, and pinned by a test that can
+// fail, because it is what the feature would turn on if that window ever
+// became the control Cakewalk and the MPC both expose, and because a choice
+// nobody recorded is one somebody silently reverses. It was not pinned at
+// first, and a full target model passed every check in the suite.
+//
 //-----------------------------------------------------------------------------
 // What is stored, and why it is stored that way
 //

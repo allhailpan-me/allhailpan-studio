@@ -286,6 +286,58 @@ a guard that cannot fire, the velocity field comment described one of the two
 things that field now means, and a test comment argued for rounding with a
 reason contradicted by a case in its own table.
 
+### A third audit round, and the decision that was asserted by nothing
+
+Run by a session that had seen neither the change nor either of the two rounds
+above. It could not break the parser, the audio thread, the export path or the
+four things new state needs, and it enumerated each of those line by line
+rather than taking them on trust. It found one thing that matters and it is the
+one this entry is largely about.
+
+**The deviation against target decision was unreachable, and the check named
+after it could not fail.** `Groove::place` has always left a note alone unless
+it is within 2 per cent of a step of the grid. The two models are *identical*
+for a note exactly on the grid, by definition, because adding the donor's
+offset to a note sitting at the grid point lands it on the donor's position.
+So that window bounds the difference between the two models at 2 per cent of a
+step, a couple of milliseconds, and nothing outside the window reaches the
+arithmetic at all. Proved by replacing the whole feel branch with a full target
+model, which passed every one of the 1600 lines of checks in
+`GrooveTemplateTest.cpp`, `theFeelIsAddedRatherThanImposed` included. Both of
+that function's assertions used a recipient a tenth of a step off the grid,
+which the window rejects under either model, so both were testing the window.
+
+Fixed in two halves, and the second matters more. The check now pins the model
+with a recipient *inside* the window and off the grid, which is the only place
+the two differ and the arithmetic is reached: with a donor a quarter of a slot
+late and a recipient a hundredth late, deviation gives 1.26 steps and target
+gives 1.25. A target model now fails three checks. And the comments in
+`Groove.h`, `GrooveTemplate.h` and the test stop implying the choice is
+audible: it is the shape of the arithmetic, and the thing the feature would
+turn on if the window ever became a control, which is why it is written down
+and pinned rather than left to a comment somebody can reverse.
+
+**What the window costs, measured and recorded rather than fixed.** It decides
+whether to apply, and what is applied is the whole deviation, so it is a step
+rather than a fade. On a part played by hand at ten milliseconds of spread the
+audit measured 4 notes of 64 taking the feel and 60 not, and the 4 take the
+full shove, which reads as a few notes being wrong rather than as a groove.
+The window is also what makes a song-wide groove safe, and that is the reason
+it has not simply been widened: the groove is one setting for the whole project
+rather than one per clip the way Live's is, so a feel read off a part somebody
+played would otherwise be applied to that same part again on top of its own
+timing. The real answer is the width as a control with the strength scaling the
+move, which is what Cakewalk documents ("the window extends half the resolution
+distance before and after the quantization point") and what the MPC ships as
+Window plus Strength. That is the next piece of work on this feature. The
+rejection of a window parameter higher up this entry stands for tonight, but
+its reason has changed from "the fixed rule does the same job" to "the fixed
+rule is the safe half of the job".
+
+Also from this round: the asynchronous feel menu still captured a raw `this`
+where the other three places in the studio that open a menu over project state
+all capture a `SafePointer`, and it now does too.
+
 ### Left for the hardening lane, deliberately not changed here
 
 - **`ProjectIO` admits a swing of 0.8 and a humanise of 1.0 together, where a
