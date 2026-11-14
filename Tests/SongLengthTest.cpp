@@ -39,26 +39,32 @@ int main()
 {
     using SongLength::loopEndBeats;
 
+    // Named rather than defaulted. `loopEndBeats` used to take the bar length
+    // as a defaulted argument and the time signature took it away: a call that
+    // leaves it out is a call that silently means 4/4, and this file was the
+    // one place that leant on it sixteen times over.
+    const double fourFour = 4.0;
+
     // The report itself: a one beat sound plays, then three beats of silence.
-    checkEqual (loopEndBeats (1.0), 4.0, "a one beat sound loops at the end of bar one");
-    checkEqual (loopEndBeats (0.05), 4.0, "a click a twentieth of a beat long still gets a bar");
-    checkEqual (loopEndBeats (1.0e-4), 4.0, "a clip shorter than the tolerance still loops, not stops looping");
-    checkEqual (loopEndBeats (3.5), 4.0, "three and a half beats round up to the bar");
-    checkEqual (loopEndBeats (4.5), 8.0, "spilling into bar two plays bar two out");
-    checkEqual (loopEndBeats (13.0), 16.0, "a clip ending in bar four plays to the end of bar four");
+    checkEqual (loopEndBeats (1.0, fourFour), 4.0, "a one beat sound loops at the end of bar one");
+    checkEqual (loopEndBeats (0.05, fourFour), 4.0, "a click a twentieth of a beat long still gets a bar");
+    checkEqual (loopEndBeats (1.0e-4, fourFour), 4.0, "a clip shorter than the tolerance still loops, not stops looping");
+    checkEqual (loopEndBeats (3.5, fourFour), 4.0, "three and a half beats round up to the bar");
+    checkEqual (loopEndBeats (4.5, fourFour), 8.0, "spilling into bar two plays bar two out");
+    checkEqual (loopEndBeats (13.0, fourFour), 16.0, "a clip ending in bar four plays to the end of bar four");
 
     // A clip cut to the bar must not gain a bar.
-    checkEqual (loopEndBeats (4.0), 4.0, "exactly one bar stays one bar");
-    checkEqual (loopEndBeats (16.0), 16.0, "exactly four bars stay four bars");
-    checkEqual (loopEndBeats (4.0 + 4.0e-4), 4.0, "a loop a few samples over the bar line does not gain a bar");
-    checkEqual (loopEndBeats (64.0 - 1.0e-12), 64.0, "floating point noise under a bar line stays on it");
-    checkEqual (loopEndBeats (4.01), 8.0, "a hundredth of a beat over is a real overhang");
+    checkEqual (loopEndBeats (4.0, fourFour), 4.0, "exactly one bar stays one bar");
+    checkEqual (loopEndBeats (16.0, fourFour), 16.0, "exactly four bars stay four bars");
+    checkEqual (loopEndBeats (4.0 + 4.0e-4, fourFour), 4.0, "a loop a few samples over the bar line does not gain a bar");
+    checkEqual (loopEndBeats (64.0 - 1.0e-12, fourFour), 64.0, "floating point noise under a bar line stays on it");
+    checkEqual (loopEndBeats (4.01, fourFour), 8.0, "a hundredth of a beat over is a real overhang");
 
     // Nothing in the playlist means no loop, which the engine reads from 0.
-    checkEqual (loopEndBeats (0.0), 0.0, "an empty playlist does not loop");
-    checkEqual (loopEndBeats (-2.0), 0.0, "a negative end does not loop");
-    checkEqual (loopEndBeats (std::numeric_limits<double>::quiet_NaN()), 0.0, "NaN does not loop");
-    checkEqual (loopEndBeats (std::numeric_limits<double>::infinity()), 0.0, "infinity does not loop");
+    checkEqual (loopEndBeats (0.0, fourFour), 0.0, "an empty playlist does not loop");
+    checkEqual (loopEndBeats (-2.0, fourFour), 0.0, "a negative end does not loop");
+    checkEqual (loopEndBeats (std::numeric_limits<double>::quiet_NaN(), fourFour), 0.0, "NaN does not loop");
+    checkEqual (loopEndBeats (std::numeric_limits<double>::infinity(), fourFour), 0.0, "infinity does not loop");
     checkEqual (loopEndBeats (2.0, 0.0), 0.0, "a bar of no beats does not loop");
 
     // Another bar length, for when there is a time signature.

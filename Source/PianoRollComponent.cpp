@@ -661,7 +661,8 @@ double PianoRollComponent::quantiseGrid() const
 
     // "None" is a choice about drawing freely, and a quantise has to have a
     // grid, so it falls back to a step rather than doing nothing silently. A
-    // step is a quarter of a display beat, so in 6/8 it is a sixteenth note.
+    // step is a quarter of a display beat, so in 6/8 it is a thirty second
+    // note rather than the sixteenth it is in 4/4.
     return fromSnap > 0.0 ? fromSnap : 0.25 * project.meter.beatLengthQuartersAt (0.0);
 }
 

@@ -211,7 +211,16 @@ inline Signature validated (const Signature& s) noexcept
 */
 inline double beatLengthQuarters (const Signature& s) noexcept
 {
-    return 4.0 / (double) s.denominator;
+    // A denominator below one reads as one, which is what keeps every length
+    // in this header finite. These are free functions over a struct with
+    // public fields, so a caller can hand them a `Signature` nobody
+    // validated, and `4.0 / 0` is an infinity that spreads: it reaches a
+    // position readout as an infinite number of quarters and a bar length as
+    // a NaN. The studio cannot produce one, because the only ways into a
+    // project are `Map::setFirst` and `validated`, which both refuse. The
+    // guard is here for the same reason as the one in `barOf`: a function
+    // that can be handed something has to say what it does with it.
+    return 4.0 / (double) std::max (1, s.denominator);
 }
 
 /** How long a bar is, in quarters.
@@ -223,7 +232,18 @@ inline double beatLengthQuarters (const Signature& s) noexcept
 */
 inline double barLengthQuarters (const Signature& s) noexcept
 {
-    return (double) s.numerator * beatLengthQuarters (s);
+    // A numerator below one reads as one, for the reason above and with more
+    // at stake: four functions here divide by this, and a bar of zero
+    // quarters makes `barOf` cast an infinity to a `long long`, which is
+    // undefined behaviour rather than a large number. It does not even
+    // announce itself: compiled exactly as `Tests/run.sh` compiles, with both
+    // sanitizers and `-fno-sanitize-recover=undefined`, `barOf ({ 0, 4 },
+    // 7.0)` returns -9223372036854775807 and exits zero, while
+    // `barFloorQuarters` and `roundUpToBar` return a NaN that then spreads
+    // into whatever asked. `isAccentedClick` and `quartersAt` already read a
+    // numerator below one as one; this is the same reading in the one place
+    // the other four inherit it from.
+    return (double) std::max (1, s.numerator) * beatLengthQuarters (s);
 }
 
 //==============================================================================
@@ -338,6 +358,50 @@ inline double quartersAt (const Signature& s, const BarBeat& p) noexcept
 }
 
 //==============================================================================
+/** The third field of a bar|beat readout: 96ths of a display beat.
+
+    96 is a choice rather than a convention, and the choice was made before
+    the signature existed: Logic shows a user chosen division with ticks under
+    it, Live shows sixteenths and Ardour shows ticks referenced to the quarter
+    note, so there is nothing to follow. 96 is what this field has always
+    shown and it divides by two, three and four, which is what makes a triplet
+    read as a round number rather than as 33.
+
+    In here, and not in the two windows that draw it, because there were two
+    copies of this line and they had drifted: the transport clock truncated
+    the product and the playlist's position label added a tolerance first and
+    took a remainder afterwards, so at a position a hair under a tick boundary
+    the two fields on screen read one tick apart. Both needed both halves. The
+    tolerance is because a position is worked out in floating point and lands
+    a few parts in 10^16 either side of a boundary, and the remainder is
+    because a fraction near enough to one then multiplies up to 96 itself,
+    which is a tick past the end of a beat with 96 of them and prints three
+    characters into a two character field.
+*/
+inline constexpr int kTicksPerDisplayBeat = 96;
+inline constexpr double kTickRounding = 1.0e-6;
+
+inline int tickOfFraction (double fraction) noexcept
+{
+    if (! std::isfinite (fraction))
+        return 0;
+
+    // `std::min (1.0, fraction)` and not the other way round, the way
+    // `roundUpToBar` writes its own clamp: `std::min` returns its first
+    // argument when the comparison is false and every comparison with a NaN
+    // is, so a NaN reads as the top of the beat rather than passing through
+    // to the cast. That makes the guard above belt and braces rather than
+    // load bearing, which is worth knowing before anybody tidies either one:
+    // removing the guard leaves the right answer, and reversing the clamp
+    // casts a NaN to an `int`, which is undefined behaviour that neither
+    // sanitizer here reports.
+    const double into = std::max (0.0, std::min (1.0, fraction));
+    const int tick = (int) (into * (double) kTicksPerDisplayBeat + kTickRounding);
+
+    return tick % kTicksPerDisplayBeat;
+}
+
+//==============================================================================
 /** The metronome.
 
     One click per display beat, with the first beat of the bar accented and
@@ -379,6 +443,36 @@ inline bool isAccentedClick (const Signature& s, long long clickIndex) noexcept
     return clickIndex % (long long) std::max (1, s.numerator) == 0;
 }
 
+/** How many clicks of a count-in are still to sound, including the one
+    sounding now, from the quarters that are left of it.
+
+    The count-in is the one place where the two things called a beat meet in
+    the same readout, so the conversion is here rather than in the window.
+    Its length is bars of the signature, the transport counts the quarters
+    every position is stored in, and the metronome clicks display beats. The
+    number to show the player is the third of those: in 6/8 a two bar count-in
+    is six quarters and twelve clicks, and a readout counting the six would
+    change every other click. A figure worked out in `MainComponent` is a
+    figure nothing tests, which is the fault `RecordAlign.h` exists to
+    remember.
+
+    Rounded up, so the number shown is the one being counted now rather than
+    the one after it, and with a tolerance in display beats so that a position
+    a hair before a click does not show the click before it twice. Zero when
+    the count-in is over or when the argument is not a length, which the
+    readout shows as the last beat rather than as a nought.
+*/
+inline constexpr double kClickRounding = 1.0e-6;
+
+inline long long clicksRemaining (const Signature& s, double quartersLeft) noexcept
+{
+    if (! std::isfinite (quartersLeft) || quartersLeft <= 0.0
+        || quartersLeft > kMaxQuarters)
+        return 0;
+
+    return (long long) std::ceil (quartersLeft / beatLengthQuarters (s) - kClickRounding);
+}
+
 /** Rounds a position down to the bar line at or before it. */
 inline double barFloorQuarters (const Signature& s, double quarters) noexcept
 {
@@ -396,8 +490,10 @@ inline double barFloorQuarters (const Signature& s, double quarters) noexcept
     The editors offer Bar, Beat, halves and thirds of a beat, and steps, which
     are quarters of a beat. Those names are all relative to a display beat, so
     they are stored that way and multiplied up here: in 6/8 a beat to snap to
-    is an eighth, and a step is a sixteenth of the bar rather than a sixteenth
-    note. In 4/4 every one of them comes out at the number it was before the
+    is an eighth, and a step is a thirty second note. A quarter of a display
+    beat is a sixteenth note only where a display beat is a quarter, so the
+    names the editors show move with the signature, which is the point of
+    storing them this way. In 4/4 every one of them comes out at the number it was before the
     signature existed, which is what makes this safe to change under every
     saved project.
 
