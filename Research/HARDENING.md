@@ -7,6 +7,258 @@ Newest first.
 
 ---
 
+## 2026-11-13: the true peak meter, the number that says whether a master is safe
+
+### What was looked at
+
+`Source/TruePeak.h` and `Tests/TruePeakTest.cpp`. The meter is the one number
+in the mix report that decides whether the owner is told his master clips:
+`MixReportPanel` warns above 0 dBTP and cautions above minus one. CLAUDE.md
+already records this file shipping a reading that was three decibels low, so
+it was on the list of numbers that were present, plausible and wrong, and
+nothing had audited it.
+
+The specification was read rather than recalled, by `dsp-researcher`: ITU-R
+BS.1770-4 Annex 2 and BS.1770-5 Annex 2 for the coefficients, EBU Tech 3341
+v4.0 for the compliance cases.
+
+### One real fault: the reading could sit below a peak the file plainly stores
+
+The waveform a converter reconstructs passes through the stored samples. So
+the true peak is at least the sample peak, always: a lower bound, not an
+estimate. The meter was reading below it.
+
+The cause is a property of the standard's own example coefficients. Interleave
+the 48 of them back into one filter and it is exactly symmetric about tap
+23.5, an even length linear phase design, so its four phases reconstruct
+positions an eighth, three eighths, five eighths and seven eighths of the way
+between one input sample and the next. **No phase lands on an input sample
+instant, so the filter never reproduces a stored value.** Two of the four
+phases are a further 0.238 dB light at DC.
+
+Measured, with the interpolator alone:
+
+| signal | sample peak | reading |
+|---|---|---|
+| a lone full scale sample, silence around it | 0.000 dBFS | **-0.245 dBTP** |
+| full scale 16 kHz tone sampled on its crests | 0.000 dBFS | **-0.265 dBTP** |
+
+A lone full scale sample is a click, or the tip of a tight transient. Worth
+0.265 dB, the under-read flipped the mix report's verdict for a master whose
+samples peak between about -1.0 and -0.74 dBFS: the reading came out under
+minus one, so the panel said nothing, and the file was within three quarters
+of a decibel of full scale. It never hid a master that was already over,
+which is the one mercy in it.
+
+The fix is to seed the maximum with the sample's own magnitude. That cannot
+produce an over-read, because the sample peak is below the true peak by the
+same theorem, so it removes an under-read and risks nothing in the other
+direction. EBU case 15 goes from 0.218 dB low to 0.021; the other four cases
+are bit for bit what they were.
+
+Other meters do not have this because they do not use the published table.
+Ardour and libebur128 both design their own interpolator, with phase 0 the
+input sample itself, so a lone full scale sample reads 0.000 there. Keeping
+the standard's coefficients and taking the sample into the maximum gets both:
+the filter every other meter can be compared against, and the bound.
+
+### What the standard's coefficients do cost, which is not a fault
+
+The per phase passband ripple reads a steady full scale tone up to **+0.2220
+dB high, at 12146 Hz, on phase 2**. That is more than EBU Tech 3341's +0.2
+dBTP allowance, and the suite passes because no test case of theirs lands
+near that frequency. It belongs to the coefficients the recommendation
+prints, and section 2.6 of 3341 says plainly that its allowance has to cover
+both the passband ripple and the grid under-read, so it is not slack to
+spend. Rescaling the coefficients to flatten it would make the reading worse
+in the other direction and would stop it being the filter everyone else
+measures with. Recorded here so the next person does not "fix" it.
+
+Case 17 of the compliance suite is the tight one, at 0.316 dB of the 0.4 dB
+allowed. The error decomposes exactly: the crest falls half an input sample
+after a sample, the nearest grid points are three eighths and five eighths
+away, which is 7.5 degrees of an 8 kHz wave, and those two are the phases
+whose gain is 0.238 dB light.
+
+### Four claims that were wrong, three of them in prose
+
+- The header, the test and `LoudnessMeter.h` all said the filter is **Table 3
+  of Annex 2**. The coefficient table is unnumbered and uncaptioned in the
+  recommendation, named only by its four column headings. Table 3 is the
+  channel weightings, in Annex 1.
+- All three said the meter is verified against **EBU Tech 3341 cases 15 to
+  19**. The true-peak cases are **15 to 23**. Cases 20 to 23 need the EBU's
+  own published audio rather than a tone this file can generate, and
+  reconstructing them from the prose would be checking our reading of the
+  prose, so they are not run. That is now written down in both headers as a
+  gap rather than left as a claim.
+- The header said each phase "already sums to about one at DC, so applying
+  that pair would cancel out". Two separate problems. The 12.04 dB pair
+  cancels because minus 12.04 followed by plus 12.04 is identity, which is
+  true whatever the filter's gain, so the sentence derived the right
+  conclusion from an irrelevance. And "about one" was hiding the 0.238 dB
+  deficit on two phases of four, which is the largest single error in the
+  meter. Both sums are now stated exactly.
+- The header said the comment's double accumulation mattered because single
+  precision "loses digits". It does, by 3e-7, which is nothing audible. The
+  real property is better: the coefficients are multiples of 1/8192 and the
+  samples are floats, so every phase sum needs 46 of double's 53 bits and no
+  rounding happens anywhere. That is what lets the test compare exactly.
+
+### The test was weaker than it looked in three places
+
+**A tolerance of a millionth could not see a mistyped digit.** Changing
+0.0017089843750 to 0.0017098843750, nine parts in ten million in the smallest
+coefficient, passed. So did accumulating the whole filter in single precision,
+and so did rounding its products to single precision.
+
+The comparison is exact now, sample by sample, over two hundred thousand
+samples rather than four thousand, and it is exact as a real property rather
+than as a tightened number: the detector's float has to be the correctly
+rounded form of the reference's double, because no rounding happens before
+the cast. Single precision accumulation now disagrees on one sample in three
+and single precision products on one in six. Verified green at -O0, -O1 with
+the sanitizers, -O2, -O3 with fast contraction, -march=native with FMA,
+-Ofast, and under clang, because an exactness claim that goes red on a CI
+runner for no reason is worse than a tolerance.
+
+**Two assertions claimed to catch something they could not.** The test said
+interleaving the phases into one filter and checking its symmetry would catch
+"a phase column swapped or reversed during transcription", and that the
+reference implementation checked the header's rearrangement. Neither is true.
+The table is symmetric in both directions at once, so reversing every row, or
+reordering the four phases, leaves the interleaved filter exactly symmetric
+and turns phase p into phase 3 - p, and a maximum over all four phases cannot
+see a relabelling. Three such mutations were tried and none moved a single
+reading.
+
+What pins the table now is `TruePeakDetector::published (row, phase)`, a new
+public accessor compared against the document's layout value by value. The
+exact output comparison pins the values to the last bit on its own; the
+accessor is the only thing that can see the rearrangement, which is the half
+of the table that is a convention rather than a number.
+
+**A band of 0.03 around one was a tenth of a decibel from going red on
+correct coefficients.** Phases 1 and 2 sit 0.027 from one. The four sums are
+pinned exactly instead.
+
+### And one gap this night's own fix opened
+
+Taking the sample's magnitude into the reading raised the floor of both sides
+of the comparison to the signal's sample peak, which on a full scale random
+signal is most of the way to the largest reconstruction there is. Records
+that only one phase could set stopped being records, and **dropping one of
+the four phases then passed**, where the same comparison without the seed had
+caught all four by margins of 0.02 to 0.13 dB.
+
+Worth remembering for the shape of it. The fix was right, the test still
+passed, and the test was weaker afterwards with nothing to say so. Comparing
+sample by sample rather than as a running maximum restores it, and is cheaper
+as well, because the reference is no longer recomputed from the start of the
+signal for every sample: 200,000 samples now run in 0.75 s where 4,000 took
+1.70 s.
+
+### Mutation testing
+
+Thirty mutations of `Source/TruePeak.h`, each compiled with the sanitizers
+exactly as `Tests/run.sh` has them, aimed at a sign, an index, a constant, a
+dropped term, two lines swapped and a guard removed. Listed here rather than
+kept as a script, so a later night can reproduce them without a second
+convention for test files:
+
+a sign flipped on the main tap of phase 0; one digit transposed in the
+smallest coefficient; one coefficient wrong in its last place; one
+coefficient moved by a single float ulp; two neighbouring coefficients
+swapped; the rows stored unreversed; the four rows in reverse order; the four
+rows in the order 0, 2, 1, 3; the ring walked newest to oldest; the write
+done after the position advances; the wrap guard removed; the wrap guard off
+by one; the absolute value dropped from the accumulator; one phase never
+evaluated; each of the four phases skipped in turn; the first tap dropped;
+the last tap dropped; the maximum over phases replaced by the last phase; the
+maximum replaced by a minimum; the accumulator in single precision; the
+products rounded to single precision; the 12.04 dB attenuation applied and
+not undone; the reading clamped to full scale; `reset()` leaving the history
+in place; `reset()` leaving the write position in place; the ring one entry
+short; the write position wrapping a sample early; the sample peak seed
+removed, taken without its absolute value, halved, doubled, and taken from
+the oldest entry in the ring instead of the current sample; `published()` not
+undoing the reversal, and with its row and phase transposed; and the two
+light phases rescaled to unity gain.
+
+**Against the test as it stood on main: 14 caught of 20.** Against the test
+as it stands now: **28 caught of 30.**
+
+The survivors, both genuine no-ops rather than gaps, each confirmed by a
+comparison of two hundred thousand samples for exact equality:
+
+- **The ring walked newest to oldest instead of oldest to newest.** Term j
+  becomes row 11-j of the table, and the reverse of column p is exactly
+  column 3-p, so phase p's filter becomes phase 3-p's. The four filters are
+  the same four, permuted, and a maximum over all four is bit identical.
+- **`reset()` leaving `writePos` where it was.** The ring is written at
+  `writePos` and read forward from it, so the mapping from slot to time is
+  rotation invariant, and with every entry zeroed it cannot matter which slot
+  is called oldest. Dropping the `history.fill` instead is caught, so the
+  half that matters is covered.
+
+Both are no-ops only because of a symmetry of the standard's coefficients and
+a property of an all-zero ring. That is why the header now says the storage
+order and the walk direction are written for a reader rather than for
+correctness, where it used to imply the reversal was load bearing.
+
+### Audited by somebody who did not write it
+
+The `auditor` agent reviewed the finished change and found four claims in it
+wrong and one new check measuring the wrong thing: the new 16 kHz tone had no
+taper, so it was reporting its own switch-on step, -0.236 where the tone is
+-0.265, and the header already said -0.265. The 1920 tone sweep had the same
+missing taper, putting its readings up to 0.64 dB above the true peak, and
+discarded the only direction of the two that can fail. It also found the
+LoudnessMeter.h correction left uncommitted, so the branch asserted a gap was
+written down in two files and had it in one. All of it is fixed above. It
+confirmed both no-op judgements independently and could not break the
+argument that seeding with the sample magnitude cannot over-read.
+
+### What is now proven that was not
+
+- The reading is never below the largest sample in the signal, over 1920
+  tapered tones across the band as well as a lone full scale sample and a
+  tone sampled on its crests, and the check is run against a
+  reconstruction-only reading first and has to catch it.
+- The reading never exceeds the true peak by more than the standard's own
+  0.222 dB of ripple, which is the direction EBU Tech 3341 is strict in and
+  which nothing measured before.
+- The stored coefficients are the document's, in the document's layout, value
+  by value, and each is the exact multiple of 1/8192 the document prints,
+  with all 48 numerators pinned.
+- The four per phase DC sums, exactly.
+- The largest per phase gain, +0.2220 dB at 12146 Hz on phase 2, computed
+  from the coefficients so the figure the header quotes is produced rather
+  than asserted.
+- The detector equals a reference written from the document's own layout
+  exactly, sample by sample, over 200,000 samples.
+- The centre of the interleaved filter's symmetry is between taps 23 and 24,
+  which is the structural reason the phase grid misses the input samples and
+  the reason the seed has to be there.
+
+### Left alone deliberately
+
+- **The 4x oversampling, unconditionally.** Annex 2 states its figures for 48
+  kHz and says a higher rate needs proportionately less, so 4x is right at
+  44.1 and 48 and more than is needed above. A branch on sample rate is a
+  branch that can be wrong, and the saving would be 24 multiply-accumulates a
+  sample a channel.
+- **The per phase ripple.** It is the standard's, and flattening it would
+  stop this being the filter other meters can be compared against.
+- **Cases 20 to 23.** They need the EBU's own audio. Recorded as a gap in
+  both headers rather than reconstructed from the prose.
+- **The filter is never flushed**, so the inter-sample positions inside the
+  last six samples of a finite signal are never evaluated. Irrelevant to a
+  live meter, which is the only caller, and the seed now covers those
+  samples' own magnitudes.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at
