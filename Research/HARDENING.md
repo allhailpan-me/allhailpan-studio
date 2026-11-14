@@ -33,9 +33,53 @@ was mutation tested in its own merge and is not the target. Nothing in
 of them. `Source/Fx/Unit.h` is still the only JUCE-free header in `Source` with
 no test, and still nothing includes it, so it is still not worth one.
 
+### The test was weaker than it looked
+
+48 mutations of `Groove.h`, every one built the way `Tests/run.sh` builds
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`) and judged
+against both tests that include the header, `GrooveTest` and
+`GrooveTemplateTest`. **28 caught, 20 survived.**
+
+Where the survivors were concentrated says more than the count. The swing
+positions themselves are watertight: all seven mutations of the shift, all
+three of the grid window and all three step lengths were caught, most of them
+by two tests independently, which is what a check worked out from the
+definition rather than from the code buys. Everything that survived was in
+one of three places nothing was asking a question about.
+
+**The humanising draw.** Five of them. The test asked only two things of it:
+the same answer twice, and never more than a quarter step. A draw that was
+always late, half the size it claims, the same number for every step, the
+same number for every note on a step, or a steady ramp rather than a scatter
+satisfied both. The first of those is the one worth naming: with the draw made
+unipolar the humanise knob becomes a delay of random length, every note in the
+pattern late and none early, which against a loop is heard as the part
+dragging rather than loosening.
+
+**The velocity half of `shade`.** Five. The off grid window could be deleted
+outright and the suite passed, so a part played by hand would have had every
+other sixteenth of it softened, which flattens exactly the dynamics somebody
+played. The softening constant could be doubled or divided by ten with nothing
+noticing, and the ceiling clamp had no case at all.
+
+**The swings the interface offers.** Five. The index clamp in `offeredSwing`
+could be removed, which turns those four lines into an out of bounds read; the
+shuffle entry could be rounded from a third to 0.66, which lands the offbeat
+0.7 ms late at 120 bpm and still passes the round trip through
+`nearestOfferedSwing` that was the only check on the table; and the tie rule in
+`nearestOfferedSwing` could be relaxed, which decides whether a stored swing
+of 0.52 reads as straight and therefore whether the groove can be switched
+off.
+
+Also untested: the whole early half of what a project may contain. `ProjectIO`
+admits a swing from 0.3 to 0.8 and this file swept 0.5 to 0.75, so a push,
+where the offbeat plays ahead of its halfway point rather than behind it, was
+never placed at all.
+
 ### Still in progress
 
-Mutation run and findings to follow.
+The checks the survivors name are written. Re-running the same 48 to confirm
+they are now caught, and judging the remainder.
 
 ---
 
