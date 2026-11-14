@@ -1,6 +1,49 @@
-The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can take the feel off something you played and put it on something you
+programmed.** Play a bar of hi-hats or a bassline in by hand, the way it
+actually sits. Then open the channel rack, press **Feel from a part**, and pick
+that clip out of the list. Whatever you step in from then on sits the way you
+played, rather than the way the grid says.
+
+The swing control has been there a while and it does a different job. Swing is
+one number: every offbeat moves by the same amount, which is what a shuffle is
+and is not what a person does. A person is late on some notes and early on
+others, leans on the backbeat, and barely touches the hat before a fill. There
+is no percentage that describes that. The only thing that describes it is the
+performance, which is why every studio that takes this seriously lets you lift
+it off a part and apply it somewhere else.
+
+**What it takes is the timing and the accents, and the accents are on the Feel
+control.** With Feel on Tight you get the timing alone. On Played or Loose you
+get how hard you hit each step as well, measured against your own average, so a
+part you played at one steady level does not change anything and the one where
+you leaned on the two and the four does. Turning it off is **No feel**, which
+puts you back on the swing you had.
+
+**It adds your feel to what is already there rather than straightening the
+part onto it.** Ableton works this way and Pro Tools, Cubase, Logic and
+Cakewalk work the other way, where the part gets dragged onto the donor's
+positions. Theirs is a quantiser with a crooked grid: it throws away whatever
+timing the part already had, which is the one thing you would not want it to
+touch on something you played. If you do want that, quantise first and then
+apply the feel, which comes to the same thing and is your decision rather than
+one made for you.
+
+**It is read at the step resolution the rack is showing**, so a feel taken at
+sixteenths moves sixteenths. It is saved in the project, it is one undo, and it
+is in a bounce exactly as you heard it, because the groove is worked out at the
+same point for playback and for export.
+
+**Two things I would rather tell you than have you find.** It only moves notes
+that are sitting on the grid, within about two per cent of a step, which is
+what keeps a feel from being applied to the very part you read it from. On
+something you played in by hand that means most notes are left alone, so this
+is for parts you stepped in rather than a way to re-feel a live take. And the
+feel is one per song rather than one per clip, which is where the swing already
+lived. Both of those are the next piece of work on this rather than oversights.
 
 **The studio has a time signature.** There is a Sig field next to the tempo in
 the transport bar: type 3/4, or 6/8, or 7/8, or 12/8, and the whole studio
