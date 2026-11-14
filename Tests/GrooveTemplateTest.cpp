@@ -442,11 +442,15 @@ static void anEmptySlotDoesNothing()
 // A part's length does not have to be a whole number of steps. The playlist
 // trims a clip wherever somebody drags it, and the clip's own length is what
 // is handed over, so the slot count has to be the nearest whole number of
-// steps rather than however many fit inside it.
+// steps.
 //
-// Dropping the partial slot instead makes the template shorter than the part
-// it came from, so it wraps early and the feel walks forward by that fraction
-// every time round, which on a long pattern ends up as a feel nobody played.
+// Nearest rather than however many fit inside it, because nearest is wrong by
+// at most half a step and in either direction, while truncating is wrong by
+// up to a whole step and always the same way: shorter than the part it came
+// from, so it wraps early and the feel walks forward every time round. A
+// length of 4.8 steps is 5 slots here and would be 4 under truncation, which
+// loses a fifth of the part. Rounding down does happen, at 4.4 steps, and
+// that is the half step either way rather than the systematic shortening.
 //=============================================================================
 static void aPartThatIsNotAWholeNumberOfStepsStillFits()
 {
@@ -473,6 +477,249 @@ static void aPartThatIsNotAWholeNumberOfStepsStillFits()
         if (feel.numSlots() != c.slots)
             fail (std::string (c.what) + ": got " + std::to_string (feel.numSlots())
                   + " slots, wanted " + std::to_string (c.slots));
+    }
+}
+
+//=============================================================================
+// The humanise knob has to do something when a feel is loaded, and something
+// of the right size.
+//
+// This exists because three breakings of that one term all survived the whole
+// suite: deleting it, making it four times too small by spending it in beats
+// where the rest of the line is in slots, and making it four times too big.
+// Every other check here asserts a bound or an ordering or determinism, and a
+// humanise that is absent or tiny satisfies all three perfectly.
+//
+// The donor plays dead on the grid, so every deviation is zero and whatever
+// separates a placed note from its own grid position is the humanising and
+// nothing else. That also keeps the combined clamp off, so what is measured
+// is the term itself rather than the bound over it.
+//=============================================================================
+static void theHumaniseKnobReachesTheFeelPath()
+{
+    const double step = 0.25;
+
+    std::vector<GrooveTemplate::SourceNote> donor;
+    for (int k = 0; k < 16; ++k)
+        donor.push_back (srcNote (step * k, 0.8f));
+
+    const auto feel = GrooveTemplate::extract (donor, 4.0, step);
+
+    check (! feel.isEmpty(), "the donor made a feel");
+
+    for (int k = 0; k < feel.numSlots(); ++k)
+        checkClose (feel.slotFor (k).timing, 0.0, 1.0e-12,
+                    "a donor played on the grid deviates by nothing");
+
+    // Over enough notes and note numbers to see the top of the draw, since
+    // the draw is a hash of the two and not a sweep.
+    const auto worstDrift = [&feel] (double random)
+    {
+        Groove g;
+        g.enabled = true;
+        g.amount  = 1.0;
+        g.random  = random;
+        g.feel    = feel;
+
+        double worst = 0.0;
+
+        for (int k = 0; k < 256; ++k)
+            for (int note = 0; note < 128; ++note)
+            {
+                const double at = feel.slotBeats() * k;
+                worst = std::max (worst, std::abs (g.place (at, note) - at));
+            }
+
+        return worst / feel.slotBeats();
+    };
+
+    checkClose (worstDrift (0.0), 0.0, 1.0e-12,
+                "the knob at nothing moves nothing, on a donor that deviates by nothing");
+
+    // A quarter of a slot either way at the top of the knob, which is what
+    // the swing half has always spent, and proportional on the way there.
+    struct Case { double random; };
+    const Case cases[] { { 0.15 }, { 0.4 }, { 1.0 } };
+
+    for (const auto& c : cases)
+    {
+        const double drift = worstDrift (c.random);
+        const double want  = c.random * 0.25;
+
+        std::printf ("    humanise %.2f with a feel: worst %.4f of a slot, up to %.4f\n",
+                     c.random, drift, want);
+
+        if (drift > want + 1.0e-9)
+            fail (std::string ("humanise ") + std::to_string (c.random)
+                  + " moved a note " + std::to_string (drift)
+                  + " of a slot, past the " + std::to_string (want) + " it may spend");
+
+        // The lower bound is what catches the term being absent or spent in
+        // the wrong unit. The draw is a hash, so it does not reach its limit
+        // exactly, but over 32768 notes it comes close to it.
+        if (drift < want * 0.9)
+            fail (std::string ("humanise ") + std::to_string (c.random)
+                  + " only moved a note " + std::to_string (drift)
+                  + " of a slot, where it should reach nearly " + std::to_string (want));
+    }
+}
+
+//=============================================================================
+// The accents are read at the feel's own resolution, the same as the timing.
+//
+// Every other accent check in this file uses a feel spaced at 0.25 and leaves
+// `base` at its default sixteenth, which is also 0.25, so the two cannot
+// disagree and `shade` reading the wrong one of them survived. The state is
+// ordinary: `base` is only written when somebody touches the swing control,
+// so reading a feel at eighths while `base` still says sixteenths is what
+// happens whenever the step resolution is changed on its own.
+//=============================================================================
+static void theAccentsAreReadAtTheFeelsOwnResolution()
+{
+    const double slot = 0.5;   // eighths, while base stays at sixteenths
+
+    // Four slots, loud then quiet, so reading the grid at twice the
+    // resolution lands on a different slot with a different accent.
+    std::vector<GrooveTemplate::SourceNote> donor
+    {
+        srcNote (slot * 0.0, 1.0f),
+        srcNote (slot * 1.0, 0.2f),
+        srcNote (slot * 2.0, 1.0f),
+        srcNote (slot * 3.0, 0.2f),
+    };
+
+    const auto feel = GrooveTemplate::extract (donor, 2.0, slot);
+
+    check (feel.numSlots() == 4, "four eighths in two beats");
+    checkClose (feel.slotBeats(), slot, 1.0e-12, "and the feel knows its own spacing");
+
+    Groove g;
+    g.enabled  = true;
+    g.amount   = 1.0;
+    g.velocity = 1.0;
+    g.base     = Groove::Base::sixteenth;   // deliberately not the feel's
+    g.feel     = feel;
+
+    const double reference = feel.velocityReference();
+
+    for (int k = 0; k < 4; ++k)
+    {
+        const double at   = slot * k;
+        const float  got  = g.shade (at, 0.5f);
+        const double want = std::clamp (0.5 + ((double) feel.slotFor (k).velocity - reference),
+                                        0.02, 1.0);
+
+        if (std::abs ((double) got - want) > 1.0e-6)
+            fail (std::string ("slot ") + std::to_string (k) + " at a feel spaced "
+                  + std::to_string (slot) + " with base at sixteenths shaded to "
+                  + std::to_string (got) + ", wanted " + std::to_string (want));
+    }
+
+    // And the loud slots really are louder than the quiet ones, so the check
+    // above is not comparing two numbers that happen to be equal.
+    check (g.shade (0.0, 0.5f) > g.shade (slot, 0.5f) + 0.2f,
+           "the donor's loud slot comes out louder than its quiet one");
+}
+
+//=============================================================================
+// A donor longer than the cap is read as far as the cap reaches, and no
+// further. It is not folded back into itself.
+//
+// Wrapping instead took the far end of the performance and laid it into the
+// slots the near end had left empty, so a 24 bar take read at thirty-seconds
+// came back with bar 17's deviation and bar 17's accent sitting in a slot
+// bars 1 to 16 never played. That is a feel out of two different places in
+// the part offered as one, and `fromString` refuses the same situation
+// outright, so the two paths disagreed about the same fault.
+//=============================================================================
+static void aDonorLongerThanTheCapIsNotFoldedIntoItself()
+{
+    const double slot = 0.125;
+
+    // One note at the very start, late. One note two slots past the cap,
+    // early, which is where wrapping used to put it: slot 2.
+    const int    beyond = GrooveTemplate::kMaxSlots + 2;
+    std::vector<GrooveTemplate::SourceNote> donor
+    {
+        srcNote (slot * 0.0 + slot * 0.2, 0.8f),
+        srcNote (slot * (double) beyond + slot * -0.4, 0.3f),
+    };
+
+    const auto feel = GrooveTemplate::extract (donor, slot * (double) (beyond + 64), slot);
+
+    check (feel.numSlots() == GrooveTemplate::kMaxSlots, "the slot count is capped");
+
+    check (feel.slotFor (0).filled, "the note inside the template is kept");
+    checkClose (feel.slotFor (0).timing, 0.2, 1.0e-12, "with its own deviation");
+
+    check (! feel.slotFor (2).filled,
+           "a note past the cap does not appear in a slot the donor left empty there");
+
+    int filled = 0;
+    for (int k = 0; k < feel.numSlots(); ++k)
+        if (feel.slotFor (k).filled)
+            ++filled;
+
+    check (filled == 1, "and nothing else was folded in either");
+
+    // The reference is the one note that is really in the template, not an
+    // average over a note that belongs to a different part of the take.
+    checkClose (feel.velocityReference(), 0.8, 1.0e-6,
+                "the accent reference is over what the template holds");
+}
+
+//=============================================================================
+// A slot spacing out of a file has to be a musical grid, because a project
+// file is text on a disk.
+//
+// Both ends did real damage. Ten beats a slot made the half-slot bound in
+// `Groove::place` five beats, so a downbeat was thrown past the next four
+// notes while they stayed where they were, which is the reorder that bound
+// exists to prevent. A millionth of a beat made an ordinary position's slot
+// index big enough to overflow the humanising hash, which is undefined
+// behaviour and which the sanitizers stop on.
+//=============================================================================
+static void aFileCannotInventASlotSpacing()
+{
+    const auto spacingOf = [] (long long micros)
+    {
+        return GrooveTemplate::fromString (std::to_string (micros) + " 100000:800000");
+    };
+
+    // Refused, not clamped: a feel at the wrong resolution is worse than none.
+    check (spacingOf (10'000'000).isEmpty(), "ten beats a slot is not a grid");
+    check (spacingOf (1).isEmpty(), "nor is a millionth of a beat");
+    check (spacingOf (4'000'001).isEmpty(), "just over a bar is refused");
+    check (spacingOf (15'624).isEmpty(), "just under a 256th note is refused");
+
+    // And the range the rack really uses, plus the edges, all load.
+    for (long long micros : { 15'625LL, 125'000LL, 250'000LL, 500'000LL, 4'000'000LL })
+    {
+        const auto feel = spacingOf (micros);
+
+        if (feel.isEmpty())
+            fail (std::string ("a spacing of ") + std::to_string (micros)
+                  + " millionths should have loaded");
+
+        checkClose (feel.slotBeats(), (double) micros / 1.0e6, 1.0e-12,
+                    "and it keeps the spacing it was given");
+    }
+
+    checkClose ((double) GrooveTemplate::kMinSlotBeats, 1.0 / 64.0, 1.0e-12,
+                "the floor is a 256th note");
+    checkClose ((double) GrooveTemplate::kMaxSlotBeats, 4.0, 1.0e-12,
+                "and the ceiling a bar of four");
+
+    // The position that used to overflow the hash, at a spacing that is now
+    // refused, so nothing reaches it. Half an hour in at 120 bpm.
+    {
+        Groove g;
+        g.enabled = true;
+        g.random  = 1.0;
+        g.feel    = GrooveTemplate::fromString ("15625 100000:800000");
+
+        check (! g.feel.isEmpty(), "the finest allowed spacing loads");
+        check (std::isfinite (g.place (3600.0, 60)), "and an hour of song is still a number");
     }
 }
 
@@ -776,12 +1023,16 @@ static void nothingTheDonorDoesBreaksIt()
 {
     std::mt19937 rng (4242u);
     std::uniform_real_distribution<double> anywhere (-40.0, 40.0);
+    std::uniform_real_distribution<double> within (0.0, 1.0);
     std::uniform_real_distribution<float>  loudness (-0.5f, 1.5f);
     std::uniform_int_distribution<int>     pitches (0, 127);
     std::uniform_int_distribution<int>     howMany (0, 60);
 
     const double steps[] { 0.5, 0.25, 0.125 };
     const double lengths[] { 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
+
+    int nonEmpty = 0;
+    long long filledSeen = 0;
 
     for (int trial = 0; trial < 4000; ++trial)
     {
@@ -791,13 +1042,27 @@ static void nothingTheDonorDoesBreaksIt()
         std::vector<GrooveTemplate::SourceNote> notes;
         const int n = howMany (rng);
 
+        // Most of the notes land inside the part and one in eight is thrown
+        // a long way outside it, so this exercises both the density and the
+        // refusal. Drawing every note across eighty beats instead, which is
+        // what this did while a note outside the template wrapped round into
+        // it, leaves a mean of three filled slots out of sixteen once such a
+        // note is dropped rather than wrapped, and most of what the loop
+        // below is for needs neighbours to actually be there.
         for (int i = 0; i < n; ++i)
-            notes.push_back (srcNote (anywhere (rng), loudness (rng), pitches (rng)));
+            notes.push_back (srcNote (i % 8 == 0 ? anywhere (rng) : within (rng) * length,
+                                      loudness (rng), pitches (rng)));
 
         const auto feel = GrooveTemplate::extract (notes, length, step);
 
         if (feel.isEmpty())
             continue;
+
+        ++nonEmpty;
+
+        for (int k = 0; k < feel.numSlots(); ++k)
+            if (feel.slotFor (k).filled)
+                ++filledSeen;
 
         check (feel.numSlots() >= 1 && feel.numSlots() <= GrooveTemplate::kMaxSlots,
                "the slot count is sane");
@@ -862,6 +1127,16 @@ static void nothingTheDonorDoesBreaksIt()
                 }
             }
     }
+
+    // Printed because this loop is only worth what it covers, and a change
+    // elsewhere that quietly stops the generated notes reaching the template
+    // would otherwise leave it passing over almost nothing.
+    std::printf ("    %d of 4000 generated donors made a feel, %.2f filled slots each\n",
+                 nonEmpty, nonEmpty > 0 ? (double) filledSeen / nonEmpty : 0.0);
+
+    check (nonEmpty > 3000, "most of the generated donors make a feel");
+    check ((double) filledSeen / std::max (1, nonEmpty) > 6.0,
+           "and the feels they make have neighbours in them to cross");
 }
 
 //=============================================================================
@@ -997,6 +1272,10 @@ int main()
     aQuantisedPartHasNoFeelInIt();
     aPartThatIsNotAWholeNumberOfStepsStillFits();
     aFileCannotPushASlotOutOfRange();
+    aFileCannotInventASlotSpacing();
+    aDonorLongerThanTheCapIsNotFoldedIntoItself();
+    theHumaniseKnobReachesTheFeelPath();
+    theAccentsAreReadAtTheFeelsOwnResolution();
     theFeelIsAddedRatherThanImposed();
     theAmountIsAffine();
     theFeelRepeatsFromTheRightPlace();

@@ -157,8 +157,14 @@ public:
         here. The reason it is needed at all is that without it the slot's
         timing depends on which voice of a spread chord the loop happened to
         reach last, which is a template that is not a function of its input.
-        "First" is earliest, with the lower pitch winning a tie, so the answer
-        does not depend on the order the notes arrive in either.
+        "First" is earliest, then lowest in pitch, then quietest, which orders
+        any two notes that are not identical in all three and so makes the
+        answer independent of the order the notes arrive in. Pitch alone was
+        not enough: two notes at one beat and one pitch kept their input
+        order under a stable sort, so pasting a note onto itself or importing
+        a MIDI file with a doubled note gave one of two templates depending
+        on which copy came first. Notes identical in all three are
+        indistinguishable, so either one is the same answer.
     */
     static GrooveTemplate extract (std::vector<SourceNote> notes,
                                    double lengthBeats,
@@ -183,7 +189,9 @@ public:
                           {
                               if (a.beat != b.beat)
                                   return a.beat < b.beat;
-                              return a.pitch < b.pitch;
+                              if (a.pitch != b.pitch)
+                                  return a.pitch < b.pitch;
+                              return a.velocity < b.velocity;
                           });
 
         for (const auto& note : notes)
@@ -199,9 +207,29 @@ public:
                 continue;
 
             const auto raw = (std::int64_t) std::llround (u);
-            const int  k   = wrapIndex (raw, count);
 
-            Slot& slot = built[(std::size_t) k];
+            // A note outside the template is dropped rather than wrapped
+            // round into it, and this is load bearing rather than tidiness.
+            //
+            // `count` is capped at kMaxSlots, so a donor longer than that is
+            // read only as far as the cap reaches. Wrapping instead took the
+            // far end of the performance and laid it into the slots the near
+            // end had left empty, which is a feel assembled out of two
+            // different places in the part and offered as one. Measured on a
+            // 24 bar donor read at thirty-seconds, slot 2 came back carrying
+            // bar 17's deviation and bar 17's accent while bars 1 to 16 never
+            // played that slot at all, with nothing on screen to say so. A
+            // recorded take longer than the cap is ordinary, and reading the
+            // feel out of a recorded take is the whole feature.
+            //
+            // So the template is the first `count` slots of the donor, which
+            // is a feel somebody really played. `fromString` refuses an
+            // oversized template for the same reason, and the two paths now
+            // agree rather than one truncating where the other refuses.
+            if (raw < 0 || raw >= (std::int64_t) count)
+                continue;
+
+            Slot& slot = built[(std::size_t) raw];
 
             if (slot.filled)
                 continue;
@@ -346,6 +374,31 @@ public:
 private:
     static constexpr double kScale = 1.0e6;
 
+public:
+    /** What a slot spacing is allowed to be, because a project file is text on
+        a disk and `fromString` will otherwise read whatever is in it.
+
+        The channel rack produces 0.125, 0.25 or 0.5 beats, an eighth to a
+        thirty-second, and these bounds are deliberately wider than that so a
+        resolution the rack grows later is not refused: a 256th note at the
+        bottom and a 4/4 bar at the top. Outside them the number is not a
+        musical grid at all, and both ends did real damage.
+
+        A spacing of ten beats made the half-slot bound in `Groove::place`
+        five beats, so the downbeat of a bar was thrown past the next four
+        notes while they stayed where they were, which is the reorder that
+        bound exists to prevent. A spacing of a millionth of a beat made the
+        slot index of an ordinary position large enough to overflow the
+        humanising hash, which `-fsanitize=undefined` rightly stops on.
+
+        Out of range is refused rather than clamped, which is `fromString`'s
+        stance everywhere else: a feel read at the wrong resolution is worse
+        than no feel, because nothing about it looks wrong. */
+    static constexpr double kMinSlotBeats = 1.0 / 64.0;
+    static constexpr double kMaxSlotBeats = 4.0;
+
+private:
+
     /** The only way the slots are ever set, so that `reference` cannot
         disagree with them. */
     void setSlots (double spacingBeats, std::vector<Slot> s)
@@ -372,9 +425,16 @@ private:
 
             // An empty slot carries no deviation and no accent, so that
             // "the donor played nothing here" is one state rather than two.
-            // Everything reading a slot already asks `filled` first, and this
-            // is what makes forgetting to ask harmless rather than a note
-            // moved by a number nobody set.
+            //
+            // No path can currently hand over an unfilled slot with anything
+            // in it: `extract` default constructs its vector and writes
+            // `timing` only where it writes `filled`, and `fromString`'s dash
+            // branch default constructs a `Slot`. So this is defence in depth
+            // and not a guard that fires, and deleting it changes nothing
+            // today. It is here so that the invariant is a property of this
+            // function rather than of `Slot`'s default member initialisers,
+            // which is what a later path that writes one field and forgets
+            // the other would otherwise depend on.
             if (! slot.filled)
             {
                 slot.timing   = 0.0;
@@ -392,7 +452,8 @@ private:
         // means "is there a feel loaded" is one question rather than two, and
         // nothing downstream has to cope with a template that is present and
         // inert.
-        if (hits == 0 || ! (spacing > 0.0) || ! std::isfinite (spacing))
+        if (hits == 0 || ! (spacing >= kMinSlotBeats) || ! (spacing <= kMaxSlotBeats)
+            || ! std::isfinite (spacing))
         {
             slots.clear();
             spacing   = 0.25;

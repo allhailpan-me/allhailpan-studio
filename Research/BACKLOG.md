@@ -226,6 +226,78 @@ is half the swing it claims, which is the failure the swing paragraph in
   full Reference Guide was not reachable, and writing a Pro Tools percentage
   from memory is exactly what the research rule forbids.
 
+### Finished 2026-11-14, and what the audit found
+
+The build, the tests and the persistence were in place from the first night.
+The second night was the verification, and it was worth more than the first.
+
+Found by measurement before the audit ran, and fixed:
+
+- **A feel plus the humanise knob reordered the pattern.** A deviation reaches
+  half a slot, which is the whole distance to the next note, so the humanising
+  on top of it walked one note past the next. Measured at 0.42 of a slot
+  backwards over 20000 generated feels. The two are bounded together now. The
+  check that should have caught it swept neither knob.
+
+Found by the `auditor`, worst first, and fixed:
+
+- **A donor longer than the slot cap was folded into itself.** The count was
+  capped and the notes were wrapped modulo the cap, so the far end of the
+  performance landed in slots the near end had left empty: a 24 bar take read
+  at thirty-seconds came back with bar 17's deviation and accent in a slot
+  bars 1 to 16 never played. Reachable at over 32 bars at the default
+  resolution, which is an ordinary recorded take. Notes outside the template
+  are dropped now, so a long donor gives the feel of its first 32 bars, and
+  the extraction path agrees with the parse path, which already refused.
+- **The slot spacing out of a file was unbounded.** Ten beats a slot made the
+  half-slot bound five beats, which threw a downbeat past the next four notes
+  and is the reorder that bound exists to prevent; a millionth of a beat made
+  an ordinary position's slot index overflow the humanising hash, which is
+  undefined behaviour. Bounded to a 256th note and a bar of four, refused
+  rather than clamped, and the hash multiply is unsigned.
+- **The groove could get stuck switched on with no control that could turn it
+  off.** Clearing a feel left `enabled` true with a straight swing, and the
+  swing box reads "Straight" in that state, so picking "Straight" sends no
+  change. The invariant that `enabled` implies a swing that is not straight
+  holds again.
+- **Two test gaps on the lines the night was about.** Deleting the humanise
+  term from the feel path, making it four times too small and making it four
+  times too big all survived the whole suite, as did `shade` reading the base
+  resolution instead of the feel's own. Both are covered directly now.
+- **Extraction was not a function of its input** for two notes sharing a beat
+  and a pitch, which a stable sort leaves in input order. Reachable by pasting
+  a note onto itself. The tie break goes to velocity after pitch.
+- **The donor's grid and the recipient's grid could sit a fraction apart,**
+  because extraction measured from the clip's offset and `place` counts from
+  the pattern's origin. A part played uniformly late off a clip split at an
+  unsnapped beat read back as perfectly straight. The anchor is rounded to a
+  whole number of slots.
+- Smaller: the menu held raw indices into `clips` across an asynchronous
+  callback where `Clip::id` and `Project::find` exist for that; it offered
+  clips whose playing portion has no notes, so the item did nothing when
+  picked; the new "Bar N" label hardcoded four beats to the bar in a project
+  that has had a time signature since 2026-11-10.
+
+Four comments said something the code did not, which is the fault this project
+keeps meeting and three of the four were written by the night that was
+verifying itself. All four are corrected: the ordering comment claimed a
+guarantee that no per-note function can make, the empty slot comment described
+a guard that cannot fire, the velocity field comment described one of the two
+things that field now means, and a test comment argued for rounding with a
+reason contradicted by a case in its own table.
+
+### Left for the hardening lane, deliberately not changed here
+
+- **`ProjectIO` admits a swing of 0.8 and a humanise of 1.0 together, where a
+  pair can cross by a twentieth of a step.** The interface offers 2/3 at most,
+  where they tie exactly, and `GrooveTest` sweeps to 0.75. This predates the
+  feel and narrowing what a saved project may contain is not a feature
+  branch's business. Either clamp `grooveSwing` to 0.75 on load or bound the
+  swing path's total shift the way the feel path's is now bounded.
+- **The channel rack still assumes four beats to the bar** in its position
+  readout and its step arithmetic. The "Bar N" label in the feel menu is off
+  that assumption now, but `rackStepBeats` and `positionLabel` are not.
+
 ### Sources
 
 - Ableton Reference Manual, Live 12, chapter 14 "Using Grooves", sections

@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <cmath>
 #include "Project.h"
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
@@ -66,9 +67,11 @@ public:
         addAndMakeVisible (feelBox);
 
         addButton (feelFrom, "Feel from a part...",
-                   "Take the timing and the accents out of a part somebody played, "
-                   "and put them on the steps here. Reads the part at the step "
-                   "resolution above, so a feel read at sixteenths swings sixteenths.");
+                   "Take the timing out of a part somebody played and put it on the "
+                   "steps here. Reads the part at the step resolution above, so a feel "
+                   "read at sixteenths swings sixteenths. The donor's accents come too, "
+                   "as far as the Feel control beside this is up: at Tight the timing "
+                   "is taken and the accents are not.");
         feelFrom.onClick = [this] { showFeelMenu(); };
 
         addButton (clearAll, "Clear", "Erase every step in this pattern");
@@ -481,16 +484,25 @@ private:
 
         menu.addSectionHeader ("Take the feel from");
 
+        // The clips are named by id rather than by position in the vector.
+        // The menu is asynchronous, so by the time the callback runs an index
+        // can name a different clip than the one that was clicked, and
+        // `Project::find` is what everything else here uses for that reason.
         std::vector<int> offered;
 
-        for (int i = 0; i < (int) project.clips.size(); ++i)
+        for (const auto& c : project.clips)
         {
-            const auto& c = project.clips[(std::size_t) i];
-
             if (! c.isMidi() || c.pattern == nullptr || c.pattern->notes.empty())
                 continue;
 
-            juce::String what = "Bar " + juce::String ((int) (c.start / 4.0) + 1);
+            // Offered only if a feel really comes out of it. A clip can hold
+            // a pattern with notes and play a stretch of it that has none,
+            // after a trim or a split, and offering that is a menu item that
+            // does nothing when it is picked with nothing to say why.
+            if (feelOf (c).isEmpty())
+                continue;
+
+            juce::String what = "Bar " + juce::String ((int) project.meter.barBeatAt (c.start).bar);
 
             if (! project.channels.empty())
             {
@@ -500,7 +512,7 @@ private:
                     what += ", " + project.channels[(std::size_t) channel].name;
             }
 
-            offered.push_back (i);
+            offered.push_back (c.id);
             menu.addItem ((int) offered.size() + 1, what);
         }
 
@@ -518,6 +530,16 @@ private:
             if (choice == 1)
             {
                 g.feel = {};
+
+                // Back to whatever the swing control is showing, which is
+                // what "go back to the swing" says. Leaving `enabled` alone
+                // left the groove switched on with a straight swing and the
+                // humanise still running, and the swing box reads "Straight"
+                // in that state: picking "Straight" again sends no change, so
+                // there was no control in the window that could turn it off
+                // again. Before this, `enabled` being true implied a swing
+                // that was not straight, and it does again.
+                g.enabled = g.swing != 0.5;
             }
             else
             {
@@ -526,27 +548,27 @@ private:
                 if (which < 0 || which >= (int) offered.size())
                     return;
 
-                const int index = offered[(std::size_t) which];
+                // By id, because the menu is asynchronous and the clip that
+                // was clicked may have been moved, deleted or replaced in the
+                // vector since. An index would quietly read a different clip.
+                const Clip* c = project.find (offered[(std::size_t) which]);
 
-                // The clips can have moved while the menu was open, since it
-                // is asynchronous. Checking the index still points at a MIDI
-                // clip is cheaper than holding a reference that could dangle.
-                if (index < 0 || index >= (int) project.clips.size())
+                if (c == nullptr || ! c->isMidi() || c->pattern == nullptr)
                     return;
 
-                const auto& c = project.clips[(std::size_t) index];
+                const auto read = feelOf (*c);
 
-                if (! c.isMidi() || c.pattern == nullptr)
+                if (read.isEmpty())
                     return;
 
-                g.feel = feelOf (c);
-
-                if (g.feel.isEmpty())
-                    return;
+                g.feel = read;
 
                 // Reading a feel is asking for it, so it is switched on. The
-                // velocity and random knobs are left where they were: they
-                // mean the same thing with a feel loaded as without one.
+                // velocity and random knobs are left where they were, which
+                // means the donor's accents are passed on only as far as the
+                // Feel control is up: at "tight" the timing is taken and the
+                // accents are not. That is what the control is for and the
+                // tooltip says so.
                 g.enabled = true;
             }
 
@@ -573,14 +595,24 @@ private:
 
         std::vector<GrooveTemplate::SourceNote> notes;
 
+        // The donor is measured from a whole number of slots, not from the
+        // clip's offset as it stands. `Groove::place` counts the recipient's
+        // slots from the pattern's origin, so if the offset is not a multiple
+        // of a slot the two grids sit a fraction apart and the donor's
+        // deviations are measured against a grid nobody plays to: a part
+        // played uniformly late off a clip split at an unsnapped beat reads
+        // back as perfectly straight, and the feel comes out empty. A split
+        // taken with snapping suppressed can leave exactly that offset.
+        const double anchor = std::round (c.offset / slot) * slot;
+
         for (const auto& n : c.pattern->notes)
         {
-            const double at = n.start - c.offset;
-
-            if (at < 0.0 || at >= c.length)
+            // Still only the stretch the clip actually plays, measured by the
+            // real offset: the anchor decides the grid, not what is in range.
+            if (n.start < c.offset || n.start >= c.offset + c.length)
                 continue;
 
-            notes.push_back ({ at, n.velocity, n.note });
+            notes.push_back ({ n.start - anchor, n.velocity, n.note });
         }
 
         return GrooveTemplate::extract (std::move (notes), c.length, slot);
