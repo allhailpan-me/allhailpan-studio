@@ -31,20 +31,31 @@
 // here; a difference between two velocities survives an offset and does not
 // survive a scale.
 //
-// --- Two deliberate breakages survive on purpose -------------------------
+// --- Which deliberate breakages survive, and which do not ----------------
 //
 // Written down so nobody goes looking for the test that should have caught
-// them. Both were checked rather than assumed.
+// them. Every one was checked rather than assumed.
 //
-// Clamping each note inside `applyMove` produces identical output, which is
-// worth saying out loud because it is the headline fault this whole header
-// exists to prevent. `planMove` has already cut the delta to one that keeps
-// every member in range, so a clamp afterwards cannot bite. The meaningful
-// versions of that mutation live in `planMove` itself and are killed hard:
-// dropping the bound against zero on the pitch ceiling fails over twenty
-// thousand checks here. The per note clamps that CAN bite, the ones on the
-// way out of a velocity or a length edit, are caught, because a note arriving
-// from a file outside the range is planted for exactly that.
+// Clamping each note inside `applyMove` is CAUGHT, in both fields, and an
+// earlier version of this comment claimed the opposite. It said the clamp
+// produced identical output because `planMove` has already cut the delta to
+// one that keeps every member in range. That is true of a note that started
+// in range and it is the whole story only if every note did. The generator
+// below deliberately plants pitches at 128 to 140 and at -12 to -1 and
+// starts before the origin, and a per note clamp drags those back into
+// range, the high pitches down and the low ones and the early starts up,
+// while leaving the rest of the group where it is, so the interval and the
+// rhythm assertions see it:
+//
+//   applyMove, pitch clamped per note  -> a moved group keeps its intervals
+//   applyMove, start clamped per note  -> a moved group keeps its rhythm
+//
+// The correction matters more than a tidy-up, which is why it is spelled
+// out: the old note told the next person that the headline fault this header
+// exists to prevent was invisible here, when it is the thing this file
+// catches best. Believing it would mean either hunting for a check that is
+// already written, or adding that clamp to `applyMove` in the belief that
+// nothing could see it.
 //
 // Swapping `lower_bound` for `upper_bound` in `remapAfter` is a no-op. Any
 // index present in the erased set is skipped by the `contains` guard one line
@@ -323,10 +334,23 @@ void testSelectionAlgebra()
         const auto added = sel;
         NoteSelection::add (sel, index);
         check (sel == added, "add is idempotent");
+        check (NoteSelection::contains (sel, index), "and puts the note in");
+
         NoteSelection::remove (sel, index);
         const auto removed = sel;
         NoteSelection::remove (sel, index);
         check (sel == removed, "remove is idempotent");
+
+        // Idempotence on its own cannot fail in the direction it was written
+        // for: a `remove` that does nothing is perfectly idempotent, and
+        // deleting the body of `remove` outright passed every check in this
+        // file. So assert what it is for, and that it minds its own index.
+        check (! NoteSelection::contains (sel, index), "and takes the note out");
+        check (isSortedUnique (sel), "leaving the selection sorted and unique");
+        for (size_t i = 0; i < count; ++i)
+            if (i != index)
+                check (NoteSelection::contains (sel, i) == NoteSelection::contains (added, i),
+                       "and leaves every other note's membership alone");
     }
 
     // A Shift modified marquee reverses membership inside the rectangle only.
@@ -358,6 +382,30 @@ void testSelectionAlgebra()
                                       { 2.0, 1.0, 60, 0.8f } };
     check (NoteSelection::atPitch (pitched, 60) == Set { 0, 2 }, "every note at one pitch");
     check (NoteSelection::atPitch (pitched, 61).empty(), "no note at an unused pitch");
+
+    // Select Inverse, which is `remove` used in anger: the roll builds
+    // `all()` and removes each selected index from it, at
+    // PianoRollComponent.cpp:573. Asserted as the complement rather than by
+    // walking the same loop, because a `remove` that did nothing would leave
+    // Select Inverse selecting everything, the already selected notes
+    // included, and nothing else in this file would notice.
+    Rng rng3 (0x5eed000bull);
+    for (int trial = 0; trial < 5000; ++trial)
+    {
+        const size_t count = (size_t) rng3.intBetween (1, 24);
+        const auto chosen = randomSelection (rng3, count);
+
+        auto inverted = NoteSelection::all (count);
+        for (const auto index : chosen)
+            NoteSelection::remove (inverted, index);
+
+        check (isSortedUnique (inverted), "the inverse stays sorted and unique");
+        check (inverted.size() + chosen.size() == count,
+               "the inverse holds exactly the notes the selection did not");
+        for (size_t i = 0; i < count; ++i)
+            check (NoteSelection::contains (inverted, i) != NoteSelection::contains (chosen, i),
+                   "Select Inverse selects exactly what was not selected");
+    }
 }
 
 //===========================================================================
@@ -652,6 +700,8 @@ void testSnapModes()
 
     Rng rng (0x5eed0007ull);
 
+    int stoodStill = 0;
+
     for (int trial = 0; trial < 40000; ++trial)
     {
         const size_t count = (size_t) rng.intBetween (1, 8);
@@ -668,7 +718,32 @@ void testSnapModes()
         const auto before = notes;
         const size_t anchor = sel[(size_t) rng.intBetween (0, (int) sel.size() - 1)];
 
-        NoteSelection::Limits limits;             // minStart 0, no upper bound
+        NoteSelection::Limits limits;             // minStart 0 by default
+
+        // A ceiling, half the time. Absolute snapping offers only the deltas
+        // that land the anchor on a grid line, and there may be no such line
+        // the group is allowed to reach: `snappedDeltaWithin` then stands
+        // still, which is the documented answer. With `maxStart` left at
+        // infinity that branch cannot be reached at all, so this test never
+        // saw it. It was reached in testGroupMovePreservesShape, which is the
+        // one that imposes a maxStart and says nothing about the grid, so the
+        // property fell down the gap between the two: sliding the group to
+        // the edge of its travel instead of standing still passed everything.
+        // The ceiling is put within a grid step or so of the group's own
+        // latest start, which is where the branch lives.
+        // Mostly a generous ceiling, because a tight one clamps nearly every
+        // request in the range below and that costs the assertions guarded by
+        // `! beatsLimited` most of their samples. A tight one some of the
+        // time is what reaches the branch.
+        if (rng.unit() < 0.5)
+        {
+            double highestStart = -std::numeric_limits<double>::infinity();
+            for (const auto index : sel)
+                highestStart = std::max (highestStart, notes[index].start);
+            limits.maxStart = highestStart + (rng.unit() < 0.4 ? rng.between (0.0, grid * 1.5)
+                                                               : rng.between (0.0, 30.0));
+        }
+
         NoteSelection::Request request;
         request.beats       = rng.between (-6.0, 20.0);
         request.grid        = grid;
@@ -703,9 +778,48 @@ void testSnapModes()
             const auto move = NoteSelection::planMove (copy, sel, request, limits);
             NoteSelection::applyMove (copy, sel, move);
 
+            // On a grid line, or standing still because there was no line
+            // to reach. The first half is what catches a group sliding to
+            // the edge of its travel instead of staying put.
+            //
+            // The second half has to assert the REASON, not the outcome.
+            // Written as "the starts did not change" it cannot fail: inside
+            // this arm `move.beats` is zero and `n.start += 0.0` leaves
+            // every start exactly where it was, so the assertion would hold
+            // however wrong the decision to stand still had been. That is
+            // the tautology this project found in the fader law, and the
+            // first version of this check was it. So the question asked is
+            // whether any grid line was reachable at all.
             const double landed = copy[anchor].start / grid;
-            checkClose (landed, std::round (landed), 1e-9,
-                        "an absolute group move lands the grabbed note on the grid");
+            if (move.beats != 0.0)
+            {
+                checkClose (landed, std::round (landed), 1e-9,
+                            "an absolute group move lands the grabbed note on the grid");
+            }
+            else
+            {
+                ++stoodStill;
+
+                double lowestStart  = std::numeric_limits<double>::infinity();
+                double highestStart = -std::numeric_limits<double>::infinity();
+                for (const auto index : sel)
+                {
+                    lowestStart  = std::min (lowestStart,  notes[index].start);
+                    highestStart = std::max (highestStart, notes[index].start);
+                }
+                const double lo = std::min (0.0, limits.minStart - lowestStart);
+                const double hi = std::max (0.0, limits.maxStart - highestStart);
+
+                // The anchor may only land on a whole number of grid steps
+                // from zero, so the lines it could reach are the multiples
+                // of the grid inside its allowed travel. The lowest one at
+                // or above the bottom of that travel has to be above the top
+                // of it, or a line was reachable and standing still was the
+                // wrong answer.
+                const double first = std::ceil ((request.anchorStart + lo) / grid - 1e-9) * grid;
+                check (first > request.anchorStart + hi + 1e-9,
+                       "and it stands still only when no grid line is reachable");
+            }
 
             for (size_t a = 0; a < sel.size(); ++a)
                 checkClose (copy[sel[a]].start - copy[anchor].start,
@@ -726,15 +840,24 @@ void testSnapModes()
             auto copy = notes;
             const auto move = NoteSelection::planMove (copy, sel, request, limits);
 
-            double lowestStart = std::numeric_limits<double>::infinity();
+            double lowestStart  = std::numeric_limits<double>::infinity();
+            double highestStart = -std::numeric_limits<double>::infinity();
             for (const auto index : sel)
-                lowestStart = std::min (lowestStart, notes[index].start);
+            {
+                lowestStart  = std::min (lowestStart,  notes[index].start);
+                highestStart = std::max (highestStart, notes[index].start);
+            }
             const double lo = std::min (0.0, limits.minStart - lowestStart);
+            // Both bounds, now that a ceiling is imposed above. Written
+            // against the lower bound alone this was sound only because
+            // maxStart was always infinite, and a neighbouring step beyond
+            // the ceiling is not an allowed answer to compare against.
+            const double hi = std::max (0.0, limits.maxStart - highestStart);
 
             // The neighbouring steps either side. Whichever of them is still
             // allowed must not be closer to what was asked for.
             for (const double neighbour : { move.beats - grid, move.beats + grid })
-                if (neighbour >= lo - 1e-12)
+                if (neighbour >= lo - 1e-12 && neighbour <= hi + 1e-12)
                     check (std::abs (neighbour - request.beats)
                            >= std::abs (move.beats - request.beats) - 1e-12,
                            "a snapped move takes the nearest step that fits, not just one that fits");
@@ -789,6 +912,40 @@ void testSnapModes()
     NoteSelection::applyMove (offGrid, one, stopped);
     checkClose (stopped.beats, -0.5, 1e-12, "a relative move stops at the last whole step that fits");
     checkClose (offGrid[0].start, 0.1, 1e-12, "which leaves the note short of the edge, still off the grid");
+
+    // The stand-still branch is the whole reason the ceiling above exists, so
+    // say how often it was reached. A generator that stopped producing it
+    // would leave the assertion in place and testing nothing, which is the
+    // failure the marquee generator counts partial overlaps to avoid.
+    std::printf ("       absolute snap stood still for want of a grid line on %d of 40000\n", stoodStill);
+    check (stoodStill > 20, "the generator reached the no-reachable-grid-line branch");
+
+    // A grid that is finite and greater than zero and still not usable. A
+    // subnormal walks through a guard written as `isfinite`, and then
+    // `raw / grid` and `anchorStart / grid` both overflow, so the delta comes
+    // back infinite or NaN and applyMove writes it into every selected start.
+    // A NaN start never compares greater than anything again, so the note
+    // stops being findable by any hit test: it is on screen and unclickable.
+    {
+        std::vector<Note> notes { { 1.5, 1.0, 60, 0.8f }, { 2.5, 1.0, 64, 0.8f } };
+        Set sel { 0, 1 };
+        const auto before = notes;
+
+        NoteSelection::Limits limits;
+        NoteSelection::Request request;
+        request.beats       = 4.0;
+        request.grid        = std::numeric_limits<double>::denorm_min();
+        request.snap        = NoteSelection::Snap::absolute;
+        request.anchorStart = notes[0].start;
+
+        const auto move = NoteSelection::planMove (notes, sel, request, limits);
+        NoteSelection::applyMove (notes, sel, move);
+
+        check (std::isfinite (move.beats), "a subnormal grid does not produce a non-finite delta");
+        for (size_t i = 0; i < notes.size(); ++i)
+            check (std::isfinite (notes[i].start) && notes[i].start == before[i].start,
+                   "and leaves every start exactly where it was");
+    }
 }
 
 //===========================================================================
@@ -816,6 +973,14 @@ void testVelocityOnAGroup()
             if (which < 0.15) n.velocity = NoteSelection::kMaxVelocity;
             else if (which < 0.30) n.velocity = NoteSelection::kMinVelocity;
             else if (which < 0.36) n.velocity = NoteSelection::kMinVelocity * 0.25f;
+            // And above the ceiling, which was the missing half. Only the
+            // floor was planted, so `std::max (0.0, ...)` on the ceiling
+            // bound was the one bound-against-zero in this header that
+            // nothing exercised: it can only differ from the bare
+            // subtraction when a selected note is already louder than the
+            // ceiling. Like a velocity under the floor, this cannot come
+            // from any edit here, only from a file.
+            else if (which < 0.42) n.velocity = (float) (1.0 + rng.between (0.05, 0.5));
         }
 
         const auto sel = randomSelection (rng, count);
@@ -859,8 +1024,16 @@ void testVelocityOnAGroup()
                 check (grouped[index].velocity >= before[index].velocity - 1e-7,
                        "a velocity already under the floor is not pushed further down");
 
-            check (grouped[index].velocity <= NoteSelection::kMaxVelocity + 1e-7,
-                   "no velocity goes over the top");
+            // The mirror of the floor rule above, and for the same reason: a
+            // limit stops an edit and never forces one, so a note that
+            // arrived over the top is not dragged back down and does not
+            // drag the rest of the group with it.
+            if (before[index].velocity <= NoteSelection::kMaxVelocity)
+                check (grouped[index].velocity <= NoteSelection::kMaxVelocity + 1e-7,
+                       "no velocity goes over the top");
+            else
+                check (grouped[index].velocity <= before[index].velocity + 1e-7,
+                       "a velocity already over the top is not pushed further up");
         }
 
         // A limit stops an edit and never forces one, here as everywhere else.
@@ -1234,6 +1407,26 @@ void testOverlapResolution()
         checkClose (notes[2].length, 1.0, 1e-12, "and cut at the earliest mover, not the latest");
     }
 
+    // A victim whose tail one mover cuts and whose start a LATER mover then
+    // covers. The cut is recorded first and then abandoned, because a note
+    // whose start is covered is deleted outright, and a trim of a note that
+    // is about to be deleted is a trim that never happened. Two things in
+    // resolveOverlaps stop it being reported: the reset of the cut to
+    // infinity, and the `doomed` guard. Either one alone does the job, which
+    // is why removing just one is a no-op; this is the case that fails when
+    // both go, and the index order matters, so the movers are laid out with
+    // the tail-cutter first.
+    {
+        std::vector<Note> notes { { 2.0, 0.5, 60, 0.8f },     // selected, cuts the tail
+                                  { 0.5, 1.0, 60, 0.8f },     // selected, covers the start
+                                  { 1.0, 2.0, 60, 0.4f } };   // the victim
+        Set sel { 0, 1 };
+        const auto report = NoteSelection::resolveOverlaps (notes, sel);
+        check (report.deleted == 1 && report.trimmed == 0,
+               "a victim that is deleted is not also counted as trimmed");
+        check (notes.size() == 2, "and it really is gone");
+    }
+
     // Randomised: resolution only ever touches unselected notes at a pitch
     // some selected note is on, and never lengthens anything.
     Rng rng (0x5eed000aull);
@@ -1274,6 +1467,27 @@ void testOverlapResolution()
         if (report.trimmed > 0) ++sawTrim;
 
         check (working.size() + (size_t) report.deleted == count, "the deletion count is the truth");
+
+        // And the trim count. Every deletion and every trim happens to a
+        // distinct unselected note, so the two together cannot outnumber the
+        // unselected notes there were. That is what catches a note being
+        // counted as trimmed and deleted both, which is what happens if the
+        // reset to infinity and the `doomed` guard are removed together.
+        //
+        // Worth being accurate about the stake, because the first version of
+        // this comment was not: the roll reads the report only as a
+        // yes-or-no, at PianoRollComponent.cpp:483, to decide whether to
+        // write back, and the counts it puts on screen are Quantise.h's own.
+        // So an inflated trim count is wrong in the API and invisible in the
+        // studio today. It is asserted because a count that is published is
+        // a count somebody will read eventually, not because anybody is
+        // reading it now.
+        //
+        // `count - sel.size()` is only well formed because every index in
+        // `sel` is real here. Reused where a stale index can appear it would
+        // underflow and the check would pass vacuously rather than fail.
+        check ((size_t) report.trimmed + (size_t) report.deleted <= count - sel.size(),
+               "no note is counted as both trimmed and deleted");
 
         // Every selected note is exactly as it was: the rule is about what a
         // mover lands on, never about the mover.
@@ -1350,6 +1564,40 @@ void testStaleIndicesAreIgnored()
 
     NoteSelection::applyLength (notes, sel, 0.5, NoteSelection::LengthMode::group);
     checkClose (notes[0].length, 1.5, 1e-9, "nor a length edit");
+
+    // resolveOverlaps was the one guard of this kind that nothing here
+    // reached. Every other one is caught, three of them by the address
+    // sanitizer rather than by a wrong answer, because a stale index is read
+    // rather than merely used: this one is read inside the mover loop.
+    //
+    // A selection is sorted, so a stale index is always reached last, and a
+    // mover that covers a start breaks out of the loop before getting there.
+    // So the case has to be one where the real mover only cuts a tail and the
+    // loop carries on to the stale index: with that the first version of this
+    // check passed an unguarded read, which is exactly the vacuous test the
+    // generators in this file are built to avoid.
+    {
+        std::vector<Note> overlapping { { 2.0, 1.0, 60, 0.8f },     // the mover, selected
+                                        { 1.0, 2.0, 60, 0.4f } };   // only its tail is covered
+        Set stale { 0, 99 };
+        const auto report = NoteSelection::resolveOverlaps (overlapping, stale);
+        check (report.trimmed == 1 && report.deleted == 0,
+               "a stale index does not stop a tail being trimmed");
+        checkClose (overlapping[1].length, 1.0, 1e-12, "and the trim is the right length");
+    }
+
+    // And the covered-start case as well, which returns through the other
+    // branch.
+    {
+        std::vector<Note> overlapping { { 1.0, 1.0, 60, 0.8f },     // the mover, selected
+                                        { 1.5, 1.0, 60, 0.4f } };   // its start is covered
+        Set stale { 0, 99 };
+        const auto report = NoteSelection::resolveOverlaps (overlapping, stale);
+        check (report.deleted == 1 && report.trimmed == 0,
+               "nor an overlap being resolved by deletion");
+        check (overlapping.size() == 1 && overlapping[0].velocity == 0.8f,
+               "and the mover is what is left");
+    }
 
     Set empty;
     const auto nothing = NoteSelection::planMove (notes, empty, request, limits);
