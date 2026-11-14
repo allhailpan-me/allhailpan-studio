@@ -714,25 +714,51 @@ static void nothingTheDonorDoesBreaksIt()
         // A grooved part must not reorder itself. Deviations are bounded by
         // half a slot either way, so two neighbours can meet but cannot
         // cross, and a pattern that reordered itself would be unusable.
-        Groove g;
-        g.enabled = true;
-        g.amount  = 1.0;
-        g.feel    = feel;
+        //
+        // The humanise knob is swept here rather than left at zero, and that
+        // is the whole point of this loop rather than a thoroughness. A
+        // deviation of half a slot already spends the entire distance to the
+        // next note, so humanising added on top of it walks one note past the
+        // other: measured at 0.42 of a slot backwards before `Groove::place`
+        // bounded the two together. Read with the knob down, every check in
+        // this file passed while a feel and a humanise together played a
+        // pattern in the wrong order.
+        //
+        // Both knobs are swept to their limits because that is where the
+        // budget runs out, and the amount below one is in the sweep because
+        // scaling the deviation leaves the humanising its full size and so
+        // moves which of the two is doing the crossing.
+        for (double random : { 0.0, 0.15, 0.4, 1.0 })
+            for (double amount : { 0.3, 0.7, 1.0 })
+            {
+                Groove g;
+                g.enabled = true;
+                g.amount  = amount;
+                g.random  = random;
+                g.feel    = feel;
 
-        double previous = -1.0e9;
+                double previous = -1.0e9;
 
-        for (int k = 0; k < 4 * feel.numSlots(); ++k)
-        {
-            const double at = feel.slotBeats() * k;
-            const double placed = g.place (at, 60);
+                for (int k = 0; k < 4 * feel.numSlots(); ++k)
+                {
+                    const double at = feel.slotBeats() * k;
+                    const double placed = g.place (at, 60 + (k % 7));
 
-            check (std::isfinite (placed), "a placed note is a real number");
-            check (placed >= previous - 1.0e-12, "the order of the notes survives");
-            check (std::abs (placed - at) <= feel.slotBeats() * 0.5 + 1.0e-12,
-                   "a note moves at most half a slot");
+                    check (std::isfinite (placed), "a placed note is a real number");
 
-            previous = placed;
-        }
+                    if (! (placed >= previous - 1.0e-12))
+                        fail (std::string ("slot ") + std::to_string (k)
+                              + " at amount " + std::to_string (amount)
+                              + ", humanise " + std::to_string (random)
+                              + " landed at " + std::to_string (placed)
+                              + ", which is behind " + std::to_string (previous));
+
+                    check (std::abs (placed - at) <= feel.slotBeats() * 0.5 + 1.0e-12,
+                           "a note moves at most half a slot");
+
+                    previous = placed;
+                }
+            }
     }
 }
 

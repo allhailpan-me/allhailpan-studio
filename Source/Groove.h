@@ -109,6 +109,14 @@ struct Groove
 
         double shifted = beatFromOrigin;
 
+        // The humanising draw, in fractions of a step, derived from the note's
+        // own position rather than drawn fresh so that a pattern plays the
+        // same way twice and an export matches what was heard. A groove that
+        // wandered on every pass would be unusable.
+        std::uint32_t h = (std::uint32_t) (whole * 2654435761u) ^ (std::uint32_t) (note * 40503u);
+        h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+        const double jitter = (h / 4294967296.0) * 2.0 - 1.0;
+
         if (byFeel)
         {
             // The deviation the donor played, added to where this note
@@ -116,25 +124,45 @@ struct Groove
             // is in GrooveTemplate.h. A slot the donor never played
             // contributes nothing: giving it one would be inventing a feel
             // for a position there is no evidence about.
-            const auto slot = feel.slotFor (whole);
+            const auto   slot      = feel.slotFor (whole);
+            const double deviation = slot.filled ? slot.timing * amount : 0.0;
 
-            if (slot.filled)
-                shifted += slot.timing * step * amount;
+            // The feel and the humanising are bounded together rather than
+            // one after the other, and this is the line that stops a pattern
+            // playing its own notes in the wrong order.
+            //
+            // A deviation is already up to half a slot either way, which is
+            // the whole of the distance between two neighbours: a note pushed
+            // to the back of its slot and the next one pulled to the front of
+            // its own land on the same beat, which is allowed. Humanising
+            // then has nothing left to spend, so added on top it walks one
+            // note past the other. Measured before this clamp existed, a note
+            // could land 0.42 of a slot behind the note in front of it.
+            //
+            // The swing half is not bounded this way and does not need to be.
+            // Swing shifts only the odd step of each pair, so a pair is at
+            // most 0.33 of a step apart at the shuffle the interface offers
+            // and the humanising fits in what is left. The feel can push every
+            // slot, which is why only this path spends the whole budget.
+            //
+            // Half a slot is also exactly the bound the test already asserts
+            // for a feel on its own, so this makes that true with the
+            // humanise knob up rather than only with it at zero.
+            shifted += std::clamp (deviation + jitter * random * 0.25, -0.5, 0.5) * step;
         }
-        else if ((whole & 1) != 0)
+        else
         {
-            // The pair spans two steps, so the straight offbeat is at one half
-            // of it and the swung offbeat is at the swing fraction of it.
-            const double pair = step * 2.0;
-            shifted += (swing * pair - step) * amount;
-        }
+            if ((whole & 1) != 0)
+            {
+                // The pair spans two steps, so the straight offbeat is at one
+                // half of it and the swung offbeat is at the swing fraction
+                // of it.
+                const double pair = step * 2.0;
+                shifted += (swing * pair - step) * amount;
+            }
 
-        if (random > 0.0)
-        {
-            std::uint32_t h = (std::uint32_t) (whole * 2654435761u) ^ (std::uint32_t) (note * 40503u);
-            h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
-            const double jitter = (h / 4294967296.0) * 2.0 - 1.0;
-            shifted += jitter * random * step * 0.25;
+            if (random > 0.0)
+                shifted += jitter * random * step * 0.25;
         }
 
         return std::max (0.0, shifted);

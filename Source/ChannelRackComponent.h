@@ -565,9 +565,11 @@ private:
         every time round. */
     GrooveTemplate feelOf (const Clip& c) const
     {
-        const double slot = project.rackStepsPerBar >= 32 ? 0.125
-                          : project.rackStepsPerBar >= 16 ? 0.25
-                                                          : 0.5;
+        // The rack's own step, rather than a second table of the same three
+        // numbers. They agree today and a fourth entry in the steps box would
+        // make them disagree silently, which is a feel read at the wrong
+        // resolution and nothing on screen to say so.
+        const double slot = project.rackStepBeats();
 
         std::vector<GrooveTemplate::SourceNote> notes;
 
