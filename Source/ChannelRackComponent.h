@@ -32,11 +32,11 @@ public:
                              "Most records sit between 54 and 62.");
         swingBox.onChange = [this]
         {
-            const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
-            const int index = juce::jlimit (0, 4, swingBox.getSelectedId() - 1);
+            const int index = juce::jlimit (0, Groove::kNumOfferedSwings - 1,
+                                            swingBox.getSelectedId() - 1);
 
             Groove g = project.groove;
-            g.swing   = swings[index];
+            g.swing   = Groove::offeredSwing (index);
             g.enabled = index > 0;
             g.base    = project.rackStepsPerBar >= 32 ? Groove::Base::thirtySecond
                       : project.rackStepsPerBar >= 16 ? Groove::Base::sixteenth
@@ -142,11 +142,8 @@ public:
         positionLabel.setText ("Bar " + juce::String ((int) (project.rackStart / 4.0) + 1),
                                juce::dontSendNotification);
 
-        const double swings[] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
-        int swingIndex = 0;
-        for (int i = 1; i < 5; ++i)
-            if (project.groove.enabled && std::abs (project.groove.swing - swings[i]) < 0.005)
-                swingIndex = i;
+        const int swingIndex = project.groove.enabled
+                             ? Groove::nearestOfferedSwing (project.groove.swing) : 0;
         swingBox.setSelectedId (swingIndex + 1, juce::dontSendNotification);
 
         const int feelIndex = project.groove.random >= 0.3 ? 2 : project.groove.velocity > 0.0 ? 1 : 0;
@@ -531,15 +528,25 @@ private:
             {
                 g.feel = {};
 
-                // Back to whatever the swing control is showing, which is
-                // what "go back to the swing" says. Leaving `enabled` alone
-                // left the groove switched on with a straight swing and the
-                // humanise still running, and the swing box reads "Straight"
-                // in that state: picking "Straight" again sends no change, so
-                // there was no control in the window that could turn it off
-                // again. Before this, `enabled` being true implied a swing
-                // that was not straight, and it does again.
-                g.enabled = g.swing != 0.5;
+                // Back to the swing, and to a swing the control can actually
+                // show. Leaving `enabled` alone left the groove switched on
+                // with the humanise running while the swing box read
+                // "Straight", and picking "Straight" sends no change because
+                // the item is already current, so no control in the window
+                // could turn it off again.
+                //
+                // Testing `swing != 0.5` is not enough, because the box reads
+                // Straight for any swing it does not recognise and a file can
+                // carry one: 0.6 would come back enabled, inaudibly swung and
+                // stuck all over again. So the swing is snapped to the nearest
+                // value the box offers and `enabled` follows that, which
+                // leaves the groove in a state the controls can represent and
+                // therefore undo. Snapping moves the swing by at most a
+                // fortieth, and only for a value this build never writes.
+                const int nearest = Groove::nearestOfferedSwing (g.swing);
+
+                g.swing   = Groove::offeredSwing (nearest);
+                g.enabled = nearest > 0;
             }
             else
             {
@@ -579,14 +586,14 @@ private:
 
     /** Reads a clip's feel at the resolution the rack is showing.
 
-        Only the stretch of the pattern this clip actually plays, which is
-        Ableton's rule for extraction: a groove "will only consider the
-        material in the playing portion of the clip". The template is as long
-        as the clip rather than as its last note, so a part that ends with a
-        rest still repeats on the bar instead of walking forward by that rest
-        every time round. */
+        Everything that decides what the feel is, including the anchor and
+        the window, is in `GrooveTemplate::fromClip` where it is tested. This
+        is only the marshalling: which notes, and at what spacing. */
     GrooveTemplate feelOf (const Clip& c) const
     {
+        if (c.pattern == nullptr)
+            return {};
+
         // The rack's own step, rather than a second table of the same three
         // numbers. They agree today and a fourth entry in the steps box would
         // make them disagree silently, which is a feel read at the wrong
@@ -594,28 +601,12 @@ private:
         const double slot = project.rackStepBeats();
 
         std::vector<GrooveTemplate::SourceNote> notes;
-
-        // The donor is measured from a whole number of slots, not from the
-        // clip's offset as it stands. `Groove::place` counts the recipient's
-        // slots from the pattern's origin, so if the offset is not a multiple
-        // of a slot the two grids sit a fraction apart and the donor's
-        // deviations are measured against a grid nobody plays to: a part
-        // played uniformly late off a clip split at an unsnapped beat reads
-        // back as perfectly straight, and the feel comes out empty. A split
-        // taken with snapping suppressed can leave exactly that offset.
-        const double anchor = std::round (c.offset / slot) * slot;
+        notes.reserve (c.pattern->notes.size());
 
         for (const auto& n : c.pattern->notes)
-        {
-            // Still only the stretch the clip actually plays, measured by the
-            // real offset: the anchor decides the grid, not what is in range.
-            if (n.start < c.offset || n.start >= c.offset + c.length)
-                continue;
+            notes.push_back ({ n.start, n.velocity, n.note });
 
-            notes.push_back ({ n.start - anchor, n.velocity, n.note });
-        }
-
-        return GrooveTemplate::extract (std::move (notes), c.length, slot);
+        return GrooveTemplate::fromClip (std::move (notes), c.offset, c.length, slot);
     }
 
     Project&     project;

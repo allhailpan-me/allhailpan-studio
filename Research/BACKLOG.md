@@ -289,11 +289,22 @@ reason contradicted by a case in its own table.
 ### Left for the hardening lane, deliberately not changed here
 
 - **`ProjectIO` admits a swing of 0.8 and a humanise of 1.0 together, where a
-  pair can cross by a twentieth of a step.** The interface offers 2/3 at most,
-  where they tie exactly, and `GrooveTest` sweeps to 0.75. This predates the
-  feel and narrowing what a saved project may contain is not a feature
-  branch's business. Either clamp `grooveSwing` to 0.75 on load or bound the
-  swing path's total shift the way the feel path's is now bounded.
+  pair can cross by a tenth of a step.** The crossing is `2 * swing - 1.5`
+  steps: nothing at 0.75, 0.1 at 0.8, measured at 0.0979. The interface offers
+  2/3 at most, where it measures zero. This predates the feel and narrowing
+  what a saved project may contain is not a feature branch's business. Either
+  clamp `grooveSwing` to 0.75 on load or bound the swing path's total shift
+  the way the feel path's is now bounded.
+
+  **`GrooveTest` sweeps swing to exactly 0.75, which is the last value at
+  which a pair meets without crossing**, so that check cannot see this however
+  many placements it makes. Whoever fixes the above should add 0.76 to that
+  array in the same commit: adding it first turns the suite red, which is why
+  it is not there now.
+- **`ProjectIO` admits `rackStepsPerBar` from 1**, where the interface offers
+  8, 16 and 32. At 1 the rack's step is a whole bar, so a feel extracted from
+  such a file is licensed to move a note two beats. Clamping it to what the
+  steps box offers is the same one line job as the swing above.
 - **The channel rack still assumes four beats to the bar** in its position
   readout and its step arithmetic. The "Bar N" label in the feel menu is off
   that assumption now, but `rackStepBeats` and `positionLabel` are not.

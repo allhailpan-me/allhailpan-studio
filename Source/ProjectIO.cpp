@@ -454,7 +454,22 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     root.setAttribute ("rackStepsPerBar", project.rackStepsPerBar);
 
     // ---- groove ----
-    root.setAttribute ("grooveOn", project.groove.enabled);
+    // What a build that does not know about a feel should make of this song.
+    //
+    // A feel supplies the timing in place of the swing, so a project carrying
+    // one is routinely saved with the groove on and the swing left straight.
+    // An older build ignores `grooveFeel` and would then open that song with
+    // the groove on, a straight swing and the humanise running, which is both
+    // audible and, because its swing control reads "Straight" in that state
+    // and re-choosing the current item sends no change, not something it has
+    // a control to turn off. So a feel that is doing the timing on its own is
+    // written down as the groove being off, which is what it means to a build
+    // with no feel to apply, and the load side switches it back on whenever a
+    // feel actually arrives.
+    const bool feelIsDoingTheTiming = ! project.groove.feel.isEmpty()
+                                   && project.groove.swing == 0.5;
+
+    root.setAttribute ("grooveOn", project.groove.enabled && ! feelIsDoingTheTiming);
     root.setAttribute ("grooveBase", (int) project.groove.base);
     root.setAttribute ("grooveSwing", project.groove.swing);
     root.setAttribute ("grooveAmount", project.groove.amount);
@@ -817,6 +832,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
     // that is partly somebody else's.
     project.groove.feel = GrooveTemplate::fromString (
         root->getStringAttribute ("grooveFeel").toStdString());
+
+    // A feel is only ever stored because somebody asked for one, so its
+    // arrival is what says the groove is on. This is the other half of the
+    // `grooveOn` note on the save side: that attribute is written false for a
+    // feel doing the timing on its own, so a build without feels opens the
+    // song quiet, and this line is what stops this build doing the same.
+    if (! project.groove.feel.isEmpty())
+        project.groove.enabled = true;
 
     // A project written before fades existed has no attribute here and gets
     // the default, so every old project opens de-clicked. The upper bound is

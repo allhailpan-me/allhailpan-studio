@@ -184,6 +184,20 @@ public:
 
         std::vector<Slot> built ((std::size_t) count);
 
+        // Dropped before the sort rather than after it. A comparator that
+        // sees a NaN reports it neither less nor greater, so NaN compares
+        // equivalent to everything while the real positions stay ordered,
+        // and equivalence that is not transitive makes `std::stable_sort`
+        // undefined rather than merely unhelpful. Nothing went wrong with it
+        // in practice and the suite fed it two of them.
+        notes.erase (std::remove_if (notes.begin(), notes.end(),
+                                     [slotBeats] (const SourceNote& n)
+                                     {
+                                         return ! std::isfinite (n.beat)
+                                             || std::abs (n.beat / slotBeats) > 1.0e15;
+                                     }),
+                     notes.end());
+
         std::stable_sort (notes.begin(), notes.end(),
                           [] (const SourceNote& a, const SourceNote& b)
                           {
@@ -196,16 +210,10 @@ public:
 
         for (const auto& note : notes)
         {
-            if (! std::isfinite (note.beat))
-                continue;
-
+            // Both guards are above, before the sort. Beyond 1e15 slots a
+            // double cannot tell one slot from the next anyway, and llround
+            // is undefined past the range of its return type.
             const double u = note.beat / slotBeats;
-
-            // Beyond this a double cannot tell one slot from the next, and
-            // llround is undefined past the range of its return type.
-            if (std::abs (u) > 1.0e15)
-                continue;
-
             const auto raw = (std::int64_t) std::llround (u);
 
             // A note outside the template is dropped rather than wrapped
@@ -223,9 +231,17 @@ public:
             // feel out of a recorded take is the whole feature.
             //
             // So the template is the first `count` slots of the donor, which
-            // is a feel somebody really played. `fromString` refuses an
-            // oversized template for the same reason, and the two paths now
-            // agree rather than one truncating where the other refuses.
+            // is a feel somebody really played.
+            //
+            // `extract` and `fromString` still differ about an oversized
+            // input on purpose, and only about what to keep: extraction reads
+            // a long donor as far as the cap reaches, because a take longer
+            // than the cap is ordinary and the near end of it is a real feel,
+            // while a file claiming more slots than the cap is refused
+            // outright, because its slot count is part of what it is saying
+            // and a template read at the wrong length is not that template.
+            // What they agree about, now, is that neither folds one part of a
+            // performance into another.
             if (raw < 0 || raw >= (std::int64_t) count)
                 continue;
 
@@ -242,6 +258,101 @@ public:
 
         t.setSlots (slotBeats, std::move (built));
         return t;
+    }
+
+    /** Reads a feel out of the stretch of a part that one clip plays.
+
+        This is here, with the rest of the arithmetic and the tests, rather
+        than in the channel rack where it was first written. It is the one
+        calculation that decides whether the donor's grid and the recipient's
+        are the same grid, and a wrong answer from it does not announce
+        itself: the feel comes back looking perfectly reasonable and measured
+        against something nobody played to. `RecordAlign.h` exists for the
+        same reason, and `CLAUDE.md` records what the version of that figure
+        which lived in the window cost: "the fourth thing wrong with it is
+        why: the figure was in the window, where nothing tests it".
+
+        `notes` are the part's own notes, positioned from the part's origin.
+        `clipOffset` is how far into the part this clip starts and
+        `clipLength` is how much of it the clip plays, which is what a clip
+        carries.
+
+        The donor is measured on the part's own grid, with no anchor taken off
+        it, and that is the whole of why the two grids agree: the slot a note
+        lands in here is `round (beat / slot)` folded by the template's
+        period, which is character for character the slot `Groove::place`
+        consults for a recipient note at the same position. Anything else has
+        to be kept in step with `place` by hand.
+
+        An earlier version subtracted the clip's offset, which put the two
+        grids a fraction apart whenever the offset was not a whole number of
+        slots: a part played late off a clip split at an unsnapped beat came
+        back carrying the split's fraction rather than the performance's feel.
+        Rounding that offset to the nearest slot does not fix it either, which
+        is what the test for this found: the donor's deviation is its distance
+        from the part's grid, and shifting the measurement by a whole number
+        of slots cannot change that distance, so an offset of 0.62 beats still
+        read a part played 0.08 of a slot late as one played 0.44 early. The
+        fraction has to come out of the arithmetic, not be rounded away.
+
+        Only the stretch the clip plays is read, which is Ableton's rule for
+        extraction: a groove "will only consider the material in the playing
+        portion of the clip". The template is as long as the clip rather than
+        as its last note, so a part that ends with a rest still repeats on
+        the bar instead of walking forward by that rest every time round.
+    */
+    static GrooveTemplate fromClip (std::vector<SourceNote> notes,
+                                    double clipOffset,
+                                    double clipLength,
+                                    double slotBeats)
+    {
+        if (! (slotBeats > 0.0) || ! (clipLength > 0.0)
+            || ! std::isfinite (slotBeats) || ! std::isfinite (clipLength)
+            || ! std::isfinite (clipOffset))
+            return {};
+
+        const double wanted = std::floor (clipLength / slotBeats + 0.5);
+
+        if (! (wanted >= 1.0))
+            return {};
+
+        const int count = (int) std::min (wanted, (double) kMaxSlots);
+
+        // A clip needing more slots than the cap is read only as far as the
+        // cap reaches, by shortening the window rather than by folding what
+        // is past it into the template. Folding laid the far end of the
+        // performance into slots the near end had left empty: a 24 bar take
+        // read at thirty-seconds came back with bar 17's deviation and accent
+        // in a slot bars 1 to 16 never played, offered as one feel.
+        const double span  = (double) count * slotBeats;
+        const double until = clipOffset + std::min (clipLength, span);
+
+        std::vector<SourceNote> kept;
+        kept.reserve (notes.size());
+
+        for (auto n : notes)
+        {
+            if (! std::isfinite (n.beat) || n.beat < clipOffset || n.beat >= until)
+                continue;
+
+            const double u = n.beat / slotBeats;
+
+            if (std::abs (u) > 1.0e15)
+                continue;
+
+            const auto idx = (std::int64_t) std::llround (u);
+
+            // Folded by the template's own period, which is what makes a
+            // template shorter than the part repeat across it, and is the
+            // same fold `slotFor` applies when the feel is read back. The
+            // deviation is untouched by the fold, because a whole number of
+            // slots is what is taken off.
+            n.beat = ((double) wrapIndex (idx, count) + (u - (double) idx)) * slotBeats;
+
+            kept.push_back (n);
+        }
+
+        return extract (std::move (kept), span, slotBeats);
     }
 
     bool   isEmpty()           const noexcept { return slots.empty(); }
@@ -384,12 +495,22 @@ public:
         bottom and a 4/4 bar at the top. Outside them the number is not a
         musical grid at all, and both ends did real damage.
 
-        A spacing of ten beats made the half-slot bound in `Groove::place`
-        five beats, so the downbeat of a bar was thrown past the next four
-        notes while they stayed where they were, which is the reorder that
-        bound exists to prevent. A spacing of a millionth of a beat made the
-        slot index of an ordinary position large enough to overflow the
-        humanising hash, which `-fsanitize=undefined` rightly stops on.
+        What the bounds are for is that a slot has to be a grid somebody
+        could play to, because half of one is how far this groove is then
+        licensed to move a note. At ten beats a slot it was licensed to move
+        a note five beats, which is not a groove by any definition: it threw
+        the downbeat of a bar past the next four notes. At a millionth of a
+        beat the slots are below the resolution anything else here works in.
+
+        What the bounds are **not** is the thing that stops a pattern
+        reordering itself, and it is worth being plain about that because an
+        earlier version of this comment claimed it was. The bound in
+        `Groove::place` is half a slot whatever the slot is, so two notes on
+        this groove's own grid cannot cross at any spacing in or out of this
+        range, and a note that is moved can pass a neighbour that is held
+        still off the grid at every spacing including the rack's own. That is
+        a property of applying a groove one note at a time, it is true of the
+        swing half as well, and `Groove::place` says so where it happens.
 
         Out of range is refused rather than clamped, which is `fromString`'s
         stance everywhere else: a feel read at the wrong resolution is worse

@@ -70,6 +70,44 @@ struct Groove
 
     bool operator== (const Groove&) const = default;
 
+    /** The swing settings the interface offers, straight first.
+
+        Here rather than in the channel rack because three places need them
+        and two of those are decisions rather than display: which swing a
+        choice means, which choice a stored swing is shown as, and whether
+        the groove is on at all once a feel is cleared. They were a table
+        written out twice, and the third use got a different rule, which is
+        how the groove ended up switched on with the box reading "Straight"
+        and no control able to turn it off.
+
+        A stored swing need not be one of these: `ProjectIO` admits anything
+        from 0.3 to 0.8, so a file can carry 0.6, which the box can only show
+        as Straight. `nearestOffered` is what lets a caller put the groove
+        into a state the controls can represent, and therefore undo. */
+    static constexpr int kNumOfferedSwings = 5;
+
+    static double offeredSwing (int index) noexcept
+    {
+        constexpr double offered[kNumOfferedSwings] { 0.5, 0.54, 0.58, 0.62, 2.0 / 3.0 };
+        return offered[index < 0 ? 0 : index >= kNumOfferedSwings ? kNumOfferedSwings - 1 : index];
+    }
+
+    /** Which offered swing a number is closest to. Index 0 is straight, so a
+        caller can read "is this a swing at all" off the result. */
+    static int nearestOfferedSwing (double swing) noexcept
+    {
+        if (! std::isfinite (swing))
+            return 0;
+
+        int best = 0;
+
+        for (int i = 1; i < kNumOfferedSwings; ++i)
+            if (std::abs (swing - offeredSwing (i)) < std::abs (swing - offeredSwing (best)))
+                best = i;
+
+        return best;
+    }
+
     /** Beats per step at this groove's resolution. */
     double stepBeats() const noexcept
     {
@@ -107,7 +145,17 @@ struct Groove
         const bool   byFeel = ! feel.isEmpty();
         const double step = byFeel ? feel.slotBeats() : stepBeats();
         const double index = beatFromOrigin / step;
-        const auto   whole = (std::int64_t) std::llround (index);
+
+        // The same guard `GrooveTemplate::extract` carries for the same
+        // call. `llround` is undefined past the range of its return type,
+        // and a note position is loaded from a project file with no bound on
+        // it, so a damaged file reaches this with whatever it likes. Beyond
+        // 1e15 steps a double cannot tell one step from the next anyway, so
+        // nothing is given up by leaving such a note where it is.
+        if (! std::isfinite (index) || std::abs (index) > 1.0e15)
+            return beatFromOrigin;
+
+        const auto whole = (std::int64_t) std::llround (index);
 
         // Only notes sitting on the grid are moved. Anything already played
         // off the grid is left where the performance put it, which is what
@@ -182,7 +230,11 @@ struct Groove
             // step and the humanising fits in what is left, so a pair can
             // meet and not cross. That argument is about what the interface
             // offers: `ProjectIO` admits a swing up to 0.8 from a file, where
-            // a pair can cross by a twentieth of a step. It predates this and
+            // a pair can cross by a tenth of a step. The crossing is
+            // `2 * swing - 1.5` steps, nothing at 0.75 and 0.1 at 0.8, and
+            // 0.75 is the last value `GrooveTest` sweeps, so that check
+            // cannot see it however many placements it makes. It predates this
+            // and
             // is recorded in the backlog rather than changed here, because
             // narrowing what a saved project may contain is not this
             // feature's business.
@@ -234,7 +286,12 @@ struct Groove
         const bool   byFeel = ! feel.isEmpty();
         const double step = byFeel ? feel.slotBeats() : stepBeats();
         const double index = beatFromOrigin / step;
-        const auto   whole = (std::int64_t) std::llround (index);
+
+        // As in `place` above, and for the same reason.
+        if (! std::isfinite (index) || std::abs (index) > 1.0e15)
+            return noteVelocity;
+
+        const auto whole = (std::int64_t) std::llround (index);
 
         if (std::abs (index - (double) whole) > 0.02)
             return noteVelocity;

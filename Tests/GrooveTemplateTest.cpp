@@ -481,6 +481,337 @@ static void aPartThatIsNotAWholeNumberOfStepsStillFits()
 }
 
 //=============================================================================
+// A note outside the template is dropped wherever the template's edges are,
+// not only when it is at the slot cap.
+//
+// The cap case has its own check below, and on its own it was not enough:
+// dropping only at the cap and wrapping otherwise, and dropping only at the
+// far edge while a note before the origin still wrapped to the last slot,
+// both passed the whole suite. The live path produces both edges routinely,
+// because `fromClip` shifts the window by the rounded anchor, so a note just
+// outside either end is ordinary rather than exotic.
+//=============================================================================
+static void aNoteOutsideTheTemplateIsDroppedAtEitherEdge()
+{
+    const double step = 0.25;
+
+    // Four slots. One note before the origin, one note past the end, and one
+    // real note in slot 1. If either of the outsiders wraps it lands in slot
+    // 3 or slot 0, which the donor never played.
+    std::vector<GrooveTemplate::SourceNote> donor
+    {
+        srcNote (step * -1.0, 0.9f),   // would wrap to slot 3
+        srcNote (step *  4.0, 0.9f),   // would wrap to slot 0
+        srcNote (step *  1.0 + step * 0.2, 0.4f),
+    };
+
+    const auto feel = GrooveTemplate::extract (donor, 1.0, step);
+
+    check (feel.numSlots() == 4, "four sixteenths in a beat");
+
+    check (! feel.slotFor (0).filled, "a note past the end does not wrap to the first slot");
+    check (feel.slotFor (1).filled, "the note that is really inside is kept");
+    check (! feel.slotFor (2).filled, "nothing appeared in between");
+    check (! feel.slotFor (3).filled, "a note before the origin does not wrap to the last slot");
+
+    checkClose (feel.slotFor (1).timing, 0.2, 1.0e-12, "with its own deviation");
+
+    // The reference is over the one note that is in the template, so neither
+    // outsider reached the accents either.
+    checkClose (feel.velocityReference(), 0.4, 1.0e-6,
+                "and the accent reference saw only what is inside");
+
+    // The far edge exactly: slot `count` is out, slot `count - 1` is in.
+    {
+        const auto onLast = GrooveTemplate::extract ({ srcNote (step * 3.0) }, 1.0, step);
+        check (onLast.slotFor (3).filled, "the last slot is inside the template");
+
+        const auto justPast = GrooveTemplate::extract ({ srcNote (step * 4.0) }, 1.0, step);
+        check (justPast.isEmpty(), "and one slot further is outside it");
+    }
+}
+
+//=============================================================================
+// The anchor: whether the donor's grid and the recipient's are the same grid.
+//
+// `Groove::place` counts the recipient's slots from the part's origin, so a
+// donor measured from a clip offset that is not a whole number of slots is
+// measured against a grid nobody played to. This lived in the channel rack
+// where nothing could reach it, which is the fault `CLAUDE.md` records for
+// the version of `RecordAlign` that lived in the window.
+//
+// The window matters as much as the anchor. Filtering by the clip's exact
+// edges while measuring from the rounded anchor leaves the two up to half a
+// slot apart, which drops a note the donor really played and then reports its
+// slot as one the donor never played: a straight step in every repetition
+// with nothing on screen to say why.
+//=============================================================================
+static void theDonorAndTheRecipientShareOneGrid()
+{
+    const double step = 0.25;
+
+    // The claim, stated as the thing it is for: read a feel off a part, then
+    // place that part's own grid positions through it, and the part comes
+    // back. That is what "the donor's grid and the recipient's are the same
+    // grid" means, and it is checked rather than reasoned about because the
+    // reasoning is what was wrong twice.
+    //
+    // The offsets include ones that are not a whole number of slots, which is
+    // what an unsnapped trim or split leaves, and the one whose fraction is
+    // exactly half a slot, which is where rounding goes the other way.
+    for (double offset : { 0.0, 0.25, 0.5, 1.0, 0.37, 0.13, 0.4, 0.62, 0.125, 2.875 })
+        for (double played : { 0.0, 0.08, -0.08, 0.3, -0.3 })
+        {
+            const double length = 2.0;
+            const int    slots  = 6;
+
+            // A part played `played` of a slot off the part's own grid, which
+            // is the grid the recipient will be read against.
+            //
+            // The run starts at the first grid point at least half a slot
+            // inside the clip, and is two slots shorter than the clip, so a
+            // note pushed half a slot either way is still inside the stretch
+            // the clip plays. A note outside it is not part of this clip's
+            // feel and is meant to be dropped, which is a different check.
+            std::vector<GrooveTemplate::SourceNote> donor;
+            std::vector<double> gridOf;
+
+            const double first = std::ceil ((offset + step * 0.5) / step) * step;
+
+            for (int k = 0; k < slots; ++k)
+            {
+                const double grid = first + step * k;
+                donor.push_back (srcNote (grid + step * played, 0.7f));
+                gridOf.push_back (grid);
+            }
+
+            const auto feel = GrooveTemplate::fromClip (donor, offset, length, step);
+
+            const std::string where = std::string ("offset ") + std::to_string (offset)
+                                    + ", played " + std::to_string (played);
+
+            if (feel.isEmpty())
+            {
+                fail ("no feel came off a clip at " + where);
+                continue;
+            }
+
+            // The template is as long as the clip, not as the run of notes
+            // in it, which is what stops a part ending in a rest walking.
+            if (feel.numSlots() != (int) std::llround (length / step))
+                fail (where + " gave " + std::to_string (feel.numSlots())
+                      + " slots for a clip " + std::to_string (length) + " beats long");
+
+            Groove g;
+            g.enabled = true;
+            g.amount  = 1.0;
+            g.feel    = feel;
+
+            for (int k = 0; k < slots; ++k)
+            {
+                const double back = g.place (gridOf[(std::size_t) k], 60);
+
+                if (std::abs (back - donor[(std::size_t) k].beat) > 1.0e-9)
+                    fail (where + ": the grid position " + std::to_string (gridOf[(std::size_t) k])
+                          + " came back at " + std::to_string (back)
+                          + " where the donor played " + std::to_string (donor[(std::size_t) k].beat));
+            }
+        }
+
+    // And the slot a donor note lands in is the slot `place` consults for a
+    // recipient note at the same position, which is the property the round
+    // trip above rests on, asserted on its own so a failure says which half
+    // broke.
+    for (double offset : { 0.0, 0.37, 0.62, 0.125 })
+    {
+        const double grid = std::ceil ((offset + step * 0.5) / step) * step;
+
+        std::vector<GrooveTemplate::SourceNote> donor { srcNote (grid, 0.7f) };
+        const auto feel = GrooveTemplate::fromClip (donor, offset, 1.0, step);
+
+        check (! feel.isEmpty(), "one note still makes a feel");
+
+        const double at    = donor[0].beat;
+        const auto   index = (std::int64_t) std::llround (at / step);
+
+        check (feel.slotFor (index).filled,
+               "the donor's note is in the slot the recipient's grid step reads");
+    }
+
+    // Only the stretch the clip plays. A part whose notes are all outside the
+    // clip's window contributes nothing rather than being folded in.
+    {
+        std::vector<GrooveTemplate::SourceNote> donor;
+        for (int k = 0; k < 4; ++k)
+            donor.push_back (srcNote (step * k, 0.7f));
+
+        check (GrooveTemplate::fromClip (donor, 4.0, 1.0, step).isEmpty(),
+               "a clip playing a stretch the part has no notes in has no feel");
+    }
+
+    // A clip needing more slots than the cap is read as far as the cap
+    // reaches and no further, rather than folding its far end into its near
+    // end. The window is shortened, so the notes past it are simply not in
+    // the part this feel is of.
+    {
+        const double slot = 0.125;
+        const int    past = GrooveTemplate::kMaxSlots + 2;
+
+        std::vector<GrooveTemplate::SourceNote> donor
+        {
+            srcNote (slot * 0.0 + slot * 0.2, 0.8f),
+            srcNote (slot * (double) past + slot * -0.4, 0.3f),
+        };
+
+        const auto feel = GrooveTemplate::fromClip (donor, 0.0, slot * (double) (past + 64), slot);
+
+        check (feel.numSlots() == GrooveTemplate::kMaxSlots, "the slot count is capped");
+        check (feel.slotFor (0).filled, "the note inside the window is kept");
+        checkClose (feel.slotFor (0).timing, 0.2, 1.0e-12, "with its own deviation");
+        check (! feel.slotFor (2).filled,
+               "and the note past the cap is not folded into a slot the donor left empty");
+        checkClose (feel.velocityReference(), 0.8, 1.0e-6,
+                    "the accent reference is over what the window holds");
+    }
+
+    // And nothing it is handed can make it misbehave.
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+
+    check (GrooveTemplate::fromClip ({ srcNote (0.0) }, nan, 1.0, step).isEmpty(),
+           "an offset of NaN gives no feel");
+    check (GrooveTemplate::fromClip ({ srcNote (0.0) }, 0.0, 1.0, nan).isEmpty(),
+           "a spacing of NaN gives no feel");
+    check (GrooveTemplate::fromClip ({ srcNote (0.0) }, 0.0, nan, step).isEmpty(),
+           "a length of NaN gives no feel");
+    check (GrooveTemplate::fromClip ({ srcNote (0.0) }, 1.0e300, 1.0, step).isEmpty(),
+           "an offset no clip could have gives no feel");
+}
+
+//=============================================================================
+// Clearing a feel has to leave the groove in a state the controls can undo.
+//
+// The swing control offers five settings and a project file may carry any
+// swing from 0.3 to 0.8, so a stored swing need not be one of them. The box
+// shows the nearest, and "go back to the swing" snaps to it, because the two
+// have to agree: when they did not, clearing a feel left the groove running
+// with the box reading "Straight", and re-choosing the item that is already
+// current sends no change, so nothing in the window could turn it off.
+//
+// The arithmetic is in `Groove` rather than in the rack for that reason: it
+// was a table written out twice and a third place that made up its own rule.
+//=============================================================================
+static void aClearedFeelLeavesAStateTheControlsCanUndo()
+{
+    check (Groove::nearestOfferedSwing (0.5) == 0, "straight is the first setting");
+    check (Groove::offeredSwing (0) == 0.5, "and the first setting is straight");
+
+    // The value that caused this: a file carrying 0.6, which is nothing the
+    // box offers. It must not read as straight, or clearing a feel leaves
+    // the groove on and unreachable.
+    check (Groove::nearestOfferedSwing (0.6) > 0, "a swing of 0.6 is not straight");
+    check (Groove::nearestOfferedSwing (0.51) == 0, "and one of 0.51 is near enough to be");
+
+    for (int i = 0; i < Groove::kNumOfferedSwings; ++i)
+        check (Groove::nearestOfferedSwing (Groove::offeredSwing (i)) == i,
+               "every offered swing is nearest to itself");
+
+    // Over every swing a project file may carry, the state after clearing a
+    // feel is one the controls can represent: the groove is on only when the
+    // swing it has snapped to is one the box shows as swung.
+    for (int n = 0; n <= 500; ++n)
+    {
+        const double stored = 0.3 + 0.001 * (double) n;
+        const int    nearest = Groove::nearestOfferedSwing (stored);
+
+        Groove g;
+        g.swing   = Groove::offeredSwing (nearest);
+        g.enabled = nearest > 0;
+
+        if (g.enabled != (Groove::nearestOfferedSwing (g.swing) > 0))
+            fail (std::string ("a stored swing of ") + std::to_string (stored)
+                  + " snapped to a state the controls cannot undo");
+
+        // And it really is the nearest, which is the claim rather than any
+        // particular distance. A stored swing can sit outside the range the
+        // box offers at all, since the loader admits up to 0.8 and the box
+        // stops at a triplet shuffle, so the move is 0.133 at the top end
+        // and asserting a tolerance instead would be asserting that number.
+        for (int i = 0; i < Groove::kNumOfferedSwings; ++i)
+            if (std::abs (Groove::offeredSwing (i) - stored) < std::abs (g.swing - stored) - 1.0e-12)
+                fail (std::string ("a stored swing of ") + std::to_string (stored)
+                      + " snapped to " + std::to_string (g.swing) + " when "
+                      + std::to_string (Groove::offeredSwing (i)) + " is nearer");
+    }
+
+    check (Groove::nearestOfferedSwing (std::numeric_limits<double>::quiet_NaN()) == 0,
+           "a swing of NaN is straight rather than undefined");
+}
+
+//=============================================================================
+// A note position out of a project file has no bound on it, and both halves of
+// the groove hand it to `llround`, which is undefined past the range of its
+// return type.
+//
+// Reachable: `pushArrangement` calls `place` for every note of every pattern
+// before it filters them to the clip's own range, and `ProjectIO` loads a
+// note's start with no bound. The humanising hash multiplied the slot index by
+// a constant that does not fit in an int, so the product was signed and
+// overflowed at an index of 3.5e9, which a note start of 1e9 beats reaches at
+// the default resolution.
+//=============================================================================
+static void aNotePositionOutOfAFileCannotBreakTheGroove()
+{
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    const auto inf = std::numeric_limits<double>::infinity();
+
+    const double positions[] { 1.0e9, 1.0e15, 1.0e300, -1.0e9, -1.0e300, inf, -inf, nan };
+
+    for (int withFeel = 0; withFeel < 2; ++withFeel)
+    {
+        Groove g;
+        g.enabled  = true;
+        g.swing    = 0.62;
+        g.random   = 1.0;
+        g.velocity = 0.5;
+
+        if (withFeel != 0)
+        {
+            std::vector<GrooveTemplate::SourceNote> donor;
+            for (int k = 0; k < 16; ++k)
+                donor.push_back (srcNote (0.25 * k + 0.25 * 0.1, 0.7f));
+            g.feel = GrooveTemplate::extract (donor, 4.0, 0.25);
+            check (! g.feel.isEmpty(), "the donor made a feel");
+        }
+
+        for (double at : positions)
+        {
+            // What this can and cannot see, since the difference matters.
+            //
+            // The signed overflow in the humanising hash is undefined
+            // behaviour that `-fsanitize=undefined` halts on, so removing
+            // that fix fails here and the check is real.
+            //
+            // The guard in front of `llround` is not like that. An argument
+            // out of its range gives an unspecified result rather than a
+            // trap, and whatever number comes back then fails the on-grid
+            // test below and the note is left where it is, which is what the
+            // guard does too. So removing the guard passes this, and it is
+            // kept as a guard against something that is unspecified rather
+            // than against an observable fault. Said plainly here because a
+            // comment claiming this check pins it would be the fault this
+            // project keeps meeting.
+            const double placed = g.place (at, 60);
+            const float  shaded = g.shade (at, 0.8f);
+
+            if (std::isfinite (at))
+                check (std::isfinite (placed), "a real position stays a real number");
+
+            check (shaded >= 0.0f && shaded <= 1.0f, "and the velocity stays in range");
+        }
+    }
+}
+
+//=============================================================================
 // Two notes at the same beat and the same pitch, which a stable sort leaves in
 // the order they arrived in.
 //
@@ -747,8 +1078,9 @@ static void aFileCannotInventASlotSpacing()
     checkClose ((double) GrooveTemplate::kMaxSlotBeats, 4.0, 1.0e-12,
                 "and the ceiling a bar of four");
 
-    // The position that used to overflow the hash, at a spacing that is now
-    // refused, so nothing reaches it. Half an hour in at 120 bpm.
+    // Half an hour in at 120 bpm, at the finest spacing a file may carry.
+    // The overflow this used to be about is reached through the note position
+    // rather than the spacing, and is checked where that is.
     {
         Groove g;
         g.enabled = true;
@@ -1311,6 +1643,10 @@ int main()
     aFileCannotPushASlotOutOfRange();
     aFileCannotInventASlotSpacing();
     aDoubledNoteGivesOneAnswer();
+    aNoteOutsideTheTemplateIsDroppedAtEitherEdge();
+    theDonorAndTheRecipientShareOneGrid();
+    aNotePositionOutOfAFileCannotBreakTheGroove();
+    aClearedFeelLeavesAStateTheControlsCanUndo();
     aDonorLongerThanTheCapIsNotFoldedIntoItself();
     theHumaniseKnobReachesTheFeelPath();
     theAccentsAreReadAtTheFeelsOwnResolution();
