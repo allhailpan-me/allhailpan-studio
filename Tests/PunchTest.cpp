@@ -34,6 +34,7 @@
 
 #include "Punch.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -955,6 +956,293 @@ int main()
                     "Out only is not at full level up to its marker");
         checkClose (gainOf (spansOut, 0, 6.5), 1.0, 1.0e-9,
                     "the old performance did not come back after Out only");
+    }
+
+    // ---------------------------------------------------------------------
+    // THE FOLDER A PUNCH IS WORKED OUT AGAINST HAS TO BE THE FOLDER IT LANDS
+    // IN.
+    //
+    // `regionFor` clamps the punch to the length of the folder it is told
+    // about, so that figure has to be the one the folder actually ends up
+    // with. A folder is as long as its longest take reaches, and a punch pass
+    // reaches its own position plus its own length: the transport rolls in
+    // before the punch and the clip began earlier still, so a punch pass
+    // always sits some way into the folder, and whenever it runs past the end
+    // of the clip that was there the folder grows.
+    //
+    // Told a folder shorter than the one it lands in, the punch is clipped at
+    // the old clip's end and the rest of it is handed back to a take with no
+    // audio in it. That is silence, in playback and in the bounce alike, while
+    // the punch reports that it happened and the pass sits in the folder
+    // holding the performance. This is the fault `Punch::passReach` exists to
+    // prevent, and it had shipped.
+    //
+    // `longestSeconds` is written out here rather than called, because it is
+    // the authority `passReach` has to agree with: calling the thing under
+    // test to work out what to expect of it would prove only that it equals
+    // itself.
+    // ---------------------------------------------------------------------
+    {
+        auto longestSeconds = [] (const std::vector<CompTakeSpan>& takes)
+        {
+            double longest = 0.0;
+            for (const auto& t : takes)
+                longest = std::max (longest, std::max (0.0, t.start) + t.length);
+            return longest;
+        };
+
+        // The worked case, which is the measurement in passReach's comment: a
+        // ten second clip punched from nine to twelve seconds, with the pass
+        // occupying folder seconds eight to thirteen. Two seconds of the take
+        // just punched in were silent before this was fixed.
+        {
+            const std::vector<CompTakeSpan> takes { { 0.0, 10.0 },      // the original
+                                                    { 8.0,  5.0 } };    // the punched pass
+            const double folderSeconds = longestSeconds (takes);
+            checkClose (folderSeconds, 13.0, 1.0e-12,
+                        "a pass reaching thirteen seconds did not make a thirteen second folder");
+
+            checkClose (Punch::passReach (takes[1].start, takes[1].length), 13.0, 1.0e-12,
+                        "passReach disagrees with the length the folder is sized to");
+
+            const Punch::Range range { 18.0, 24.0, true, true };   // 9 s to 12 s at 120 bpm
+            const Punch::Material material { takes[1].start, takes[1].end(), folderSeconds };
+            const auto r = Punch::regionFor (range, 0.0, 120.0, material);
+            check (r.valid, "the worked overhanging punch was refused");
+
+            std::vector<CompSegment> comp { { 0.0, 0 } };
+            double crossfadeMs = 10.0;
+            check (Punch::applyTo (comp, crossfadeMs, r, 1, 2, folderSeconds),
+                   "the worked overhanging punch was not applied");
+
+            const auto spans = buildCompSpans (comp, takes, folderSeconds, crossfadeMs * 0.001);
+
+            // Every one of these read nought before the fix, from ten seconds
+            // on: the punch stopped at the end of the clip that was there.
+            for (double t : { 9.5, 10.5, 11.0, 11.9, 11.999 })
+            {
+                checkClose (gainOf (spans, 1, t), 1.0, 1.0e-9,
+                            "the overhanging punch is not at full level at " + std::to_string (t));
+                checkClose (gainOf (spans, 0, t), 0.0, 1.0e-9,
+                            "the old performance is still sounding inside the overhanging punch at "
+                              + std::to_string (t));
+            }
+        }
+
+        // Randomised, with the pass deliberately allowed to run past the end
+        // of the clip it is punching into, which is what the generator above
+        // never does: there `material.folderSeconds` is the clip's own length
+        // and the folder never grows. That is the blind spot the fault lived
+        // in for five nights.
+        std::mt19937 rng (20261112u);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        int checked = 0, grew = 0;
+
+        for (int trial = 0; trial < 4000; ++trial)
+        {
+            const double clipSeconds = 1.0 + unit (rng) * 20.0;
+            const double bpm         = 40.0 + unit (rng) * 200.0;
+            const double clipStart   = unit (rng) * 64.0;
+
+            // Where the transport rolled in, and how long the player kept
+            // going. Two thirds of the time they play past the end of the
+            // clip, which is what makes the folder grow.
+            const double passStart  = unit (rng) * clipSeconds * 0.8;
+            const double passLength = (trial % 3 == 0 ? 0.2 + unit (rng) * 2.0
+                                                      : 1.0 + unit (rng) * 20.0);
+
+            const std::vector<CompTakeSpan> takes { { 0.0, clipSeconds },
+                                                   { passStart, passLength } };
+            const double folderSeconds = longestSeconds (takes);
+
+            // The figure the caller now works the folder's length out with has
+            // to be the same one.
+            checkClose (Punch::passReach (passStart, passLength),
+                        std::max (0.0, passStart) + passLength, 1.0e-12,
+                        "passReach is not a pass's position plus its length");
+
+            // And over the signs this loop never generates. A pass placed by
+            // `placePass` is never at a negative position, but
+            // `longestSeconds` walks every take in the folder including ones a
+            // caller placed itself, and the two have to agree on all of them
+            // or the whole point of the function is lost. Floored on the
+            // position and not on the length, exactly as `longestSeconds` is:
+            // two deliberate breakages of those floors survived a version of
+            // this check that only ever fed it positives.
+            {
+                const double awkwardStart  = -5.0 + unit (rng) * 10.0;
+                const double awkwardLength = -5.0 + unit (rng) * 10.0;
+
+                checkClose (Punch::passReach (awkwardStart, awkwardLength),
+                            std::max (0.0, awkwardStart) + awkwardLength, 1.0e-12,
+                            "passReach and longestSeconds disagree at "
+                              + std::to_string (awkwardStart) + ", "
+                              + std::to_string (awkwardLength));
+            }
+
+            if (folderSeconds > clipSeconds + 1.0e-9)
+                ++grew;
+
+            // A punch somewhere inside the pass, so there is always material
+            // for it, and often past the end of the old clip.
+            const double a = passStart + unit (rng) * passLength;
+            const double b = passStart + unit (rng) * passLength;
+            const double inSec  = std::min (a, b);
+            const double outSec = std::max (a, b);
+
+            if (outSec - inSec < 1.0e-3)
+                continue;
+
+            const Punch::Range range { clipStart + inSec  * bpm / 60.0,
+                                       clipStart + outSec * bpm / 60.0, true, true };
+            const Punch::Material material { passStart, passStart + passLength, folderSeconds };
+
+            const auto r = Punch::regionFor (range, clipStart, bpm, material);
+            if (! r.valid)
+                continue;
+
+            std::vector<CompSegment> comp { { 0.0, 0 } };
+            double crossfadeMs = 10.0;
+            if (! Punch::applyTo (comp, crossfadeMs, r, 1, 2, folderSeconds))
+            {
+                fail ("growth trial " + std::to_string (trial) + ": a valid punch was not applied");
+                continue;
+            }
+
+            const auto spans = buildCompSpans (comp, takes, folderSeconds, crossfadeMs * 0.001);
+            if (spans.empty())
+            {
+                fail ("growth trial " + std::to_string (trial) + ": no spans to play");
+                continue;
+            }
+
+            // Where the punch can really reach, worked out from the folder the
+            // comp is actually built over.
+            const double reachFrom = std::max (std::max (inSec, 0.0), passStart);
+            const double reachTo   = std::min (std::min (outSec, folderSeconds),
+                                               passStart + passLength);
+            if (reachTo - reachFrom < 1.0e-6)
+                continue;
+
+            ++checked;
+
+            const int steps = 32;
+            for (int i = 0; i <= steps; ++i)
+            {
+                const double t = i == steps ? reachTo - 1.0e-9
+                                            : reachFrom + (reachTo - reachFrom) * (double) i / (double) steps;
+
+                checkClose (gainOf (spans, 1, t), 1.0, 1.0e-9,
+                            "growth trial " + std::to_string (trial)
+                              + ": the punch is not at full level at " + std::to_string (t));
+
+                // And it replaced what was under it rather than summing with
+                // it, read as the engine reads it.
+                checkClose (renderAt (spans, { 0.5, 1.0 }, t), 1.0, 1.0e-9,
+                            "growth trial " + std::to_string (trial)
+                              + ": the punch did not replace what was under it at " + std::to_string (t));
+            }
+        }
+
+        check (checked > 2000, "too few growing folders were checked: " + std::to_string (checked));
+        check (grew > 1000, "almost no generated pass ran past the end of the clip it was punched "
+                            "into, so the case the fault lived in was not exercised: "
+                              + std::to_string (grew));
+        std::printf ("  %d punches into a growing folder checked, %d where the folder grew\n",
+                     checked, grew);
+    }
+
+    // ---------------------------------------------------------------------
+    // A NEGATIVE CROSSFADE WIDTH IS NO WIDTH.
+    //
+    // `regionFor` takes the width as a parameter with a default, so a caller
+    // can hand it anything, and Pro Tools exposes exactly this figure as a
+    // preference. Left unfloored, a negative width makes `half` negative and
+    // the two boundaries are then shifted *into* the punch rather than out of
+    // it: the take that was there plays at full level for half a width at each
+    // end of the punch, with no fade to explain it. The mutation that removed
+    // the floor survived the whole suite, because nothing passed a negative.
+    // ---------------------------------------------------------------------
+    {
+        const Punch::Material mat { 2.0, 8.0, 10.0 };
+        const Punch::Range range { 8.0, 12.0, true, true };    // 4 s to 6 s at 120 bpm
+
+        const auto r = Punch::regionFor (range, 0.0, 120.0, mat, -0.02);
+
+        check (r.valid, "a negative crossfade should fall back rather than refuse the punch");
+        checkClose (r.crossfadeSeconds, 0.0, 1.0e-12,
+                    "a negative crossfade width came back negative");
+        checkClose (r.from, 4.0, 1.0e-12,
+                    "a negative crossfade shifted the in boundary into the punch");
+        checkClose (r.to, 6.0, 1.0e-12,
+                    "a negative crossfade shifted the out boundary into the punch");
+
+        // And heard: the punch is still alone and at full level from end to
+        // end, which is what the shift going the wrong way would break.
+        const std::vector<CompTakeSpan> takes { { 0.0, 10.0 }, { 2.0, 6.0 } };
+        std::vector<CompSegment> comp { { 0.0, 0 } };
+        double crossfadeMs = 10.0;
+        check (Punch::applyTo (comp, crossfadeMs, r, 1, 2, 10.0),
+               "a punch with a negative crossfade was not applied");
+        checkClose (crossfadeMs, 0.0, 1.0e-12,
+                    "the folder kept a crossfade a negative width was not built for");
+
+        const auto spans = buildCompSpans (comp, takes, 10.0, crossfadeMs * 0.001);
+        for (double t : { 4.0, 4.001, 5.0, 5.999 })
+        {
+            checkClose (gainOf (spans, 1, t), 1.0, 1.0e-9,
+                        "a negative crossfade left the punch below full level at " + std::to_string (t));
+            checkClose (gainOf (spans, 0, t), 0.0, 1.0e-9,
+                        "a negative crossfade left the old performance sounding inside the punch at "
+                          + std::to_string (t));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // THE FIGURE IN THE HEADER FOR WIDENING A PUNCHED FOLDER AFTERWARDS.
+    //
+    // Punch.h says the geometry holds at the moment of punching rather than
+    // for ever: widen a punched folder's crossfade afterwards and the fade
+    // walks back into the punch, "which measures 1.8 dB off the attack at
+    // 50 ms where 10 was asked for". That number was stated and nothing
+    // reproduced it, so it is reproduced here. Nothing offers that control
+    // today; this is here so that the day something does, the cost of it is
+    // already written down and checked.
+    // ---------------------------------------------------------------------
+    {
+        const Punch::Material mat { 2.0, 8.0, 10.0 };
+        const Punch::Range range { 8.0, 12.0, true, true };    // 4 s to 6 s at 120 bpm
+
+        const auto r = Punch::regionFor (range, 0.0, 120.0, mat);
+        check (r.valid, "the punch behind the widening figure was refused");
+        checkClose (r.crossfadeSeconds, 0.010, 1.0e-12, "the punch did not get the ten it asked for");
+
+        const std::vector<CompTakeSpan> takes { { 0.0, 10.0 }, { 2.0, 6.0 } };
+        std::vector<CompSegment> comp { { 0.0, 0 } };
+        double crossfadeMs = 10.0;
+        check (Punch::applyTo (comp, crossfadeMs, r, 1, 2, 10.0), "it was not applied");
+
+        // At the width it was built for, the attack is untouched.
+        {
+            const auto spans = buildCompSpans (comp, takes, 10.0, 0.010);
+            checkClose (gainOf (spans, 1, 4.0), 1.0, 1.0e-9,
+                        "the punch is not at full level at its own in point");
+        }
+
+        // Widened to 50 ms afterwards, with the boundaries still where 10 put
+        // them, the fade reaches 20 ms into the punch and the in point sits
+        // three fifths of the way up it.
+        {
+            const auto spans = buildCompSpans (comp, takes, 10.0, 0.050);
+            const double g  = gainOf (spans, 1, 4.0);
+            const double dB = 20.0 * std::log10 (g);
+
+            checkClose (dB, -1.84, 0.05,
+                        "widening a punched folder to 50 ms does not cost the attack the 1.8 dB "
+                        "the header says it does");
+            std::printf ("  widening a punched folder from 10 ms to 50 ms costs the attack %.2f dB\n", dB);
+        }
     }
 
     if (failures == 0)

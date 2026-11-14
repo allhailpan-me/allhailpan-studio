@@ -1266,9 +1266,12 @@ public:
         // How long the folder will be once the passes are in it. `tidyFolder`
         // sizes a folder to its longest take, so this is the same figure it
         // will arrive at, worked out before anything is changed.
+        // A pass reaches its own position plus its own length, which is what
+        // `longestSeconds` measures and what this has to match: see
+        // Punch::passReach for what taking the length alone silenced.
         double folderSeconds = c->isTakeFolder() ? c->folder->longestSeconds() : c->length;
         for (const auto& t : passes)
-            folderSeconds = std::max (folderSeconds, t.length);
+            folderSeconds = std::max (folderSeconds, Punch::passReach (t.start, t.length));
 
         // The last pass is the punched one. That is Cubase's `Cycle History +
         // Replace` exactly: what is overlapped is "replaced by the last
