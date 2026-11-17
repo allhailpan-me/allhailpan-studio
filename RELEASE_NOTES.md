@@ -20,10 +20,13 @@ while and until now the only way to find the number was to record a click
 through a cable and eyeball it against the grid.
 
 **What it tells you when it will not give you a number is the useful part.**
-Nothing coming back means check the cable. A reading that will not settle means
-something else is in the loop. Too loud means turn the input gain down, and
-that one now recovers by itself once you do, which it did not in the first
-version of this.
+Nothing coming back means check the cable. If that input is hearing something
+loud but none of it is the signal, it says so instead, and tells you to look at
+which socket the cable is in rather than at the gain: it would be no help at
+all to be told to turn up an input that is already nearly clipping. A reading
+that will not settle means something else is in the loop. Too loud means turn
+the input gain down, and that one now recovers by itself once you do, which it
+did not in the first version of this.
 
 **Two things worth knowing.** Turn off anything you are monitoring before you
 measure, because an input you are listening to sends the signal back out again
