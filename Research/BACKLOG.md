@@ -56,6 +56,131 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-17: finishing the loopback measurement rather than starting something new
+
+### What was looked at
+
+Nothing new, on purpose. The first thing a night here does is look for work
+that was cut off, and this time there was some: the loopback round trip
+measurement was written on 11-12, audited, mutation tested, pushed, marked
+ready, and built green on all three platforms, and then never merged. It sat
+for five days while `main` moved three commits past it. A feature that is
+finished and unmerged is worth nothing to the person who records through this
+studio, and it is the exact failure the "save as you go" rule exists to catch,
+one step later than the rule looks.
+
+So tonight is that one: bring it up to date, audit it again with eyes that did
+not write it, fix what that finds, merge it.
+
+### What the second audit found
+
+The `auditor` agent, over the whole diff rather than the fixes alone, having
+first been told what the first audit had already found so it would not spend
+itself repeating that. It confirmed the four earlier fixes were really made,
+confirmed the integration with today's `main` is clean, and confirmed both of
+the findings that were deliberately left alone, re-deriving their numbers
+rather than taking them: an unnecessary inversion lands the first bit's
+residual on exactly 0.5 and so can never be accepted (13 readings in 2256 come
+back flagged while settling, none accepted), and the denormal state takes 56
+seconds to decay into the denormal range and 2.9 seconds to cross it, at
+around 3 operations a sample, which is not a dropout risk.
+
+Then it found four things nobody had.
+
+**A reading the panel had dropped stayed on screen offering itself.**
+`forgetMeasurement` cleared the reading and greyed the Apply button and left
+the report. So the panel still read "the driver claims 5.33 ms, so it is
+understating by 16.00 ms. Press Use this measurement to apply it." about a
+device that was no longer open. The trim slider is immediately below it and
+takes a typed value. Greying the button stops the button, and the number was
+the thing that had to be withdrawn: the previous audit's whole finding, left
+open through the one path that does not go through the button at all.
+
+**"Nothing is coming back" was being said to an input at nearly full scale.**
+A floating or unbalanced input sits at a DC offset, and DC demodulates to
+exactly nothing at every one of the thirteen tones, so the probe hears silence
+while the converter is almost clipping. The advice attached to that status was
+"turn the input's gain up far enough to hear a quiet tone", which sends
+somebody to the one knob that cannot help. The peak that tells the two cases
+apart was already measured, packed into the published word and carried across
+the thread boundary, and then nothing read it. It is a decision, so it is now
+`LatencyProbe::hearingSomething` in the tested header rather than a condition
+in the window.
+
+The threshold is -40 dBFS and the header says plainly that it is this
+project's own choice, because no reference publishes one: no other tool tells
+these two cases apart at all. Fons's prints a level and leaves it to a person;
+Ardour says it heard nothing. What is pinned in the test is the property
+rather than the number: a converter idling at -80 dBFS must not read as a
+signal and an input at -20 dBFS must.
+
+**The channel pickers kept the id rather than the channel**, under a comment
+saying they did the opposite so that "opening and closing the window does not
+quietly re-point the cable". The ids are positions in the device's compacted
+list of active channels, so they mean a different socket as soon as the active
+set changes: untick Output 1 with a cable in Output 3 and the picker silently
+moves to Output 4. Keyed by name now. The same fault `LatencyCalibration`'s
+own comment already warns about, one level up from where it was guarded.
+
+**The panel polled slower than the probe publishes.** Four readings a second
+against eight written, so half were thrown away, and the one that matters most
+is the transient: an input that goes over the ceiling for a moment could have
+its "too hot" word overwritten by an ok one before the panel ever read it, so
+the single message with an action attached to it would simply not appear. Ten
+a second now, which is Ardour's rate for the same panel.
+
+Plus three smaller ones, all fixed: `measurementText` took a second, newer
+reading than the one the Apply button would write, so the panel could print a
+figure it was not going to apply; `applyMeasurement` had a path that returned
+without saying anything, which is the one failure a person cannot report
+usefully; and two comments overclaimed, one of them written by the first
+audit's own fix commit.
+
+### Mutations
+
+Nine against the new code, all killed, run the way `Tests/run.sh` runs: the
+status gate removed from `hearingSomething`, `>` for `>=` and for `<`, the
+threshold moved to 0.5, to 0.00001 and to zero, the packing's round to nearest
+turned into a truncation, the rate term deleted from `stillApplicable`, and
+the status test widened from `noSignal` to "not ok".
+
+One of those survived at first and is worth writing down, because it is the
+shape of weak test this project keeps meeting. The threshold check was written
+in terms of `quietInput` on both sides, so moving the constant moved the
+expectation with it and the check passed at any value, including zero. A test
+written against the constant it is testing asserts only that the code is
+self-consistent. The absolute pair above is what closed it.
+
+Two more deliberate breakages are recorded as near no-ops rather than fixed:
+the revert in the inversion retry (the readings it affects are refused anyway,
+and the flag is only read after the status is found to be ok), and
+`stillApplicable`'s rate term in the panel's own use (a reading is only kept
+under figures with a real rate). The second is pinned by a test now anyway,
+because a function whose whole job is to be the testable half of a decision
+should not carry a term nothing exercises.
+
+### Also
+
+Another session pushed a second audit pass onto this branch while this run was
+working, which arrived as a rebase: the device identity check moved inside
+`measurementStillApplies`, the signature grew the driver type, and three more
+stale comments were corrected. Both sets of fixes are in. Worth noting as a
+fact about how these nights overlap: the branch was picked up precisely
+because it looked abandoned, and it was not quite.
+
+### Left for a later night
+
+- The duplicated `RecordAlign::Figures`, still. The panel builds one and the
+  engine builds another, and they still differ in the sample rate fallback. It
+  belongs in `PreferencesActions`, which is built in `MainComponent.cpp`, which
+  an open hardening branch still holds.
+- The measurement is of the round trip only, and the MIDI round trip has its
+  own algorithm in Ardour, `MIDIDM`, which is the one of the two that
+  publishes a numeric quality figure. Still the reference if a MIDI alignment
+  night ever happens.
+
+---
+
 ## 2026-11-13: a groove taken from one performance and applied to another
 
 The roadmap has carried "groove taken from one performance and applied to
