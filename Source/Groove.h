@@ -84,12 +84,28 @@ struct Groove
         from 0.3 to 0.8, so a file can carry 0.6, which the box shows as the
         nearest it has, 0.58. An earlier version of this comment said such a
         swing could only be shown as Straight, which was never what the code
-        did: only something within a hundredth of straight reads as straight,
-        and `GrooveTemplateTest` has asserted that 0.6 does not since the day
-        it was written. `nearestOfferedSwing` is what lets a caller put the
-        groove into a state the controls can represent, and therefore undo,
-        and on an exact tie it answers with the straighter of the two so that
-        the control never claims more swing than the file carries. */
+        did, and `GrooveTemplateTest` has asserted that 0.6 is not shown that
+        way since the day it was written. `nearestOfferedSwing` is what lets a
+        caller put the groove into a state the controls can represent, and
+        therefore undo, and on an exact tie it answers with the straighter of
+        the two so that the control never claims more swing than the file
+        carries.
+
+        Which swings do read as Straight is worth writing down, because the
+        correction above was itself written down wrong once. The entries are a
+        fortieth apart, so the straight cell is half of that wide and the tie
+        goes to the straighter: anything up to and including 0.52 reads as
+        straight, two fortieths rather than one.
+
+        And the table is one sided, so the whole early half of the band a
+        file may carry reads as straight too. There is no entry below 0.5, so
+        a stored 0.4, which `GrooveTest` establishes is an audible push, is
+        nearest to straight and is switched off by the channel rack the
+        moment a feel is cleared. That is the intended answer rather than an
+        oversight: the controls cannot show a push at all, and the state this
+        snapping exists to prevent is a groove left in one no control can
+        reach. Offering a push is a decision about the interface and not
+        about this table. */
     static constexpr int kNumOfferedSwings = 5;
 
     static double offeredSwing (int index) noexcept
@@ -267,14 +283,13 @@ struct Groove
             // is the one the suite asserts, which is over the notes the
             // groove is actually acting on.
             //
-            // The swing half below is bounded the same way, at three
-            // quarters of a step rather than a half because what it moves is
-            // one note of a pair rather than every note. It used not to be,
-            // on the argument that at the shuffle the interface offers the
-            // shift is a third of a step and the humanising fits in what is
-            // left. That argument is about what the interface offers, and the
-            // crossing is `2 * swing - 1.5` steps, which is nothing at 0.75
-            // and a tenth of a step at the 0.8 a file may carry.
+            // The swing half below makes the same promise and divides the
+            // step unevenly to make it, because what it moves is one note of
+            // a pair rather than every note. It used not to bound the two
+            // together at all, on the argument that at the shuffle the
+            // interface offers the shift is a third of a step and the
+            // humanising fits in what is left. That argument is about what
+            // the interface offers, and a file may carry more.
             //
             // Half a slot is also exactly the bound the test already asserts
             // for a feel on its own, so this makes that true with the
@@ -283,9 +298,11 @@ struct Groove
         }
         else
         {
+            const bool offbeat = (whole & 1) != 0;
+
             double move = 0.0;
 
-            if ((whole & 1) != 0)
+            if (offbeat)
             {
                 // The pair spans two steps, so the straight offbeat is at one
                 // half of it and the swung offbeat is at the swing fraction
@@ -297,26 +314,51 @@ struct Groove
             if (random > 0.0)
                 move += jitter * random * step * 0.25;
 
-            // Bounded together, exactly as the feel half above is, so that
-            // two notes on this groove's own grid cannot change places.
+            // Bounded so that two notes on this groove's own grid cannot
+            // change places, which is the same promise the feel half above
+            // makes and not the same arithmetic.
             //
-            // Three quarters of a step is what the neighbours leave, because
-            // each of them is humanised too: the downbeat behind this one may
-            // be drawn a quarter of a step late and the one in front a
-            // quarter early, so a note may travel three quarters of a step
-            // and meet one of them without passing it.
+            // The feel half moves every note and bounds every note at half a
+            // step, so any two neighbours divide one step between them. Here
+            // only the offbeat is swung, so the step between a pair is
+            // divided unevenly: three quarters of it for the offbeat, which
+            // is the one that has somewhere to go, and the remaining quarter
+            // for the downbeat, which is moved only by its own draw. The two
+            // still sum to the one step that separates them, so the furthest
+            // either can travel leaves them meeting rather than crossing.
+            //
+            // The downbeat's quarter is clamped rather than assumed. Its draw
+            // is `jitter * random * 0.25` of a step and `|jitter| < 1`, so
+            // the clamp binds only when `random` is above one, which
+            // `ProjectIO` does not admit today. Leaving it out would mean
+            // this file's guarantee rested on a bound in another file: the
+            // whole reason this clamp exists is that a file carries numbers
+            // the interface will not offer, so the guarantee is kept where
+            // the arithmetic is. At a humanise of 1.2 and a swing of 0.8 the
+            // unclamped downbeat put the crossing back, half of it, which is
+            // the fault arriving through the other field.
             //
             // It binds only above the swing the interface offers, so nothing
-            // the controls can ask for is changed by it. `ProjectIO` admits a
-            // swing to 0.8 from a file, where the shift alone is 0.6 of a
-            // step and the humanising then had nothing left to spend:
-            // measured over a hundred thousand placements at 0.8, a note
-            // landed up to 0.096 of a step behind the note in front of it,
-            // which plays a pattern's own notes in the wrong order and only
-            // on some patterns. The swing's own position is untouched by this
-            // whatever the file carries, since with the humanise knob down
-            // the shift is 0.6 of a step at the very worst.
-            shifted += std::clamp (move, -0.75 * step, 0.75 * step);
+            // the controls can ask for is changed by it: at the triplet
+            // shuffle the shift is a third of a step and the draw a quarter,
+            // which is inside three quarters with room to spare. `ProjectIO`
+            // admits a swing to 0.8, where the shift alone is 0.6 of a step
+            // and the crossing was `2 * swing - 1.5`, a tenth of a step, so a
+            // pattern played its own notes in the wrong order and only on
+            // some patterns.
+            //
+            // What the clamp costs above 0.75 is the late half of the draw,
+            // progressively: at 0.8 it reaches 0.15 of a step late against
+            // the full 0.25 early, about one offbeat in five lands exactly on
+            // the bound, and the draw acquires an early bias of a hundredth
+            // of a step. That is the right way round. The alternative is to
+            // keep the draw and let the swing move, and where the swing lands
+            // is the number somebody reads off the box, so with the humanise
+            // knob down the swing is still exactly where its number says
+            // whatever the file carries.
+            const double bound = (offbeat ? 0.75 : 0.25) * step;
+
+            shifted += std::clamp (move, -bound, bound);
         }
 
         return std::max (0.0, shifted);

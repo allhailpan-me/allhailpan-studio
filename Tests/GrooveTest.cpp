@@ -398,22 +398,39 @@ static void theStepLengthsAreTheNoteValues()
 // two questions of it: does it give the same answer twice, and does it stay
 // inside a quarter step. Both are necessary and neither says what the draw
 // is. A draw that was always positive, or half the size it claims, or the
-// same number for every step, or a steady ramp, passed both. So the four
-// things that make it humanising rather than a shift are measured here, and
-// each measurement is pointed at a generator known to fail it first.
+// same number for every step, or a steady ramp, passed both. So the things
+// that make it humanising rather than a shift are measured here.
 //
-//   - It goes both ways. A draw that only ever pushes late is a delay with a
+//   - It reaches early. A draw that only ever pushes late is a delay with a
 //     random length, and on a loop it is heard as the pattern dragging.
-//   - It fills the range the knob promises. At the top of the knob the drift
-//     reaches a quarter step; at half that, the knob does half what it says
-//     and no reading of the output can tell.
-//   - It moves from step to step and from note to note. One draw for the
-//     whole part is a shift, and one draw per step shared by every note on
-//     it cannot loosen a hat against a kick.
+//   - It reaches late, by as much as the knob promises. At half the promised
+//     reach the knob does half what it says and no reading of a single note
+//     can tell.
+//   - It is centred. A draw that reaches both ends of its range and still
+//     spends most of its time on one side of the grid drags in the same way,
+//     more quietly.
 //   - It is a scatter rather than a pattern. Successive steps have to be
 //     uncorrelated: a draw that advances by a fixed amount each step is
 //     perfectly spread and perfectly predictable, and what it plays is a
 //     slow sweep rather than a player's unsteadiness.
+//   - It is finely spread. A draw with a handful of possible positions is a
+//     quantised wobble, heard as the notes snapping between a few spots.
+//
+// It moves from step to step and from note to note as well, which is what
+// `everyNoteAndEveryStepGetsItsOwnDraw` asks: one draw for the whole part is
+// a shift, and one draw per step shared by every note on it cannot loosen a
+// hat against a kick. It is not in the yardstick because it is a comparison
+// between draws rather than a property of a run of them.
+//
+// A yardstick is only worth what its ability to fail is worth, and the first
+// version of this section claimed more than it had: it said each measurement
+// was pointed at a generator known to fail it first, and in fact two of the
+// four generators failed on the same term, no generator exercised the spread
+// at all, and four of the five terms could be deleted outright with the whole
+// suite still passing. So there is now one generator per term that fails that
+// term and passes the other four, which is the only arrangement under which
+// deleting a term is caught, and each one is asserted to fail for its own
+// reason rather than merely to fail.
 // ---------------------------------------------------------------------------
 
 struct DrawStats
@@ -458,51 +475,159 @@ static DrawStats summarise (const std::vector<double>& draws)
     return s;
 }
 
-// The four questions, as one answer, so the same yardstick can be turned on
-// a generator that is meant to fail it. `bound` is the drift the knob
-// promises at the top of its travel, in fractions of a step.
+// The questions one at a time, so a generator meant to fail one of them can
+// be asked which one it failed. `bound` is the drift the knob promises at the
+// top of its travel, in fractions of a step.
+struct DrawVerdict
+{
+    bool reachesEarly  = false;
+    bool reachesLate   = false;
+    bool isCentred     = false;
+    bool isUnpatterned = false;
+    bool isFineGrained = false;
+
+    bool humanising() const
+    {
+        return reachesEarly && reachesLate && isCentred && isUnpatterned && isFineGrained;
+    }
+};
+
+static DrawVerdict judgeDraw (const DrawStats& s, double bound)
+{
+    DrawVerdict v;
+    v.reachesEarly  = s.lowest  <= -0.95 * bound;
+    v.reachesLate   = s.highest >=  0.95 * bound;
+    v.isCentred     = std::abs (s.mean) <= 0.03 * bound;
+    v.isUnpatterned = std::abs (s.lag1) <= 0.12;
+    v.isFineGrained = s.distinct > 200;
+    return v;
+}
+
 static bool looksLikeHumanising (const DrawStats& s, double bound)
 {
-    return s.lowest  <= -0.95 * bound
-        && s.highest >=  0.95 * bound
-        && std::abs (s.mean) <= 0.03 * bound
-        && std::abs (s.lag1) <= 0.12
-        && s.distinct > 200;
+    return judgeDraw (s, bound).humanising();
+}
+
+// Asserts that a generator built to be wrong in one way is rejected, and
+// rejected for that reason and no other. The second half is what keeps the
+// yardstick honest: a generator that fails two terms cannot prove either of
+// them is load bearing, which is how four of these five terms were once
+// deletable with the suite still green.
+static void onlyFails (const std::vector<double>& draws,
+                       bool DrawVerdict::* term, const char* which, const char* what)
+{
+    const auto s = summarise (draws);
+    const auto v = judgeDraw (s, 0.25);
+
+    check (! v.humanising(), std::string ("the yardstick accepted ") + what);
+
+    check (! (v.*term),
+           std::string (what) + " was not rejected on " + which
+               + ", which is the one term it is the proof for");
+
+    int othersFailed = 0;
+    for (bool DrawVerdict::* t : { &DrawVerdict::reachesEarly, &DrawVerdict::reachesLate,
+                                   &DrawVerdict::isCentred, &DrawVerdict::isUnpatterned,
+                                   &DrawVerdict::isFineGrained })
+        if (t != term && ! (v.*t))
+            ++othersFailed;
+
+    check (othersFailed == 0,
+           std::string (what) + " failed " + std::to_string (othersFailed)
+               + " terms besides " + which + ", so " + which + " is not pinned by it");
+
+    std::printf ("    %-44s low %+.4f high %+.4f mean %+.5f lag1 %+.4f %4d distinct -> fails %s\n",
+                 what, s.lowest, s.highest, s.mean, s.lag1, s.distinct, which);
 }
 
 static void theHumanisingDrawIsADrawAndNotAShift()
 {
-    std::printf ("the humanising draw goes both ways, fills its range and is not a pattern\n");
+    std::printf ("the humanising draw reaches both ways, is centred, is a scatter and is finely spread\n");
 
-    // The yardstick has to be able to fail, or the passes below mean nothing.
-    // Four generators, each wrong in one of the four ways, measured over the
-    // same number of samples.
+    // The yardstick has to be able to fail, or the passes below mean nothing,
+    // and it has to be able to fail one term at a time or a term can be
+    // deleted without anything noticing. So: five generators, one per term,
+    // each built to fail its own and pass the other four.
+    //
+    // The two lopsided ones are centred by construction, by taking their own
+    // mean off, which is the only way to reach one end of the range and not
+    // the other without the mean giving it away first. That is not a contrived
+    // shape: it is what a draw whose two halves are scaled differently looks
+    // like, and the version of this file before tonight could not tell it from
+    // a good one.
     const int n = 1024;
-    std::vector<double> unipolar, halfRange, biased, ramp;
+    std::vector<double> unipolar, lopsidedLate, lopsidedEarly, mostlyLate, ramp, fivePositions;
     {
         std::mt19937 rng (20261114);
         std::uniform_real_distribution<double> uniform (-1.0, 1.0);
+        std::uniform_real_distribution<double> late (0.0, 1.0);
+        std::uniform_real_distribution<double> edge (-1.0, -0.95);
         double weyl = 0.0;
 
         for (int i = 0; i < n; ++i)
         {
             const double u = uniform (rng);
-            unipolar .push_back (std::abs (u) * 0.25);
-            halfRange.push_back (u * 0.125);
-            biased   .push_back (u * 0.25 * 0.5 + 0.125);
+
+            unipolar     .push_back (std::abs (u) * 0.25);
+            lopsidedLate .push_back (u > 0.0 ? u * 0.28 : u * 0.15);
+            lopsidedEarly.push_back (u < 0.0 ? u * 0.28 : u * 0.15);
+
+            // Reaches both ends of its range and still spends six notes in
+            // seven on the late side of the grid, which is the quiet version
+            // of the unipolar draw above.
+            mostlyLate.push_back ((i % 7 == 0 ? edge (rng) : late (rng)) * 0.25);
+
             weyl = weyl + 0.6180339887498949;
             weyl -= std::floor (weyl);
-            ramp     .push_back ((weyl * 2.0 - 1.0) * 0.25);
+            ramp.push_back ((weyl * 2.0 - 1.0) * 0.25);
+        }
+
+        // Five positions in equal numbers, so the mean is exactly zero and
+        // only the spread gives it away. The odd one out is the middle value,
+        // which does not move the mean.
+        for (double v : { -0.25, -0.125, 0.125, 0.25 })
+            fivePositions.insert (fivePositions.end(), 205, v);
+        fivePositions.insert (fivePositions.end(), n - (int) fivePositions.size(), 0.0);
+        std::shuffle (fivePositions.begin(), fivePositions.end(), rng);
+
+        for (auto* v : { &lopsidedLate, &lopsidedEarly })
+        {
+            double sum = 0.0;
+            for (double d : *v) sum += d;
+            const double mean = sum / (double) v->size();
+            for (double& d : *v) d -= mean;
         }
     }
 
-    check (! looksLikeHumanising (summarise (unipolar),  0.25), "a draw that never goes early was accepted");
-    check (! looksLikeHumanising (summarise (halfRange), 0.25), "a draw half the size it claims was accepted");
-    check (! looksLikeHumanising (summarise (biased),    0.25), "a draw biased late was accepted");
-    check (! looksLikeHumanising (summarise (ramp),      0.25), "a draw that is a steady ramp was accepted");
+    // The one real world shape, which fails two terms and so proves neither.
+    // Kept because it is the failure somebody would actually ship: the draw
+    // made unipolar is a delay of random length and the pattern drags.
+    check (! looksLikeHumanising (summarise (unipolar), 0.25),
+           "a draw that never goes early was accepted");
+
+    onlyFails (lopsidedEarly, &DrawVerdict::reachesLate, "its late reach",
+               "a draw that reaches early and only half as far late");
+    onlyFails (lopsidedLate, &DrawVerdict::reachesEarly, "its early reach",
+               "a draw that reaches late and only half as far early");
+    onlyFails (mostlyLate, &DrawVerdict::isCentred, "being centred",
+               "a draw that reaches both ways and still drags");
+    onlyFails (ramp, &DrawVerdict::isUnpatterned, "being a scatter",
+               "a draw that is a steady ramp");
+    onlyFails (fivePositions, &DrawVerdict::isFineGrained, "being finely spread",
+               "a draw with only five positions in it");
 
     // And now the real one, at every resolution, with the knob at the top and
     // the swing straight so that nothing but the draw is moving anything.
+    //
+    // Measured as a fraction of a step the three resolutions have to give the
+    // identical sequence, because the draw is a fraction of a step and the
+    // hash keys on the step index rather than on the beat. That is asked
+    // outright below rather than left as three rows of the same numbers,
+    // which is what this loop printed before: two of its three passes could
+    // not fail if the first passed, and a reader comparing the rows would
+    // reasonably have taken the agreement for evidence.
+    std::vector<double> firstResolution;
+
     for (const auto& r : resolutions)
     {
         auto g = swungAt (r.base, 0.5);
@@ -523,6 +648,14 @@ static void theHumanisingDrawIsADrawAndNotAShift()
                    + ", mean " + std::to_string (s.mean)
                    + ", lag1 " + std::to_string (s.lag1)
                    + ", " + std::to_string (s.distinct) + " distinct");
+
+        if (firstResolution.empty())
+            firstResolution = draws;
+        else
+            check (draws == firstResolution,
+                   std::string ("the draw at ") + baseName (r.base)
+                       + " is not the same fraction of a step as at an eighth, so moving the"
+                         " rack to another resolution changes which way a note is drawn");
     }
 
     // The knob is a fraction of that bound rather than a switch, so halfway
@@ -817,20 +950,46 @@ static void aSwingOutOfAFileCannotReorderThePattern()
 
     int cases = 0;
 
+    // `random` is swept past the one `ProjectIO` admits as well. The bound
+    // the offbeat is held to is only half of the promise: the other half is
+    // that the downbeat beside it stays inside the quarter step the offbeat
+    // left for it, and that was once true only because `ProjectIO` clamps the
+    // humanise to one. With the downbeat unclamped a humanise of 1.2 at a
+    // swing of 0.8 put a note 0.05 of a step behind the note in front of it,
+    // which is the same fault arriving through the other field. Nothing a
+    // file can carry today reaches it, which is exactly why it has to be
+    // asked here rather than left to the loader.
+    //
+    // Two different promises, and which one applies depends on the humanise.
+    // Within the band a file can carry, every note is strictly after the one
+    // before it, because the draw is a strict fraction of its quarter step:
+    // `|jitter| < 1`, so neither bound is ever quite reached. Past that band
+    // both bounds saturate, and since the pair divides exactly one step
+    // between them, saturating both puts two notes on the same beat. That is
+    // not a reordering and it is the same thing the feel half's comment
+    // already calls allowed, so what is asked out there is that the order
+    // never reverses rather than that no two notes ever coincide. Asking for
+    // the strict version everywhere would be asking the budget to be less
+    // than the step it is dividing.
     for (const auto& r : resolutions)
         for (double swing : { 0.3, 0.45, 0.62, 2.0 / 3.0, 0.7, 0.75, 0.76, 0.78, 0.8 })
-            for (double random : { 0.0, 0.5, 1.0 })
+            for (double random : { 0.0, 0.5, 1.0, 1.2, 4.0 })
                 for (double amount : { 0.5, 1.0 })
                 {
                     auto g = swungAt (r.base, swing);
                     g.random = random;
                     g.amount = amount;
 
+                    const bool strict = random <= 1.0;
+
                     double previous = -1.0;
                     for (int step = 0; step < 256; ++step)
                     {
                         const double placed = g.place (step * r.step, noteDist (rng));
-                        if (! (placed > previous || step == 0))
+                        const bool   ok     = step == 0
+                                            || (strict ? placed > previous : placed >= previous);
+
+                        if (! ok)
                             fail (std::string ("a swing of ") + std::to_string (swing)
                                   + " at " + baseName (r.base) + ", humanise "
                                   + std::to_string (random) + ", amount " + std::to_string (amount)
@@ -844,7 +1003,43 @@ static void aSwingOutOfAFileCannotReorderThePattern()
 
     std::printf ("    %d placements across the whole band a file may carry, all still in order\n", cases);
 
-    // What the bound must not do is move the swing itself. With the humanise
+    // What the bound must not do is take the humanising away. Holding the
+    // offbeat's total to three quarters of a step costs the late half of the
+    // draw once the shift is past half a step, and how much it costs is a
+    // number nothing was asking about: a bound of 0.7, of 0.65 or of 0.6 all
+    // passed the whole suite, and at 0.6 every offbeat's draw is cut off at
+    // exactly the swung position, so more than half of them pile onto one
+    // instant and the knob can only pull early. A pile-up is the opposite of
+    // humanising. So the reach either side is pinned at the top of the band:
+    // at a swing of 0.8 the shift is 0.6 of a step, which leaves 0.15 late
+    // and the whole 0.25 early.
+    {
+        auto g = swungAt (Groove::Base::sixteenth, 0.8);
+        g.random = 1.0;
+
+        const double pair = 0.5;
+        double late = 0.0, early = 0.0;
+
+        for (int k = 0; k < 2048; ++k)
+        {
+            const double at    = k * pair + 0.25;
+            const double drawn = (g.place (at, 60) - (k * pair + 0.8 * pair)) / 0.25;
+            late  = std::max (late,  drawn);
+            early = std::min (early, drawn);
+        }
+
+        std::printf ("    at a swing of 0.8 the draw reaches %+.4f late and %+.4f early of a step\n",
+                     late, early);
+
+        check (late >= 0.14,
+               "the bound ate the late half of the humanising at a swing of 0.8: it reaches only "
+                   + std::to_string (late) + " of a step");
+        check (early <= -0.24,
+               "the humanising does not reach early at a swing of 0.8: only "
+                   + std::to_string (early) + " of a step");
+    }
+
+    // And what it must not do is move the swing itself. With the humanise
     // knob down there is nothing to bound, so even the strongest swing a file
     // can carry has to land exactly where the number says, which is the one
     // thing somebody would notice.
