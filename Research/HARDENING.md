@@ -38,7 +38,8 @@ no test, and still nothing includes it, so it is still not worth one.
 48 mutations of `Groove.h`, every one built the way `Tests/run.sh` builds
 (`-fsanitize=address,undefined -fno-sanitize-recover=undefined`) and judged
 against both tests that include the header, `GrooveTest` and
-`GrooveTemplateTest`. **28 caught, 20 survived.**
+`GrooveTemplateTest`. **28 caught, 20 survived** against the test as it stood
+at the start of the night.
 
 Where the survivors were concentrated says more than the count. The swing
 positions themselves are watertight: all seven mutations of the shift, all
@@ -127,12 +128,121 @@ project keeps meeting:
   placed at the start of the clip rather than left where it is. `GrooveTest`
   now pins that.
 
+### The audit of the fix, which found seven things around it
+
+The clamp was audited by a reader who had not written it, which is what
+`.claude/agents/auditor.md` is for, and the headline is that the bound is
+right: exhaustively, at a thirty-second, swing 0.8, amount 1, humanise 1, over
+every one of the 128 note numbers on both sides of every join, the worst gap
+between a step and the next is `+2.7e-7` of a step. Positive, so nothing
+changes places, and essentially zero, so the bound is tight rather than
+generous. Removing it reproduces the fault exactly, and the closed form
+`2 * swing - 1.5` is confirmed to the digit at 0.76, 0.78 and 0.80. A feel
+deviation cannot be added on top of a swing, because `place` branches on
+`byFeel`, so the two bounds never compose.
+
+**The bound was sufficient but not self sufficient, which is the same mistake
+one field over.** The offbeat's total was held to three quarters of a step.
+The downbeat beside it was held to a quarter only because `ProjectIO` clamps
+the humanise amount to one: nothing in `Groove.h` said so, and the whole
+argument for the clamp is that a file carries numbers the interface will not
+offer. At a humanise of 1.2 and a swing of 0.8 the unclamped downbeat put the
+crossing back, half of it, 0.05 of a step. Not reachable from a file today, and
+not claimed as a live fault: it is the guarantee resting on another file's
+bound, which is exactly the shape the fix exists to remove. The downbeat's
+quarter is now clamped too, so the pair divides exactly one step whatever a
+file carries, and the ordering sweep asks for humanise amounts past the one the
+loader admits.
+
+That sweep also had to learn the difference between two promises. Within the
+band a file can carry, every note is strictly after the one before it, because
+`|jitter| < 1` strictly and neither bound is quite reached. Past that band both
+bounds saturate, and since the pair divides exactly one step, saturating both
+puts two notes on the same beat. That is not a reordering, and it is what the
+feel half's own comment already calls allowed, so what is asked out there is
+that the order never reverses. Asking for the strict version everywhere would
+be asking the budget to be less than the step it divides.
+
+**How much of the humanising the bound costs was a number nothing asked
+about.** A bound of 0.70, 0.65 or 0.60 all passed the whole suite. At 0.60 and
+a swing of 0.8 every offbeat's draw is cut off at exactly the swung position,
+so more than half of them pile onto one instant and the knob can only pull
+early, which is the opposite of humanising. The reach either side is now
+pinned at the top of the band: 0.15 of a step late against the full 0.25 early.
+
+**The draw's yardstick claimed more than it had.** The comment said each of its
+measurements was pointed at a generator known to fail it first. In fact it had
+five terms and four generators, two of which failed on the same term; nothing
+exercised the spread at all; and four of the five terms could be deleted
+outright with the whole suite still green, so only the correlation test was
+load bearing. There is now one generator per term that fails that term and
+passes the other four, which is the only arrangement under which deleting a
+term is caught, and each is asserted to fail for its own reason rather than
+merely to fail. The two lopsided generators take their own mean off, because
+reaching one end of the range and not the other is otherwise given away by the
+mean first.
+
+Its three resolutions were also printing the identical sequence three times,
+since the draw is a fraction of a step and the hash keys on the step index. Two
+of the three passes could not fail if the first did not, and a reader comparing
+the rows would reasonably have read the agreement as evidence. The invariance
+is now asked outright, and a draw keyed on the beat rather than on the step
+fails it.
+
+**Three comments said things the code does not do, two of them written the same
+night as the fix.** This is the fourth time this file records that shape.
+
+- `Groove.h` said only something within a hundredth of straight reads as
+  straight. The entries are a fortieth apart and the tie goes to the straighter,
+  so it is two fortieths: anything up to and including 0.52, which the test in
+  the same commit asserted. The table is also one sided, so every swing in the
+  early half of the band a file may carry reads as straight and is switched off
+  when a feel is cleared. That is the intended answer, since the controls cannot
+  show a push at all and a groove left in a state no control can reach is the
+  worse outcome, but it was nowhere written down.
+- `Groove.h` said the humanising had nothing left to spend at a swing of 0.8.
+  It has 0.15 of a step late and the whole 0.25 early, with about one offbeat
+  in five landing on the bound and an early bias of a hundredth of a step. And
+  the 0.096 of a step quoted as the crossing was a hundred thousand draws
+  falling short of a bound that has a closed form: it is a tenth of a step.
+  A sampling shortfall presented as a bound is the same failure in miniature as
+  the true peak meter reading the largest sample.
+- `ChannelRackComponent.h` still carried the claim this night set out to
+  correct, with the same 0.6 example, directly above the snapping code it
+  justifies, so it was the copy the next reader would believe. It also said
+  snapping moves a swing by at most a fortieth, which is true inside the range
+  the box covers and not outside it: a stored 0.8 snaps to the triplet shuffle,
+  0.133 in the number and 0.27 of a step on the offbeat.
+
+Two things the audit raised were deliberately left alone. `Research/BACKLOG.md`
+still carries the entry calling the crossing open and offering "clamp
+`grooveSwing` to 0.75 on load" as one of two remedies: that one must not now be
+done, since it would silently move an existing 0.8 file's offbeats by an eighth
+of a step for no remaining reason. The entry is stale and the file is being
+changed by an open pull request, so it is recorded here rather than edited
+there. And offering a push in the interface, so that the early half of the band
+a file may carry becomes representable, is a decision about the interface
+rather than about this header.
+
 ### Where it stands
 
-52 mutations, the 48 above plus four aimed at the new bound. **45 caught, 7
-survived**, 41 of the 45 by `GrooveTest` on its own. All 48 test programs pass.
+**58 mutations, 46 caught, 8 survived**, every one built the way `Tests/run.sh`
+builds and judged against both tests that include the header. All 48 test
+programs pass.
 
-The seven survivors, each with a judgement:
+Three further mutations were discarded rather than counted, and the reason is
+worth keeping. Turning a leaf assertion of the test into a tautology
+(`othersFailed >= 0`, `draws == draws`, `late >= 0.0`) survives by construction
+and measures nothing: a weakened assertion cannot make its own suite fail. What
+does show such an assertion is load bearing is breaking the code it judges,
+which is where `bound-offbeat-seven-tenths` and
+`draw-keyed-on-the-beat-not-the-step` earn their place. Mutating test machinery
+is only meaningful where it is shared, as the five `yardstick-term-dropped`
+mutations are: dropping a term makes a generator built to fail it be accepted,
+and the test says so.
+
+The eight survivors, each with a judgement. All eight were survivors before
+this night's work too, and none of them is a gap in a test:
 
 - `jitter-drawn-when-the-knob-is-down`, the draw's guard relaxed from
   `random > 0.0` to `>= 0.0`. **Genuine no-op.** The hash is computed and then
@@ -161,6 +271,12 @@ The seven survivors, each with a judgement:
   slot's deviation. **Genuine no-op.** An unfilled slot carries a deviation of
   zero by construction, which `GrooveTemplate.h` enforces in one place and
   documents there as defence in depth.
+- `place-huge-position-guard-removed`, the `1e15` half of `place`'s guard,
+  leaving the `isfinite` half. **A guard against the unspecified, not a gap**,
+  and the same judgement as `shade-finite-guard-removed` above for the same
+  reason: past that range `llround` gives back an unspecified number, which
+  then fails the on grid test, so the note is left alone either way. The NaN
+  half of the guard is the observable one and `GrooveTest` pins it.
 
 Nothing else in the header is now unasked. The swing positions are checked
 against the definition rather than against the code, in both directions and
