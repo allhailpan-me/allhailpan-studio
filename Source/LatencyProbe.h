@@ -199,6 +199,22 @@ namespace LatencyProbe
         the only thing in the band. */
     inline constexpr float peakCeiling = 0.707f;
 
+    /** The level above which an input that is hearing nothing of the probe is
+        nevertheless hearing something.
+
+        This one is not anybody's specification and the project's rule is to
+        say so: no reference publishes it, because no reference tells these
+        two apart at all. Fons's tool prints a signal level and leaves the
+        reading to a person, and Ardour simply says it heard nothing.
+
+        -40 dBFS, chosen to sit well above a converter's own noise floor,
+        which on an interface of this class idles around -100 dBFS, and well
+        below anything somebody would call a signal. Anywhere in that gap
+        would do: the number is not a threshold the answer turns on, only the
+        one that decides which of two sentences a person is shown.
+    */
+    inline constexpr float quietInput = 0.01f;
+
     /** The two residual thresholds, both Ardour's and both in units of half a
         cycle, so they run from 0 to 0.5. Past the first, try it inverted;
         past the second, the result is not usable. A reversed cable gives
@@ -311,7 +327,10 @@ namespace LatencyProbe
 
             It is shown in the panel's `tooHot` message, so that somebody told
             the signal is too loud can see how much too loud and by how much to
-            come down. */
+            come down. It is also what tells "nothing is plugged in" apart from
+            "the input is hearing something that is not the probe", which
+            `hearingSomething` below is the decision over: both of those read
+            as `noSignal` and they want opposite advice. */
         float inputPeak = 0.0f;
 
         /** Whether the answer was recovered by inverting the demodulation,
@@ -792,6 +811,29 @@ namespace LatencyProbe
         return r;
     }
 
+    /** Whether a reading that heard nothing of the probe was hearing anything
+        at all.
+
+        Both cases arrive as `noSignal` and they want opposite advice. A dead
+        input wants "check the cable and turn the gain up". An input that is
+        at -6 dBFS while none of the thirteen tones is coming back wants the
+        opposite: the gain is plainly up, so what is wrong is which socket the
+        cable is in, or that the input is listening to something else
+        entirely. Telling somebody to turn up an input that is nearly clipping
+        is the kind of advice that sends them looking in the wrong place, and
+        this panel's whole argument for naming a thing to go and do is that
+        the thing named is the right one.
+
+        It is a decision rather than a display, so it is here where it is
+        tested rather than in the window. The status is part of it: a peak
+        means nothing on a reading that was refused for being too hot, where
+        a loud input is the finding itself.
+    */
+    inline bool hearingSomething (const Reading& r) noexcept
+    {
+        return r.status == Status::noSignal && r.inputPeak > quietInput;
+    }
+
     /** Whether a measurement taken under one set of device figures may still
         be applied under another.
 
@@ -823,11 +865,18 @@ namespace LatencyProbe
 
         It cannot see the one thing that is not in `Figures`, which is which
         device this is. Two different devices that happen to report the same
-        rate, buffer and latencies would pass. The panel closes that
-        separately, by dropping the reading whenever the device it is looking
-        at changes at all, and this is the check that catches everything else.
+        rate, buffer and latencies would pass. The panel closes most of that
+        separately, by dropping the reading whenever the driver type, the
+        device's name, its rate, its buffer size or the names of its active
+        channels change, and this is the check that catches everything else.
         Both, rather than either: the panel's is the one that knows about
         devices and this is the one that can be tested.
+
+        What neither closes, said plainly rather than left as an implied
+        guarantee: two identical interfaces of the same model, with the same
+        channel names, on the same driver. A driver gives this studio nothing
+        else to tell them apart by, and inventing a serial number it does not
+        publish would be claiming a check that is not there.
     */
     inline bool stillApplicable (const RecordAlign::Figures& measuredUnder,
                                  const RecordAlign::Figures& now) noexcept

@@ -487,6 +487,18 @@ int main()
     // other way round was not better. Left flipped, a straight cable is
     // announced as reversed for as long as it takes to settle, and it
     // flickers, because the next read tries both again.
+    //
+    // What this does not pin, said here because an audit mutation-tested it
+    // and the comment above read as though it did: deleting the revert
+    // outright passes. An unnecessary inversion lands the first bit's
+    // residual on exactly 0.5, so the reading it produces is refused for
+    // being unusable, and the counts below only look at readings that were
+    // accepted. The flag on a refused reading reaches nothing, because the
+    // panel reads it only after the status has been found to be ok, which
+    // LatencyProbe.h's note on the field is about. So the revert is close to
+    // a no-op and is kept because the arithmetic around it is not: measured
+    // on straight cables here, 13 readings in 2256 come back flagged while
+    // settling and none of them is ever accepted.
     {
         std::mt19937 rng (8191u);
         std::uniform_real_distribution<double> delay (0.0, 2000.0);
@@ -613,6 +625,103 @@ int main()
             probe.process (in.data(), nullptr, -4);
 
             check (true, "degenerate blocks do not fall over");
+        }
+    }
+
+    //==========================================================================
+    // 5b. An input that is hearing something, just not this.
+    //
+    // Two faults arrive as the same status and want opposite advice. A dead
+    // input wants the gain turned up; an input sitting near full scale with
+    // none of the thirteen tones in it wants the cable moved, and telling
+    // somebody to turn up an input that is nearly clipping sends them looking
+    // in the wrong place. The panel used to give the first message to both,
+    // which an audit found: the number that tells them apart was measured,
+    // carried across the thread boundary and thrown away.
+    //
+    // The DC case is the honest shape of it rather than a contrivance: a
+    // floating or unbalanced input really does sit at an offset, and DC
+    // demodulates to exactly nothing at every one of the thirteen tones, so
+    // the probe hears silence while the converter is almost full.
+    {
+        checkStatus (measure ({ 0.0, 0.0 }, bulkRate, 1.0).status, Status::noSignal,
+                     "silence on the input is no signal");
+        check (! hearingSomething (measure ({ 0.0, 0.0 }, bulkRate, 1.0)),
+               "a dead input is not hearing anything");
+
+        Loop loud;
+        loud.gain     = 0.0;        // none of the probe comes back
+        loud.dcOffset = 0.9;        // and the input is nearly full scale
+
+        const auto heard = measure (loud, bulkRate, 1.0);
+        checkStatus (heard.status, Status::noSignal, "an input with no tones in it is no signal");
+        check (heard.inputPeak > 0.8f, "the peak of a loud input is reported");
+        check (hearingSomething (heard), "a loud input with no tones in it is hearing something");
+
+        // The status is half the decision and the half that is easy to drop.
+        // A working loopback peaks at about 0.29, which is well over the
+        // threshold, so a test of the level alone would call a perfectly good
+        // measurement a patching fault.
+        const auto good = measure ({ 480.0 }, bulkRate, 1.0);
+        checkStatus (good.status, Status::ok, "a straight cable measures");
+        check (good.inputPeak > quietInput,
+               "a working loopback is louder than the threshold, which is why the status matters");
+        check (! hearingSomething (good), "a measurement that worked is not a patching fault");
+
+        Loop hot;
+        hot.gain   = 3.0;
+        hot.clipAt = 1.0;
+        const auto clipped = measure (hot, bulkRate, 1.0);
+        checkStatus (clipped.status, Status::tooHot, "a clipping loopback is too hot");
+        check (! hearingSomething (clipped),
+               "a reading refused for being too hot already says the input is loud");
+
+        // Where the threshold has to sit, in absolute levels rather than in
+        // terms of itself. The sweep below is written against `quietInput`,
+        // so it moves with the constant and a mutation of the constant walks
+        // straight through it, which is how this was found. These two do not
+        // move: a converter idling must not be called a signal, and a signal
+        // must not be called an idle converter. Anywhere between them is a
+        // matter of taste, which is what the header says.
+        {
+            Loop idle;
+            idle.gain     = 0.0;
+            idle.dcOffset = 0.0001;     // -80 dBFS, far above an interface's own floor
+            check (! hearingSomething (measure (idle, bulkRate, 0.5)),
+                   "an idling converter is not hearing something");
+
+            Loop signal;
+            signal.gain     = 0.0;
+            signal.dcOffset = 0.1;      // -20 dBFS, which nobody would call silence
+            check (hearingSomething (measure (signal, bulkRate, 0.5)),
+                   "an input at -20 dBFS is hearing something");
+        }
+
+        // The threshold itself, swept, because the one value a boundary is
+        // most likely to be wrong at is the boundary. Exact equality is
+        // included deliberately: it is the only case that can tell > from >=.
+        {
+            Loop at;
+            at.gain     = 0.0;
+            at.dcOffset = (double) quietInput;
+            check (! hearingSomething (measure (at, bulkRate, 0.5)),
+                   "an input exactly at the threshold is not yet hearing something");
+
+            std::mt19937 rng (6553u);
+            std::uniform_real_distribution<double> level (0.0005, 0.5);
+
+            for (int trial = 0; trial < 200; ++trial)
+            {
+                Loop sweep;
+                sweep.gain     = 0.0;
+                sweep.dcOffset = level (rng);
+
+                const auto r = measure (sweep, bulkRate, 0.5);
+
+                checkStatus (r.status, Status::noSignal, "DC alone is never a measurement");
+                check (hearingSomething (r) == (sweep.dcOffset > (double) quietInput),
+                       "hearing something is exactly the input being above the threshold");
+            }
         }
     }
 
@@ -1299,6 +1408,19 @@ int main()
             checkClose (back.worstResidual, r.worstResidual, 1.0 / 1024.0,
                         "the residual survives packing");
 
+            // Round to nearest, exactly, and asserted rather than left to the
+            // tolerances above. An audit mutation turned the rounding into a
+            // truncation and every tolerance in this check passed it, because
+            // each is set at exactly one quantum: a truncation is wrong by
+            // less than that and slips under all of them. It is a tenth of a
+            // microsecond of error and nothing turns on it, which is the
+            // point. A tolerance that admits the mutation reads to the next
+            // person as though the rounding were pinned when it is not.
+            if (r.roundTripSamples < (double) unambiguousSamples)
+                check (back.roundTripSamples
+                           == std::floor (r.roundTripSamples * 256.0 + 0.5) / 256.0,
+                       "the round trip is rounded to the nearest quantum, not truncated");
+
             // The peak is only ever compared against the ceiling, so what has
             // to survive is which side of it the input was on.
             check ((back.inputPeak > peakCeiling) == (r.inputPeak > peakCeiling)
@@ -1408,6 +1530,19 @@ int main()
         };
 
         const auto taken = figuresFor (0, 0, 128, 48000.0, 0);
+
+        // No device at all, both sides, which is the one case the equality
+        // terms cannot refuse on their own: two closed devices agree about
+        // everything. An audit mutation deleted the rate term and this check
+        // passed without it, because every case here puts a real rate on one
+        // side. Nothing in the panel can reach it today, since a reading is
+        // only kept under figures whose rate is above zero, but this function
+        // exists to be the half of the decision that is tested, and a term
+        // nothing exercises is a term somebody is free to delete.
+        check (! stillApplicable ({}, {}),
+               "a measurement taken under no device applies to no device");
+        check (! stillApplicable (taken, {}),
+               "a measurement does not survive the device closing");
 
         // The buffer size needs a case of its own, and it has to be built on
         // purpose: for most figures a change of buffer moves the two buffer

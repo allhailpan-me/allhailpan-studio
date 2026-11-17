@@ -177,7 +177,16 @@ public:
 
         refreshChannelLists();
         refresh();
-        startTimerHz (4);          // the device can change under this window
+        // Ten a second, which is Ardour's rate for the same panel and for the
+        // same reason: the probe publishes eight readings a second, so
+        // polling slower than it writes drops readings on the floor. At four
+        // a second half of them were never seen, and the one that matters
+        // most is the transient: an input that goes over the ceiling for a
+        // moment could have its "too hot" word overwritten by an ok one
+        // before this panel ever read it, so the message telling somebody to
+        // turn the gain down would simply not appear. The timer also watches
+        // for the device changing under this window.
+        startTimerHz (10);
         setSize (560, 600);
     }
 
@@ -272,7 +281,16 @@ private:
 
         const auto fill = [] (juce::ComboBox& box, const juce::Array<LatencyCalibration::Channel>& channels)
         {
-            const int wanted = box.getSelectedId();
+            // By name, and that is the whole point of this line. The ids here
+            // are a position in the device's compacted list of active
+            // channels, so the same id means a different socket the moment
+            // the active set changes: untick Output 1 while a cable is in
+            // Output 3 and the id that said Output 3 now says Output 4. The
+            // id is the thing that survives; what somebody patched is the
+            // thing that has to. It is the same fault
+            // LatencyCalibration::activeChannels already warns about, which
+            // is offering a person one channel's name and measuring another.
+            const juce::String wanted = box.getText();
 
             box.clear (juce::dontSendNotification);
 
@@ -285,10 +303,16 @@ private:
             {
                 box.setEnabled (true);
 
-                // Keep what was chosen if it is still there, so opening and
-                // closing the window does not quietly re-point the cable.
-                box.setSelectedId (box.indexOfItemId (wanted) >= 0 ? wanted : channels[0].index + 1,
-                                   juce::dontSendNotification);
+                int chosen = channels[0].index + 1;
+
+                for (const auto& c : channels)
+                    if (c.name == wanted)
+                    {
+                        chosen = c.index + 1;
+                        break;
+                    }
+
+                box.setSelectedId (chosen, juce::dontSendNotification);
             }
         };
 
@@ -362,6 +386,18 @@ private:
     */
     void forgetMeasurement()
     {
+        // The report goes with the reading, and an audit found out why. The
+        // button was greyed and the text was left, so the panel still read
+        // "the driver is understating by 16.00 ms. Press Use this measurement
+        // to apply it." about a device that was no longer open. Greying the
+        // button stops the button; it does nothing about the number, and the
+        // trim slider is directly below and takes a typed value. Somebody
+        // reading that figure off a dead report and typing it in gets exactly
+        // the misalignment the button was stopped from applying.
+        if (lastMeasured.status == LatencyProbe::Status::ok)
+            outcome.setText ("That measurement was of a setup that has since changed, so it has "
+                             "been dropped. Measure again.", false);
+
         lastMeasured           = {};
         measuredUnder          = {};
         measuredUnderSignature = {};
@@ -377,11 +413,12 @@ private:
         is not in Figures, so the signature is compared here too.
 
         Both halves in this one function, and the second re-audit is why. The
-        signature comparison used to live only in refresh(), which runs four
-        times a second, and the apply path is reached straight from the
-        button. So this function, whose name and whose comment both promised to
-        cover device identity, answered on the figures alone for up to a
-        quarter of a second after a device change. Two non-reporting ASIO
+        signature comparison used to live only in refresh(), which runs on a
+        timer, and the apply path is reached straight from the button. So this
+        function, whose name and whose comment both promised to cover device
+        identity, answered on the figures alone for however long it was until
+        the next tick. Said that way on purpose: the rate has since been
+        raised and the window got shorter, which is not the same as closed. Two non-reporting ASIO
         drivers at the same rate and buffer both claim nothing, which is the
         same claim, so the figures agree and only the names differ: clicking
         inside that window applied the first device's correction to the second.
@@ -517,7 +554,7 @@ private:
     {
         // Asked again here rather than trusted from the button's enabled
         // state. The button is a picture of what was true when it was last
-        // drawn, and the device can change in the quarter second before
+        // drawn, and the device can change in the tenth of a second before
         // somebody's finger arrives.
         if (! measurementStillApplies())
         {
@@ -530,7 +567,15 @@ private:
         const double trim = LatencyProbe::trimMsFor (lastMeasured.roundTripSamples, claimFigures());
 
         if (! LatencyProbe::trimFits (trim))
+        {
+            // Unreachable while the button's enabled state is honest, and
+            // written out anyway: every other path out of here says why, and
+            // a button that does nothing at all when pressed is the one
+            // failure a person cannot report usefully.
+            outcome.setText ("That correction is larger than the control can hold, so it is not "
+                             "being applied.", false);
             return;
+        }
 
         // Through the slider, which is the one path from a correction to its
         // effect: it notifies, which stores the value and applies it to the
@@ -547,9 +592,9 @@ private:
         a patching problem and a reading that will not settle is a signal
         problem.
     */
-    juce::String measurementText (const RecordAlign::Figures& figures)
+    juce::String measurementText (const LatencyProbe::Reading& reading,
+                                  const RecordAlign::Figures& figures)
     {
-        const auto reading = calibration.latest();
         const double seconds = calibration.elapsedSeconds();
         const double rate = figures.sampleRate;
 
@@ -563,6 +608,19 @@ private:
             case LatencyProbe::Status::noSignal:
                 if (seconds < 1.0)
                     return "Listening for the signal coming back.";
+
+                // Two cases, opposite advice, and the reading carries which
+                // one it is. An input sitting near full scale with none of
+                // the thirteen tones in it is not an input that needs turning
+                // up: the cable is in the wrong socket, or that input is
+                // listening to something else. LatencyProbe::hearingSomething
+                // is the decision, kept there because it is a decision.
+                if (LatencyProbe::hearingSomething (reading))
+                    return "\"" + inputBox.getText() + "\" is hearing something, but none of it "
+                           "is the measurement tone (it peaks at "
+                           + juce::String (reading.inputPeak, 2) + "). Check that the cable is in \""
+                           + outputBox.getText() + "\" and not another output, and that nothing "
+                           "else is feeding that input.";
 
                 return "Nothing is coming back. Check that the cable really joins \""
                        + outputBox.getText() + "\" to \"" + inputBox.getText()
@@ -760,7 +818,7 @@ private:
                 measuredUnderSignature = deviceSignature();
             }
 
-            outcome.setText (measurementText (figures), false);
+            outcome.setText (measurementText (reading, figures), false);
 
             applyButton.setEnabled (measurementStillApplies()
                                     && LatencyProbe::trimFits (
