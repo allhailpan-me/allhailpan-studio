@@ -1,6 +1,6 @@
-You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
-## Since v0.7.0
+## Since v0.7.1
 
 **You can measure what your interface actually costs you, instead of trusting
 it.** Patch a cable from one of your outputs back into one of your inputs, open
@@ -488,21 +488,86 @@ Nothing changes unless you go looking. The default is still 24 bit, and at 24
 bit the dither is off, so an export you do not reconfigure writes the same
 file it always did.
 
-**PAN One has forty five new presets, sixty seven in all.** The holes in the
-bank are filled: kicks, snares, rims, hats, a shaker and a zap; an acid line,
-a reese, a tempo wobble and a sub boom; an electric piano, a drawbar organ, a
-clavinet style funk key, brass and a string machine; bells, a music box and a
+**PAN One is a much bigger instrument than it was.** It had two oscillators
+with a short list of fixed shapes, one filter, two envelopes and eighteen
+knobs, which is enough for a bass and a pad and not much past that. What is on
+its panel now is two wavetable oscillators with a sub and noise under them, a
+wavefolder, drive, the resonant filter, a low pass gate, four envelopes, two
+slopes, four LFOs, glide, four macros, and a modulation matrix with thirty two
+rows in it.
+
+The oscillators are what you will notice first. Each one picks a wavetable,
+which is a row of sixteen waveforms rather than a single shape, and the Pos
+knob beside it moves along that row: sweep it by hand, or point an envelope or
+an LFO at it, and the waveform changes while the note is still sounding. There
+are ten tables, from analogue saws and pulses through harmonic series to
+digital shapes and a dense cluster. Every one of them is calculated here from
+its own definition rather than sampled off anything, and band limited, so
+playing high up the keyboard does not lay the shimmer of aliasing over the top
+of what you are playing.
+
+**The folder and the gate are the two that are not ordinary, and they are
+worth finding.** The wavefolder makes a sound brighter by generating harmonics
+rather than by letting them through: it folds the wave back on itself, over and
+over as you turn it up, so a plain sine going in comes out richer instead of
+louder. The low pass gate is one control taking brightness and level together,
+through a model of the lamp and the light sensitive resistor a real one is
+built out of, which strikes fast and lets go slowly whatever you ask of it.
+That is why it sounds like something struck rather than something switched on,
+and it is not something you can draw with an envelope on a filter and an
+envelope on a volume, which is why almost nobody does.
+
+**Nothing in it is wired up for you except the one thing that has to be.** The
+envelopes, the slopes and the LFOs do nothing at all until the matrix says
+where they go. A row of the matrix is a source, a destination, how much, and
+optionally a second source scaling the first, which is what lets the mod wheel
+control how deep a vibrato is rather than the vibrato itself. The one fixed
+wire is envelope 1 on the output level, because something has to be able to
+tell the instrument a note has finished. The slopes are worth a mention of
+their own: a slope is a rise and a fall with its own two times, and it will
+either happen once or go round for ever, so the same control is a long swell,
+a vibrato, or a growl depending only on how fast you set it.
+
+Two things I would rather say than have you find. **It costs more than the old
+one did**, which it has to, and measured here on one machine it is about six
+tenths of a processor core with sixteen notes of a simple patch down and about
+a whole core on the busiest presets in the bank. If you are stacking those on
+an older laptop, that is the thing to watch. And **the wavetables are all built
+when the studio starts**, about forty megabytes of them, which adds a moment to
+launch and is deliberate: the alternative is the instrument stopping to think
+in the middle of something you are playing.
+
+**There are sixty seven presets now, where the old instrument had five.**
+Twenty two of them came with the new engine and forty five were written after
+it, and between them the holes in the bank are filled: kicks, snares, rims,
+hats, a shaker and a zap; an acid line, a reese, a tempo wobble and a sub
+boom; an electric piano, a drawbar organ, a clavinet style funk key, brass and
+a string machine; bells, a music box and a
 gong; tempo locked gates that turn a held chord into a part; and pads, plucks,
 leads, drones and effects that use the LFOs, which the first bank never
 touched. The preset menu on the panel is now grouped under headings by
 category.
 
-**The four macros now mean the same thing on every new preset**: 1 is Tone,
-2 is Movement, 3 is Grit and 4 is Shape. Each rests in the middle, so the
+**The four macros mean the same thing on every one of the forty five**: 1 is
+Tone, 2 is Movement, 3 is Grit and 4 is Shape. Each rests in the middle, so the
 preset sounds as designed until you move one, and either direction is a
-musical move. The mod wheel is vibrato on all of them. Your old presets are
-all still there, in the same places, so every project opens on the sound it
-was saved with.
+musical move. The mod wheel is vibrato on all of them.
+
+**A project you saved with the old instrument opens on the sound you saved.**
+Every knob is stored under its own name rather than as a position in a list,
+so the ones that still exist come straight back, and the four that have no
+equivalent any more are translated rather than dropped: the old oscillator
+shapes and the pulse width become a wavetable and a position along it, and the
+old filter envelope depth becomes a matrix row that moves the cutoff by the
+same number of octaves it used to. Dropped instead, your project would open
+with the right envelope times and entirely the wrong sound, which is the
+failure that was worth the work.
+
+The exception, and it is a narrow one: a project saved back when PAN One had no
+controls at all, which is v0.3.1 and nothing since, stored only which preset it
+was on and no knob values. The bank has been rebuilt since, so one of those
+opens on a different sound, and the preset menu is the place to go looking for
+what you wanted.
 
 **PAN One can grow a new sound out of the one you are playing.** Press
 **Grow** on its panel and it breeds a variation of the current patch. The
@@ -525,7 +590,90 @@ becomes a band pass or a high pass, never a notch or an all pass.
 a voice of its own and thrown away if it is silent, would clip a chord, or is
 more than twelve decibels louder or quieter than what you started from, which
 are the same rules the factory presets are tested against. So Grow cannot land
-on a dud, and a click costs about a tenth of a second while it listens.
+on a dud, and a click costs a couple of tenths of a second while it listens,
+because it has to hear what you started from as well as what it grew.
+
+**A short sound in the playlist plays once a bar, not over and over.** Drop
+a one shot into an empty playlist and press play, and it used to repeat back
+to back, because playback looped at the exact end of the last clip. It now
+plays to the end of the bar the last clip finishes in, with silence for the
+rest of that bar, so what you hear is a bar of music rather than a stutter.
+A loop you have cut to exactly one bar, or four, stays exactly that long. A
+loop range you set yourself works as it always did, and an export still ends
+where your last sound does.
+
+**There is a solo on every mixer strip.** There was no solo anywhere in the
+studio before this. Hearing one thing on its own meant muting the other
+fifteen strips by hand and then remembering which of them you had already
+muted before you started, which is one click everywhere else and fifteen
+here, and a state nobody puts back correctly.
+
+**A soloed vocal keeps its reverb.** That is the half of this that is not the
+button, and it is the half that decides whether a solo is any use. Muting
+everything that is not soloed also mutes the reverb your vocal is sending to,
+so soloing the vocal would give you a dry vocal and soloing the reverb would
+give you a reverb with nothing going into it. So anything a soloed strip sends
+to stays audible, and anything feeding a soloed strip stays audible too. Of the
+studios whose behaviour is written down anywhere, Ardour is the only one that
+publishes the rule for this, and it is the rule followed here.
+
+A few things worth knowing about how it behaves:
+
+- **Alt click solos only that strip** and clears the others, and Alt clicking a
+  strip that is already lit clears every solo in the mixer. If you would rather
+  one at a time was the ordinary click, there is a setting for it in
+  Preferences, and Alt then does the opposite of whichever way you have it.
+- **Something is always lit when anything is soloed**, both on the master strip
+  and up in the transport bar, and clicking either clears the lot. A solo left
+  up in a session you came back to the next day is the most ordinary way to
+  lose half of a mix and wonder what you broke.
+- **Right click a strip for Solo isolate**, which keeps that strip audible
+  whatever else is soloed. It is what you want on a shared effects return, and
+  it is self defeating if you set it on everything.
+- Preferences also has how far a strip that is not soloed is turned down. It is
+  silent by default, and you can make it a dip of so many decibels instead,
+  which is useful for picking one part out of a mix without losing the mix.
+- It is saved with the song, and the press is ramped over a few milliseconds so
+  that silencing fifteen strips at once does not click.
+
+**And the thing to be careful about: a bounce gets whatever is soloed.** The
+export goes through the same mixer, so if you render with a solo up you get
+the solo and not the mix. Nothing stops you, because there are honest reasons
+to want exactly that, which is why the lit button in the transport bar is
+there. Clear it before you export.
+
+**Every audio clip has a fade in and a fade out.** Click a clip and two small
+handles appear along its top edge: drag one inward and that end fades, as far
+in as you like. Before this a clip had no fade of any kind, so fading the end
+of a song out meant drawing an automation curve on a mixer insert, which is
+four or five actions for something that should be one drag.
+
+**And every audio clip edge now has a short fade on it whether you ask or
+not.** Trim a take back to its first note and it used to start on whatever
+sample the trim happened to land on, which is a step in the waveform, and a
+step is a click you can hear right across the band. Four milliseconds of fade
+at each edge removes it and takes nothing off the performance. If you want an
+edge left exactly alone you can turn that off, and the length is on the same
+menu, from one millisecond to ten.
+
+Right click a fade handle and you can pick its shape: equal power, which is the
+default and holds the level across a join between two different performances;
+linear, which is the transparent one for splicing one continuous recording back
+together; or an S-curve. Those are the laws Avid and Ardour both describe for
+those two jobs rather than three shapes picked for looking different.
+
+One thing it deliberately declines to do. Where one clip ends exactly where the
+next begins, as it does after a split, neither edge gets an automatic fade.
+Clips here do not overlap unless you overlap them, so the two automatic fades
+would be one after the other rather than at the same time: the first would ramp
+down to nothing and the second up from nothing, which is a hole in the audio
+rather than a crossfade, and worse than the cut it replaced. A fade you draw
+yourself is still yours to put wherever you want it.
+
+Fades are in the bounce exactly as you heard them, because playback and export
+apply them in the same place.
+
+## Since v0.7.0
 
 **Panning a guitar or a vocal no longer makes it quieter.** Move a mono track
 off centre and it lost 3 dB. Not because anything was broken: the pan knob was
@@ -621,15 +769,6 @@ using the mark's silhouette rather than its outline, so the shape survives
 down to about 32. At 16 pixels it is a bright mark rather than a readable
 one, which is as far as line art of this kind goes without drawing a simpler
 version of the logo.
-
-**A short sound in the playlist plays once a bar, not over and over.** Drop
-a one shot into an empty playlist and press play, and it used to repeat back
-to back, because playback looped at the exact end of the last clip. It now
-plays to the end of the bar the last clip finishes in, with silence for the
-rest of that bar, so what you hear is a bar of music rather than a stutter.
-A loop you have cut to exactly one bar, or four, stays exactly that long. A
-loop range you set yourself works as it always did, and an export still ends
-where your last sound does.
 
 ## Since v0.6.1
 
@@ -935,7 +1074,7 @@ Not code-signed, so every operating system will complain. Nothing is wrong with 
 ## Known limitations
 
 - **Low latency on Windows needs an interface with an ASIO driver,** or a sound card whose driver supports Windows' small shared buffers. Plenty of built-in sound chips support neither, and on those the studio will offer exclusive mode and little else.
-- **4/4 only, and one tempo for the whole song.** A MIDI file that changes tempo part way through is read at its opening tempo, and the status bar says so.
+- **One time signature and one tempo for the whole song.** You can set any signature you like, and it applies from the first bar to the last: neither it nor the tempo can change part way through a piece yet. A MIDI file that changes either is read at its opening value, and the status bar says so.
 - **Loading a plugin and dragging a mixer fader are not undo steps.** Everything else that edits the arrangement is.
 - **An instrument with 32 or more output channels** (sixteen stereo buses, which is the most this studio will route) makes the engine allocate once per block on the audio thread. Instruments with eight buses or fewer, which is all of the ones tested, are unaffected.
 - **macOS and Linux builds are lightly tested.** Please report anything broken.
