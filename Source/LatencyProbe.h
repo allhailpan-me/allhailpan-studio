@@ -85,10 +85,11 @@
 
     Ardour's peak tracker, which feeds its own clipping check, is wrong in two
     ways in four lines. Its block local `peak` tests `fabsf (vip) > peak` and
-    then stores the signed `vip`, so a block whose loudest sample is negative
-    records a negative peak; and the hold afterwards assigns `vip`, the last
-    sample of the block, rather than `peak`, so `get_peak()` returns close to
-    an arbitrary sample value. Fons's own code has no peak tracking at all, so
+    then stores the signed `vip`, so one negative sample makes `peak` negative
+    and every sample after it then passes the test and overwrites it; and the
+    hold afterwards assigns `vip`, the last sample of the block, rather than
+    `peak`. Either way `get_peak()` returns close to an arbitrary sample
+    value. Fons's own code has no peak tracking at all, so
     this is Ardour's addition. The one below is written from scratch and
     tested.
 
@@ -289,14 +290,28 @@ namespace LatencyProbe
             perfect and 0.5 is as wrong as it can be. It falls as the
             measurement settles, so it is a progress indicator as much as a
             quality one. Measured on a clean loopback at 48 kHz, the first
-            reading accepted arrives at 48 ms and the figure keeps improving
-            for about half a second after that, taking the answer from a
-            hundredth of a sample to a thousandth. */
+            accepted reading arrives at 48 ms with a residual of 0.198 and an
+            answer already within 0.0014 samples, and half a second later the
+            residual is about 0.001 and the answer is within a few hundred
+            thousandths. An earlier version of this comment said a hundredth
+            to a thousandth, which was the randomised check's tolerance rather
+            than anything measured here: a figure that is present, plausible
+            and wrong, which is the thing this project keeps a record of. */
         double worstResidual = 0.5;
 
-        /** The loudest thing seen on the input since the measurement started,
-            as a magnitude. Shown so that "no cable" and "the input gain is
-            wound up" can be told apart. */
+        /** The loudest thing seen on the input since the **previous read**,
+            as a magnitude, which as LatencyCalibration drives it is the last
+            eighth of a second.
+
+            Not since the measurement started, which is what it used to be and
+            what this comment used to say. Latching it meant one click while
+            the probe was running refused every reading afterwards, so `read()`
+            takes this and clears it. Anything deciding from it is deciding
+            about the last eighth of a second and nothing earlier.
+
+            It is shown in the panel's `tooHot` message, so that somebody told
+            the signal is too loud can see how much too loud and by how much to
+            come down. */
         float inputPeak = 0.0f;
 
         /** Whether the answer was recovered by inverting the demodulation,
@@ -309,9 +324,9 @@ namespace LatencyProbe
             and the test measures why: the recovery tries the other polarity
             whenever a reading disagrees with itself, which an unsettled
             reading always does, and on unsettled data the wrong polarity can
-            come back with the lower residual by luck. About seven reads in a
-            thousand of a perfectly straight cable claim to be reversed while
-            settling. An accepted reading cannot, because an unnecessary
+            come back with the lower residual by luck. Six reads in a thousand
+            of a perfectly straight cable claim to be reversed while settling,
+            measured as 7 of 1128. An accepted reading cannot, because an unnecessary
             inversion puts the first bit exactly half a cycle out and half a
             cycle is a residual of 0.5. So anything that shows this to somebody
             must check the status first, which is what the panel does. */
@@ -448,10 +463,22 @@ namespace LatencyProbe
 
         /** Resolves what the demodulator currently holds.
 
-            Const in spirit and not in signature, because recovering a reading
-            from a reversed cable means inverting the demodulation and trying
-            again, and that choice is kept so the next reading does not have
-            to rediscover it. Fons does the same.
+            **Call this once per interval: it consumes the peak.** The
+            clipping guard is on the input peak since the previous read, so a
+            second read taken straight after a first sees a peak of nothing and
+            cannot refuse anything, whatever the input is doing. That is the
+            whole guard gone for that call. LatencyCalibration calls it exactly
+            once per resolve, and the test takes two in a row on purpose to pin
+            the clearing, but the next person to add a second consumer or read
+            it from a window would silently remove a guard that cost an audit
+            to put right, and a signature cannot warn them. This sentence is
+            the warning.
+
+            Not const for two reasons, then. Recovering a reading from a
+            reversed cable means inverting the demodulation and trying again,
+            and that choice is kept so the next reading does not have to
+            rediscover it, which is what Fons does. And the peak is taken
+            rather than looked at, which is what Ardour does.
         */
         Reading read() noexcept
         {

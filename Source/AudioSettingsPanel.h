@@ -330,7 +330,14 @@ private:
         if (device == nullptr)
             return {};
 
-        juce::String signature = device->getName()
+        // The driver type as well as the device, because on Windows the three
+        // WASAPI modes enumerate the same endpoints under the same name with
+        // the same channel names. Switching between them does change the claim
+        // today, so this is not fixing a live fault, it is removing a case
+        // somebody would otherwise have to reason about: the type is already
+        // being asked for a dozen lines further down in refresh().
+        juce::String signature = devices.getCurrentAudioDeviceType()
+                                 + "/" + device->getName()
                                  + "/" + juce::String (device->getCurrentSampleRate(), 1)
                                  + "/" + juce::String (device->getCurrentBufferSizeSamples());
 
@@ -355,8 +362,9 @@ private:
     */
     void forgetMeasurement()
     {
-        lastMeasured  = {};
-        measuredUnder = {};
+        lastMeasured           = {};
+        measuredUnder          = {};
+        measuredUnderSignature = {};
         applyButton.setEnabled (false);
     }
 
@@ -366,12 +374,24 @@ private:
         by LatencyProbe::stillApplicable, which is where that decision is
         testable, and it catches a change of rate, of buffer size or of what
         the driver claims. It cannot see which device this is, because a device
-        is not in Figures, so the signature below drops the reading outright
-        whenever the device changes at all.
+        is not in Figures, so the signature is compared here too.
+
+        Both halves in this one function, and the second re-audit is why. The
+        signature comparison used to live only in refresh(), which runs four
+        times a second, and the apply path is reached straight from the
+        button. So this function, whose name and whose comment both promised to
+        cover device identity, answered on the figures alone for up to a
+        quarter of a second after a device change. Two non-reporting ASIO
+        drivers at the same rate and buffer both claim nothing, which is the
+        same claim, so the figures agree and only the names differ: clicking
+        inside that window applied the first device's correction to the second.
+        A check that is documented as having two halves has to have both of
+        them where it is asked.
     */
     bool measurementStillApplies() const
     {
         return lastMeasured.status == LatencyProbe::Status::ok
+               && measuredUnderSignature == deviceSignature()
                && LatencyProbe::stillApplicable (measuredUnder, claimFigures());
     }
 
@@ -732,10 +752,12 @@ private:
 
             if (reading.status == LatencyProbe::Status::ok)
             {
-                // Kept together, because a reading without the figures it was
-                // taken under cannot be checked against anything later.
-                lastMeasured  = reading;
-                measuredUnder = figures;
+                // Kept together, because a reading without the figures and
+                // the device it was taken on cannot be checked against
+                // anything later.
+                lastMeasured           = reading;
+                measuredUnder          = figures;
+                measuredUnderSignature = deviceSignature();
             }
 
             outcome.setText (measurementText (figures), false);
@@ -784,6 +806,7 @@ private:
         moved. */
     LatencyProbe::Reading lastMeasured;
     RecordAlign::Figures  measuredUnder;
+    juce::String          measuredUnderSignature;
 
     /** What the channel boxes were built from, so a device change is noticed
         without asking the device manager for a callback this panel does not

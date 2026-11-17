@@ -619,6 +619,35 @@ scope. A driver overstating its latency resolves perfectly happily and only
 refusing it on a tighter bound would be inventing a specification that no
 reference publishes.
 
+A second audit pass over those fixes found the applicability check was only
+half where its own comment said it was. `measurementStillApplies` compared the
+figures and left the device identity to the signature in `refresh()`, which
+runs four times a second, while the apply path is reached straight from the
+button. Two non-reporting ASIO drivers at the same rate and buffer both claim
+nothing, which is the same claim, so only the names differ: a click inside that
+quarter second applied the first device's correction to the second. Both halves
+are in the one function now, and the signature carries the driver type as well,
+since on Windows the three WASAPI modes enumerate the same endpoints under the
+same name.
+
+It also found three comments that the first round of fixes had left behind or
+introduced, which makes seven in this file altogether and is worth counting:
+`Reading::inputPeak` still said "since the measurement started", which is
+exactly what the fix had stopped being true; `read()` was still described as
+const in spirit after it became a method that consumes the peak, so a second
+caller would silently lose the clipping guard; and the convergence figure put
+in to replace a vague one was itself wrong, quoting the randomised check's
+tolerance rather than anything measured. The real numbers, re-measured against
+the header: the first accepted reading arrives at 48 ms with a residual of
+0.198 and an answer already within 0.0014 samples, and half a second later the
+residual is 0.001 and the answer is within a few hundred thousandths.
+
+The pattern across all seven is the same and worth naming, because it is not
+carelessness: every one of them was a true sentence about an earlier version of
+the code that nobody reread when the code moved. A comment explaining why is
+the thing this project values most, and it is also the thing that goes stale
+without failing anything.
+
 Two things the audit raised that were left as they are, with the reason
 written into the code rather than fixed:
 
