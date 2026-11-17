@@ -1,6 +1,43 @@
-You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One has forty five new presets and can grow new sounds out of the one you are playing. Panning a mono track no longer makes it quieter, takes now land where you played them, which they did not quite before, and the app icon is visible again. Below that, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument itself, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.0
+
+**You can measure what your interface actually costs you, instead of trusting
+it.** Patch a cable from one of your outputs back into one of your inputs, open
+Preferences > Audio, pick those two channels next to **Loopback cable, from**,
+and press **Measure the round trip**. The studio plays a signal down the cable,
+listens for it coming back, and tells you to a fraction of a sample how long
+the whole trip took. If that disagrees with what your driver claims, press
+**Use this measurement** and the record offset correction is set for you.
+
+This is the last loose end in takes landing where you played them. The studio
+already pulls a recording back by what the driver says the round trip is, but
+that is the driver's own word for it, and plenty of them understate it or, on
+ASIO, do not answer at all. When that happens everything you overdub sits a few
+milliseconds late, which does not look like anything on screen and sounds like
+you cannot keep time. The correction to it has been in the preferences for a
+while and until now the only way to find the number was to record a click
+through a cable and eyeball it against the grid.
+
+**What it tells you when it will not give you a number is the useful part.**
+Nothing coming back means check the cable. A reading that will not settle means
+something else is in the loop. Too loud means turn the input gain down, and
+that one now recovers by itself once you do, which it did not in the first
+version of this.
+
+**Two things worth knowing.** Turn off anything you are monitoring before you
+measure, because an input you are listening to sends the signal back out again
+and that is a loop rather than a round trip. And measure again if you change
+your buffer size or your driver: the studio drops the measurement when it sees
+you do, rather than quietly applying a figure that was about something else.
+
+I should be straight about one thing: none of this has been tried on your
+UMC1820, or on any real hardware at all. The measurement itself is built from
+the published algorithm that the JACK and Ardour calibration tools both use,
+and it is tested against thousands of simulated loopbacks, but whether your
+interface and its driver behave is the part only you can find out. If the
+number it gives you looks wrong, it probably is, and I would rather hear that
+than have you dial it in by hand.
 
 **You can take the feel off something you played and put it on something you
 programmed.** Play a bar of hi-hats or a bassline in by hand, the way it
