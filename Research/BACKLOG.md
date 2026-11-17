@@ -56,6 +56,131 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-17: finishing the loopback measurement rather than starting something new
+
+### What was looked at
+
+Nothing new, on purpose. The first thing a night here does is look for work
+that was cut off, and this time there was some: the loopback round trip
+measurement was written on 11-12, audited, mutation tested, pushed, marked
+ready, and built green on all three platforms, and then never merged. It sat
+for five days while `main` moved three commits past it. A feature that is
+finished and unmerged is worth nothing to the person who records through this
+studio, and it is the exact failure the "save as you go" rule exists to catch,
+one step later than the rule looks.
+
+So tonight is that one: bring it up to date, audit it again with eyes that did
+not write it, fix what that finds, merge it.
+
+### What the second audit found
+
+The `auditor` agent, over the whole diff rather than the fixes alone, having
+first been told what the first audit had already found so it would not spend
+itself repeating that. It confirmed the four earlier fixes were really made,
+confirmed the integration with today's `main` is clean, and confirmed both of
+the findings that were deliberately left alone, re-deriving their numbers
+rather than taking them: an unnecessary inversion lands the first bit's
+residual on exactly 0.5 and so can never be accepted (13 readings in 2256 come
+back flagged while settling, none accepted), and the denormal state takes 56
+seconds to decay into the denormal range and 2.9 seconds to cross it, at
+around 3 operations a sample, which is not a dropout risk.
+
+Then it found four things nobody had.
+
+**A reading the panel had dropped stayed on screen offering itself.**
+`forgetMeasurement` cleared the reading and greyed the Apply button and left
+the report. So the panel still read "the driver claims 5.33 ms, so it is
+understating by 16.00 ms. Press Use this measurement to apply it." about a
+device that was no longer open. The trim slider is immediately below it and
+takes a typed value. Greying the button stops the button, and the number was
+the thing that had to be withdrawn: the previous audit's whole finding, left
+open through the one path that does not go through the button at all.
+
+**"Nothing is coming back" was being said to an input at nearly full scale.**
+A floating or unbalanced input sits at a DC offset, and DC demodulates to
+exactly nothing at every one of the thirteen tones, so the probe hears silence
+while the converter is almost clipping. The advice attached to that status was
+"turn the input's gain up far enough to hear a quiet tone", which sends
+somebody to the one knob that cannot help. The peak that tells the two cases
+apart was already measured, packed into the published word and carried across
+the thread boundary, and then nothing read it. It is a decision, so it is now
+`LatencyProbe::hearingSomething` in the tested header rather than a condition
+in the window.
+
+The threshold is -40 dBFS and the header says plainly that it is this
+project's own choice, because no reference publishes one: no other tool tells
+these two cases apart at all. Fons's prints a level and leaves it to a person;
+Ardour says it heard nothing. What is pinned in the test is the property
+rather than the number: a converter idling at -80 dBFS must not read as a
+signal and an input at -20 dBFS must.
+
+**The channel pickers kept the id rather than the channel**, under a comment
+saying they did the opposite so that "opening and closing the window does not
+quietly re-point the cable". The ids are positions in the device's compacted
+list of active channels, so they mean a different socket as soon as the active
+set changes: untick Output 1 with a cable in Output 3 and the picker silently
+moves to Output 4. Keyed by name now. The same fault `LatencyCalibration`'s
+own comment already warns about, one level up from where it was guarded.
+
+**The panel polled slower than the probe publishes.** Four readings a second
+against eight written, so half were thrown away, and the one that matters most
+is the transient: an input that goes over the ceiling for a moment could have
+its "too hot" word overwritten by an ok one before the panel ever read it, so
+the single message with an action attached to it would simply not appear. Ten
+a second now, which is Ardour's rate for the same panel.
+
+Plus three smaller ones, all fixed: `measurementText` took a second, newer
+reading than the one the Apply button would write, so the panel could print a
+figure it was not going to apply; `applyMeasurement` had a path that returned
+without saying anything, which is the one failure a person cannot report
+usefully; and two comments overclaimed, one of them written by the first
+audit's own fix commit.
+
+### Mutations
+
+Nine against the new code, all killed, run the way `Tests/run.sh` runs: the
+status gate removed from `hearingSomething`, `>` for `>=` and for `<`, the
+threshold moved to 0.5, to 0.00001 and to zero, the packing's round to nearest
+turned into a truncation, the rate term deleted from `stillApplicable`, and
+the status test widened from `noSignal` to "not ok".
+
+One of those survived at first and is worth writing down, because it is the
+shape of weak test this project keeps meeting. The threshold check was written
+in terms of `quietInput` on both sides, so moving the constant moved the
+expectation with it and the check passed at any value, including zero. A test
+written against the constant it is testing asserts only that the code is
+self-consistent. The absolute pair above is what closed it.
+
+Two more deliberate breakages are recorded as near no-ops rather than fixed:
+the revert in the inversion retry (the readings it affects are refused anyway,
+and the flag is only read after the status is found to be ok), and
+`stillApplicable`'s rate term in the panel's own use (a reading is only kept
+under figures with a real rate). The second is pinned by a test now anyway,
+because a function whose whole job is to be the testable half of a decision
+should not carry a term nothing exercises.
+
+### Also
+
+Another session pushed a second audit pass onto this branch while this run was
+working, which arrived as a rebase: the device identity check moved inside
+`measurementStillApplies`, the signature grew the driver type, and three more
+stale comments were corrected. Both sets of fixes are in. Worth noting as a
+fact about how these nights overlap: the branch was picked up precisely
+because it looked abandoned, and it was not quite.
+
+### Left for a later night
+
+- The duplicated `RecordAlign::Figures`, still. The panel builds one and the
+  engine builds another, and they still differ in the sample rate fallback. It
+  belongs in `PreferencesActions`, which is built in `MainComponent.cpp`, which
+  an open hardening branch still holds.
+- The measurement is of the round trip only, and the MIDI round trip has its
+  own algorithm in Ardour, `MIDIDM`, which is the one of the two that
+  publishes a numeric quality figure. Still the reference if a MIDI alignment
+  night ever happens.
+
+---
+
 ## 2026-11-13: a groove taken from one performance and applied to another
 
 The roadmap has carried "groove taken from one performance and applied to
@@ -378,6 +503,314 @@ all capture a `SafePointer`, and it now does too.
   DNA Groove Templates
 - Akai MPC software user guide and MPC3000 manual, Timing Correct
 - US 7,525,036 B2, "Groove mapping" (Sony), for the piecewise map model only
+
+---
+
+## 2026-11-12: measuring the round trip instead of guessing at it
+
+### What was looked at
+
+Candidates, judged against daily recording, editing, arranging and mixing of
+guitar and vocals through a UMC1820, and against what the open pull requests
+left free. Six hardening branches were open, which between them hold
+`MainComponent.cpp`, `Project.h`, both the playlist and the piano roll,
+`Meter.h`, `SongLength.h`, `LatencyGraph.h`, `Spectrogram.h`, `Envelope.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`. That rules out anything whose state lives in
+the project file or whose wiring lives in the window.
+
+| Candidate | Verdict |
+|---|---|
+| **Measuring the real round trip with a loopback cable** | **Chosen.** Named on 2026-10-08 as "a night's work on its own", and it is the one thing the record alignment built that night still cannot do for itself. |
+| Stem export | Deferred. `renderOffline` is free now, but the names the stems would be written under live in `Project.h`, which #77 holds. |
+| Clip gain on audio clips | Deferred for the same reason: the gain is a field on `Clip`. |
+| MIDI record alignment | Deferred an eighth time, same reason as the seven before it: the figure is easy and knowing whether the keyboard is being played live or a pattern is being bounced off the grid is not. |
+| Noise shaping on export | Deferred, not re-rejected. Still wants the paper itself. |
+
+### What was chosen, and why
+
+**The trim the studio offers for a lying driver is a figure somebody has to
+guess.** `RecordAlign.h` compensates a take by `input + output + engine +
+trim`, where the first two are what the driver claims. It also says, in its own
+words, why there is a trim at all: the claim is only a claim, JUCE's ASIO
+backend reports zero for both when the driver will not answer, and Ardour's
+manual puts it plainly, "the only way to accurately learn about the total
+(additional) latency is to measure it".
+
+So the studio already has the right arithmetic and the wrong input to it. What
+the trim slider's own tooltip told somebody to do, before tonight, was this:
+
+> Record a click through a cable from an output back into an input, look at
+> where the recorded clicks sit against the metronome, and dial this until
+> they line up.
+
+That is a real method and it is the method of last resort. It asks a musician
+to eyeball a waveform against a grid line, at whatever zoom they happen to be
+at, and then convert what they see into milliseconds. Every other studio that
+takes this seriously measures it instead.
+
+### Where the behaviour came from
+
+The reference implementation is **Fons Adriaensen's MTDM**, which is what
+`jack_delay` and `jack_iodelay` are, and what Ardour and Harrison Mixbus both
+use for their own calibration. Read from his code rather than from anybody's
+description of it: `jack2/tests/iodelay.cpp`, "Copyright (C) 2003-2008 Fons
+Adriaensen", and the same algorithm as a class in Ardour's
+`libs/ardour/mtdm.cc`. It is GPL-2 or later, so it may be taken at GPL-3,
+which AGPL-3.0 may combine with through section 13 of each: the same argument
+`CLAUDE.md` already records for the ASIO SDK.
+
+**It is not an impulse and not a chirp**, which is the first thing worth
+knowing, because an impulse is what anybody would reach for. It plays
+**thirteen steady sine tones at once** and reads the phase of each by
+quadrature demodulation. The fundamental's phase gives the delay to within one
+of its own cycles; each of the other twelve contributes exactly **one bit** of
+the whole number of cycles on top of that.
+
+The whole design is in the frequency table, and the property that makes it work
+is not stated in the source, so it was checked arithmetically rather than
+taken on trust. With the increments Fons uses, every one of the twelve
+satisfies
+
+```
+f_i / f_0 = odd / 2^(i+1)
+```
+
+exactly: 1/2, 3/4, 5/8, 9/16, 17/32, 17/64, 41/128, 97/256, 225/512, 833/1024,
+1793/2048, 3841/4096. A change of 2^i cycles in the delay therefore moves tone
+i's phase by an odd multiple of half a cycle, which flips a bit that nothing
+else can flip. Which odd numerator is used at each step is free, and that
+freedom is spent keeping all thirteen tones inside one mid band, between
+`fs/60` and `fs/16`: 732 Hz to 2.8 kHz at 44.1 kHz. The frequencies are
+proportional to the sample rate rather than fixed in hertz.
+
+Twelve bits of sixteen samples each is **65536 samples of unambiguous range**,
+and sub-sample precision inside it. A faithful transcription of his code,
+driven by an analytically exact fractional delay, recovers a known delay to
+better than 2e-5 samples.
+
+What Ardour does with the figure, from `gtk2_ardour/engine_dialog.cc` and
+`libs/ardour/audioengine.cc`: it subtracts the backend's own buffering from
+the measurement and stores the remainder as "systemic latency". On its Windows
+and PortAudio path what it subtracts is `Pa_GetStreamInfo`'s input and output
+latency, which is **the driver's own claim**, so what Ardour stores there is
+exactly measured-minus-claimed. That is the same quantity this studio's trim
+already is, which is why the measurement can feed the control that exists
+rather than needing one of its own.
+
+The rejection rules are published too, in Ardour's
+`check_audio_latency_measurement` and in `jack_iodelay`'s own output, and they
+are taken as they are rather than invented:
+
+- nothing came back: the fundamental's magnitude under 0.001, which works out
+  at a received loop gain of -64 dB.
+- too hot: Ardour refuses a result whose input peak is above **-3 dBFS**.
+- inconsistent: the worst of the twelve bit decisions off by more than
+  **0.2** of a half cycle makes the result unusable, and more than **0.3**
+  means try it inverted.
+- a reversed cable gives a worst residual of **exactly 0.5**, which is a
+  signature rather than a failure, and inverting the demodulation recovers the
+  right answer from it.
+
+### Rejected, on the research
+
+- **A click, or an impulse, and a correlation peak.** It is the obvious design
+  and it is worse at this job. A correlation peak for a flat-spectrum probe is
+  a sinc, and the three-point parabolic interpolation everybody reaches for to
+  get a sub-sample answer out of it is **biased by up to 0.119 samples**,
+  measured, with the error an S-shape against the true fractional delay that
+  is zero at 0 and 0.5 and worst near 0.2. It does not average away over
+  repeated measurements. Julius Smith's formula for it is exact for a
+  **Gaussian** peak interpolated on a **log** scale, which is a spectral-peak
+  context and not this one. MTDM's narrowband demodulation also survives noise
+  that a single impulse would not: correct to 0.05 samples at +3 dB SNR, and
+  **rejected rather than wrong** at -17 dB.
+- **An exponentially swept sine, after Farina.** The right tool for an impulse
+  response and more than is needed for one number. Worth recording why it was
+  not built from the paper: the 2000 AES paper is paywalled, the repository
+  record for it has no file attached, and the equation as recovered from
+  Farina's own 2007 restatement came through a garbled PDF text layer. The
+  inverse filter's slope is also in dispute in the secondary literature, +3
+  against -6 dB per octave, from two different normalisations. Building from
+  that would be building from a transcription, which is the thing this project
+  does not do.
+- **Splitting the answer into an input and an output figure.** Ardour and
+  `jack_iodelay` both do, and both do it by halving: Fons's man page says to
+  divide by two "if you believe that the latency is equally distributed
+  between the input and output parts of your audio hardware (extremely
+  likely)". Here there is nothing to split it for. The two figures are only
+  ever added together, in `captureOffsetSamples`, so halving a number and then
+  adding the halves back up would be arithmetic with a belief in the middle of
+  it for no gain.
+- **Any check that the signal came through a cable rather than through the
+  air.** Neither reference has one and MTDM cannot have one in principle: it
+  measures the phase of whatever arrives, by whatever path. Ardour offers a
+  speaker and a microphone as a deliberate mode, not as a failure. What is
+  here instead is a plausibility ceiling, and the comment says it is this
+  studio's own rule rather than anybody's specification.
+
+### Faults in the references, found before copying them
+
+- **Ardour's peak tracker is broken**, in the four lines that feed its own
+  -3 dBFS check. `mtdm.cc` tests `fabsf (vip) > peak` and then stores the
+  **signed** `vip`, so one negative excursion sets the running peak negative
+  and it loses every comparison after that; and the hold afterwards assigns
+  `vip`, the last sample of the block, rather than `peak`. `get_peak()`
+  therefore returns close to an arbitrary sample. Fons's own code has no peak
+  tracking at all, so this is Ardour's addition. Written from scratch here,
+  and tested.
+- **The phase accumulator overflows.** Fons's `Freq::p` is an `int` advanced
+  by up to 4096 a sample and then masked with `& 65535`. That is signed
+  overflow after about eleven seconds at 48 kHz, which is undefined behaviour
+  rather than a wrong answer, and a calibration left running reaches it. An
+  unsigned accumulator masked to sixteen bits is the same arithmetic without
+  the fault, and the sanitizers in `Tests/run.sh` would have found it.
+- **`jack_iodelay`'s man page is wrong about its own program**, twice: it
+  says the value is printed every 0.5 seconds and the no-signal line every
+  second, and the source sleeps 250 ms. Recorded only so nobody takes the man
+  page as the specification for the timing.
+- **MTDM wraps silently past its range.** A true delay of 70000 samples reads
+  as 4464 with a clean residual: the one failure mode that produces a
+  confident wrong answer. That is what the plausibility ceiling is for.
+
+### What is being built
+
+- `Source/LatencyProbe.h`, with no JUCE in it: the thirteen tones, the
+  demodulator, the bit ladder, an honest peak tracker, the rejection rules,
+  and the arithmetic that turns a measured round trip into the trim
+  `RecordAlign` already takes.
+- `Tests/LatencyProbeTest.cpp`, driving all of it through an analytically
+  exact fractional delay, which needs no interpolator because the probe is a
+  sum of sinusoids.
+- `Source/LatencyCalibration.h`: the JUCE side, which is a device callback and
+  nothing else.
+- The button and the readout in `Source/AudioSettingsPanel.h`.
+
+The property worth asserting, which is the one a studio gets wrong: **the
+total offset is independent of how honest the driver was.** A device whose
+claim is right must produce a trim of zero, and a device claiming nothing must
+produce a trim of the whole round trip, and `captureOffsetSamples` must land
+on the same total either way.
+
+### What the audit found
+
+Nine findings, four of them real. The two that mattered were both in the JUCE
+side, which is the part nothing tests, and that is the shape `CLAUDE.md`
+already records about the old record alignment: "the fourth thing wrong with it
+is why: the figure was in the window, where nothing tests it."
+
+1. **A measurement could be applied to a device that was never measured.** The
+   reading is kept after the measurement is stopped on purpose, because the
+   useful way to use this is to watch it settle, stop and then decide. Nothing
+   checked that the device decided about was the device measured. Measure an
+   ASIO interface whose driver will not report its latency, stop, press Find
+   the fastest device, land on a shared Windows mode, press Use this
+   measurement, and a correction computed against a claim of 256 samples is
+   applied against a claim of 1440: every take on a device that was already
+   right is pushed 8.67 ms late, and nothing about it looks wrong. The buffer
+   size alone does it with no device change at all. The fix put the decision in
+   the header where it can be tested, as `LatencyProbe::stillApplicable`, and
+   the panel drops the reading whenever the device changes at all, since which
+   device this is cannot be seen from `Figures`.
+2. **The input peak latched for the whole measurement while the panel promised
+   it did not.** Once anything crossed -3 dBFS for one sample the reading was
+   refused for the rest of the run, under a message saying to turn the gain
+   down and it would settle again in a second. It never would. The trigger is
+   the ordinary workflow: press Measure, then plug the jack in, and the
+   contacts making is a full scale click. This is a divergence from the
+   reference that had not been noticed: Ardour's `get_peak()` **clears** the
+   peak as it reads it, so its check is on the peak since the last poll, which
+   is what makes its own advice honest. The threshold had been copied and the
+   reset had not. Worse, the test pinned the latch, so it would have held the
+   bug in place.
+3. **A memset of eighteen exabytes.** The output clear ran before the
+   `numSamples <= 0` guard, and `FloatVectorOperations::clear` is `zeromem` of
+   `num * sizeof (float)` bytes with no check of its own. The probe's own test
+   already feeds it a block length of -4, with a comment saying a backend can
+   hand that over while shutting down, and the tested header handles it
+   correctly. The untested wrapper in front of it did not.
+4. **The channel pickers went stale in two ways.** Repointed mid-measurement
+   they were ignored, so the probe stayed on the old channels while the report
+   named the new ones, which is the fault `activeChannels` exists to prevent
+   arrived at from the other side. And the signature that noticed a device
+   change counted channels rather than naming them, so swapping input 1 for
+   input 5 was invisible, which on JACK can happen without anybody touching
+   the chooser.
+
+And a fourth misleading comment, after the three the mutation testing had
+already found. `minBelievableSamples` said it refused "a measurement well under
+the driver's own claim". It does not and cannot: `read()` has no `Figures` in
+scope. A driver overstating its latency resolves perfectly happily and only
+`trimFits` eventually refuses it. The comment now says so, and says why
+refusing it on a tighter bound would be inventing a specification that no
+reference publishes.
+
+A second audit pass over those fixes found the applicability check was only
+half where its own comment said it was. `measurementStillApplies` compared the
+figures and left the device identity to the signature in `refresh()`, which
+runs four times a second, while the apply path is reached straight from the
+button. Two non-reporting ASIO drivers at the same rate and buffer both claim
+nothing, which is the same claim, so only the names differ: a click inside that
+quarter second applied the first device's correction to the second. Both halves
+are in the one function now, and the signature carries the driver type as well,
+since on Windows the three WASAPI modes enumerate the same endpoints under the
+same name.
+
+It also found three comments that the first round of fixes had left behind or
+introduced, which makes seven in this file altogether and is worth counting:
+`Reading::inputPeak` still said "since the measurement started", which is
+exactly what the fix had stopped being true; `read()` was still described as
+const in spirit after it became a method that consumes the peak, so a second
+caller would silently lose the clipping guard; and the convergence figure put
+in to replace a vague one was itself wrong, quoting the randomised check's
+tolerance rather than anything measured. The real numbers, re-measured against
+the header: the first accepted reading arrives at 48 ms with a residual of
+0.198 and an answer already within 0.0014 samples, and half a second later the
+residual is 0.001 and the answer is within a few hundred thousandths.
+
+The pattern across all seven is the same and worth naming, because it is not
+carelessness: every one of them was a true sentence about an earlier version of
+the code that nobody reread when the code moved. A comment explaining why is
+the thing this project values most, and it is also the thing that goes stale
+without failing anything.
+
+Two things the audit raised that were left as they are, with the reason
+written into the code rather than fixed:
+
+- **`inverted` means nothing unless the status is `ok`.** The recovery tries
+  the other polarity whenever a reading disagrees with itself, which an
+  unsettled reading always does, and on unsettled data the wrong polarity can
+  come back with the lower residual by luck: measured, about seven reads in a
+  thousand of a perfectly straight cable claim to be reversed while settling.
+  An accepted reading cannot, because an unnecessary inversion puts the first
+  bit exactly half a cycle out. So the field is documented as meaningful only
+  when the status is `ok`, which is what the panel already relied on, and the
+  test asserts it for accepted readings only.
+- **Fons's denormal guard is not copied.** He adds 1e-20 to each filter line.
+  His state is float and this is double, which takes about a minute of silence
+  to decay that far and three seconds to pass through. Recorded in the code
+  rather than silently dropped.
+
+### Left for later
+
+- **The panel builds its own `RecordAlign::Figures`, and the engine builds
+  another.** They already differ: the engine falls back to its own stored
+  sample rate when the device reports none and the panel does not. Today that
+  only decides which sentence the panel prints, so it is a maintenance fault
+  rather than a live one, but it is the exact shape of thing
+  `claimedRoundTripSamples` was extracted to prevent one level down. It
+  belongs in `PreferencesActions` next to `recordOffsetSamples`, which is
+  already a `std::function<int()>` from the engine for this kind of question.
+  Not done tonight because `PreferencesActions` is built in
+  `MainComponent.cpp`, which an open hardening branch holds.
+- The measurement is of the device as it is configured now. Change the buffer
+  size and it should be taken again. Storing the difference rather than the
+  absolute is what makes that mostly harmless, since the claim moves with the
+  buffer size and so does the real round trip, but "mostly" is not "exactly"
+  and nothing says so yet.
+- Nothing here measures the **MIDI** round trip. Ardour has a second
+  algorithm for it, `MIDIDM`, and it is the one of the two that publishes a
+  numeric quality figure. If a MIDI alignment night ever happens, that is the
+  reference.
 
 ---
 

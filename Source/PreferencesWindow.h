@@ -664,7 +664,7 @@ public:
         // Taller than it was: the audio tab gained a line of readout and a
         // correction, and the device chooser is the thing that must not be
         // squeezed, since it is the one control in here somebody has to use.
-        setSize (820, 680);
+        setSize (820, 720);
     }
 
     void setTab (Tab t) { tabs.setCurrentTabIndex ((int) t); }
