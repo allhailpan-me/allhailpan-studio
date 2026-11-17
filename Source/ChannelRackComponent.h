@@ -542,14 +542,27 @@ private:
                 // the item is already current, so no control in the window
                 // could turn it off again.
                 //
-                // Testing `swing != 0.5` is not enough, because the box reads
-                // Straight for any swing it does not recognise and a file can
-                // carry one: 0.6 would come back enabled, inaudibly swung and
-                // stuck all over again. So the swing is snapped to the nearest
-                // value the box offers and `enabled` follows that, which
-                // leaves the groove in a state the controls can represent and
-                // therefore undo. Snapping moves the swing by at most a
-                // fortieth, and only for a value this build never writes.
+                // Testing `swing != 0.5` is not enough, because the box has
+                // no entry below straight and reads Straight for everything
+                // in the early half of the band a file may carry: a stored
+                // 0.4 is an audible push and would come back enabled with no
+                // control able to turn it off, which is the fault above
+                // arriving from the other side. So the swing is snapped to
+                // the nearest value the box offers and `enabled` follows
+                // that, which leaves the groove in a state the controls can
+                // represent and therefore undo.
+                //
+                // How far snapping may move it: half a fortieth within the
+                // range the box covers, since that is how far apart its
+                // entries are, and further outside it. A stored 0.8 snaps to
+                // the triplet shuffle, a move of 0.133 in the number, which
+                // is 0.27 of a step on the offbeat since the number is a
+                // fraction of the pair. A stored 0.3 snaps to straight, which
+                // is 0.2 in the number and switches the groove off. Both are
+                // values this build never writes, and being left in a state
+                // no control can reach is the worse of the two outcomes. An earlier version of this comment said a
+                // fortieth was the whole story and offered 0.6 as a swing the
+                // box cannot show, which it can: it reads 0.58.
                 const int nearest = Groove::nearestOfferedSwing (g.swing);
 
                 g.swing   = Groove::offeredSwing (nearest);

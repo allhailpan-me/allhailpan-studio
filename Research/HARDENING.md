@@ -7,6 +7,288 @@ Newest first.
 
 ---
 
+## 2026-11-14: the swing half of the groove, which is a number other studios own
+
+### What is being looked at
+
+`Source/Groove.h`, 351 lines, and `Tests/GrooveTest.cpp`, 414 lines, which
+covers it. A priority 2 target: a test suspected of being weaker than it looks.
+
+Picked for three reasons. It is now the thinnest cover of any arithmetic
+header here that no night has audited and no open pull request is changing:
+351 lines of source to 414 of test, where the ratio elsewhere runs from two to
+four. `Groove.h` grew by 264 lines in the feel merge and `Tests/GrooveTest.cpp`
+was not touched in that merge at all, so whatever it was missing before, it is
+missing over a larger header now. And a swing percentage is a claim about
+agreement with every other studio that reports one, which is the shape of
+number this project has been wrong about before.
+
+The feel half, `Source/GrooveTemplate.h` and `Tests/GrooveTemplateTest.cpp`,
+was mutation tested in its own merge and is not the target. Nothing in
+`Source/LoudnessMeter.h`, `Source/TruePeak.h`, `Source/Project.h`,
+`Source/Punch.h`, `Source/RecordAlign.h`, `Source/Meter.h`,
+`Source/SongLength.h`, `Source/NoteSelection.h`, `Source/LatencyGraph.h`,
+`Source/Spectrogram.h`, `Source/Fx/BellMatch.h`, `Source/Envelope.h` or
+`Source/Fx/Svf.h` is touched here, because open pull requests are changing all
+of them. `Source/Fx/Unit.h` is still the only JUCE-free header in `Source` with
+no test, and still nothing includes it, so it is still not worth one.
+
+### The test was weaker than it looked
+
+48 mutations of `Groove.h`, every one built the way `Tests/run.sh` builds
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`) and judged
+against both tests that include the header, `GrooveTest` and
+`GrooveTemplateTest`. **28 caught, 20 survived** against the test as it stood
+at the start of the night.
+
+Where the survivors were concentrated says more than the count. The swing
+positions themselves are watertight: all seven mutations of the shift, all
+three of the grid window and all three step lengths were caught, most of them
+by two tests independently, which is what a check worked out from the
+definition rather than from the code buys. Everything that survived was in
+one of three places nothing was asking a question about.
+
+**The humanising draw.** Five of them. The test asked only two things of it:
+the same answer twice, and never more than a quarter step. A draw that was
+always late, half the size it claims, the same number for every step, the
+same number for every note on a step, or a steady ramp rather than a scatter
+satisfied both. The first of those is the one worth naming: with the draw made
+unipolar the humanise knob becomes a delay of random length, every note in the
+pattern late and none early, which against a loop is heard as the part
+dragging rather than loosening.
+
+**The velocity half of `shade`.** Five. The off grid window could be deleted
+outright and the suite passed, so a part played by hand would have had every
+other sixteenth of it softened, which flattens exactly the dynamics somebody
+played. The softening constant could be doubled or divided by ten with nothing
+noticing, and the ceiling clamp had no case at all.
+
+**The swings the interface offers.** Five. The index clamp in `offeredSwing`
+could be removed, which turns those four lines into an out of bounds read; the
+shuffle entry could be rounded from a third to 0.66, which lands the offbeat
+0.7 ms late at 120 bpm and still passes the round trip through
+`nearestOfferedSwing` that was the only check on the table; and the tie rule in
+`nearestOfferedSwing` could be relaxed, which decides whether a stored swing
+of 0.52 reads as straight and therefore whether the groove can be switched
+off.
+
+Also untested: the whole early half of what a project may contain. `ProjectIO`
+admits a swing from 0.3 to 0.8 and this file swept 0.5 to 0.75, so a push,
+where the offbeat plays ahead of its halfway point rather than behind it, was
+never placed at all.
+
+### The fault
+
+**A swing a project file may carry played a pattern's own notes in the wrong
+order.**
+
+The feel half bounds its deviation and the humanising draw together, for
+exactly this reason, and the swing half did not. The argument written in the
+header was that at the shuffle the interface offers, the shift is a third of a
+step and the draw fits in what is left, so a pair can meet and not cross. That
+argument is about what the interface offers. `ProjectIO` admits a swing from
+0.3 to 0.8, and above 0.75 the shift alone leaves the draw nothing to spend:
+the crossing is `2 * swing - 1.5` steps.
+
+Measured over a hundred thousand placements at 0.8 with the humanise knob up,
+a note landed up to **0.096 of a step** behind the note in front of it, which
+at a sixteenth and 120 bpm is 12 ms. The predicted figures and the measured
+ones agree across the band: 0.0176 against 0.02 at swing 0.76, 0.0535 against
+0.06 at 0.78, 0.0964 against 0.1 at 0.8.
+
+The shift and the draw are now bounded together at three quarters of a step,
+which is what the neighbours leave once their own humanising is counted: the
+downbeat behind may be drawn a quarter of a step late and the one in front a
+quarter early, so a note may travel three quarters of a step and meet one of
+them without passing it. The bound binds only above 0.75, so nothing the
+controls can ask for is changed by it, and with the humanise knob down the
+swing still lands exactly where its number says whatever the file carries,
+which the test now asserts to 0.8.
+
+How reachable: not from the interface, which offers nothing above a triplet
+shuffle, so this needs a hand edited `.ahp` or a file written by a build whose
+offered list reached further. It is in the band `ProjectIO` deliberately
+admits, and the previous night recorded the crossing in the backlog as
+something a later night should decide about rather than as a fault. It is a
+fault: notes playing out of order is not a degree of swing. The backlog entry
+saying it is open is now stale, and is left alone rather than tidied because
+two open pull requests are changing that file.
+
+Two comments also said the opposite of the code, which is the shape this
+project keeps meeting:
+
+- `Groove.h` said a stored swing of 0.6 "can only be shown as Straight". It is
+  shown as 0.58, and `GrooveTemplateTest` has asserted that it is not shown as
+  Straight since the day it was written, so the comment and the suite
+  contradicted each other in the same repository.
+- `GrooveTemplateTest` said the guard in front of `llround` is a guard against
+  something unspecified rather than against an observable fault. That is true
+  of the huge finite positions and not of a NaN, which compares false against
+  the on grid test and so goes through: with the guard removed such a note is
+  placed at the start of the clip rather than left where it is. `GrooveTest`
+  now pins that.
+
+### The audit of the fix, which found seven things around it
+
+The clamp was audited by a reader who had not written it, which is what
+`.claude/agents/auditor.md` is for, and the headline is that the bound is
+right: exhaustively, at a thirty-second, swing 0.8, amount 1, humanise 1, over
+every one of the 128 note numbers on both sides of every join, the worst gap
+between a step and the next is `+2.7e-7` of a step. Positive, so nothing
+changes places, and essentially zero, so the bound is tight rather than
+generous. Removing it reproduces the fault exactly, and the closed form
+`2 * swing - 1.5` is confirmed to the digit at 0.76, 0.78 and 0.80. A feel
+deviation cannot be added on top of a swing, because `place` branches on
+`byFeel`, so the two bounds never compose.
+
+**The bound was sufficient but not self sufficient, which is the same mistake
+one field over.** The offbeat's total was held to three quarters of a step.
+The downbeat beside it was held to a quarter only because `ProjectIO` clamps
+the humanise amount to one: nothing in `Groove.h` said so, and the whole
+argument for the clamp is that a file carries numbers the interface will not
+offer. At a humanise of 1.2 and a swing of 0.8 the unclamped downbeat put the
+crossing back, half of it, 0.05 of a step. Not reachable from a file today, and
+not claimed as a live fault: it is the guarantee resting on another file's
+bound, which is exactly the shape the fix exists to remove. The downbeat's
+quarter is now clamped too, so the pair divides exactly one step whatever a
+file carries, and the ordering sweep asks for humanise amounts past the one the
+loader admits.
+
+That sweep also had to learn the difference between two promises. Within the
+band a file can carry, every note is strictly after the one before it, because
+`|jitter| < 1` strictly and neither bound is quite reached. Past that band both
+bounds saturate, and since the pair divides exactly one step, saturating both
+puts two notes on the same beat. That is not a reordering, and it is what the
+feel half's own comment already calls allowed, so what is asked out there is
+that the order never reverses. Asking for the strict version everywhere would
+be asking the budget to be less than the step it divides.
+
+**How much of the humanising the bound costs was a number nothing asked
+about.** A bound of 0.70, 0.65 or 0.60 all passed the whole suite. At 0.60 and
+a swing of 0.8 every offbeat's draw is cut off at exactly the swung position,
+so more than half of them pile onto one instant and the knob can only pull
+early, which is the opposite of humanising. The reach either side is now
+pinned at the top of the band: 0.15 of a step late against the full 0.25 early.
+
+**The draw's yardstick claimed more than it had.** The comment said each of its
+measurements was pointed at a generator known to fail it first. In fact it had
+five terms and four generators, two of which failed on the same term; nothing
+exercised the spread at all; and four of the five terms could be deleted
+outright with the whole suite still green, so only the correlation test was
+load bearing. There is now one generator per term that fails that term and
+passes the other four, which is the only arrangement under which deleting a
+term is caught, and each is asserted to fail for its own reason rather than
+merely to fail. The two lopsided generators take their own mean off, because
+reaching one end of the range and not the other is otherwise given away by the
+mean first.
+
+Its three resolutions were also printing the identical sequence three times,
+since the draw is a fraction of a step and the hash keys on the step index. Two
+of the three passes could not fail if the first did not, and a reader comparing
+the rows would reasonably have read the agreement as evidence. The invariance
+is now asked outright, and a draw keyed on the beat rather than on the step
+fails it.
+
+**Three comments said things the code does not do, two of them written the same
+night as the fix.** This is the fourth time this file records that shape.
+
+- `Groove.h` said only something within a hundredth of straight reads as
+  straight. The entries are a fortieth apart and the tie goes to the straighter,
+  so it is two fortieths: anything up to and including 0.52, which the test in
+  the same commit asserted. The table is also one sided, so every swing in the
+  early half of the band a file may carry reads as straight and is switched off
+  when a feel is cleared. That is the intended answer, since the controls cannot
+  show a push at all and a groove left in a state no control can reach is the
+  worse outcome, but it was nowhere written down.
+- `Groove.h` said the humanising had nothing left to spend at a swing of 0.8.
+  It has 0.15 of a step late and the whole 0.25 early, with about one offbeat
+  in five landing on the bound and an early bias of a hundredth of a step. And
+  the 0.096 of a step quoted as the crossing was a hundred thousand draws
+  falling short of a bound that has a closed form: it is a tenth of a step.
+  A sampling shortfall presented as a bound is the same failure in miniature as
+  the true peak meter reading the largest sample.
+- `ChannelRackComponent.h` still carried the claim this night set out to
+  correct, with the same 0.6 example, directly above the snapping code it
+  justifies, so it was the copy the next reader would believe. It also said
+  snapping moves a swing by at most a fortieth, which is true inside the range
+  the box covers and not outside it: a stored 0.8 snaps to the triplet shuffle,
+  0.133 in the number and 0.27 of a step on the offbeat.
+
+Two things the audit raised were deliberately left alone. `Research/BACKLOG.md`
+still carries the entry calling the crossing open and offering "clamp
+`grooveSwing` to 0.75 on load" as one of two remedies: that one must not now be
+done, since it would silently move an existing 0.8 file's offbeats by an eighth
+of a step for no remaining reason. The entry is stale and the file is being
+changed by an open pull request, so it is recorded here rather than edited
+there. And offering a push in the interface, so that the early half of the band
+a file may carry becomes representable, is a decision about the interface
+rather than about this header.
+
+### Where it stands
+
+**58 mutations, 46 caught, 8 survived**, every one built the way `Tests/run.sh`
+builds and judged against both tests that include the header. All 48 test
+programs pass.
+
+Three further mutations were discarded rather than counted, and the reason is
+worth keeping. Turning a leaf assertion of the test into a tautology
+(`othersFailed >= 0`, `draws == draws`, `late >= 0.0`) survives by construction
+and measures nothing: a weakened assertion cannot make its own suite fail. What
+does show such an assertion is load bearing is breaking the code it judges,
+which is where `bound-offbeat-seven-tenths` and
+`draw-keyed-on-the-beat-not-the-step` earn their place. Mutating test machinery
+is only meaningful where it is shared, as the five `yardstick-term-dropped`
+mutations are: dropping a term makes a generator built to fail it be accepted,
+and the test says so.
+
+The eight survivors, each with a judgement. All eight were survivors before
+this night's work too, and none of them is a gap in a test:
+
+- `jitter-drawn-when-the-knob-is-down`, the draw's guard relaxed from
+  `random > 0.0` to `>= 0.0`. **Genuine no-op.** The hash is computed and then
+  multiplied by zero. It costs a multiply and two shifts per note of every
+  pattern and changes no output.
+- `jitter-spent-when-the-knob-is-down`, the same relaxation where the draw is
+  spent. **Genuine no-op**, adding exactly 0.0.
+- `step-fallthrough-is-an-eighth`, the `return` after the switch in
+  `stepBeats` changed. **Genuine no-op.** The switch covers all three
+  enumerators and `ProjectIO` clamps the stored base to 0 to 2, so nothing can
+  reach it.
+- `shade-finite-guard-removed`. **A guard against the unspecified, not a gap.**
+  For the huge finite positions the unspecified number `llround` gives back
+  then fails the on grid test, which is what the guard does too. For a NaN the
+  result depends on whether that unspecified number is odd, and in this build
+  it is even, so the velocity comes back untouched either way. A check written
+  around that would be pinning the compiler's choice rather than the
+  behaviour. `place`'s equivalent guard is observable and is pinned.
+- `nearest-starts-from-zero`, the loop in `nearestOfferedSwing` starting at 0
+  rather than 1. **Genuine no-op**: it compares entry 0 against itself under a
+  strict `<`.
+- `nearest-nan-guard-removed`. **Genuine no-op.** Every comparison against a
+  NaN is false, so `best` stays at 0, which is what the guard returns. The
+  guard says the intent out loud and nothing more.
+- `feel-empty-slot-gets-a-feel`, the `filled` test dropped when reading a
+  slot's deviation. **Genuine no-op.** An unfilled slot carries a deviation of
+  zero by construction, which `GrooveTemplate.h` enforces in one place and
+  documents there as defence in depth.
+- `place-huge-position-guard-removed`, the `1e15` half of `place`'s guard,
+  leaving the `isfinite` half. **A guard against the unspecified, not a gap**,
+  and the same judgement as `shade-finite-guard-removed` above for the same
+  reason: past that range `llround` gives back an unspecified number, which
+  then fails the on grid test, so the note is left alone either way. The NaN
+  half of the guard is the observable one and `GrooveTest` pins it.
+
+Nothing else in the header is now unasked. The swing positions are checked
+against the definition rather than against the code, in both directions and
+across the whole band a file may carry; the draw is measured rather than only
+bounded, with the yardstick pointed at four generators built to fail it before
+it is believed; `shade` has the same window, the same amount and the same
+clamps pinned as `place`; and the table of offered swings is checked for being
+straight first, increasing, a real triplet at the top, clamped at both ends and
+decided the straighter way on a tie.
+
+---
+
 ## 2026-10-29: the loudness meter, which is the one number other people check
 
 ### What was looked at

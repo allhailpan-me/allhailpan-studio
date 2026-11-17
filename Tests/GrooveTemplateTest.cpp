@@ -841,15 +841,20 @@ static void aNotePositionOutOfAFileCannotBreakTheGroove()
             // behaviour that `-fsanitize=undefined` halts on, so removing
             // that fix fails here and the check is real.
             //
-            // The guard in front of `llround` is not like that. An argument
-            // out of its range gives an unspecified result rather than a
-            // trap, and whatever number comes back then fails the on-grid
-            // test below and the note is left where it is, which is what the
-            // guard does too. So removing the guard passes this, and it is
-            // kept as a guard against something that is unspecified rather
-            // than against an observable fault. Said plainly here because a
-            // comment claiming this check pins it would be the fault this
-            // project keeps meeting.
+            // The guard in front of `llround` is not like that, for the
+            // positions this loop can tell apart. An argument out of its
+            // range gives an unspecified result rather than a trap, and
+            // whatever number comes back then fails the on-grid test below
+            // and the note is left where it is, which is what the guard does
+            // too. So removing the guard passes this.
+            //
+            // It is not invisible everywhere, though, which this comment used
+            // to say it was. A NaN compares false against everything, so it
+            // passes the on-grid test, and with the guard gone such a note is
+            // placed at the start of the clip rather than left alone. That is
+            // observable and it is pinned in `GrooveTest`, under
+            // `aDamagedNotePositionIsLeftWhereItIs`, rather than here, because
+            // it is a property of `place` and not of a feel.
             const double placed = g.place (at, 60);
             const float  shaded = g.shade (at, 0.8f);
 
