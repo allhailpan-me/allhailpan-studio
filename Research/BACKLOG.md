@@ -1,20 +1,45 @@
 # Research backlog
 
-## Standing question: the unreleased work keeps growing, and now includes a time signature
+## Standing question: answered, on 2026-11-17, after four deferrals
 
-The last tag is still **v0.7.1**, cut on 2026-10-13, and the pile grew again on
-11-11: the time signature is now the largest user visible thing in it. Somebody
-who writes in 3/4 or 6/8 could not use this studio at all before it, and still
-cannot use the version they can download, which is the sharpest form this
-question has taken.
+**The call was made rather than deferred a fifth time.** The last tag was
+**v0.7.1**, cut on 2026-10-13, and `main` had reached **forty five commits**
+past it over **thirty five days**. The `release-manager` agent was launched to
+settle the span, which is the thing every previous entry said this needed and
+none of them did.
 
-The night that merged it did not cut the release, and the reason is the one
-written below rather than an oversight: a release spans several nights by
-several sessions, six hardening pull requests were open as this was written, and
-settling the span is the `release-manager` agent's job over the whole of it
-rather than part of building one improvement. So it is deferred again, with the
-reason, for the third entry running, and that repetition is itself the argument
-for somebody making the call.
+What finally decided it was noticing that the reason for deferring had not
+changed in four entries while the thing being deferred had grown every time.
+Each night's reasoning was sound on its own: a release spans several nights by
+several sessions, settling the span is the `release-manager` agent's job over
+the whole of it rather than part of building one improvement, and there were
+open hardening pull requests. All true, and all still true. But a reason that
+is equally good on every occasion is not a reason to wait for a better
+occasion, and the pile it was protecting had come to include a time signature
+without which nobody can write in 3/4, a tuner, punch recording, the feel
+lifted off a performance, and the loopback measurement this night added. None
+of that reaches the person it is for until a build carries it.
+
+The open hardening pull requests were considered and are not a reason to hold
+a release: they strengthen tests over code that is already merged, so they
+change what the next release is confident about rather than what this one
+contains.
+
+Recorded this way deliberately. The useful part for a later night is not that
+a release was cut, it is that a standing question can be deferred indefinitely
+by a reason that never stops being true, and that the repetition itself is the
+signal to act rather than the justification for waiting again.
+
+What was written on 2026-11-12, when the loopback measurement was the newest
+thing in the pile and this was still open:
+
+The night that merged the time signature did not cut the release, and the
+reason is the one written below rather than an oversight: a release spans
+several nights by several sessions, six hardening pull requests were open as
+this was written, and settling the span is the `release-manager` agent's job
+over the whole of it rather than part of building one improvement. So it is
+deferred again, with the reason, for the third entry running, and that
+repetition is itself the argument for somebody making the call.
 
 What was written when the tuner was the newest thing in the pile:
 
