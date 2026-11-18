@@ -1,6 +1,52 @@
-You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.1
+
+**Moving a fader while something is playing no longer makes a noise.** Nor does
+moving a pan knob, or a send, and nor does a volume or pan automation curve
+playing back. They all used to, and here is what was happening: the mixer
+looked at where your fader was once every buffer and then held that level for
+the whole buffer, so dragging a fader did not move the level smoothly, it moved
+it in steps, sixty or so a second. Each step is a tiny instantaneous jump in
+the signal, and an instantaneous jump is a click. Quiet, but broadband, and
+right across whatever you were listening to. Riding a fader into a chorus put a
+faint crackle on the chorus.
+
+The gain now travels to where you have put it instead of jumping there, over
+about five milliseconds, which is quick enough that the fader still feels
+immediate. Measured, the worst single jump during a drag is about thirteen times
+smaller, and the part of the mess that lands up where a click is heard is down
+by about 12 dB. Solo and mute already worked this way; the fader sitting two
+lines away in the code did not.
+
+Three other things came out of the same work:
+
+- **A send fading to nothing fades all the way.** Pulling a send down used to
+  stop feeding the bus the instant the control hit zero, which on a track with
+  a lookahead plugin anywhere in the project chopped the last few milliseconds
+  off the fade, somewhere you could not see it.
+- **Pointing a live send at a different bus no longer dumps a few milliseconds
+  of the old bus's sound onto the new one.**
+- **Switching a strip between balance and panning, or changing the project's
+  pan law, no longer jumps the level** by up to 3 dB in the middle of whatever
+  is playing.
+
+**What this does not fix, so you know what to expect.** An automation curve
+still reaches the mixer once per buffer, so an automated fade comes out smooth
+but still slightly stepped underneath, and that part is unchanged. Removing it
+means reading the curve for every single sample rather than once a buffer, which
+is the next job in this area and is written down. There is also a better way to
+do the smoothing itself, which I measured at about 30 dB better than what is
+here; I did not take it tonight because it would make mute and solo noticeably
+slower to go quiet, and that trade is worth making deliberately rather than in
+passing. The measurement is kept in the repository so it can be.
+
+A bounce is unaffected by any of this, by design: every one of these gains is
+put exactly where it belongs before the first sample of a render, so an export
+is never the mixer catching up. That was wrong in the first version of this
+change and an audit caught it, which is worth saying because the symptom would
+have been a quiet first beat on some exports and nothing anywhere to explain
+it.
 
 **You can measure what your interface actually costs you, instead of trusting
 it.** Patch a cable from one of your outputs back into one of your inputs, open
