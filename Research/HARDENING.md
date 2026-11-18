@@ -1587,3 +1587,47 @@ so nobody goes looking for the test that should have caught them:
   one computes an output that is thrown away, so each is exactly twice the
   work it needs to be. That is a performance change, not a hardening one, and
   it would want its own night and its own before and after measurement.
+
+## 2026-11-18: the tuner's load bearing numbers, which nothing reproduced
+
+Picked from `Research/BACKLOG.md`'s own list of what was left undone, where it
+is stated plainly:
+
+> **The reading cost table and the tear rate figures are still not
+> reproducible from anything checked in.** `CLAUDE.md` names `*Probe.cpp` as
+> the mechanism for exactly this and there is no `TunerProbe.cpp`. These
+> figures are load bearing: they set the duty cycle, which sets the reading
+> rate, which decides the whole vibrato result.
+
+This is category 4 of the hardening brief: a claim stated as measured, with no
+measurement in the tree that still produces it.
+
+What is claimed and by whom:
+
+- `Tuner.h`, above `Pacing`: a four row table of what one reading costs, 9 ms
+  at 44.1 kHz, 11 at 48, 48 at 96 and 197 at 192, said to be a release build
+  measurement, and the statement that the cost goes as the square of the
+  sample rate.
+- The same comment, derived from that table: reading rates of 8.5 a second at
+  44.1 and 48 kHz, 4.5 at 96 and 1.1 at 192; mean hops of 118 ms at 44.1 and
+  221 ms at 96; a quarter of a core as what `dutyMultiple = 3` holds the
+  analysis thread under.
+- `Tuner.h`, above `InputRing`: tear rates measured with two real threads, 38
+  per cent of accepted snapshots torn at a capacity of the snapshot plus 64
+  with 512 sample blocks, 29 out of 147572 at the snapshot plus 512, and none
+  out of 412710 at four times the snapshot.
+- `Tests/TunerTest.cpp:2249` hard codes the four cost figures, and
+  `sweepVibrato` is handed 0.009 and 0.048 out of the same table, so the
+  vibrato conclusions, 4.9 cents over 14 readings and 18.5 cents at 192 kHz,
+  rest on numbers nothing checks.
+
+### What is being done
+
+A `Tests/TunerProbe.cpp` that measures all of it, and a check in the suite for
+the parts that are arithmetic over a cost rather than a property of a machine.
+The absolute milliseconds belong to whatever processor runs the probe, so the
+machine independent claim, that the cost goes as the square of the rate, is
+what the probe holds to a bound, and the derived rates are checked against
+`Pacing` itself.
+
+Then mutation testing of whatever is added.
