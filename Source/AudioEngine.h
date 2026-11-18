@@ -14,6 +14,7 @@
 #include "RecordAlign.h"
 #include "PanLaw.h"
 #include "FaderLaw.h"
+#include "GainRamp.h"
 #include "SoloGraph.h"
 #include "Tuner.h"
 
@@ -755,6 +756,29 @@ private:
         juce::AudioBuffer<float> sendScratch;              // one send's copy, mid flight
         LatencyDelay align;                                // levels this insert against the others
         std::array<LatencyDelay, kNumSends> sendAlign;     // levels each send against its destination's other inputs
+
+        // Audio thread only: where each send's level has got to, and which
+        // destination that level is currently feeding. Here beside sendAlign
+        // rather than on InsertControls because InsertControls is the control
+        // surface the interface reads and writes, and a ramp is the audio
+        // thread's own working state. One per gain that is applied, which is
+        // the discipline Ardour keeps by holding _current_gain in the Amp and
+        // nothing at all in the GainControl: the mixing loop and this loop
+        // read the same atomics and must not share a ramp.
+        //
+        // sendActiveTo starts at zero, which is "off", so the first block
+        // after a destination is chosen fades the send in from nothing rather
+        // than switching it on at full level.
+        std::array<GainRamp::Ramp, kNumSends> sendRamp {};
+        std::array<int, kNumSends>            sendActiveTo {};
+
+        // How many more samples the send has to keep running after its level
+        // has reached silence, so that sendAlign gives up what it is still
+        // holding instead of having the tail of the fade cut off inside it.
+        // Without this a send on a compensated path would fade out at this end
+        // and stop at the other, which is the click the ramp exists to remove
+        // appearing at a distance.
+        std::array<int, kNumSends>            sendFlush {};
     };
     struct ChannelSlot
     {
@@ -795,10 +819,33 @@ private:
         held, which is why it has no lock of its own. */
     void updateSolo();
 
-    /** Puts every solo ramp where it is going, so nothing fades. For the
+    /** Where the four gains on one insert are going, under a given pan law.
+
+        One place, read by the mixer and by the latch below, because the two
+        reading it differently is a fault nothing here could catch: a render
+        that latched the raw fader position while the mixer ramped toward the
+        gain the law makes of it would start every bounce slewing from one to
+        the other. Needs the graph lock or the audio thread, like everything
+        that reads these atomics together. */
+    GainRamp::Targets insertTargets (int index, PanLaw::Law law) const noexcept;
+
+    /** Puts every moving gain where it is going, so nothing fades. For the
         start of a render and for a device opening, where a ramp would be a
-        fade on the front of a file or of the first block. */
-    void latchSoloRamps();
+        fade on the front of a file or of the first block.
+
+        Every one of them, not only solo: the fader, both pan gains and every
+        send level hold their state across blocks for the reason GainRamp.h
+        gives, and the other side of that is that a moment which is not a gain
+        change has to be told so. A bounce taken straight after a fader move
+        would otherwise open with a ramp from the old gain, and one taken
+        before a device has ever opened would open with a fade in from silence.
+        Ardour does the same thing in two places, disk_reader.cc:348-354 for
+        its declick when exporting offline and amp.cc:409-428 for its gain
+        whenever the transport is not where it expected to be.
+
+        Takes the pan law rather than reading it, so that a render latches the
+        same law it is about to mix the whole bounce under. */
+    void latchGainRamps (PanLaw::Law law);
     void processInsert (int index, int numSamples, PanLaw::Law law);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
@@ -876,16 +923,21 @@ private:
         zero and zero here is silence. Set in the constructor. */
     std::array<std::atomic<float>, kNumInserts> soloGain;
 
-    /** Audio thread only: where each insert's solo gain has got to on its way
-        to the figure above. One press of solo moves up to fifteen of these at
-        once, and a gain that arrives in one sample is a click on every one of
-        them. Latched to the target rather than ramped at the start of a
-        render and when a device opens. */
-    std::array<float, kNumInserts> soloRamp = [] {
-        std::array<float, kNumInserts> a;
-        a.fill (1.0f);
-        return a;
-    }();
+    /** Audio thread only: the four gains on each insert on their way to where
+        they are going.
+
+        The fader and the pan are read once a block, and before these existed
+        each was applied as one constant across the whole of it, so every fader
+        move, every pan move and every block of a volume or pan automation
+        curve stepped the gain between blocks. Solo was already ramped, and the
+        argument above its ramp was the same argument, two lines from the fader
+        it had never been applied to. GainRamp.h has what a stepped gain sounds
+        like, how much of it this removes and how much it does not, and why the
+        four live in one object rather than four.
+
+        Latched to their targets rather than ramped at the start of a render
+        and when a device opens. */
+    std::array<GainRamp::Strip, kNumInserts> stripRamps {};
 
     // Published for the interface, which reads them without the graph lock
     // because that lock is held for the length of a bounce.
@@ -924,7 +976,7 @@ private:
     // while the code zeroed them, which made the guard below dead.
     std::array<int, kNumInserts>   monitorActiveLeft  = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
     std::array<int, kNumInserts>   monitorActiveRight = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
-    std::array<float, kNumInserts> monitorRamps {};
+    std::array<GainRamp::Ramp, kNumInserts> monitorRamps {};
 
 
     // Mix analysis. Measured on the audio thread, read by the interface.

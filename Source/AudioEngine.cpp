@@ -587,10 +587,53 @@ void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, floa
     vectors that are already the right size after the first call.
 */
 // ---------------------------------------------------------------------------
-void AudioEngine::latchSoloRamps()
+GainRamp::Targets AudioEngine::insertTargets (int index, PanLaw::Law law) const noexcept
+{
+    const auto& ctl = controls[(size_t) index];
+
+    // What a fader position means is FaderLaw.h's and which pair of gains a
+    // pan position means is PanLaw.h's, and both are tested, because neither
+    // can announce that it is wrong: a law a decibel out does not error, does
+    // not crackle and looks entirely normal on a meter.
+    const auto pan = PanLaw::gains (ctl.panMode.load(), law, (double) ctl.pan.load());
+
+    return { (double) soloGain[(size_t) index].load(),
+             FaderLaw::positionToGain ((double) ctl.volume.load()),
+             pan.left,
+             pan.right };
+}
+
+void AudioEngine::latchGainRamps (PanLaw::Law law)
 {
     for (int i = 0; i < kNumInserts; ++i)
-        soloRamp[(size_t) i] = soloGain[(size_t) i].load();
+    {
+        auto& ctl  = controls[(size_t) i];
+        auto& slot = insertSlots[(size_t) i];
+
+        stripRamps[(size_t) i].latch (insertTargets (i, law));
+
+        for (int sendIndex = 0; sendIndex < kNumSends; ++sendIndex)
+        {
+            const int to = ctl.sendTo[(size_t) sendIndex].load();
+
+            // Forward only, so anything else is off and feeds nothing. Same
+            // test as routeSends makes, and it has to be the same test: a
+            // ramp latched to a level whose destination the send loop then
+            // refuses would sit at that level forever without ever being
+            // applied, and would be the level the send jumped to the moment a
+            // valid destination was chosen.
+            const bool valid = to > i && to < kNumInserts;
+
+            slot.sendActiveTo[(size_t) sendIndex] = to;
+            slot.sendRamp[(size_t) sendIndex].latch (valid ? (double) ctl.sendLevel[(size_t) sendIndex].load()
+                                                           : 0.0);
+
+            // Nothing is fading, so there is nothing left to drain. A render
+            // that inherited a flush would spend its first blocks emptying a
+            // line on behalf of a fade that happened before the bounce began.
+            slot.sendFlush[(size_t) sendIndex] = 0;
+        }
+    }
 }
 
 void AudioEngine::updateSolo()
@@ -1284,7 +1327,7 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // changing its rate is not a moment to fade anything: the step size is
     // worked out from the sample rate, and a ramp left half way across a
     // restart would be a fade over whatever the new rate makes of it.
-    latchSoloRamps();
+    latchGainRamps (panLaw.load());
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -1652,6 +1695,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             scheduleMidi (numSamples, sendAllOff, sequencing);
             if (sequencing)
                 applyAutomation (blockStartBeat);
+
+            // And after a locate, whatever the gain ramps are holding belongs
+            // to the old position too. Latched here rather than up in the
+            // branch above, because applyAutomation has just written the
+            // volume and pan atomics for the new position and those are two of
+            // the four things these ramps follow: latching before it would put
+            // them on the gains of wherever the transport used to be and then
+            // slew from there. That ordering is the whole of the fault this
+            // line exists to avoid, and it is the same one the authority
+            // behind the latch names: Ardour reseeds from the first sample of
+            // the curve, not from the control it left behind (amp.cc:409-428).
+            //
+            // A loop wrap is deliberately left to ramp, for the same reason
+            // the branch above leaves its compensation lines alone: that audio
+            // really is the continuation of what was just heard, and a gain
+            // stepping at every wrap is a click once a bar.
+            if (jumped)
+            {
+                latchGainRamps (panLaw.load());
+
+                for (auto& ins : insertSlots)
+                    ins.sendFlush.fill (0);
+            }
 
             // Locked to the song while it plays, free running while stopped.
             applyModulation (isRunning ? blockStartBeat : modFreeClock);
@@ -2370,95 +2436,111 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
         slot.buffer.copyFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
     }
 
-    // The fader, whose travel is 0..1 with unity at three quarters of it, then
-    // the pan control. What a position means is FaderLaw.h's, not this
-    // function's: see the load below.
+    // The fader, the pan and solo, which between them are what an insert's
+    // output is multiplied by.
     //
-    // Which pair of gains a position means is in PanLaw.h, which has no JUCE
-    // in it and is tested, because nothing here can announce that it is wrong:
-    // a pan law a decibel out does not error, does not crackle and looks
-    // perfectly normal on a meter. All that is left here is the load and the
-    // two gains, and because the export goes through this same function a
-    // bounce gets the law without being told about it.
-    const float v    = ctl.volume.load();
-    const float pan  = ctl.pan.load();
-
-    // Mute is no longer read here, and that is the point rather than a
-    // refactor. What an insert's output is multiplied by now depends on every
+    // None of the three laws is here. What a fader position means is
+    // FaderLaw.h's, which pair of gains a pan position means is PanLaw.h's,
+    // and what solo adds up to across the whole mixer is SoloGraph's, and all
+    // three are tested because none of them can announce that it is wrong: a
+    // law a decibel out does not error, does not crackle and looks entirely
+    // normal on a meter. They meet in insertTargets, which both this and the
+    // latch read, so the mixer and a bounce cannot disagree about where a gain
+    // is going.
+    //
+    // Mute is not read here either, and that is the point rather than a
+    // refactor. What an insert's output is multiplied by depends on every
     // other insert's solo and on the send matrix, so it is worked out by
-    // SoloGraph on the message thread and read here as one number. Whether a
-    // mute still wins over a solo on the same insert is part of that
-    // arithmetic, which is why reading ctl.mute here as well would be a
-    // second opinion rather than a safety net.
+    // SoloGraph on the message thread and read as one number. Whether a mute
+    // still wins over a solo on the same insert is part of that arithmetic,
+    // which is why reading ctl.mute here as well would be a second opinion
+    // rather than a safety net.
     //
-    // It is read straight from the atomic rather than latched into a local at
-    // the top of the block, as the pan law is. The difference is that these
-    // are written under the graph lock, and the audio thread holds that lock
-    // for the whole block, so a block cannot see half of an update. The pan
-    // law is a bare atomic that anybody can store into at any moment.
+    // That one multiply is also what carries solo into the sends, because
+    // routeSends copies out of this same buffer afterwards. Without it an
+    // insert silenced by somebody else's solo would still feed a bus that solo
+    // is keeping audible, and would be heard through it.
     //
-    // This one multiply is also what carries solo into the sends, because
-    // routeSends copies out of this same buffer afterwards. Without that, an
-    // insert silenced by somebody else's solo would still feed a bus that
-    // solo is keeping audible, and would be heard through it.
+    // The targets are worked out once per block rather than cached anywhere.
+    // In balance mode the pan is a comparison; in pan mode it is three sines
+    // and two divisions, and three square roots on top under the -4.5 dB law,
+    // and the fader is one std::pow. Next to a whole block of audio that is
+    // nothing, and a cached copy would be a second version of the pan position
+    // and the fader position, updated from the message thread, free to
+    // disagree with the atomics they came from.
     //
-    // Ramped rather than stepped, and that is not a polish. One press of solo
-    // moves up to fifteen of these from unity to zero, and a gain that steps
-    // between two blocks puts a discontinuity on each of them at whatever the
-    // signal happened to be: a step's spectrum falls at only 6 dB per octave,
-    // so a mix sitting at -10 dBFS gives a broadband click at -10 dBFS into
-    // the master chain, on every press and every release. Ardour does not
-    // apply its own figure flat either: `Delivery::run` interpolates towards
-    // it across the buffer, and that interpolation is what keeps its mute and
-    // solo quiet. The studio already has the argument and the figure, in
-    // mixMonitorInput: about five milliseconds, short enough to feel
-    // immediate and long enough not to click.
-    const float wanted = soloGain[(size_t) index].load();
-    const float from   = soloRamp[(size_t) index];
-    const float step   = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
-    const float to     = from < wanted ? std::min (wanted, from + step * (float) numSamples)
-                                       : std::max (wanted, from - step * (float) numSamples);
+    // The law arrives as an argument rather than being read here, so that one
+    // block, and one whole bounce, is mixed under one law. See the call sites.
+    //
+    // RAMPED RATHER THAN STEPPED, which is not a polish. A gain that steps
+    // between two blocks puts a discontinuity on the signal at whatever it
+    // happened to be, and a step's spectrum falls at only 6 dB per octave, so
+    // a mix sitting at -10 dBFS gives a broadband click at -10 dBFS into the
+    // master chain. One press of solo does that to up to fifteen inserts at
+    // once; one drag of a fader does it sixty times a second. Solo was ramped
+    // and the fader two lines below it was not.
+    //
+    // Ardour does not apply its own figure flat either: every gain in it, the
+    // fader, the sends and the mute alike, goes through `Amp::apply_gain`,
+    // which runs a one pole toward the target with its state held across
+    // blocks. An earlier version of this comment said `Delivery::run`
+    // interpolated across the buffer. It does not, and the difference is the
+    // whole of the design: interpolating across the buffer would make the
+    // smoothing time a function of the buffer size, which is the one shape of
+    // this fix that would make a bounce differ from what was heard.
+    //
+    // What the ramp is, what it costs, how much of the artifact it removes and
+    // what it leaves behind are all in GainRamp.h. One thing worth knowing
+    // from here: a change of pan mode or of pan law used to be a step of up to
+    // 3 dB in the middle of whatever was playing, and now travels like
+    // everything else, because both change where the two pan gains are going
+    // rather than where they are.
+    //
+    // How far any of them may travel in one sample is worked out per block
+    // rather than held somewhere, because the sample rate is a member that a
+    // device change rewrites and a cached step would be the old rate's for one
+    // block after it.
+    const double levelStep = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
+    const double panStep   = GainRamp::stepPerSample (sampleRate, GainRamp::panSeconds);
 
-    soloRamp[(size_t) index] = to;
+    const auto targets = insertTargets (index, law);
+    auto&      ramps   = stripRamps[(size_t) index];
 
-    // What the position means is in FaderLaw.h, which has no JUCE in it and is
-    // tested, for the same reason the pan law above is: a fader law a decibel
-    // out does not error, does not crackle and looks entirely normal on a
-    // meter. All that is left here is the load and the one multiply.
-    //
-    // Once per block, not once per sample, which is what makes a pow
-    // affordable. One is all it is: positionToGain is a branch and a single
-    // std::pow, and the log10 in that header belongs to gainToPosition, which
-    // the engine never calls. Next to a whole block of audio that is nothing,
-    // and the pan law above already costs three sines and three square roots
-    // under the -4.5 dB law.
-    const float fader = (float) FaderLaw::positionToGain ((double) v);
-    const float gain  = from * fader;
-
-    // Worked out per block rather than kept somewhere. In balance mode that is
-    // a comparison; in pan mode it is three sines and two divisions, and three
-    // square roots on top of that under the -4.5 dB law, which is still
-    // nothing next to a block of audio. A cached pair would be a second copy
-    // of the pan position, updated from the message thread, free to disagree
-    // with the atomic it came from.
-    //
-    // The law comes in as an argument rather than being read here, so that one
-    // block, and one whole bounce, uses one law. See the call sites.
-    const auto panGain = PanLaw::gains (ctl.panMode.load(), law, (double) pan);
-
-    if (to == from)
+    // Nothing is moving, so the block is one exact constant multiply per
+    // channel and a steady mix comes out the same every time. This is the
+    // common case by a long way: a mix is listened to far more often than it
+    // is adjusted.
+    if (ramps.settled (targets))
     {
-        slot.buffer.applyGain (0, 0, numSamples, gain * (float) panGain.left);
-        slot.buffer.applyGain (1, 0, numSamples, gain * (float) panGain.right);
+        const auto gain = ramps.gains();
+
+        slot.buffer.applyGain (0, 0, numSamples, (float) gain.left);
+        slot.buffer.applyGain (1, 0, numSamples, (float) gain.right);
     }
     else
     {
-        const float end = to * fader;
+        // Per sample, because the gain a sample gets is the product of four
+        // ramps and the straight line between the ends of a block is not that
+        // product. GainRamp.h has what goes wrong with the chord and with
+        // spreading a move that arrives early across the whole buffer: both
+        // are the buffer size reaching the sound.
+        //
+        // Both channels out of one call, rather than a ramp advanced per
+        // channel, which is the shape CLAUDE.md warns about: it would give the
+        // two channels different halves of every move, which is a pan on every
+        // gain change. GainRamp::Strip is written so that cannot be spelled
+        // here, and so that the measurement in GainRampTest drives the same
+        // arithmetic this does.
+        auto* left  = slot.buffer.getWritePointer (0);
+        auto* right = slot.buffer.getWritePointer (1);
 
-        slot.buffer.applyGainRamp (0, 0, numSamples, gain * (float) panGain.left,
-                                   end * (float) panGain.left);
-        slot.buffer.applyGainRamp (1, 0, numSamples, gain * (float) panGain.right,
-                                   end * (float) panGain.right);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const auto gain = ramps.next (targets, levelStep, panStep);
+
+            left [i] = (float) ((double) left [i] * gain.left);
+            right[i] = (float) ((double) right[i] * gain.right);
+        }
     }
 
     ctl.peakL.store (std::max (slot.buffer.getMagnitude (0, 0, numSamples), ctl.peakL.load() * 0.9f));
@@ -2501,15 +2583,21 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
     const auto mode = monitorMode.load();
     bool anyLive = false;
 
-    // About five milliseconds either way, which is short enough to feel
-    // immediate and long enough not to click.
-    const float step = (float) (1.0 / std::max (1.0, sampleRate * 0.005));
+    // The same figure every other gain in the mixer travels at, from
+    // GainRamp.h, which has the argument for it. One constant in one place:
+    // this used to be its own literal, and the fader next door had none at
+    // all.
+    //
+    // The same ramp the rest of the mixer uses, rather than a second copy of
+    // the same arithmetic: this loop used to clamp its own float by hand.
+    const double step = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
     const float gain = monitorGain.load();
 
     for (int i = 1; i < kNumInserts; ++i)
     {
         const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
         auto& ramp = monitorRamps[(size_t) i];
+        const double rampValue = ramp.value;
 
         const auto pick = assignment.assigned
                             ? InputSource::resolve (assignment.choice, numInputChannels)
@@ -2544,13 +2632,13 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
 
         const float target = (listening && ! changingSource) ? 1.0f : 0.0f;
 
-        if (changingSource && ramp <= 0.0f)
+        if (changingSource && rampValue <= 0.0)
         {
             monitorActiveLeft[(size_t) i]  = wantLeft;
             monitorActiveRight[(size_t) i] = wantRight;
         }
 
-        if (ramp <= 0.0f && target <= 0.0f)
+        if (rampValue <= 0.0 && target <= 0.0f)
             continue;
 
         // Still reading the channels it was reading, because the ramp has not
@@ -2568,7 +2656,7 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
             || readLeft < 0 || readRight < 0
             || readLeft >= numInputChannels || readRight >= numInputChannels)
         {
-            ramp = 0.0f;
+            ramp.latch (0.0);
             continue;
         }
 
@@ -2586,21 +2674,14 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
         auto* outL = dest.getWritePointer (0);
         auto* outR = dest.getWritePointer (1);
 
-        float level = ramp;
-
         for (int n = 0; n < numSamples; ++n)
         {
-            if (level < target)      level = std::min (target, level + step);
-            else if (level > target) level = std::max (target, level - step);
-
-            const float scaled = level * gain;
+            const float scaled = (float) ramp.next ((double) target, step) * gain;
             outL[n] += left[n]  * scaled;
             outR[n] += right[n] * scaled;
         }
 
-        ramp = level;
-
-        if (ramp > 0.0f)
+        if (ramp.value > 0.0)
             anyLive = true;
     }
 
@@ -2734,26 +2815,141 @@ void AudioEngine::routeSends (int index, int numSamples)
     auto& slot = insertSlots[(size_t) index];
     auto& ctl  = controls[(size_t) index];
 
+    const double levelStep = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
+
     for (int s = 0; s < kNumSends; ++s)
     {
         const int   to    = ctl.sendTo[(size_t) s].load();
         const float level = ctl.sendLevel[(size_t) s].load();
 
+        auto& ramp     = slot.sendRamp[(size_t) s];
+        auto& activeTo = slot.sendActiveTo[(size_t) s];
+
         // Forward only, so the destination has not been mixed yet this block.
-        if (to <= index || to >= kNumInserts || level <= 0.0f)
+        const bool valid = to > index && to < kNumInserts;
+
+        // A destination change is a routing change rather than a level
+        // change, and the two want different answers. The level is ramped
+        // below; a destination is adopted at once and fed in from nothing, so
+        // choosing a bus for a send whose level is already up fades it in over
+        // the same few milliseconds as everything else instead of appearing at
+        // full level in one sample.
+        //
+        // What is deliberately not done is fading the old destination out,
+        // which is the half of this that cannot be done with one ramp. The
+        // copy reaches its destination through sendAlign, a delay line holding
+        // up to the compensation of the whole graph, so by the time a fade out
+        // at this end emerged at the other the send would already have been
+        // repointed, and the audio still in flight would arrive at the new
+        // destination instead. Doing it properly means feeding the old
+        // destination until its own line has drained, which is a second ramp
+        // and a second destination held alongside this one. Left, with the
+        // unlock named: today repointing a live send still truncates it at the
+        // old bus, which is what it did before any of this, and choosing one
+        // no longer clicks at the new one.
+        auto& align = slot.sendAlign[(size_t) s];
+        auto& flush = slot.sendFlush[(size_t) s];
+
+        if (to != activeTo)
+        {
+            activeTo = to;
+            ramp.latch (0.0);
+
+            // What is in the line belongs to the destination it was taken for,
+            // and that destination is no longer this one. Dropping it is a
+            // truncation of a send that was already being truncated; letting
+            // it drain would be the old bus's audio arriving at the new one,
+            // a few milliseconds of the wrong material on the wrong strip.
+            align.reset();
+            flush = 0;
+        }
+
+        if (! valid)
+        {
+            // Nothing to feed and nowhere to feed it, so there is no fade to
+            // be had: turning a destination off is the same truncation as
+            // repointing it. Latched rather than left where it was so that
+            // choosing a destination again starts from silence.
+            //
+            // The line is NOT emptied here, and that is deliberate rather than
+            // an omission. The branch above already emptied it on the one
+            // block where the destination changed, and nothing can write to it
+            // afterwards because process is never reached while a send is off,
+            // so there is nothing to empty. Doing it here instead costs a
+            // memset of the whole line on every block of every switched off
+            // send, which is two per insert by default: with a lookahead
+            // plugin reporting 4096 samples and a 64 sample buffer that is
+            // over a megabyte a block, walked through the cache, in a 1.3 ms
+            // budget, paid by somebody who does not use sends at all.
+            ramp.latch (0.0);
+            flush = 0;
+            continue;
+        }
+
+        const double target = (double) level;
+
+        // Zero level and a ramp already at zero is the only case that can be
+        // skipped. Skipping on the level alone, which is what this did before
+        // the ramp existed, would be the one way to make a send click on the
+        // way down: the moment somebody pulled the level to nothing the send
+        // would stop being mixed, with the ramp still at whatever it had
+        // reached. Ardour states the rule as a comment on three of its own
+        // classes, delivery.cc:325-327 and the same words in send.cc and
+        // internal_send.cc: "we need to continue running until the gain has
+        // gone to zero".
+        const bool quiet = target <= 0.0 && ramp.settled (0.0);
+
+        if (quiet && flush <= 0)
             continue;
 
         if (slot.sendScratch.getNumChannels() < 2 || slot.sendScratch.getNumSamples() < numSamples)
+        {
+            // No scratch to copy through, so this block cannot be sent at all.
+            // A gap in a send is a gap whatever the ramp does, so it is put
+            // back to silence rather than left mid fade to resume from an
+            // arbitrary level once the buffer reappears.
+            ramp.latch (0.0);
             continue;
+        }
 
         juce::AudioBuffer<float> copy (slot.sendScratch.getArrayOfWritePointers(), 2, numSamples);
         copy.copyFrom (0, 0, slot.buffer, 0, 0, numSamples);
         copy.copyFrom (1, 0, slot.buffer, 1, 0, numSamples);
-        copy.applyGain (level);
+
+        if (ramp.settled (target))
+        {
+            // Which includes every block of a flush, where the level has
+            // reached zero and this is feeding silence in to push the last of
+            // the fade out of the alignment line.
+            copy.applyGain ((float) ramp.value);
+        }
+        else
+        {
+            // Per sample and both channels together, for the reasons
+            // processInsert gives: a move that arrives part way through a block
+            // must not be spread across the rest of it, and a send is not a
+            // place to put a stereo image on a level change.
+            auto* left  = copy.getWritePointer (0);
+            auto* right = copy.getWritePointer (1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float g = (float) ramp.next (target, levelStep);
+                left [i] *= g;
+                right[i] *= g;
+            }
+        }
 
         // A bus fed from here runs at least as late as this insert, so the send
         // waits for whatever else arrives there.
-        slot.sendAlign[(size_t) s].process (copy, 2, numSamples);
+        align.process (copy, 2, numSamples);
+
+        // Enough to empty the line once the level reaches silence, and reset to
+        // the whole of it while anything is still being sent. Read from the
+        // line rather than assumed, because the figure is whatever the
+        // compensation graph made it this block and it changes whenever a
+        // plugin is loaded anywhere.
+        flush = quiet ? std::max (0, flush - numSamples) : align.getDelay();
 
         auto& dest = insertSlots[(size_t) to].buffer;
         dest.addFrom (0, 0, copy, 0, 0, numSamples);
@@ -2833,13 +3029,17 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     updateLatency();
 
     // The ramps start where they are going rather than where live playback
-    // left them. Solo cannot change during a render, because this function
-    // holds the graph lock for all of it, so the only thing a ramp could do
-    // here is put a five millisecond fade on the front of the bounce: engage
-    // a solo and export at once and the material being held under it would
-    // fade out across the first few hundred samples of the file. A bounce has
-    // to be the same from its first sample to its last.
-    latchSoloRamps();
+    // left them: move a fader, or engage a solo, and export at once, and the
+    // front of the file would otherwise be the mixer catching up with the mix.
+    // A bounce has to be the same from its first sample to its last.
+    //
+    // Done on the first block of the loop below rather than here, because two
+    // of the four gains a ramp follows are written by the automation inside
+    // that loop. The comment there has the failure that ordering causes.
+    //
+    // Solo cannot change during a render, because this function holds the
+    // graph lock for all of it.
+    bool firstBlock = true;
 
     struct RestoreCompensation
     {
@@ -2924,6 +3124,32 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         if (sequencing)
             applyAutomation (blockStart);
         applyModulation (blockStart);
+
+        // The gain ramps are put where they are going HERE, on the first block
+        // and after that block's automation has been written, rather than
+        // before the loop.
+        //
+        // That ordering is the whole of it. applyAutomation stores a volume or
+        // pan curve's value straight into the same two atomics the mixer reads
+        // its targets from, so a latch taken before the loop captures whatever
+        // the live transport or somebody's hand last left in them, and then
+        // this block overwrites them with the curve's value at fromBeat and
+        // the mixer slews from one to the other. Two consequences, both silent
+        // and both exactly what a latch exists to prevent: a bounce of a range
+        // where a curve sits at unity, taken after playing to a fade out, opens
+        // with the first few milliseconds fading in from the fade's last
+        // value, so a downbeat at sample zero loses its attack; and rendering
+        // the same range twice gives two different files, because the first
+        // render leaves the atomics where its own last block put them.
+        //
+        // Ardour reseeds from the first sample of the automation curve for the
+        // same reason, and tells the two cases apart by whether the transport
+        // is where it expected to be (amp.cc:409-428).
+        if (firstBlock)
+        {
+            latchGainRamps (renderLaw);
+            firstBlock = false;
+        }
 
         for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
         {
