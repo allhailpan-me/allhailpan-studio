@@ -27,7 +27,11 @@ AudioEngine::AudioEngine()
     // out at about half a second at 192 kHz, the longest half second the
     // studio can be asked for, so the ring never has to be resized once the
     // audio thread may be writing to it.
-    tunerRing.setSize (Tuner::studioRingCapacity());
+    // The block bound goes with it, because the tear check subtracts the block
+    // the write counter is published too late to describe. The same constant
+    // the capacity is derived from, so the two cannot drift apart here the way
+    // the capacity and the requirement once did.
+    tunerRing.setSize (Tuner::studioRingCapacity(), Tuner::largestStudioBlockSamples);
 }
 
 AudioEngine::~AudioEngine()

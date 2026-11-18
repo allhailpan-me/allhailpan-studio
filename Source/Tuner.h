@@ -1564,15 +1564,49 @@ private:
     HOW BIG THE RING HAS TO BE is a correctness requirement rather than a
     performance tip, and it is worth stating as one. The writer publishes its
     counter AFTER copying its block, so the second read understates how far an
-    in-progress block has already reached, by up to one block. The check is
-    therefore blind to that block, and the requirement is
+    in-progress block has already reached, by up to one block.
+
+    THAT BLIND BLOCK IS WHY THE CHECK SUBTRACTS IT, and the subtraction is the
+    whole of the fix: this used to compare against the capacity itself and
+    carry the words below as a requirement on the capacity instead, which was
+    wrong in a way no capacity could rescue.
+
+    Write it out. The reader takes `before`, copies `[first, first + want)`
+    where `first = before - want`, and takes `after`. Call the writer's true
+    position, including the block it is partway through, T. Then
+    `after <= T <= after + block`. The copy survived only if the writer never
+    came back round onto `first`, which is `T - first <= capacity`. Comparing
+    `after - first` against the capacity therefore accepts everything up to
+    `T - first <= capacity + block`: a window one block wide, at EVERY
+    capacity, in which a torn buffer is handed back as audio. Growing the ring
+    makes landing in that window less likely and never impossible, which is
+    exactly what the measurement showed before the fix: `Tests/TunerProbe.cpp`,
+    with the detection validated against a ring nobody was writing to, found 5
+    torn snapshots in 48802 accepted at the capacity these words called the
+    requirement, 6 in 52438 one block above it and 5 in 68489 two blocks above
+    it. A rate that stops falling as the ring grows is the signature of a fixed
+    blind window rather than of a ring that is too small, and reading it as the
+    latter is how it survived.
+
+    Compared against `capacity - block`, the same algebra gives
+    `T - first <= capacity`, which is the condition itself. So the check is
+    sound at any capacity, and what the capacity decides is whether a copy can
+    ever succeed rather than whether success can be believed:
 
         capacity >= snapshot + 2 * largest block the callback will deliver
 
-    Measured with two real threads: at a capacity of the snapshot plus 64, with
-    512 sample blocks, 38 per cent of the snapshots this accepted were torn. At
-    the snapshot plus 512 it was 29 out of 147572, and at four times the
-    snapshot it was none out of 412710.
+    is still the figure, and it is still required, for the other reason. A copy
+    is accepted only if the writer advanced at most
+    `capacity - block - snapshot` during it, and the writer advances in whole
+    blocks, so one block of that is the least that is useful: below snapshot
+    plus two blocks a reader that is overtaken by a single block is refused
+    every time, and the tuner shows nothing at all rather than something wrong.
+    Which is the right way round, and is why a ring that is too small now reads
+    as a dead needle instead of a confident one.
+
+    So the largest block has to be told to the ring rather than assumed, and
+    `setSize` takes it. A bound and not a measurement, for the reason
+    `largestStudioBlockSamples` gives.
 
     The engine's ring is `studioRingCapacity()`, which works out at 99756
     samples: half a second at the highest rate the studio runs at and 2.26
@@ -1581,7 +1615,10 @@ private:
     the two numbers used to meet in `AudioEngine.cpp` where nothing could
     compile them together. So it clears the requirement by a wide margin, and
     the reader has between half a second and two seconds to copy it, for a copy
-    that is a few tens of microseconds.
+    that is a few tens of microseconds. That margin is what kept the fault
+    above from being audible: at four times the snapshot the probe found no
+    torn snapshot in 200000 even with the loose check, so this was a fault in
+    waiting rather than one anybody heard.
 
     The counter is also monotonic and is never reset, which a reader has to know
     rather than discover: "enough has arrived" latches true the first time it
@@ -1592,10 +1629,28 @@ class InputRing
 {
 public:
     /** Message thread. Allocates, so never call this while the callback is
-        running without the usual handover. */
-    void setSize (int samples)
+        running without the usual handover.
+
+        `maxBlockSamples` is the largest block that can land WHILE A SNAPSHOT IS
+        BEING COPIED, which the tear check subtracts because the write counter
+        is published after a block rather than during it. For the engine that
+        is the largest block the device callback can deliver. For a single
+        threaded caller, where nothing can overtake a copy, it is zero, and
+        that is a statement about the writer rather than a way of turning the
+        check off.
+
+        There is no default. A bound that is too small is a torn buffer read as
+        a confident wrong pitch, and the caller is the only thing that knows
+        what can arrive during its own copy.
+
+        It also bounds how much can be read at once: a snapshot larger than
+        `samples - maxBlockSamples` can never be served, because there would be
+        no room left to tell an intact copy from an overwritten one.
+    */
+    void setSize (int samples, int maxBlockSamples)
     {
         buffer.assign ((size_t) std::max (1, samples), 0.0f);
+        maxBlock = std::max (0, maxBlockSamples);
         written.store (0, std::memory_order_release);
     }
 
@@ -1669,7 +1724,21 @@ public:
         // ring's capacity rather than against `before` is what makes this a
         // tear check and not a "did anything arrive" check: audio arriving
         // during the copy is normal and harmless.
-        return after - first <= (std::uint64_t) cap;
+        //
+        // Less one block, because `after` is published after a block is written
+        // and so understates the writer's true position by up to one of them.
+        // Without that subtraction there is a window one block wide, at every
+        // capacity, where a torn buffer is accepted: the long comment above has
+        // the algebra and the measurement that found it.
+        //
+        // Clamped at zero rather than allowed to go negative, which on unsigned
+        // arithmetic would wrap to the largest possible span and accept
+        // everything, turning a ring too small to serve safely into one that
+        // never refuses anything. A ring at or below one block cannot be read
+        // safely at all, so it refuses every snapshot instead.
+        const std::uint64_t safeSpan = cap > maxBlock ? (std::uint64_t) (cap - maxBlock) : 0ull;
+
+        return after - first <= safeSpan;
     }
 
     void clear() noexcept
@@ -1688,6 +1757,10 @@ public:
 private:
     std::vector<float>         buffer;
     std::atomic<std::uint64_t> written { 0 };
+
+    // Zero until setSize is called, which makes an unsized ring refuse every
+    // snapshot for having no audio rather than accept one on a loose bound.
+    int maxBlock = 0;
 };
 
 //==============================================================================
@@ -1713,8 +1786,8 @@ inline constexpr double highestStudioSampleRate = 192000.0;
 */
 inline constexpr int largestStudioBlockSamples = 8192;
 
-/** The smallest ring that can serve an estimator at this rate without the tear
-    check being optimistic, given the largest block the callback will deliver.
+/** The smallest ring that can actually serve an estimator at this rate, given
+    the largest block the callback will deliver.
 
     This is `InputRing`'s stated requirement, `capacity >= snapshot + 2 * block`,
     as arithmetic instead of prose. It was prose, and the two numbers it relates
@@ -1722,6 +1795,16 @@ inline constexpr int largestStudioBlockSamples = 8192;
     that halving the engine's constant to a figure that still looked generous
     would have silently started accepting torn snapshots, with nothing to
     error, assert or fail.
+
+    What the figure is FOR changed once the tear check was fixed, and the
+    distinction is worth keeping straight because the old reading is the more
+    comfortable one. It was believed to be what made the check sound. It is
+    not: the check is sound at any capacity now that it subtracts the block it
+    is blind to, and no capacity made it sound before. What this figure decides
+    is whether a copy can ever be accepted, because the writer advances in
+    whole blocks and the check allows `capacity - block - snapshot` of advance.
+    Below this, a reader overtaken by one block is refused every time and the
+    tuner shows nothing. Above it, a refusal means what it says.
 */
 inline int requiredRingCapacity (double sampleRate, int maxBlockSamples, const Spec& base = {})
 {
@@ -1750,12 +1833,16 @@ inline int studioRingCapacity()
     Detector d;
     d.configure (s);
 
-    // The requirement is what makes the tear check sound. Four times the
-    // snapshot is what the measurement in `InputRing`'s comment found tears
-    // nothing at all: none in 412710 against 29 in 147572 at one snapshot plus
-    // a block. So take the larger of the two, which is correctness first and
-    // then the margin a measurement says is worth paying for. At 192 kHz the
-    // margin wins; at a hypothetical rate where blocks dominate the
+    // The requirement is what makes a copy acceptable at all. Four times the
+    // snapshot is the margin on top of it, and it is kept for a different
+    // reason than the one originally written here: not because it is what
+    // makes a snapshot trustworthy, which the check now does on its own, but
+    // because a refusal costs a reading and a reading is a fifth of a second.
+    // `Tests/TunerProbe.cpp` measures the refusals: at four times the snapshot
+    // it is 303 in 200000, and at the requirement itself it is a few million
+    // refusals per fifty thousand accepted, because a reader overtaken by one
+    // block has to start again. So the margin buys a needle that moves. At
+    // 192 kHz it wins; at a hypothetical rate where blocks dominate, the
     // requirement would.
     return std::max (required, 4 * d.requiredSampleCount());
 }

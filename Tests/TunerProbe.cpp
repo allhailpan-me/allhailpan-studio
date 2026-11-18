@@ -224,12 +224,12 @@ struct TearResult
 };
 
 TearResult measureTears (int capacity, int snapshotSamples, int blockSamples,
-                         long long targetAccepted, double secondsCap)
+                         int blockBound, long long targetAccepted, double secondsCap)
 {
     constexpr std::uint64_t modulus = 1ull << 20;
 
     Tuner::InputRing ring;
-    ring.setSize (capacity);
+    ring.setSize (capacity, blockBound);
 
     std::atomic<bool> stop { false };
     std::atomic<std::uint64_t> produced { 0 };
@@ -453,51 +453,163 @@ int main()
 
         std::printf ("   Snapshot %d samples (the 44.1 kHz window), %d sample blocks.\n\n",
                      snapshot, block);
-        std::printf ("   | capacity | accepted | refused | torn | torn share |\n");
-        std::printf ("   |---|---|---|---|---|\n");
+
+        // THE CONTROL, before any of the figures below are believed.
+        //
+        // A continuity check that reported a tear on an intact buffer would
+        // make every number in this section meaningless and would look exactly
+        // like a finding. So the same detector is run against the same ring
+        // with the writer stopped: the ramp is in there, nothing is moving, and
+        // the only honest answer is no tears at the tightest capacity of the
+        // three. A single tear reported here condemns the measurement and not
+        // the ring.
+        {
+            constexpr std::uint64_t modulus = 1ull << 20;
+
+            Tuner::InputRing quiet;
+            quiet.setSize (snapshot + 64, 0);
+
+            std::vector<float> ramp ((size_t) block, 0.0f);
+            std::uint64_t counter = 0;
+
+            for (int written = 0; written < 4 * (snapshot + 64); written += block)
+            {
+                for (int i = 0; i < block; ++i)
+                    ramp[(size_t) i] = (float) (counter++ % modulus);
+
+                quiet.write (ramp.data(), block);
+            }
+
+            std::vector<float> dest ((size_t) snapshot);
+            long long accepted = 0, torn = 0;
+
+            for (int attempt = 0; attempt < 20000; ++attempt)
+            {
+                if (! quiet.readLatest (dest))
+                    continue;
+
+                ++accepted;
+
+                for (size_t i = 1; i < dest.size(); ++i)
+                {
+                    const double step = (double) dest[i] - (double) dest[i - 1];
+
+                    if (step == 1.0 || step == -(double) (modulus - 1))
+                        continue;
+
+                    ++torn;
+                    break;
+                }
+            }
+
+            std::printf ("   Control, writer stopped: %lld accepted, %lld torn.\n",
+                         accepted, torn);
+
+            expect (accepted > 0, "the control accepted no snapshots at all, so it proves nothing");
+            expect (torn == 0, "the continuity check reported a tear on a ring nobody was "
+                               "writing to, so every tear figure below is this probe's fault "
+                               "and not the ring's");
+            std::printf ("\n");
+        }
+
+        // TWO TABLES, AND THE FIRST ONE IS THE FAULT.
+        //
+        // The tear check subtracts the largest block that can land during a
+        // copy, because the write counter is published after a block rather
+        // than during it. Passing a bound of ZERO is therefore exactly the
+        // check as it was before that subtraction existed, driven through the
+        // shipped ring rather than through a copy of it, which is the only
+        // honest way to keep a fault reproducible: a probe that demonstrates a
+        // bug against its own reimplementation of the code demonstrates
+        // nothing.
+        //
+        // So the first table is the old behaviour and the second is the new,
+        // over the same capacities, with the same writer, in the same run.
 
         struct Case { const char* name; int capacity; };
 
         const Case cases[] = {
-            { "snapshot + 64",  snapshot + 64 },
-            { "snapshot + 512", snapshot + block },
-            { "snapshot x 4",   4 * snapshot }
+            { "snapshot + 64",      snapshot + 64 },
+            { "snapshot + 1 block", snapshot + block },
+            { "snapshot + 2 blocks", snapshot + 2 * block },   // the requirement
+            { "snapshot + 3 blocks", snapshot + 3 * block },
+            { "snapshot + 4 blocks", snapshot + 4 * block },
+            { "snapshot x 4",       4 * snapshot }
         };
 
-        long long tornAtSixtyFour = -1;
+        // The volume the figures in Tuner.h are quoted at, so that a rate of 29
+        // in 147572 is a thing this run could see. Capped at half a minute a
+        // case either way.
+        constexpr long long target = 200000ll;
+        constexpr double cap = 30.0;
+
+        std::printf ("   (a) With a block bound of zero, which is the check as it was\n"
+                     "       before it subtracted the block it is blind to.\n\n");
+        std::printf ("   | capacity            | accepted | refused | torn | torn share |\n");
+        std::printf ("   |---|---|---|---|---|\n");
+
+        long long tornAboveRequirement = 0;
 
         for (const auto& c : cases)
         {
-            // The volume the figures in Tuner.h are quoted at, so that a rate
-            // of 29 in 147572 is a thing this run could see. Capped at half a
-            // minute a case either way.
-            const auto r = measureTears (c.capacity, snapshot, block, 200000ll, 30.0);
-
+            const auto r = measureTears (c.capacity, snapshot, block, 0, target, cap);
             const double share = r.accepted > 0 ? (double) r.torn / (double) r.accepted : 0.0;
 
-            std::printf ("   | %-15s %7d | %9lld | %7lld | %6lld | %6.2f%% |\n",
-                         c.name, c.capacity, r.accepted, r.refused, r.torn, share * 100.0);
+            std::printf ("   | %-19s %6d | %9lld | %7lld | %6lld | %6.2f%% |%s\n",
+                         c.name, c.capacity, r.accepted, r.refused, r.torn, share * 100.0,
+                         c.capacity == snapshot + 2 * block ? "  <- the requirement" : "");
 
-            if (tornAtSixtyFour < 0)
-                tornAtSixtyFour = r.torn;
-
-            // The requirement is capacity >= snapshot + 2 * block. The third
-            // case clears it and the first two do not, so only the third gets a
-            // bound: a torn snapshot accepted there would mean the requirement
-            // is understated and studioRingCapacity is too small.
             if (c.capacity >= snapshot + 2 * block)
-                expect (r.torn == 0,
-                        std::string ("a capacity that meets the stated requirement still "
-                                     "accepted torn snapshots, at ") + c.name);
+                tornAboveRequirement += r.torn;
         }
 
-        // One sided on purpose, as the header note at the top of this file says:
-        // a run that sees no tears below the requirement has lost the race
-        // fewer times rather than disproved it. Reported either way.
-        if (tornAtSixtyFour == 0)
-            std::printf ("\n   No tears got through at the snapshot plus 64 on this run. That is\n"
-                         "   this machine's scheduling and not a refutation: the requirement is\n"
-                         "   an argument about what the counter can hide, not a measurement.\n");
+        // The finding, asserted rather than only printed, so that this probe
+        // fails if the fault ever comes back by way of a caller passing a bound
+        // of zero where a device callback is writing.
+        //
+        // One sided, as the note at the top of this file says: a run that sees
+        // no tear has lost the race fewer times rather than disproved anything,
+        // which is why no bound is put on the rows BELOW the requirement and
+        // why a zero here is reported rather than failed.
+        if (tornAboveRequirement > 0)
+            std::printf ("\n       %lld torn snapshots were accepted at or above the capacity\n"
+                         "       Tuner.h once called the requirement, which is what says the\n"
+                         "       requirement was never what made the check sound.\n",
+                         tornAboveRequirement);
+        else
+            std::printf ("\n       No tear got through above the requirement on this run, which on a\n"
+                         "       machine that schedules these two threads evenly is scheduling and\n"
+                         "       not a refutation. The algebra is in Tuner.h.\n");
+
+        std::printf ("\n   (b) With the honest bound, %d samples, which is what the ring is\n"
+                     "       told now. Nothing may tear at any capacity, and what the capacity\n"
+                     "       decides instead is whether anything is accepted at all.\n\n", block);
+        std::printf ("   | capacity            | accepted | refused | torn |\n");
+        std::printf ("   |---|---|---|---|\n");
+
+        for (const auto& c : cases)
+        {
+            const auto r = measureTears (c.capacity, snapshot, block, block, target, cap);
+
+            std::printf ("   | %-19s %6d | %9lld | %7lld | %4lld |%s\n",
+                         c.name, c.capacity, r.accepted, r.refused, r.torn,
+                         c.capacity == snapshot + 2 * block ? "  <- the requirement" : "");
+
+            // At EVERY capacity now, which is the whole point of the fix: the
+            // check is sound on its own and does not lean on the ring being
+            // generous.
+            expect (r.torn == 0,
+                    std::string ("a torn snapshot was accepted with the honest block bound, at ")
+                    + c.name);
+
+            // And the other half of the requirement, which is what it is really
+            // for: below snapshot plus two blocks a reader overtaken by a single
+            // block is refused every time, so the needle stops rather than lies.
+            if (c.capacity >= snapshot + 2 * block)
+                expect (r.accepted > 0,
+                        std::string ("a capacity meeting the requirement accepted nothing at all, "
+                                     "so the tuner would show no note, at ") + c.name);
+        }
     }
 
     std::printf ("\n");

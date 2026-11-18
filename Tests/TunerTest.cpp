@@ -1665,7 +1665,13 @@ static void testInputRing()
     std::printf ("InputRing: audio thread in, analysis out\n");
 
     Tuner::InputRing ring;
-    ring.setSize (1000);
+
+    // Zero for the largest block that can land during a copy, because this
+    // section is single threaded: it writes, then reads, and nothing can
+    // overtake the copy. That is a statement about this writer and not a way
+    // of turning the tear check off, which the racing checks below exercise
+    // with the real bound.
+    ring.setSize (1000, 0);
 
     check (ring.size() == 1000, "the ring is not the size it was asked for");
     check (ring.totalWritten() == 0, "a fresh ring has been written to");
@@ -1721,7 +1727,7 @@ static void testInputRing()
     // what survives must be the newest rather than the oldest.
     {
         Tuner::InputRing small;
-        small.setSize (64);
+        small.setSize (64, 0);
 
         std::vector<float> big (500);
         for (size_t i = 0; i < big.size(); ++i)
@@ -1769,7 +1775,7 @@ static void testInputRing()
     // the snapshot between the two reads the check is made of.
     {
         Tuner::InputRing r;
-        r.setSize (256);
+        r.setSize (256, 0);
 
         std::vector<float> block (256, 1.0f);
         r.write (block.data(), 256);
@@ -1801,7 +1807,9 @@ static void testInputRing()
     {
         Tuner::InputRing r;
         const int want = 4096;
-        r.setSize (want * 4);
+        // The real bound this time: a writer thread is running and hands over
+        // 128 samples at a time, so that is what can land during a copy.
+        r.setSize (want * 4, 128);
 
         std::vector<float> block (128, 1.0f);
 
@@ -1853,7 +1861,7 @@ static void testInputRing()
     {
         Tuner::InputRing r;
         const int cap = 8192;
-        r.setSize (cap);
+        r.setSize (cap, 128);
 
         std::vector<float> block (128, 1.0f);
 
@@ -1948,7 +1956,7 @@ static void testEndToEnd()
     an.configure (spec);
 
     Tuner::InputRing ring;
-    ring.setSize (an.requiredSampleCount() * 4);
+    ring.setSize (an.requiredSampleCount() * 4, 128);
 
     std::mt19937 rng (31u);
     const double f0 = 329.627557;   // guitar high E
