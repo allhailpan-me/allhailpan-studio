@@ -985,7 +985,7 @@ private:
     // while the code zeroed them, which made the guard below dead.
     std::array<int, kNumInserts>   monitorActiveLeft  = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
     std::array<int, kNumInserts>   monitorActiveRight = [] { std::array<int, kNumInserts> a; a.fill (-1); return a; }();
-    std::array<float, kNumInserts> monitorRamps {};
+    std::array<GainRamp::Ramp, kNumInserts> monitorRamps {};
 
 
     // Mix analysis. Measured on the audio thread, read by the interface.

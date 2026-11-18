@@ -2454,8 +2454,7 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // design: interpolating across the buffer would make the smoothing time a
     // function of the buffer size, which is the one shape of this fix that
     // would make a bounce differ from what was heard. See GainRamp.h.
-    const auto solo = soloRamp[(size_t) index].advance (soloGain[(size_t) index].load(),
-                                                       levelStep, numSamples);
+    const double soloTarget = (double) soloGain[(size_t) index].load();
 
     // What the position means is in FaderLaw.h, which has no JUCE in it and is
     // tested, for the same reason the pan law below is: a fader law a decibel
@@ -2473,8 +2472,7 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // references do and what lets one law serve the fader, solo, the sends and
     // the pan: a position is only meaningful through a law, and the three
     // other things being ramped here have no position at all.
-    const auto fader = faderRamp[(size_t) index].advance (FaderLaw::positionToGain ((double) ctl.volume.load()),
-                                                         levelStep, numSamples);
+    const double faderTarget = FaderLaw::positionToGain ((double) ctl.volume.load());
 
     // Worked out per block rather than kept somewhere. In balance mode that is
     // a comparison; in pan mode it is three sines and two divisions, and three
@@ -2492,37 +2490,47 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
     // they are, so switching a strip between a balance control and a panner,
     // or changing the project's law, now travels there like anything else.
     const auto panTarget = PanLaw::gains (ctl.panMode.load(), law, (double) ctl.pan.load());
-    const auto panL = panRampL[(size_t) index].advance (panTarget.left,  panStep, numSamples);
-    const auto panR = panRampR[(size_t) index].advance (panTarget.right, panStep, numSamples);
 
-    // One ramp per channel across the block, between the product at its start
-    // and the product at its end. The true product of three ramps is a cubic
-    // and this is the straight line between its ends, which is deliberate: the
-    // endpoints are exact, so consecutive blocks join with no discontinuity at
-    // all, which is the whole point, and the chord departs from the curve only
-    // while more than one of the three is moving, smoothly, by less than the
-    // travel of one of them. A sample loop evaluating all three per sample
-    // would be exact and would be the one place CLAUDE.md's warning about
-    // advancing a ramp through one channel and continuing it into the next
-    // could bite.
-    const float startL = (float) (solo.from * fader.from * panL.from);
-    const float endL   = (float) (solo.to   * fader.to   * panL.to);
-    const float startR = (float) (solo.from * fader.from * panR.from);
-    const float endR   = (float) (solo.to   * fader.to   * panR.to);
+    auto& soloing = soloRamp [(size_t) index];
+    auto& fading  = faderRamp[(size_t) index];
+    auto& panning = panRampL [(size_t) index];
+    auto& panningRight = panRampR[(size_t) index];
 
     // Nothing is moving, so the block is one exact constant multiply per
-    // channel and a steady mix stays reproducible block to block. Tested on
-    // the four ramps rather than on the two products, because two products
-    // can agree at the ends of a block while something inside them moved.
-    if (solo.steady() && fader.steady() && panL.steady() && panR.steady())
+    // channel and a steady mix comes out the same every time. This is the
+    // common case by a long way: a mix is listened to far more often than it
+    // is adjusted.
+    if (soloing.settled (soloTarget) && fading.settled (faderTarget)
+        && panning.settled (panTarget.left) && panningRight.settled (panTarget.right))
     {
-        slot.buffer.applyGain (0, 0, numSamples, startL);
-        slot.buffer.applyGain (1, 0, numSamples, startR);
+        slot.buffer.applyGain (0, 0, numSamples, (float) (soloing.value * fading.value * panning.value));
+        slot.buffer.applyGain (1, 0, numSamples, (float) (soloing.value * fading.value * panningRight.value));
     }
     else
     {
-        slot.buffer.applyGainRamp (0, 0, numSamples, startL, endL);
-        slot.buffer.applyGainRamp (1, 0, numSamples, startR, endR);
+        // Per sample, because the gain a sample gets is the product of four
+        // ramps and the straight line between the ends of a block is not that
+        // product. GainRamp.h's Ramp has what goes wrong with the chord and
+        // with spreading a move that arrives early across the whole buffer:
+        // both are the buffer size reaching the sound.
+        //
+        // Both channels inside one iteration, which is the shape CLAUDE.md
+        // warns about getting wrong: advancing a ramp through channel 0 and
+        // then continuing it into channel 1 would give the two channels
+        // different halves of the move, which is a pan every time a gain
+        // changed. Ardour reseeds its own interpolator at the top of each
+        // channel for the same reason (amp.cc:111).
+        auto* left  = slot.buffer.getWritePointer (0);
+        auto* right = slot.buffer.getWritePointer (1);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const double level = soloing.next (soloTarget,  levelStep)
+                               * fading .next (faderTarget, levelStep);
+
+            left [i]  = (float) ((double) left [i] * level * panning     .next (panTarget.left,  panStep));
+            right[i]  = (float) ((double) right[i] * level * panningRight.next (panTarget.right, panStep));
+        }
     }
 
     ctl.peakL.store (std::max (slot.buffer.getMagnitude (0, 0, numSamples), ctl.peakL.load() * 0.9f));
@@ -2570,18 +2578,16 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
     // this used to be its own literal, and the fader next door had none at
     // all.
     //
-    // Advanced per sample here rather than per block, which is not a second
-    // law. This loop is already reading the input sample by sample to mix it
-    // in, so it has the loop for free, and the value it leaves behind agrees
-    // with GainRamp::Ramp::advance to within rounding, which the test pins so
-    // the two cannot drift apart.
-    const float step = (float) GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
+    // The same ramp the rest of the mixer uses, rather than a second copy of
+    // the same arithmetic: this loop used to clamp its own float by hand.
+    const double step = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
     const float gain = monitorGain.load();
 
     for (int i = 1; i < kNumInserts; ++i)
     {
         const auto assignment = InputSource::assignmentFromStored (insertInput[(size_t) i].load());
         auto& ramp = monitorRamps[(size_t) i];
+        const double rampValue = ramp.value;
 
         const auto pick = assignment.assigned
                             ? InputSource::resolve (assignment.choice, numInputChannels)
@@ -2616,13 +2622,13 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
 
         const float target = (listening && ! changingSource) ? 1.0f : 0.0f;
 
-        if (changingSource && ramp <= 0.0f)
+        if (changingSource && rampValue <= 0.0)
         {
             monitorActiveLeft[(size_t) i]  = wantLeft;
             monitorActiveRight[(size_t) i] = wantRight;
         }
 
-        if (ramp <= 0.0f && target <= 0.0f)
+        if (rampValue <= 0.0 && target <= 0.0f)
             continue;
 
         // Still reading the channels it was reading, because the ramp has not
@@ -2640,7 +2646,7 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
             || readLeft < 0 || readRight < 0
             || readLeft >= numInputChannels || readRight >= numInputChannels)
         {
-            ramp = 0.0f;
+            ramp.latch (0.0);
             continue;
         }
 
@@ -2658,21 +2664,14 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
         auto* outL = dest.getWritePointer (0);
         auto* outR = dest.getWritePointer (1);
 
-        float level = ramp;
-
         for (int n = 0; n < numSamples; ++n)
         {
-            if (level < target)      level = std::min (target, level + step);
-            else if (level > target) level = std::max (target, level - step);
-
-            const float scaled = level * gain;
+            const float scaled = (float) ramp.next ((double) target, step) * gain;
             outL[n] += left[n]  * scaled;
             outR[n] += right[n] * scaled;
         }
 
-        ramp = level;
-
-        if (ramp > 0.0f)
+        if (ramp.value > 0.0)
             anyLive = true;
     }
 
@@ -2898,16 +2897,28 @@ void AudioEngine::routeSends (int index, int numSamples)
         copy.copyFrom (0, 0, slot.buffer, 0, 0, numSamples);
         copy.copyFrom (1, 0, slot.buffer, 1, 0, numSamples);
 
-        const auto span = ramp.advance (target, levelStep, numSamples);
-
-        if (span.steady())
+        if (ramp.settled (target))
         {
-            copy.applyGain ((float) span.from);
+            // Which includes every block of a flush, where the level has
+            // reached zero and this is feeding silence in to push the last of
+            // the fade out of the alignment line.
+            copy.applyGain ((float) ramp.value);
         }
         else
         {
-            copy.applyGainRamp (0, 0, numSamples, (float) span.from, (float) span.to);
-            copy.applyGainRamp (1, 0, numSamples, (float) span.from, (float) span.to);
+            // Per sample and both channels together, for the reasons
+            // processInsert gives: a move that arrives part way through a block
+            // must not be spread across the rest of it, and a send is not a
+            // place to put a stereo image on a level change.
+            auto* left  = copy.getWritePointer (0);
+            auto* right = copy.getWritePointer (1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const float g = (float) ramp.next (target, levelStep);
+                left [i] *= g;
+                right[i] *= g;
+            }
         }
 
         // A bus fed from here runs at least as late as this insert, so the send

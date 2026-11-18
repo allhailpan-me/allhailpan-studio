@@ -50,17 +50,42 @@
     is multiplicative and which never reaches zero: a cutoff, a frequency, a
     delay time.
 
-    A SLEW LIMITER, not a one pole. Ardour's is a one pole at a 25 Hz corner,
+    A SLEW LIMITER, not a one pole, and this is the one choice here that is a
+    trade rather than a conclusion. Ardour's is a one pole at a 25 Hz corner,
     a = 156.825f / sample_rate, a time constant of 6.3765 ms at every sample
     rate. A one pole never arrives, so Ardour carries an epsilon snap at a
     linear gain of 1e-5 in four separate places to make it terminate
     (amp.cc:136, 219, 285 and delivery.cc:354). A slew limiter arrives because
-    it is clamped, which is worth more here than the shape: a control left
-    alone then sits exactly on its own gain, so a steady mix is one exact
-    multiply and is reproducible, and a mute is actually silent rather than 100
-    dB down. It is also the law the solo and input monitoring ramps in this
-    engine already follow, so there is one law rather than two shapes meeting
-    in the same multiply.
+    it is clamped, which is worth a great deal here: a control left alone then
+    sits exactly on its own gain, so a steady mix is one exact multiply and is
+    reproducible, and a mute is actually silent rather than 100 dB down. It is
+    also the law the solo and input monitoring ramps in this engine already
+    follow, so there is one law rather than two shapes meeting in the same
+    multiply.
+
+    What it costs is measured rather than waved away, in GainRampTest's drag
+    check. A slew limiter's smoothing time is proportional to the size of the
+    move, so the small jumps an interface makes while somebody drags a fader,
+    about a twentieth of the travel at sixty a second, are smoothed over
+    thirteen samples. That removes the discontinuity completely, which is the
+    audible part, and takes 11.7 dB off the error that lands above 2 kHz. A one
+    pole smooths every move over the same time whatever its size and would take
+    about 30 dB off instead. The reason it is not here is that at a time
+    constant long enough to be worth having it would make a mute and a solo
+    slower than the five milliseconds this studio deliberately chose for them,
+    and it would need the epsilon machinery. Both numbers are in
+    Research/BACKLOG.md so that trade can be taken later with the measurement
+    already in hand rather than from scratch.
+
+    One thing it does NOT fix, which is worth knowing before trusting it: a
+    control that only changes once a block still arrives as a staircase, and a
+    slew that crosses the whole fader in five milliseconds crosses a single
+    block's worth of an automation curve in a few samples and then waits. So an
+    automated fade comes out continuous but still shelved, and the sidebands
+    the derivation above describes are unchanged. Removing those needs the
+    target to move within the block, which means reading the automation curve
+    per sample the way Ardour does (amp.cc:106-116). That is the next step and
+    is recorded, not done here.
 
     CLAMPED AGAINST THE TARGET, which is what makes arrival exact, and is also
     what makes a dead band unnecessary. Ardour needs one because its one pole
@@ -152,40 +177,6 @@ namespace GainRamp
         return 1.0 / (std::max (1.0, sampleRate) * std::max (1.0e-6, seconds));
     }
 
-    /** Where a ramp was at the start of a block and where it is at the end.
-
-        Two numbers rather than one because that is what the mixer applies: a
-        gain ramped across the block from the first to the second, which is a
-        straight line and so is exactly the slew the ramp is following. When
-        the two are equal nothing is moving and the block takes one constant
-        multiply, which is what keeps a steady mix reproducible.
-    */
-    struct Span
-    {
-        double from = 0.0, to = 0.0;
-
-        bool steady() const noexcept { return from == to; }
-    };
-
-    /** The gain the n'th sample of a block gets under that span.
-
-        This is juce::AudioBuffer::applyGainRamp's arithmetic written out, so
-        that what the test measures is what the mixer applies. Note what it
-        means at the ends, because JUCE's own documentation gets it wrong: the
-        first sample is multiplied by `from` and the last by one increment
-        short of `to`, not by `to`. That is correct rather than an off by one.
-        It is what makes two consecutive blocks continuous instead of applying
-        the same gain to the last sample of one and the first of the next, and
-        a test that asserts the last sample carries `to` is asserting a bug.
-    */
-    inline double gainAt (Span s, int numSamples, int n) noexcept
-    {
-        if (numSamples <= 0)
-            return s.from;
-
-        return s.from + (s.to - s.from) * ((double) n / (double) numSamples);
-    }
-
     /** One moving gain.
 
         One of these per gain that is applied, not per control that is read.
@@ -196,41 +187,60 @@ namespace GainRamp
         consumers would make each one's ramp depend on how often the others
         ran.
 
+        Advanced one sample at a time, which is what makes the gesture
+        independent of the buffer size: the recursion below does not know what
+        a block is, so the same move gives the same samples whether the driver
+        hands over 32 of them or 2048, and a bounce is what was heard.
+
+        Written as a block of two numbers and one ramp across it instead, which
+        is what the first version of this did, it is not. Two things break.
+        A ramp that arrives part way through a block has its remaining travel
+        spread across the whole of it, so a move that should take five
+        milliseconds takes as long as the buffer: 42.7 ms at 2048 samples. And
+        a mixer multiplies several of these together, so the gain a sample gets
+        is a product of ramps, and the straight line between the ends of a
+        block is not that product: solo and the fader both crossing their whole
+        travel inside one block put the chord a quarter of full scale away from
+        the curve in the middle of it. Both of those are the buffer size
+        reaching the sound through the back door, which is the one thing this
+        header exists to prevent. The measured cost of doing it per sample
+        instead is a handful of operations a sample on the inserts that are
+        actually moving.
+
         Held in double rather than in float, which costs nothing next to a
-        block of audio and buys two things. A long ramp accumulates its step
-        once per block, so the rounding of that addition is what decides
-        whether the same gesture comes out the same at every buffer size, which
-        is the property the export depends on. And arrival is tested as exact
-        equality, which a float accumulating toward a float target reaches only
-        because of the clamp, where a double reaches it with room to spare.
+        block of audio: arrival is tested as exact equality, and the clamp
+        reaches it with room to spare rather than only just.
     */
     struct Ramp
     {
         double value = 0.0;
 
-        /** Moves toward `target` by at most `step` a sample and reports the
-            block. Never overshoots and never reverses: the clamp is the whole
-            of the arrival rule, and monotone arrival is a property the test
-            asserts rather than an accident. Ardour's own pan ramp is worth
-            knowing about here as the thing not to do: it advances its
-            interpolator by a delta taken from the error in a *lagged* copy of
-            itself (panner_1in2out.cc:166-176), so it overshoots by about 12
-            per cent of the step and crosses zero on one side, which is a
-            momentarily inverted gain, before settling over five or six blocks.
+        /** Moves one sample toward `target` and gives back the gain that
+            sample gets.
+
+            Advanced before it is read, which is a choice and is written down
+            because the two references differ and mixing them inside one engine
+            would be a half sample disagreement between a gain and a pan that
+            nobody would ever find: Ardour's Amp multiplies and then updates
+            (amp.cc:210-213) and its panner updates and then multiplies
+            (panner_1in2out.cc:172-174). This is the second, because the
+            monitoring path here was already written that way.
+
+            Never overshoots and never reverses: the clamp is the whole of the
+            arrival rule, and monotone arrival is a property the test asserts
+            rather than an accident. Ardour's own pan ramp is worth knowing
+            about as the thing not to do: it advances its interpolator by a
+            delta taken from the error in a lagged copy of itself, so it
+            overshoots by about 12 per cent of the step and crosses zero on one
+            side, which is a momentarily inverted gain, before settling over
+            five or six blocks.
         */
-        Span advance (double target, double step, int numSamples) noexcept
+        double next (double target, double step) noexcept
         {
-            const double from = value;
+            value = value < target ? std::min (target, value + step)
+                                   : std::max (target, value - step);
 
-            if (numSamples > 0)
-            {
-                const double travel = step * (double) numSamples;
-
-                value = from < target ? std::min (target, from + travel)
-                                      : std::max (target, from - travel);
-            }
-
-            return { from, value };
+            return value;
         }
 
         /** Puts the ramp where it is going, for a moment that is not a gain
@@ -242,6 +252,11 @@ namespace GainRamp
         */
         void latch (double target) noexcept { value = target; }
 
+        /** Exact equality, deliberately. It is what lets a block that is not
+            moving be one constant multiply, so a steady mix comes out the same
+            every time, and it is reachable because the step above is clamped
+            rather than asymptotic. Ardour's one pole cannot do this, which is
+            why it carries an epsilon snap in four places. */
         bool settled (double target) const noexcept { return value == target; }
     };
 
