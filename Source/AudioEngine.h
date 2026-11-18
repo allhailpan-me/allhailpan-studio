@@ -819,6 +819,16 @@ private:
         held, which is why it has no lock of its own. */
     void updateSolo();
 
+    /** Where the four gains on one insert are going, under a given pan law.
+
+        One place, read by the mixer and by the latch below, because the two
+        reading it differently is a fault nothing here could catch: a render
+        that latched the raw fader position while the mixer ramped toward the
+        gain the law makes of it would start every bounce slewing from one to
+        the other. Needs the graph lock or the audio thread, like everything
+        that reads these atomics together. */
+    GainRamp::Targets insertTargets (int index, PanLaw::Law law) const noexcept;
+
     /** Puts every moving gain where it is going, so nothing fades. For the
         start of a render and for a device opening, where a ramp would be a
         fade on the front of a file or of the first block.
@@ -913,40 +923,21 @@ private:
         zero and zero here is silence. Set in the constructor. */
     std::array<std::atomic<float>, kNumInserts> soloGain;
 
-    /** Audio thread only: where each insert's solo gain has got to on its way
-        to the figure above. One press of solo moves up to fifteen of these at
-        once, and a gain that arrives in one sample is a click on every one of
-        them. Latched to the target rather than ramped at the start of a
-        render and when a device opens.
-
-        Starts at unity because nothing is soloed until something is, and
-        because zero here is silence: a default constructed ramp would open the
-        studio with every insert fading up. */
-    std::array<GainRamp::Ramp, kNumInserts> soloRamp = [] {
-        std::array<GainRamp::Ramp, kNumInserts> a;
-        a.fill (GainRamp::Ramp { 1.0 });
-        return a;
-    }();
-
-    /** Audio thread only: the same, for the three gains that used to be
-        applied flat across the block.
+    /** Audio thread only: the four gains on each insert on their way to where
+        they are going.
 
         The fader and the pan are read once a block, and before these existed
-        each was applied as one constant over the whole of it, so every fader
+        each was applied as one constant across the whole of it, so every fader
         move, every pan move and every block of a volume or pan automation
-        curve stepped the gain between blocks. GainRamp.h has what that
-        sounds like and why the remedy is shaped the way it is.
+        curve stepped the gain between blocks. Solo was already ramped, and the
+        argument above its ramp was the same argument, two lines from the fader
+        it had never been applied to. GainRamp.h has what a stepped gain sounds
+        like, how much of it this removes and how much it does not, and why the
+        four live in one object rather than four.
 
-        Two pan ramps rather than one, on the two gains rather than on the
-        position, which is the trade GainRamp::panSeconds documents: it is what
-        lets the block be applied as one ramp per channel instead of
-        re-evaluating the law per sample, and it is why the pan span is shorter
-        than the level one.
-
-        These are safe to leave default constructed at zero: nothing reads them
-        before a device has opened, and opening one latches them. */
-    std::array<GainRamp::Ramp, kNumInserts> faderRamp {};
-    std::array<GainRamp::Ramp, kNumInserts> panRampL {}, panRampR {};
+        Latched to their targets rather than ramped at the start of a render
+        and when a device opens. */
+    std::array<GainRamp::Strip, kNumInserts> stripRamps {};
 
     // Published for the interface, which reads them without the graph lock
     // because that lock is held for the length of a bounce.

@@ -587,6 +587,22 @@ void AudioEngine::setSend (int insertIndex, int sendIndex, int destination, floa
     vectors that are already the right size after the first call.
 */
 // ---------------------------------------------------------------------------
+GainRamp::Targets AudioEngine::insertTargets (int index, PanLaw::Law law) const noexcept
+{
+    const auto& ctl = controls[(size_t) index];
+
+    // What a fader position means is FaderLaw.h's and which pair of gains a
+    // pan position means is PanLaw.h's, and both are tested, because neither
+    // can announce that it is wrong: a law a decibel out does not error, does
+    // not crackle and looks entirely normal on a meter.
+    const auto pan = PanLaw::gains (ctl.panMode.load(), law, (double) ctl.pan.load());
+
+    return { (double) soloGain[(size_t) index].load(),
+             FaderLaw::positionToGain ((double) ctl.volume.load()),
+             pan.left,
+             pan.right };
+}
+
 void AudioEngine::latchGainRamps (PanLaw::Law law)
 {
     for (int i = 0; i < kNumInserts; ++i)
@@ -594,12 +610,7 @@ void AudioEngine::latchGainRamps (PanLaw::Law law)
         auto& ctl  = controls[(size_t) i];
         auto& slot = insertSlots[(size_t) i];
 
-        soloRamp [(size_t) i].latch (soloGain[(size_t) i].load());
-        faderRamp[(size_t) i].latch (FaderLaw::positionToGain ((double) ctl.volume.load()));
-
-        const auto pan = PanLaw::gains (ctl.panMode.load(), law, (double) ctl.pan.load());
-        panRampL[(size_t) i].latch (pan.left);
-        panRampR[(size_t) i].latch (pan.right);
+        stripRamps[(size_t) i].latch (insertTargets (i, law));
 
         for (int sendIndex = 0; sendIndex < kNumSends; ++sendIndex)
         {
@@ -2402,134 +2413,110 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
         slot.buffer.copyFrom (1, 0, view, std::min (1, outs - 1), 0, numSamples);
     }
 
-    // The fader, whose travel is 0..1 with unity at three quarters of it, then
-    // the pan control. What a position means is FaderLaw.h's, not this
-    // function's: see the load below.
+    // The fader, the pan and solo, which between them are what an insert's
+    // output is multiplied by.
     //
-    // Which pair of gains a position means is in PanLaw.h, which has no JUCE
-    // in it and is tested, because nothing here can announce that it is wrong:
-    // a pan law a decibel out does not error, does not crackle and looks
-    // perfectly normal on a meter. All that is left here is the load and the
-    // two gains, and because the export goes through this same function a
-    // bounce gets the law without being told about it.
-    // How far any of the gains below may travel in one sample. Both from
-    // GainRamp.h, which has the law, the two figures and why the pan one is
-    // the shorter of them. Worked out per block rather than held somewhere
-    // because the sample rate is a member that a device change rewrites, and
-    // a cached step would be the old rate's step for one block after it.
+    // None of the three laws is here. What a fader position means is
+    // FaderLaw.h's, which pair of gains a pan position means is PanLaw.h's,
+    // and what solo adds up to across the whole mixer is SoloGraph's, and all
+    // three are tested because none of them can announce that it is wrong: a
+    // law a decibel out does not error, does not crackle and looks entirely
+    // normal on a meter. They meet in insertTargets, which both this and the
+    // latch read, so the mixer and a bounce cannot disagree about where a gain
+    // is going.
+    //
+    // Mute is not read here either, and that is the point rather than a
+    // refactor. What an insert's output is multiplied by depends on every
+    // other insert's solo and on the send matrix, so it is worked out by
+    // SoloGraph on the message thread and read as one number. Whether a mute
+    // still wins over a solo on the same insert is part of that arithmetic,
+    // which is why reading ctl.mute here as well would be a second opinion
+    // rather than a safety net.
+    //
+    // That one multiply is also what carries solo into the sends, because
+    // routeSends copies out of this same buffer afterwards. Without it an
+    // insert silenced by somebody else's solo would still feed a bus that solo
+    // is keeping audible, and would be heard through it.
+    //
+    // The targets are worked out once per block rather than cached anywhere.
+    // In balance mode the pan is a comparison; in pan mode it is three sines
+    // and two divisions, and three square roots on top under the -4.5 dB law,
+    // and the fader is one std::pow. Next to a whole block of audio that is
+    // nothing, and a cached copy would be a second version of the pan position
+    // and the fader position, updated from the message thread, free to
+    // disagree with the atomics they came from.
+    //
+    // The law arrives as an argument rather than being read here, so that one
+    // block, and one whole bounce, is mixed under one law. See the call sites.
+    //
+    // RAMPED RATHER THAN STEPPED, which is not a polish. A gain that steps
+    // between two blocks puts a discontinuity on the signal at whatever it
+    // happened to be, and a step's spectrum falls at only 6 dB per octave, so
+    // a mix sitting at -10 dBFS gives a broadband click at -10 dBFS into the
+    // master chain. One press of solo does that to up to fifteen inserts at
+    // once; one drag of a fader does it sixty times a second. Solo was ramped
+    // and the fader two lines below it was not.
+    //
+    // Ardour does not apply its own figure flat either: every gain in it, the
+    // fader, the sends and the mute alike, goes through `Amp::apply_gain`,
+    // which runs a one pole toward the target with its state held across
+    // blocks. An earlier version of this comment said `Delivery::run`
+    // interpolated across the buffer. It does not, and the difference is the
+    // whole of the design: interpolating across the buffer would make the
+    // smoothing time a function of the buffer size, which is the one shape of
+    // this fix that would make a bounce differ from what was heard.
+    //
+    // What the ramp is, what it costs, how much of the artifact it removes and
+    // what it leaves behind are all in GainRamp.h. One thing worth knowing
+    // from here: a change of pan mode or of pan law used to be a step of up to
+    // 3 dB in the middle of whatever was playing, and now travels like
+    // everything else, because both change where the two pan gains are going
+    // rather than where they are.
+    //
+    // How far any of them may travel in one sample is worked out per block
+    // rather than held somewhere, because the sample rate is a member that a
+    // device change rewrites and a cached step would be the old rate's for one
+    // block after it.
     const double levelStep = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
     const double panStep   = GainRamp::stepPerSample (sampleRate, GainRamp::panSeconds);
 
-    // Mute is no longer read here, and that is the point rather than a
-    // refactor. What an insert's output is multiplied by now depends on every
-    // other insert's solo and on the send matrix, so it is worked out by
-    // SoloGraph on the message thread and read here as one number. Whether a
-    // mute still wins over a solo on the same insert is part of that
-    // arithmetic, which is why reading ctl.mute here as well would be a
-    // second opinion rather than a safety net.
-    //
-    // It is read straight from the atomic rather than latched into a local at
-    // the top of the block, as the pan law is. The difference is that these
-    // are written under the graph lock, and the audio thread holds that lock
-    // for the whole block, so a block cannot see half of an update. The pan
-    // law is a bare atomic that anybody can store into at any moment.
-    //
-    // This one multiply is also what carries solo into the sends, because
-    // routeSends copies out of this same buffer afterwards. Without that, an
-    // insert silenced by somebody else's solo would still feed a bus that
-    // solo is keeping audible, and would be heard through it.
-    //
-    // Ramped rather than stepped, and that is not a polish. One press of solo
-    // moves up to fifteen of these from unity to zero, and a gain that steps
-    // between two blocks puts a discontinuity on each of them at whatever the
-    // signal happened to be: a step's spectrum falls at only 6 dB per octave,
-    // so a mix sitting at -10 dBFS gives a broadband click at -10 dBFS into
-    // the master chain, on every press and every release. Ardour does not
-    // apply its own figure flat either: every gain in it, the fader, the sends
-    // and the mute alike, goes through `Amp::apply_gain`, which runs a one
-    // pole toward the target with its state held across blocks.
-    //
-    // An earlier version of this comment said `Delivery::run` interpolated
-    // across the buffer. It does not, and the difference is the whole of the
-    // design: interpolating across the buffer would make the smoothing time a
-    // function of the buffer size, which is the one shape of this fix that
-    // would make a bounce differ from what was heard. See GainRamp.h.
-    const double soloTarget = (double) soloGain[(size_t) index].load();
-
-    // What the position means is in FaderLaw.h, which has no JUCE in it and is
-    // tested, for the same reason the pan law below is: a fader law a decibel
-    // out does not error, does not crackle and looks entirely normal on a
-    // meter. All that is left here is the load, the law and the ramp.
-    //
-    // Once per block, not once per sample, which is what makes a pow
-    // affordable. One is all it is: positionToGain is a branch and a single
-    // std::pow, and the log10 in that header belongs to gainToPosition, which
-    // the engine never calls. Next to a whole block of audio that is nothing,
-    // and the pan law below already costs three sines and three square roots
-    // under the -4.5 dB law.
-    //
-    // The ramp is on the gain rather than on the position, which is what both
-    // references do and what lets one law serve the fader, solo, the sends and
-    // the pan: a position is only meaningful through a law, and the three
-    // other things being ramped here have no position at all.
-    const double faderTarget = FaderLaw::positionToGain ((double) ctl.volume.load());
-
-    // Worked out per block rather than kept somewhere. In balance mode that is
-    // a comparison; in pan mode it is three sines and two divisions, and three
-    // square roots on top of that under the -4.5 dB law, which is still
-    // nothing next to a block of audio. A cached pair would be a second copy
-    // of the pan position, updated from the message thread, free to disagree
-    // with the atomic it came from.
-    //
-    // The law comes in as an argument rather than being read here, so that one
-    // block, and one whole bounce, uses one law. See the call sites.
-    //
-    // Note what the two ramps below mean for a change of pan mode or of law,
-    // which used to be a step of up to 3 dB in the middle of whatever was
-    // playing: both change where these two gains are going rather than where
-    // they are, so switching a strip between a balance control and a panner,
-    // or changing the project's law, now travels there like anything else.
-    const auto panTarget = PanLaw::gains (ctl.panMode.load(), law, (double) ctl.pan.load());
-
-    auto& soloing = soloRamp [(size_t) index];
-    auto& fading  = faderRamp[(size_t) index];
-    auto& panning = panRampL [(size_t) index];
-    auto& panningRight = panRampR[(size_t) index];
+    const auto targets = insertTargets (index, law);
+    auto&      ramps   = stripRamps[(size_t) index];
 
     // Nothing is moving, so the block is one exact constant multiply per
     // channel and a steady mix comes out the same every time. This is the
     // common case by a long way: a mix is listened to far more often than it
     // is adjusted.
-    if (soloing.settled (soloTarget) && fading.settled (faderTarget)
-        && panning.settled (panTarget.left) && panningRight.settled (panTarget.right))
+    if (ramps.settled (targets))
     {
-        slot.buffer.applyGain (0, 0, numSamples, (float) (soloing.value * fading.value * panning.value));
-        slot.buffer.applyGain (1, 0, numSamples, (float) (soloing.value * fading.value * panningRight.value));
+        const auto gain = ramps.gains();
+
+        slot.buffer.applyGain (0, 0, numSamples, (float) gain.left);
+        slot.buffer.applyGain (1, 0, numSamples, (float) gain.right);
     }
     else
     {
         // Per sample, because the gain a sample gets is the product of four
         // ramps and the straight line between the ends of a block is not that
-        // product. GainRamp.h's Ramp has what goes wrong with the chord and
-        // with spreading a move that arrives early across the whole buffer:
-        // both are the buffer size reaching the sound.
+        // product. GainRamp.h has what goes wrong with the chord and with
+        // spreading a move that arrives early across the whole buffer: both
+        // are the buffer size reaching the sound.
         //
-        // Both channels inside one iteration, which is the shape CLAUDE.md
-        // warns about getting wrong: advancing a ramp through channel 0 and
-        // then continuing it into channel 1 would give the two channels
-        // different halves of the move, which is a pan every time a gain
-        // changed. Ardour reseeds its own interpolator at the top of each
-        // channel for the same reason (amp.cc:111).
+        // Both channels out of one call, rather than a ramp advanced per
+        // channel, which is the shape CLAUDE.md warns about: it would give the
+        // two channels different halves of every move, which is a pan on every
+        // gain change. GainRamp::Strip is written so that cannot be spelled
+        // here, and so that the measurement in GainRampTest drives the same
+        // arithmetic this does.
         auto* left  = slot.buffer.getWritePointer (0);
         auto* right = slot.buffer.getWritePointer (1);
 
         for (int i = 0; i < numSamples; ++i)
         {
-            const double level = soloing.next (soloTarget,  levelStep)
-                               * fading .next (faderTarget, levelStep);
+            const auto gain = ramps.next (targets, levelStep, panStep);
 
-            left [i]  = (float) ((double) left [i] * level * panning     .next (panTarget.left,  panStep));
-            right[i]  = (float) ((double) right[i] * level * panningRight.next (panTarget.right, panStep));
+            left [i] = (float) ((double) left [i] * gain.left);
+            right[i] = (float) ((double) right[i] * gain.right);
         }
     }
 

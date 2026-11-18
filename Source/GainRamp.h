@@ -166,11 +166,15 @@ namespace GainRamp
     /** How far a ramp may travel in one sample, from the time it should take
         to cross unity.
 
-        Guarded at both ends because both have reached here before: a sample
-        rate of zero before a device has opened, and a time of zero from a
-        preference that has not been read yet. Either would be a division by
-        nothing, and the second would make every ramp instant, which is the
-        fault this header exists to fix wearing the shape of a fix.
+        Guarded at both ends because both have reached code like this before: a
+        sample rate of zero before a device has opened, and a span of zero from
+        a preference that has not been read yet. Unguarded, either is a
+        division by nothing, and what comes out is an infinity that becomes a
+        NaN the first time it meets a gain of zero, which does not go quiet: it
+        silences everything downstream of that insert and gives no clue where
+        it came from. The guards do not pretend to rescue a nonsense rate, and
+        the test says so rather than implying otherwise: at no sample rate
+        there is no ramp to be had and the gain arrives at once.
     */
     inline double stepPerSample (double sampleRate, double seconds) noexcept
     {
@@ -258,6 +262,94 @@ namespace GainRamp
             rather than asymptotic. Ardour's one pole cannot do this, which is
             why it carries an epsilon snap in four places. */
         bool settled (double target) const noexcept { return value == target; }
+    };
+
+    /** The two gains an insert's output is multiplied by, for one sample. */
+    struct Pair
+    {
+        double left = 0.0, right = 0.0;
+    };
+
+    /** Where the four gains on a mixer strip are going.
+
+        Gains rather than positions, because a position only means anything
+        through a law and three of these four have no position at all.
+    */
+    struct Targets
+    {
+        double solo  = 1.0;
+        double fader = 1.0;
+        double left  = 1.0;
+        double right = 1.0;
+    };
+
+    /** The four moving gains on one insert, and the pair they come to.
+
+        This is here rather than in the mixer, and the whole of it is here
+        rather than half, because of what the two halves get wrong when they
+        are apart. Both faults were found by mutation testing the engine and
+        neither was reachable by any test while the arithmetic lived in
+        `AudioEngine.cpp`, which cannot be compiled without JUCE:
+
+        Advancing the ramps once per channel instead of once per sample pair
+        halves every span and gives the left channel the first half of every
+        move while the right gets the second, which is a pan on every gain
+        change. CLAUDE.md warns about exactly this shape and Ardour reseeds its
+        own interpolator at the top of each channel to avoid it
+        (amp.cc:111). Asking for both gains in one call makes it unspellable.
+
+        Advancing the two pan gains at different rates lets a pan move swing
+        through an image the law never specifies, and makes the 3.01 dB dip
+        last the longer of the two spans rather than the shorter, which is the
+        whole justification for the pan span being short. One step argument for
+        both pan ramps makes that unspellable too.
+
+        The multiply order is written down because it is load bearing: solo and
+        the fader make one level, and the two pan gains are applied to that
+        same level, so the two channels can only differ by their pan. Computing
+        each channel's gain as its own product of three would let them differ
+        by a rounding step in the level as well.
+    */
+    struct Strip
+    {
+        // Solo starts at unity because nothing is soloed until something is,
+        // and because zero here is silence: a strip default constructed at
+        // zero would open the studio fading up.
+        Ramp solo { 1.0 };
+        Ramp fader, left, right;
+
+        Pair next (const Targets& t, double levelStep, double panStep) noexcept
+        {
+            const double level = solo.next (t.solo, levelStep) * fader.next (t.fader, levelStep);
+
+            return { level * left .next (t.left,  panStep),
+                     level * right.next (t.right, panStep) };
+        }
+
+        bool settled (const Targets& t) const noexcept
+        {
+            return solo.settled (t.solo) && fader.settled (t.fader)
+                && left.settled (t.left) && right.settled (t.right);
+        }
+
+        /** The pair a settled strip applies, which the mixer uses as one
+            constant multiply per channel for the whole block. Same multiply
+            order as `next`, so a block that stops moving mid gesture does not
+            change the gain by a rounding step as it settles. */
+        Pair gains() const noexcept
+        {
+            const double level = solo.value * fader.value;
+
+            return { level * left.value, level * right.value };
+        }
+
+        void latch (const Targets& t) noexcept
+        {
+            solo .latch (t.solo);
+            fader.latch (t.fader);
+            left .latch (t.left);
+            right.latch (t.right);
+        }
     };
 
     /** The level of the k'th sideband that a per block constant gain puts

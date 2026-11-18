@@ -791,7 +791,15 @@ static void checkMuteIsSilent()
 
 static double panEnergyDeficitDbMs (double seconds, double rate, int blockSize, PanLaw::Law law)
 {
-    const double step = GainRamp::stepPerSample (rate, seconds);
+    // Through GainRamp::Strip, with the level step and the pan step passed
+    // separately exactly as the mixer passes them, so that this measures what
+    // processInsert does rather than something near it. That matters for one
+    // mutation in particular: advancing the two pan gains at different rates
+    // swings a pan move through an image the law never specifies and makes the
+    // dip last the longer of the two spans, and it is this measurement that
+    // sees it.
+    const double levelStep = GainRamp::stepPerSample (rate, GainRamp::levelSeconds);
+    const double panStep   = GainRamp::stepPerSample (rate, seconds);
 
     const auto from = PanLaw::gains (PanLaw::Mode::pan, law, -1.0);
     const auto to   = PanLaw::gains (PanLaw::Mode::pan, law,  1.0);
@@ -801,7 +809,10 @@ static double panEnergyDeficitDbMs (double seconds, double rate, int blockSize, 
     // centre is unity, so its constant is 2 rather than 1.
     const double reference = 10.0 * std::log10 (from.left * from.left + from.right * from.right);
 
-    GainRamp::Ramp left { from.left }, right { from.right };
+    GainRamp::Strip strip;
+    strip.latch ({ 1.0, 1.0, from.left, from.right });
+
+    const GainRamp::Targets targets { 1.0, 1.0, to.left, to.right };
 
     const int total = (int) (rate * seconds * 4.0) + blockSize;
     double deficit = 0.0;
@@ -812,9 +823,8 @@ static double panEnergyDeficitDbMs (double seconds, double rate, int blockSize, 
 
         for (int i = 0; i < n; ++i)
         {
-            const double gl = left .next (to.left,  step);
-            const double gr = right.next (to.right, step);
-            const double power = gl * gl + gr * gr;
+            const auto gain = strip.next (targets, levelStep, panStep);
+            const double power = gain.left * gain.left + gain.right * gain.right;
             const double db = power > 0.0 ? 10.0 * std::log10 (power) : -1000.0;
 
             // Only a shortfall against what the law holds counts. An excess
@@ -826,6 +836,139 @@ static double panEnergyDeficitDbMs (double seconds, double rate, int blockSize, 
     }
 
     return deficit;
+}
+
+// ---------------------------------------------------------------------------
+// 7b. The strip itself: four gains, two channels, and the two things that go
+//     wrong when the arithmetic lives in the engine where nothing can compile
+//     it. Both of these were found by mutation testing `AudioEngine.cpp` by
+//     hand, and the answer to both was to move the arithmetic in here.
+
+static void checkTheStrip()
+{
+    const double rate      = 48000.0;
+    const double levelStep = GainRamp::stepPerSample (rate, GainRamp::levelSeconds);
+    const double panStep   = GainRamp::stepPerSample (rate, GainRamp::panSeconds);
+
+    // One call, two channels, one advance. A ramp advanced once per channel
+    // would halve every span and hand the left channel the first half of each
+    // move while the right got the second, which is a pan on every gain
+    // change. Checked by driving the strip and a bare pair of ramps side by
+    // side: the strip's own level has to match a level advanced once.
+    {
+        GainRamp::Strip strip;
+        strip.latch ({ 1.0, 1.0, 1.0, 1.0 });
+
+        GainRamp::Ramp solo { 1.0 }, fader { 1.0 };
+        const GainRamp::Targets targets { 0.0, 0.25, 1.0, 1.0 };
+
+        for (int i = 0; i < 512; ++i)
+        {
+            const auto gain = strip.next (targets, levelStep, panStep);
+            const double level = solo.next (0.0, levelStep) * fader.next (0.25, levelStep);
+
+            check (gain.left == level && gain.right == level,
+                   "the strip advanced its level more than once for one sample pair");
+        }
+    }
+
+    // The two pan gains travel at the pan rate and the level gains at the
+    // level rate, and the two rates are not the same. A strip that used one
+    // step for everything would pass every other check in this file.
+    {
+        GainRamp::Strip strip;
+        strip.latch ({ 1.0, 1.0, 0.0, 0.0 });
+
+        const GainRamp::Targets targets { 0.0, 0.0, 1.0, 1.0 };
+
+        for (int i = 1; i <= 16; ++i)
+        {
+            strip.next (targets, levelStep, panStep);
+
+            check (std::abs (strip.left.value - (double) i * panStep) < 1.0e-12
+                       && std::abs (strip.right.value - (double) i * panStep) < 1.0e-12,
+                   "a pan gain did not travel at the pan rate");
+            check (std::abs (strip.solo.value - (1.0 - (double) i * levelStep)) < 1.0e-12,
+                   "the solo gain did not travel at the level rate");
+        }
+
+        check (strip.left.value == strip.right.value,
+               "the two pan gains did not travel together");
+    }
+
+    // Both channels differ only by their pan, which is what the multiply order
+    // is for: each channel computing its own product of three would let them
+    // differ by a rounding step in the level as well, and a stereo image that
+    // wanders by a rounding step whenever a fader moves is not something
+    // anybody would find.
+    {
+        GainRamp::Strip strip;
+        strip.latch ({ 0.3, 0.7, 0.6, 0.8 });
+
+        const auto gain = strip.gains();
+
+        check (gain.left == 0.3 * 0.7 * 0.6 && gain.right == 0.3 * 0.7 * 0.8,
+               "a settled strip's two gains are not the level times each pan gain");
+    }
+
+    // And the settled path has to agree with the moving one, because the mixer
+    // takes one or the other for a whole block: a strip that arrives mid
+    // gesture must not change the gain by a rounding step as it settles.
+    {
+        GainRamp::Strip moving, still;
+        const GainRamp::Targets targets { 0.5, 1.25, 0.9, 0.1 };
+
+        moving.latch (targets);
+        still .latch (targets);
+
+        const auto stepped = moving.next (targets, levelStep, panStep);
+        const auto constant = still.gains();
+
+        check (stepped.left == constant.left && stepped.right == constant.right,
+               "a settled strip's constant does not match what one more sample would give");
+
+        check (still.settled (targets), "a latched strip does not report itself settled");
+    }
+
+    // Every one of the four, asked separately. A settled strip takes the
+    // constant path for the whole block and stops advancing, so a strip that
+    // overlooks one of its gains leaves that gain frozen wherever it had got
+    // to for as long as nothing else moves: a fader move that stops halfway
+    // and finishes only when somebody touches the pan. Asked one at a time
+    // because a strip that is off on three of four is unsettled whichever of
+    // them it happens to look at, which is what an earlier version of this
+    // check could not tell apart.
+    {
+        const GainRamp::Targets at { 0.5, 1.25, 0.9, 0.1 };
+
+        const GainRamp::Targets moved[] = { { 0.4, 1.25, 0.9, 0.1 },
+                                            { 0.5, 1.20, 0.9, 0.1 },
+                                            { 0.5, 1.25, 0.8, 0.1 },
+                                            { 0.5, 1.25, 0.9, 0.2 } };
+        const char* named[] = { "solo", "the fader", "the left pan gain", "the right pan gain" };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            GainRamp::Strip strip;
+            strip.latch (at);
+
+            check (! strip.settled (moved[(size_t) i]),
+                   std::string ("a strip reports itself settled while ") + named[(size_t) i]
+                       + " still has somewhere to go");
+        }
+    }
+
+    // A strip default constructed is at unity solo and silent everywhere else,
+    // which is what AudioEngine.h relies on in writing for the ramps it leaves
+    // default constructed.
+    {
+        const GainRamp::Strip fresh;
+
+        check (fresh.solo.value == 1.0, "a fresh strip does not start with solo at unity");
+        check (fresh.fader.value == 0.0 && fresh.left.value == 0.0 && fresh.right.value == 0.0,
+               "a fresh strip does not start silent, so a device opening would not be a latch "
+               "but a jump");
+    }
 }
 
 static void checkPanSweep()
@@ -1064,6 +1207,9 @@ int main()
 
     std::printf (" mute\n");
     checkMuteIsSilent();
+
+    std::printf (" the strip\n");
+    checkTheStrip();
 
     std::printf (" the pan sweep\n");
     checkPanSweep();
