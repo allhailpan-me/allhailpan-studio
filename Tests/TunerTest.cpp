@@ -1942,6 +1942,308 @@ static void testInputRing()
 }
 
 //==============================================================================
+// 11b. The block the tear check is blind to, which is the half of the ring's
+//      safety that a capacity cannot supply.
+//
+// WHAT THIS IS FOR. `readLatest` compares the writer's published counter
+// against the ring's capacity LESS the largest block that can land during a
+// copy. The subtraction is the load bearing part and it was missing: the
+// counter is published after a block rather than during it, so it understates
+// the writer's true position by up to one block, and comparing against the
+// capacity alone accepted any copy the writer had overtaken by less than that.
+//
+// That is a window one block wide at EVERY capacity, which is why the figure
+// the header used to lean on, `capacity >= snapshot + 2 * block`, could never
+// have closed it. `Tests/TunerProbe.cpp` measured it at 6 torn snapshots in
+// 43129 accepted at exactly that capacity and 4 in 69697 two blocks above it,
+// a rate that stops falling as the ring grows.
+//
+// Two checks, because either alone can be satisfied by the wrong thing. The
+// first is the bound itself, deterministically: a snapshot of exactly
+// `capacity - block` is the largest that can be served and one sample more
+// cannot be. The second is a real writer at a capacity BELOW the requirement,
+// where the old check accepted torn buffers two times in three: every accepted
+// snapshot has to be intact, and intact is checked by looking at the samples
+// rather than by trusting the return value.
+static void testTearBlindBlock()
+{
+    std::printf ("InputRing: the block the tear check must subtract\n");
+
+    // ---- the bound, exactly, with nothing racing ----------------------------
+    {
+        const int cap   = 4096;
+        const int block = 512;
+
+        Tuner::InputRing r;
+        r.setSize (cap, block);
+
+        std::vector<float> filler ((size_t) block, 1.0f);
+
+        for (int written = 0; written < 2 * cap; written += block)
+            r.write (filler.data(), block);
+
+        // The largest snapshot that leaves room to tell an intact copy from an
+        // overwritten one, and one sample more than that.
+        {
+            std::vector<float> fits ((size_t) (cap - block));
+            check (r.readLatest (fits),
+                   "the largest snapshot the bound allows was refused");
+        }
+
+        {
+            std::vector<float> over ((size_t) (cap - block + 1));
+            check (! r.readLatest (over),
+                   "a snapshot larger than the capacity less one block was served, so the "
+                   "tear check has no room left to notice a writer that overtook the copy");
+        }
+
+        // And the degenerate end, which unsigned arithmetic makes worth stating:
+        // a ring no larger than the block it may be handed has no safe span at
+        // all, and the subtraction must clamp rather than go negative in int
+        // arithmetic and then wrap to the largest possible span, which would
+        // turn a ring too small to serve safely into one that never refuses
+        // anything.
+        //
+        // SMALLER than the block and not equal to it, which is the whole value
+        // of this case. At equality the subtraction is zero whether it clamps or
+        // not, so a version with the clamp removed passes: that was a real gap
+        // in the first draft of this check and mutation testing is what found
+        // it. Only a capacity BELOW the bound makes the difference observable.
+        {
+            Tuner::InputRing tiny;
+            tiny.setSize (block / 2, block);
+
+            for (int written = 0; written < 4 * block; written += block)
+                tiny.write (filler.data(), block);
+
+            std::vector<float> dest ((size_t) (block / 2));
+            check (! tiny.readLatest (dest),
+                   "a ring smaller than the block it may be handed served a snapshot, so "
+                   "the safe span wrapped instead of clamping");
+        }
+
+        // The boundary itself, kept alongside it: exactly one block of capacity
+        // leaves a safe span of nothing, so nothing can be served either.
+        {
+            Tuner::InputRing exact;
+            exact.setSize (block, block);
+
+            for (int written = 0; written < 4 * block; written += block)
+                exact.write (filler.data(), block);
+
+            std::vector<float> dest ((size_t) block);
+            check (! exact.readLatest (dest),
+                   "a ring the size of one block served a snapshot");
+        }
+
+        // A NEGATIVE BOUND IS NOT CHECKED HERE, and the reason is worth writing
+        // down because the obvious check for it fails against correct code.
+        //
+        // Clamping it at zero looks like it must be observable: the span is the
+        // capacity less the block, so a negative block would add headroom and
+        // accept more than the capacity. It cannot, because `readLatest`
+        // refuses `want > cap` before the span is computed at all, and `want`
+        // is the only thing the extra headroom could ever admit. So the clamp
+        // is a provable no-op through the public interface rather than an
+        // untested line, and it stays as a statement of intent. A check that
+        // asserted a negative bound refuses the whole ring was written, failed
+        // on the fixed code, and is recorded here instead of being bent until
+        // it passed.
+
+        // Resized, which has to forget what the old buffer held.
+        //
+        // Unreachable today: the engine sizes its ring once in the constructor,
+        // because resizing it would allocate while the audio thread may be
+        // writing. It is checked anyway because the count is what a reader uses
+        // to decide there is enough audio, so a count carried across a resize
+        // is a reader served a buffer of fresh zeros as though it were a
+        // performance, and CLAUDE.md is plain about which of the four things new
+        // state needs is the one that survives testing.
+        {
+            Tuner::InputRing again;
+            again.setSize (cap, block);
+
+            for (int written = 0; written < 2 * cap; written += block)
+                again.write (filler.data(), block);
+
+            // Re-sized with a LARGER bound, so that the bound being carried over
+            // from the first call is observable too. Same capacity and the same
+            // block would not show it.
+            again.setSize (cap, 2 * block);
+
+            check (again.totalWritten() == 0,
+                   "a resized ring kept the count from the buffer it no longer has");
+
+            std::vector<float> dest ((size_t) (cap - block));
+            check (! again.readLatest (dest),
+                   "a resized ring served a snapshot out of a buffer that was just "
+                   "reallocated, which is silence handed back as audio");
+
+            // Refill it, and then the only thing that can refuse this snapshot
+            // is the new bound: it fits the old one exactly.
+            for (int written = 0; written < 2 * cap; written += block)
+                again.write (filler.data(), block);
+
+            check (! again.readLatest (dest),
+                   "a resized ring kept the block bound from the buffer it no longer has, "
+                   "so the span it checks against is the old one");
+
+            std::vector<float> fitsNew ((size_t) (cap - 2 * block));
+            check (again.readLatest (fitsNew),
+                   "a resized ring refused a snapshot that its new bound allows");
+        }
+    }
+
+    // ---- a real writer, below the requirement, where the old check tore -----
+    //
+    // The ramp rather than audio, so that continuity can be CHECKED instead of
+    // assumed: sample k carries k modulo 2^20, exact in a float and far enough
+    // from a block that a tear cannot pass for the one wrap a window may hold.
+    // A torn snapshot steps by a whole capacity somewhere in the middle, which
+    // is the discontinuity an estimator reads as a plausible wrong pitch.
+    //
+    // Bounded by the writer's own progress rather than by a number of attempts
+    // or a clock, so a machine that schedules these two threads unevenly makes
+    // this slower rather than flaky.
+    {
+        constexpr std::uint64_t modulus = 1ull << 20;
+
+        const int snapshot = 4096;
+        const int block    = 512;
+        const int cap      = snapshot + 64;     // below snapshot + 2 * block, on purpose
+
+        Tuner::InputRing r;
+        r.setSize (cap, block);
+
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &stop, block]
+        {
+            std::vector<float> out ((size_t) block, 0.0f);
+            std::uint64_t counter = 0;
+
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                for (int i = 0; i < block; ++i)
+                    out[(size_t) i] = (float) (counter++ % modulus);
+
+                r.write (out.data(), block);
+            }
+        });
+
+        while (r.totalWritten() < (std::uint64_t) cap)
+            std::this_thread::yield();
+
+        std::vector<float> dest ((size_t) snapshot);
+
+        const std::uint64_t startedAt = r.totalWritten();
+        const std::uint64_t budget    = 2000ull * (std::uint64_t) cap;
+
+        long long accepted = 0, torn = 0;
+
+        while (r.totalWritten() - startedAt < budget)
+        {
+            if (! r.readLatest (dest))
+                continue;
+
+            ++accepted;
+
+            for (size_t i = 1; i < dest.size(); ++i)
+            {
+                const double step = (double) dest[i] - (double) dest[i - 1];
+
+                if (step == 1.0 || step == -(double) (modulus - 1))
+                    continue;
+
+                ++torn;
+                break;
+            }
+        }
+
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+
+        std::printf ("  below the requirement: %lld accepted, %lld torn\n", accepted, torn);
+
+        check (torn == 0,
+               "a torn snapshot was accepted while a writer ran over it, so a buffer with a "
+               "discontinuity in the middle would reach the estimator and be read as a "
+               "confident wrong pitch");
+    }
+
+    // ---- and a real writer at a capacity that meets the requirement ---------
+    //
+    // Without this the check above is satisfied by a bound that refuses
+    // everything, which is a tuner that never shows a note. The requirement is
+    // what makes a copy acceptable at all, so above it some have to be.
+    {
+        constexpr std::uint64_t modulus = 1ull << 20;
+
+        const int snapshot = 4096;
+        const int block    = 512;
+        const int cap      = snapshot + 2 * block;
+
+        Tuner::InputRing r;
+        r.setSize (cap, block);
+
+        std::atomic<bool> stop { false };
+
+        std::thread writer ([&r, &stop, block]
+        {
+            std::vector<float> out ((size_t) block, 0.0f);
+            std::uint64_t counter = 0;
+
+            while (! stop.load (std::memory_order_relaxed))
+            {
+                for (int i = 0; i < block; ++i)
+                    out[(size_t) i] = (float) (counter++ % modulus);
+
+                r.write (out.data(), block);
+            }
+        });
+
+        while (r.totalWritten() < (std::uint64_t) cap)
+            std::this_thread::yield();
+
+        std::vector<float> dest ((size_t) snapshot);
+
+        const std::uint64_t startedAt = r.totalWritten();
+        const std::uint64_t budget    = 2000ull * (std::uint64_t) cap;
+
+        long long accepted = 0, torn = 0;
+
+        while (r.totalWritten() - startedAt < budget)
+        {
+            if (! r.readLatest (dest))
+                continue;
+
+            ++accepted;
+
+            for (size_t i = 1; i < dest.size(); ++i)
+            {
+                const double step = (double) dest[i] - (double) dest[i - 1];
+
+                if (step == 1.0 || step == -(double) (modulus - 1))
+                    continue;
+
+                ++torn;
+                break;
+            }
+        }
+
+        stop.store (true, std::memory_order_relaxed);
+        writer.join();
+
+        std::printf ("  at the requirement:    %lld accepted, %lld torn\n", accepted, torn);
+
+        check (accepted > 0,
+               "a capacity meeting the stated requirement accepted no snapshot at all, so the "
+               "tuner would show nothing rather than something wrong");
+        check (torn == 0, "a torn snapshot was accepted at the stated requirement");
+    }
+}
+
+//==============================================================================
 // 12. End to end: the ring, the estimator and the gate together, which is what
 //     the studio actually runs.
 //==============================================================================
@@ -3086,6 +3388,7 @@ int main()
     testGate();
     testPluckedGlide();
     testInputRing();
+    testTearBlindBlock();
     testEndToEnd();
     testClarity();
     testCumulativeMeanAgainstClosedForm();
