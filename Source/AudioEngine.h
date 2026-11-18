@@ -14,6 +14,7 @@
 #include "RecordAlign.h"
 #include "PanLaw.h"
 #include "FaderLaw.h"
+#include "GainRamp.h"
 #include "SoloGraph.h"
 #include "Tuner.h"
 
@@ -755,6 +756,29 @@ private:
         juce::AudioBuffer<float> sendScratch;              // one send's copy, mid flight
         LatencyDelay align;                                // levels this insert against the others
         std::array<LatencyDelay, kNumSends> sendAlign;     // levels each send against its destination's other inputs
+
+        // Audio thread only: where each send's level has got to, and which
+        // destination that level is currently feeding. Here beside sendAlign
+        // rather than on InsertControls because InsertControls is the control
+        // surface the interface reads and writes, and a ramp is the audio
+        // thread's own working state. One per gain that is applied, which is
+        // the discipline Ardour keeps by holding _current_gain in the Amp and
+        // nothing at all in the GainControl: the mixing loop and this loop
+        // read the same atomics and must not share a ramp.
+        //
+        // sendActiveTo starts at zero, which is "off", so the first block
+        // after a destination is chosen fades the send in from nothing rather
+        // than switching it on at full level.
+        std::array<GainRamp::Ramp, kNumSends> sendRamp {};
+        std::array<int, kNumSends>            sendActiveTo {};
+
+        // How many more samples the send has to keep running after its level
+        // has reached silence, so that sendAlign gives up what it is still
+        // holding instead of having the tail of the fade cut off inside it.
+        // Without this a send on a compensated path would fade out at this end
+        // and stop at the other, which is the click the ramp exists to remove
+        // appearing at a distance.
+        std::array<int, kNumSends>            sendFlush {};
     };
     struct ChannelSlot
     {
@@ -795,10 +819,23 @@ private:
         held, which is why it has no lock of its own. */
     void updateSolo();
 
-    /** Puts every solo ramp where it is going, so nothing fades. For the
+    /** Puts every moving gain where it is going, so nothing fades. For the
         start of a render and for a device opening, where a ramp would be a
-        fade on the front of a file or of the first block. */
-    void latchSoloRamps();
+        fade on the front of a file or of the first block.
+
+        Every one of them, not only solo: the fader, both pan gains and every
+        send level hold their state across blocks for the reason GainRamp.h
+        gives, and the other side of that is that a moment which is not a gain
+        change has to be told so. A bounce taken straight after a fader move
+        would otherwise open with a ramp from the old gain, and one taken
+        before a device has ever opened would open with a fade in from silence.
+        Ardour does the same thing in two places, disk_reader.cc:348-354 for
+        its declick when exporting offline and amp.cc:409-428 for its gain
+        whenever the transport is not where it expected to be.
+
+        Takes the pan law rather than reading it, so that a render latches the
+        same law it is about to mix the whole bounce under. */
+    void latchGainRamps (PanLaw::Law law);
     void processInsert (int index, int numSamples, PanLaw::Law law);
     void routeSends (int index, int numSamples);
     void mixChannelOutput (ChannelSlot&, const juce::AudioBuffer<float>& view, int numSamples);
@@ -880,12 +917,36 @@ private:
         to the figure above. One press of solo moves up to fifteen of these at
         once, and a gain that arrives in one sample is a click on every one of
         them. Latched to the target rather than ramped at the start of a
-        render and when a device opens. */
-    std::array<float, kNumInserts> soloRamp = [] {
-        std::array<float, kNumInserts> a;
-        a.fill (1.0f);
+        render and when a device opens.
+
+        Starts at unity because nothing is soloed until something is, and
+        because zero here is silence: a default constructed ramp would open the
+        studio with every insert fading up. */
+    std::array<GainRamp::Ramp, kNumInserts> soloRamp = [] {
+        std::array<GainRamp::Ramp, kNumInserts> a;
+        a.fill (GainRamp::Ramp { 1.0 });
         return a;
     }();
+
+    /** Audio thread only: the same, for the three gains that used to be
+        applied flat across the block.
+
+        The fader and the pan are read once a block, and before these existed
+        each was applied as one constant over the whole of it, so every fader
+        move, every pan move and every block of a volume or pan automation
+        curve stepped the gain between blocks. GainRamp.h has what that
+        sounds like and why the remedy is shaped the way it is.
+
+        Two pan ramps rather than one, on the two gains rather than on the
+        position, which is the trade GainRamp::panSeconds documents: it is what
+        lets the block be applied as one ramp per channel instead of
+        re-evaluating the law per sample, and it is why the pan span is shorter
+        than the level one.
+
+        These are safe to leave default constructed at zero: nothing reads them
+        before a device has opened, and opening one latches them. */
+    std::array<GainRamp::Ramp, kNumInserts> faderRamp {};
+    std::array<GainRamp::Ramp, kNumInserts> panRampL {}, panRampR {};
 
     // Published for the interface, which reads them without the graph lock
     // because that lock is held for the length of a bounce.
