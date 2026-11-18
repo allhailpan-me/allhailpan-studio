@@ -39,7 +39,15 @@
 //
 //   * EXACT ARRIVAL AND EXACT STEADINESS, as bitwise equality, because a gain
 //     that merely approaches its target leaves a mute 100 dB down rather than
-//     silent and a steady mix irreproducible.
+//     silent and a steady mix irreproducible. Both halves of that: arriving
+//     lands exactly, and nearly arrived does not report itself settled, which
+//     is the half with the consequence because the engine stops advancing a
+//     ramp it believes has arrived.
+//
+//   * AND THE TWO SPANS, PINNED, because every other check here takes its
+//     expectation from the span it is checking and so cannot see one move. A
+//     factor of four in the level span changes the sound of every fader, mute
+//     and solo in the studio and reads identically everywhere else below.
 //
 //   ./Tests/run.sh
 // ---------------------------------------------------------------------------
@@ -260,12 +268,21 @@ static void checkTheArtifact()
     }
 
     const double predicted = GainRamp::stepSidebandDb (perBlock, 1);
-    std::printf ("  the derivation says the stepped one should be %7.2f dB\n", predicted);
+    std::printf ("  the derivation says the stepped one should be %7.2f dB, which is %.4f dB away\n",
+                 predicted, std::abs (sidebandDb[1] - predicted));
 
     // The measurement against the derivation. If these disagree then either
     // the derivation in the header is wrong or this transform is, and until
     // they agree no reading here means anything.
-    check (std::abs (sidebandDb[1] - predicted) < 1.0,
+    //
+    // The bound comes from what the two actually agree to, 0.004 dB, rather
+    // than from a round number. A decibel of slack is 250 times that, and
+    // what fits in the gap is a constant in the derivation being wrong by a
+    // few per cent: pi written as 3 moves this reading by 0.40 dB and passed a
+    // bound of one. Thirteen times the observed agreement is loose enough that
+    // only a changed derivation or a changed transform can fail it, which is
+    // what the check is for.
+    check (std::abs (sidebandDb[1] - predicted) < 0.05,
            "the measured sideband of a per block constant gain disagrees with the derivation: measured "
                + std::to_string (sidebandDb[1]) + " dB, derived " + std::to_string (predicted) + " dB");
 
@@ -312,6 +329,35 @@ static void checkTheArtifact()
            "the derivation does not scale at 6 dB per doubling of the gain change per block");
     check (std::abs ((GainRamp::stepSidebandDb (perBlock, 2) - predicted) + 6.0206) < 1.0e-3,
            "the derivation does not fall at 6 dB per doubling of the sideband order");
+
+    // Which direction the gain moved cannot matter, and that is not a
+    // formality: the everyday case is a fader going DOWN, so the figure the
+    // engine's own gesture hands this is negative, and everything measured
+    // above hands it a positive one. A derivation that read a fade out as
+    // silent would have reported the one artifact this header exists to
+    // describe as absent, for half of all the moves there are.
+    const double downward = GainRamp::stepSidebandDb (-perBlock, 1);
+
+    check (std::abs (downward - predicted) < 1.0e-12,
+           "the derivation reads a gain moving down differently from the same move up: "
+               + std::to_string (downward) + " dB against " + std::to_string (predicted) + " dB");
+
+    // A gain that is not moving puts nothing anywhere, and has to be reported
+    // as far below everything rather than as a level. This figure is read in
+    // decibels relative to the signal, where zero is the loudest it can be, so
+    // a floor written as zero would report a still fader as the worst case
+    // there is.
+    check (GainRamp::stepSidebandDb (0.0, 1) < -300.0,
+           "a gain that does not move is not reported as putting nothing into the signal: "
+               + std::to_string (GainRamp::stepSidebandDb (0.0, 1)) + " dB");
+
+    // And a nonsense sideband order gives a number, for the same reason
+    // stepPerSample guards its two inputs: whatever is measuring prints this
+    // beside its own readings, and an infinity or a NaN there would spread
+    // into every figure next to it rather than announcing itself.
+    for (int k : { -2, -1, 0, 1, 2, 7 })
+        check (std::isfinite (GainRamp::stepSidebandDb (perBlock, k)),
+               "the derivation is not a usable number at sideband order " + std::to_string (k));
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +694,42 @@ static void checkSteadiness()
     check (arriving.settled (0.999), "a ramp that arrives mid block is not exactly on its target");
     check (arriving.value == 0.999, "a ramp that arrives is not bitwise on its target");
 
+    // And the other half of exact equality, which is the half that has a
+    // consequence: a ramp that is NEARLY there is not settled. The engine
+    // multiplies by `ramp.value` on the settled path and stops advancing the
+    // ramp at all, so one that reports itself settled while it is short of its
+    // target is a gain stuck off target for as long as nothing else moves. A
+    // mute would sit a hair above silence and a fader a fraction of a decibel
+    // from where the law put it, neither of which can be heard and both of
+    // which make a steady mix something other than the product of its own
+    // controls, which is the one claim this header makes about it.
+    //
+    // Asked with the smallest gap there is, the next double above unity, which
+    // is the only size that pins the claim rather than a reading of it: any
+    // larger gap leaves room for an epsilon smaller than it, and below this
+    // one there is nothing to ask about, because no two distinct gains of this
+    // order are closer together than this. A gap this small is also invisible
+    // in float, so a comparison made in float fails here too.
+    GainRamp::Ramp aHairShort { 1.0 };
+    const double justPast = std::nextafter (1.0, 2.0);
+
+    check (! aHairShort.settled (justPast),
+           "a ramp short of its target reports itself settled, so a gain can stick off its target");
+
+    check (aHairShort.next (justPast, step) == justPast,
+           "a ramp one representable step short of its target does not land exactly on it");
+
+    // A ramp nobody has placed anywhere is at silence. The engine relies on
+    // that in writing: the fader, the pan and the send ramps are left default
+    // constructed because opening a device latches them, and the solo ramps
+    // are filled with unity by hand precisely because zero would open the
+    // studio with every insert fading up. Any other default is a send that has
+    // never been touched starting at full level.
+    GainRamp::Ramp untouched;
+
+    check (untouched.value == 0.0, "a ramp nobody has placed anywhere does not start at silence");
+    check (untouched.settled (0.0), "a default constructed ramp does not report itself settled at silence");
+
     // And a latch, which is what a render and a device opening do, has to
     // leave nothing to fade. This is the property nothing else can catch: a
     // bounce that opened with the mixer catching up would sound like a quiet
@@ -862,6 +944,24 @@ static void checkStepGuards()
            "the level span is not a few milliseconds");
     check (GainRamp::panSeconds > 0.0005 && GainRamp::panSeconds < 0.01,
            "the pan span is not a few milliseconds");
+
+    // And the two figures themselves, pinned.
+    //
+    // Everything else in this file takes its expectation from the constant it
+    // is checking, which it has to: the span is what says how long a move
+    // should take, so there is nothing else to compare the move against. The
+    // consequence was measured rather than guessed at. A level span of 4.5 ms
+    // instead of 5, and one of 20 ms instead of 5, both passed every other
+    // check in this file, and so did a pan span of 0.8 ms instead of 1.5. Each
+    // of those changes the sound of every fader, mute, solo, pan and send in
+    // the studio.
+    //
+    // These two numbers are the whole of GainRamp.h's argument, taken against
+    // the two references that publish theirs, so moving one is a decision to
+    // be made with that comment open rather than a knob to turn. This is what
+    // says so.
+    check (GainRamp::levelSeconds == 0.005, "the level span is not the published five milliseconds");
+    check (GainRamp::panSeconds == 0.0015, "the pan span is not the published one and a half");
 }
 
 // ---------------------------------------------------------------------------
