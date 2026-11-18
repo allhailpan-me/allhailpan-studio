@@ -2602,6 +2602,46 @@ static void testPacing()
 
         check (share <= 0.25 + 1.0e-9, "the analysis thread took more than a quarter of a core");
 
+        // THE FIGURES TUNER.H QUOTES IN PROSE, checked rather than printed.
+        //
+        // The comment above `Pacing` names the reading rate at each of these
+        // rates and the mean hop at two of them, and those numbers are the
+        // whole argument for where the vibrato sweep below is centred: they are
+        // what says the reading rate lands in the middle of what a singer's
+        // vibrato and a guitarist's hand do. They were prose, derived once from
+        // the cost table and never recomputed, which is the shape of claim this
+        // project keeps finding wrong.
+        //
+        // Arithmetic over the table rather than a measurement, so the bound is
+        // tight. What the table's own four figures rest on is
+        // `Tests/TunerProbe.cpp`, which measures a reading and holds the one
+        // claim a processor cannot change, that the cost grows as the square of
+        // the sample rate.
+        {
+            struct Claim { double rate, readingsPerSecond, meanHopMs; };
+
+            // A hop of zero means the comment states no figure for that rate.
+            const Claim claims[] = { {  44100.0, 8.5, 118.0 },
+                                     {  48000.0, 8.5,   0.0 },
+                                     {  96000.0, 4.5, 221.0 },
+                                     { 192000.0, 1.1,   0.0 } };
+
+            for (const auto& q : claims)
+            {
+                if (q.rate != c.rate)
+                    continue;
+
+                checkNear (1.0 / hop, q.readingsPerSecond, 0.05,
+                           "the reading rate Tuner.h states for " + std::to_string ((int) c.rate)
+                           + " Hz is not what Pacing produces from the cost it states");
+
+                if (q.meanHopMs > 0.0)
+                    checkNear (hop * 1000.0, q.meanHopMs, 1.0,
+                               "the mean hop Tuner.h states for " + std::to_string ((int) c.rate)
+                               + " Hz is not what Pacing produces from the cost it states");
+            }
+        }
+
         // The dither has to actually spread, or it is a cost with no benefit.
         // Measured against the base rather than against a constant, because
         // the base is different at every rate.

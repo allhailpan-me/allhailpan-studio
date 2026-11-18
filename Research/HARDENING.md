@@ -1631,3 +1631,163 @@ what the probe holds to a bound, and the derived rates are checked against
 `Pacing` itself.
 
 Then mutation testing of whatever is added.
+
+### The fault
+
+**`InputRing`'s tear check was blind to one audio block at every ring size, and
+the header called the thing that was supposed to close that a correctness
+requirement.** A torn snapshot reaching the estimator is a discontinuity in the
+middle of the buffer, which YIN reads as a perfectly plausible and completely
+wrong period: the tuner shows a confident note that is not the one being
+played, with nothing on screen to say so.
+
+The arithmetic. The reader takes `before`, copies `[first, first + want)` where
+`first = before - want`, then takes `after`. Call the writer's true position,
+including the block it is partway through, T. The counter is published after a
+block rather than during it, so `after <= T <= after + block`. The copy survived
+only if the writer never came back round onto `first`, which is
+`T - first <= capacity`. Comparing `after - first` against the capacity, which
+is what it did, therefore accepts everything up to `T - first <= capacity +
+block`: a window one block wide, at **every** capacity.
+
+The header instead carried
+
+    capacity >= snapshot + 2 * largest block the callback will deliver
+
+and called it a correctness requirement, with tear rates quoted beside it as
+though the requirement were what the rates demonstrated. No capacity could have
+closed a window whose width does not depend on the capacity.
+
+Measured by `Tests/TunerProbe.cpp`, with the detection validated first against
+a ring nobody was writing to (20000 accepted, 0 torn):
+
+| capacity | accepted | torn | torn share |
+|---|---|---|---|
+| snapshot + 64 | 43965 | 27987 | 63.66% |
+| snapshot + 1 block | 45524 | 29 | 0.06% |
+| snapshot + 2 blocks, **the stated requirement** | 43129 | 6 | 0.01% |
+| snapshot + 3 blocks | 59990 | 3 | 0.01% |
+| snapshot + 4 blocks | 69697 | 4 | 0.01% |
+| snapshot x 4 | 200000 | 0 | 0.00% |
+
+**A rate that stops falling as the ring grows is the signature of a fixed blind
+window rather than of a ring that is too small, and reading it as the latter is
+how this survived two audits.** The three capacities the header quoted were two
+below the requirement and one nearly four times it, so between them they said
+only that a small ring tears and a large one does not, which was never in
+doubt. Nothing had ever walked across the boundary the requirement names.
+
+### The fix
+
+Compare against `capacity - block` instead. The same algebra then gives
+`T - first <= capacity`, which is the condition itself, so the check is sound at
+any capacity and does not lean on the ring being generous. The ring has to be
+told the largest block that can land during a copy, so `setSize` takes it and
+has **no default**: the engine passes `largestStudioBlockSamples`, the same
+constant the capacity is derived from, and a single threaded caller passes zero,
+which is a statement about its writer and not a way of switching the check off.
+The span is clamped at zero rather than allowed to go negative in int arithmetic
+and wrap to the largest possible span.
+
+The `snapshot + 2 * block` figure is kept and is still required, for the reason
+it actually serves rather than the one it was given: a copy is accepted only if
+the writer advanced at most `capacity - block - snapshot` during it, and the
+writer advances in whole blocks, so below that a reader overtaken by a single
+block is refused every time. That is the right way round. A ring too small now
+reads as a needle that does not move instead of one that lies.
+
+With the honest bound, over the same capacities, the same writer and the same
+run: **zero torn at all six**, and acceptance healthy at the requirement and
+above (43255 accepted at the requirement, 200000 at four times the snapshot).
+
+**Nobody will have heard it.** The shipped ring is `studioRingCapacity()`, four
+times the snapshot, where the probe found no torn snapshot in 200000 even with
+the old check. It was a fault in waiting that the capacity margin was carrying,
+which is why the margin is now documented as buying a needle that moves rather
+than as what makes a snapshot trustworthy.
+
+### What the probe does and does not settle
+
+`Tests/TunerProbe.cpp` reproduces the fault through the shipped ring rather than
+through a copy of it, by passing a block bound of zero, which is the old check
+exactly. A probe that demonstrates a bug against its own reimplementation of the
+code demonstrates nothing.
+
+- **The window table is exact and reproduces to the sample**: 5734, 6239, 12473
+  and 24939 at 44.1, 48, 96 and 192 kHz, 130 ms at every rate.
+- **The reading cost table is corroborated and is machine dependent.** This
+  sandbox measured 4.5, 5.4, 25.6 and 81.6 ms against the header's 9, 11, 48 and
+  197. That is a uniform factor of about two at the first three rates and 2.4 at
+  the top, which is one machine being faster than another rather than a figure
+  being wrong. The claim a processor cannot change, that the cost goes as the
+  square of the sample rate, is what the probe holds to a bound: measured 4.77x
+  and 3.19x across the two doublings, against 4.
+- **Every figure the comment derives from that table is right.** Checked as
+  assertions in the suite now rather than printed: 8.45 and 8.48 readings a
+  second at 44.1 and 48 kHz against the stated 8.5, 4.53 at 96 against 4.5, 1.10
+  at 192 against 1.1, and mean hops of 118.3 and 220.9 ms against the stated 118
+  and 221. The quarter of a core that `dutyMultiple = 3` is said to hold is
+  21.7% wherever the duty cycle binds.
+- **`studioRingCapacity` reproduces**: 99756 samples, 0.52 s at 192 kHz and
+  2.26 s at 44.1 kHz, against a requirement of 41323.
+- **The tear percentages themselves are a race and are not reproducible as
+  numbers.** 63.66% here against the header's 38% at the snapshot plus 64, on
+  two cores against however many the original had. What reproduces is the
+  ordering and the zero, which is what the decision rested on. The header now
+  quotes the probe's figures and says they are a race.
+
+### Mutation testing
+
+Seventeen mutations, compiled with the sanitizers exactly as `Tests/run.sh` has
+them. Fourteen caught, three survivors, of which two were real gaps in the first
+draft of the new test and are closed, and one is a provable no-op.
+
+| # | mutation | result |
+|---|---|---|
+| 1 | the subtraction removed, which is the original fault | caught, including by the racing check |
+| 2 | one sample too generous, `cap - maxBlock + 1` | caught |
+| 3 | the clamp on the span removed | **survived**, gap, closed |
+| 4 | two blocks subtracted instead of one | caught |
+| 5 | `maxBlock` never stored | caught |
+| 6 | `<=` becomes `<` in the comparison | caught |
+| 7 | tear check becomes a did-anything-arrive check | caught |
+| 8 | the check removed entirely, `return true` | caught |
+| 9 | the writer publishes before it copies | caught, only by the new racing check |
+| 10 | `first` one sample late | caught |
+| 11 | `setSize` leaves the counter behind | **survived**, gap, closed |
+| 12 | an overfilled write keeps the oldest samples | caught |
+| 13 | the negative clamp on `maxBlock` removed | **survived**, provable no-op |
+| 14 | `maxBlock` not updated on a resize | **survived**, gap, closed |
+| 15 | `jitter` halved to 0.2 | caught by the new rate assertions |
+| 16 | `dutyMultiple` 3 becomes 2 | caught |
+| 17 | the nominal interval 100 ms becomes 120 | caught |
+
+**The two gaps, and why they are worth recording as shapes.**
+
+Mutation 3 was checked at a capacity **equal** to the block, where the
+subtraction is zero whether it clamps or not, so removing the clamp passed. It
+needs a capacity **below** the block, where int arithmetic goes negative and the
+cast wraps to the largest possible span and accepts everything. A check that
+pushes a guard to its boundary is testing the one value most likely not to
+exercise it.
+
+Mutation 14 was checked by resizing with the **same** bound twice, so a bound
+carried over from the first call was invisible. It resizes with a larger one
+now. Same shape: a reset is only observable against a different value.
+
+**The no-op, mutation 13.** Clamping a negative block bound at zero looks like it
+must be observable, because the span is the capacity less the block and a
+negative block would add headroom. It cannot: `readLatest` refuses `want > cap`
+before the span is computed, and `want` is the only thing extra headroom could
+ever admit. A check asserting that a negative bound refuses the whole ring was
+written, failed against correct code, and is recorded in the test as a no-op
+rather than bent until it passed.
+
+**One breakage the suite cannot reach, named so nobody hunts for the test.**
+Passing a bound of zero at the engine's own call site, where a device callback
+is writing, reintroduces the fault exactly. `AudioEngine.cpp` cannot be compiled
+without JUCE, so no test here can see it. That is precisely why `setSize` has no
+default parameter: the bound has to be said out loud at every call site, and the
+one call site that matters says `Tuner::largestStudioBlockSamples`, the same
+constant the capacity is derived from, so the two cannot drift apart the way the
+capacity and the requirement once did.
