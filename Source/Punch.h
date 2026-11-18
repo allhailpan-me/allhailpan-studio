@@ -544,6 +544,38 @@ inline Placement placePass (double passStartBeat, double clipStartBeat, double b
     return out;
 }
 
+/** How far into its folder a pass reaches.
+
+    THIS IS THE FIGURE THAT HAS TO AGREE WITH THE FOLDER, and it is here for
+    the same reason `placePass` is: the one line that needs it cannot be
+    tested, and this can.
+
+    `regionFor` clamps the punch to the length of the folder it is told about,
+    because a comp cannot play past the end of the clip it is on. That length
+    is worked out before the passes go in, by walking them, and a pass sits at
+    a position in the folder and runs for its own length, so what it reaches is
+    the two added together.
+
+    Taking the length alone says a pass that starts a bar in reaches a bar less
+    far than it does. The punch is then clipped at the end of the clip that was
+    already there, and the part of it past that point is handed back to a take
+    with no audio in it: silent, in playback and in the bounce alike, while the
+    punch still reports that it happened and the pass sits in the folder
+    holding a performance nobody can hear. Measured on a ten second clip
+    punched from nine to twelve seconds, with the pass occupying folder seconds
+    eight to thirteen, two seconds of the take that had just been punched in
+    were silent. Nothing errors.
+
+    Deliberately the same arithmetic as `TakeFolder::longestSeconds`, which is
+    what `tidyFolder` sizes the folder to, down to flooring the position and
+    not the length: agreeing with the figure the folder actually ends up with
+    is the whole job, so the two must not be free to drift.
+*/
+inline double passReach (double passStart, double passLength) noexcept
+{
+    return std::max (0.0, passStart) + passLength;
+}
+
 /** Whether a punch would land on a clip that is already carrying something,
     which is the question that decides whether this is a punch at all or just
     a recording. Both in beats, the clip's end exclusive.
