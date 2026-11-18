@@ -1696,6 +1696,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
             if (sequencing)
                 applyAutomation (blockStartBeat);
 
+            // And after a locate, whatever the gain ramps are holding belongs
+            // to the old position too. Latched here rather than up in the
+            // branch above, because applyAutomation has just written the
+            // volume and pan atomics for the new position and those are two of
+            // the four things these ramps follow: latching before it would put
+            // them on the gains of wherever the transport used to be and then
+            // slew from there. That ordering is the whole of the fault this
+            // line exists to avoid, and it is the same one the authority
+            // behind the latch names: Ardour reseeds from the first sample of
+            // the curve, not from the control it left behind (amp.cc:409-428).
+            //
+            // A loop wrap is deliberately left to ramp, for the same reason
+            // the branch above leaves its compensation lines alone: that audio
+            // really is the continuation of what was just heard, and a gain
+            // stepping at every wrap is a click once a bar.
+            if (jumped)
+            {
+                latchGainRamps (panLaw.load());
+
+                for (auto& ins : insertSlots)
+                    ins.sendFlush.fill (0);
+            }
+
             // Locked to the song while it plays, free running while stopped.
             applyModulation (isRunning ? blockStartBeat : modFreeClock);
             modFreeClock += numSamples * beatsPerSample;
@@ -2846,10 +2869,19 @@ void AudioEngine::routeSends (int index, int numSamples)
             // Nothing to feed and nowhere to feed it, so there is no fade to
             // be had: turning a destination off is the same truncation as
             // repointing it. Latched rather than left where it was so that
-            // choosing a destination again starts from silence, and the line
-            // emptied for the same reason it is emptied above.
+            // choosing a destination again starts from silence.
+            //
+            // The line is NOT emptied here, and that is deliberate rather than
+            // an omission. The branch above already emptied it on the one
+            // block where the destination changed, and nothing can write to it
+            // afterwards because process is never reached while a send is off,
+            // so there is nothing to empty. Doing it here instead costs a
+            // memset of the whole line on every block of every switched off
+            // send, which is two per insert by default: with a lookahead
+            // plugin reporting 4096 samples and a 64 sample buffer that is
+            // over a megabyte a block, walked through the cache, in a 1.3 ms
+            // budget, paid by somebody who does not use sends at all.
             ramp.latch (0.0);
-            align.reset();
             flush = 0;
             continue;
         }
@@ -2997,19 +3029,17 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
     updateLatency();
 
     // The ramps start where they are going rather than where live playback
-    // left them. Nothing a ramp follows can change during a render, because
-    // this function holds the graph lock for all of it, so the only thing one
-    // could do here is put a few milliseconds of fade on the front of the
-    // bounce: move a fader, or engage a solo, and export at once, and the
-    // first few hundred samples of the file would be the mixer catching up
-    // with the mix. A bounce has to be the same from its first sample to its
-    // last, and this is the moment where that is cheap to guarantee and
-    // invisible to get wrong.
+    // left them: move a fader, or engage a solo, and export at once, and the
+    // front of the file would otherwise be the mixer catching up with the mix.
+    // A bounce has to be the same from its first sample to its last.
     //
-    // Latched under the law the render is about to use rather than under
-    // whatever the mixer is live under, because the pan ramps are on the two
-    // gains and the law is what turns a position into them.
-    latchGainRamps (renderLaw);
+    // Done on the first block of the loop below rather than here, because two
+    // of the four gains a ramp follows are written by the automation inside
+    // that loop. The comment there has the failure that ordering causes.
+    //
+    // Solo cannot change during a render, because this function holds the
+    // graph lock for all of it.
+    bool firstBlock = true;
 
     struct RestoreCompensation
     {
@@ -3094,6 +3124,32 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         if (sequencing)
             applyAutomation (blockStart);
         applyModulation (blockStart);
+
+        // The gain ramps are put where they are going HERE, on the first block
+        // and after that block's automation has been written, rather than
+        // before the loop.
+        //
+        // That ordering is the whole of it. applyAutomation stores a volume or
+        // pan curve's value straight into the same two atomics the mixer reads
+        // its targets from, so a latch taken before the loop captures whatever
+        // the live transport or somebody's hand last left in them, and then
+        // this block overwrites them with the curve's value at fromBeat and
+        // the mixer slews from one to the other. Two consequences, both silent
+        // and both exactly what a latch exists to prevent: a bounce of a range
+        // where a curve sits at unity, taken after playing to a fade out, opens
+        // with the first few milliseconds fading in from the fade's last
+        // value, so a downbeat at sample zero loses its attack; and rendering
+        // the same range twice gives two different files, because the first
+        // render leaves the atomics where its own last block put them.
+        //
+        // Ardour reseeds from the first sample of the automation curve for the
+        // same reason, and tells the two cases apart by whether the transport
+        // is where it expected to be (amp.cc:409-428).
+        if (firstBlock)
+        {
+            latchGainRamps (renderLaw);
+            firstBlock = false;
+        }
 
         for (int slotIndex = 0; slotIndex < kNumChannels; ++slotIndex)
         {
