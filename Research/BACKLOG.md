@@ -81,6 +81,171 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-18: the fader, the pan and the sends stop stepping
+
+### What was looked at
+
+The open pull requests decided the area before anything else did. Nine
+hardening branches hold `Project.h`, `MainComponent.cpp`, both editors,
+`Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`,
+`NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h` and two
+files in `Source/Fx`, and `Source/Synth` and `Source/Fx` are being built by
+hand. `Project.h` and `LatencyGraph.h` between them rule out almost every
+arrangement and routing idea: new project state needs the first and any change
+to the signal topology needs the second.
+
+What that leaves is the inside of a mixer strip, and the mixer's state does not
+live in `Project.h` at all: it is `AudioEngine::InsertControls`, which no open
+branch touches, alongside `AudioEngine.cpp`, `ProjectIO.cpp` and
+`MixerComponent.h`.
+
+| Candidate | Verdict |
+|---|---|
+| **The fader, the pan and the send levels interpolated across the block** | **Chosen.** `mixChannelOutput` reads `volume` and `pan` once per block and applies each as a constant gain over the whole block; `routeSends` does the same with `copy.applyGain (level)`. So every fader move, every pan move, every send move and every block of a volume or pan **automation** curve steps the gain between blocks. Solo and input monitoring are already ramped, and the comment above the solo ramp makes the whole argument for why: "a gain that steps between two blocks puts a discontinuity on each of them at whatever the signal happened to be". That argument was never applied to the fader sitting two lines below it. |
+| Polarity invert and a trim on each strip | Deferred, and worth its own night. Every console has a polarity switch in its preamp and this studio has none, which matters to anybody recording one source with two microphones, or a microphone and a direct box, where a polarity error is the usual reason a blend sounds thin. It is also the smaller half of the job: the thing that actually fixes comb filtering is a per strip delay to time align the two, and a delay changes the compensation graph, which is `LatencyGraph.h`, which #72 holds. Both halves on the same night, when that file is free. |
+| A subgroup: an insert's output routed to another insert rather than to the master | Deferred by the same lock, and the lock is the right one. A drum bus or a guitar bus is standard everywhere and is a real gap in a sixteen insert mixer. It is a change to the signal topology, so the compensation arithmetic has to know about it, and that arithmetic is deliberately in `LatencyGraph.h` so that it can be tested. Building it against the engine instead would be exactly the "decisions moved back into the engine stop being testable" failure `CLAUDE.md` warns about. |
+| Pre fader sends, and Ardour's mute point | Deferred rather than rejected. Well specified in `libs/ardour/delivery.cc` and a real mixing control, but it is worth less to somebody recording and mixing their own guitar than the thing that makes every existing fader move quiet. |
+| Stem export, clip gain, autosave, count-in | **Not gaps at all, and the backlog was wrong about three of them.** `AudioEngine::renderOffline` already takes `stemInserts` and `ExportJob` already writes stems; autosave and crash recovery are in `MainComponent` and `Preferences`; the count-in is in the engine. The 11-12 entry deferred stem export on the grounds that the names live in `Project.h`. Recorded here so a later night checks the code before trusting a deferral: a deferral ages into a false claim about what is missing. |
+
+### Why this one is worth a night
+
+It is the second of the three kinds the brief asks for: present, and notably
+weaker than the industry norm. The studio already has volume and pan
+automation, through `AutoTargetKind::insertVolume` and `insertPan`, and an
+automated fade is the single worst case for a per block gain, because it is a
+gain moving continuously for as long as the fade lasts. An automated fade is
+therefore not merely slightly rough here, it is the feature whose whole purpose
+is defeated by the way the gain is applied.
+
+The artifact is derivable, and the derivation is what says how much it matters.
+A per block constant gain is the intended gain multiplied by a zero order hold
+sampled at the block rate. For a control moving at a constant rate the error is
+a sawtooth of period `N/fs` and peak to peak amplitude `dg`, the gain change
+per block, whose `k`th harmonic has amplitude `dg/(pi k)`. Against a signal at
+`f0` that puts sidebands at `f0 +- k fb` at `20 log10 (dg / (2 pi k))`
+relative to the signal. Fading a channel from unity to silence over 100 ms at
+48 kHz on a 512 sample buffer gives `dg = 0.107` and a first sideband at
+**-35.4 dB**, at 93.75 Hz either side of every component of the signal. The
+same fade over two seconds gives -61.4 dB. The sidebands are inharmonic and
+they move when the buffer size changes, which is what the word zipper is
+describing.
+
+That derivation is sampling theory rather than an audio specification, and the
+research found **no published audibility threshold for it anywhere**, so the
+floor the test holds the ramped version to is this project's own number and the
+header says so.
+
+### What the research settled, and what it changed
+
+The `dsp-researcher` agent read Ardour at `c453ffb4` and JUCE at 9.0.3 rather
+than any summary of them. The full report is long; what decided the design:
+
+**Ardour does not interpolate across the buffer, and the smoothing time is not
+the block length.** `libs/ardour/amp.cc:195-213` runs a one pole low pass on
+the *linear* gain, `a = 156.825f / sample_rate`, which is the small `w`
+approximation to a 25 Hz corner: a time constant of 6.3765 ms, the same at
+every sample rate, 29.3 ms to 99 per cent. `_current_gain` is a member, so a
+move takes as many blocks as it takes. The same filter is applied to the per
+sample automation curve at `amp.cc:106-116`, and the same `Amp` sits inside
+every send's `Delivery`, so a send level is smoothed by exactly the same
+figure.
+
+**Ramping across the whole block, which is the obvious cheap fix, is the one
+thing not to do.** It needs no state and always arrives by the end of the
+block, and it makes the smoothing time a function of the buffer size: 1.33 ms
+at 64 samples and 42.7 ms at 2048, at 48 kHz. `renderOffline` is a second code
+path over the same graph, so a project would bounce differently from how it
+played and differently again at another buffer size. That is the class of bug
+`CLAUDE.md` calls among the worst a studio can have. Neither reference does it.
+
+**Linear in gain, not in decibels.** JUCE's own documentation, at
+`juce_SmoothedValue.h:228-237`: "Note that when you are using multiplicative
+smoothing you cannot ever reach a target value of zero!", and it is asserted
+rather than only documented. JUCE's `dsp::Gain` and `dsp::Panner` both use the
+`Linear` type despite offering `Multiplicative`, and the Web Audio API throws
+on an exponential ramp to zero. A fader has to reach silence and a mute has to
+reach silence, so the decibel domain is the wrong one.
+
+**A slew limiter beats a one pole, and this studio already has one.** Ardour's
+one pole never arrives, so it carries an epsilon snap at `GAIN_COEFF_DELTA`,
+1e-5 of linear gain, in four separate places to make it terminate
+(`amp.cc:136, 219, 285`, `delivery.cc:354`). JUCE's `SmoothedValue` is a finite
+linear ramp whose last step is an assignment rather than an increment, so it
+arrives exactly with no accumulated drift. The solo and monitor ramps here are
+already the better shape of the two: a linear slew clamped against the target,
+which arrives exactly, holds its state across blocks, and is expressed as a
+time rather than a sample count. The new ramps are the same arithmetic, which
+is now in a header both can be tested through.
+
+**The pan is the one place the two references disagree, and both are
+defensible.** A pan position means two gains, and smoothing the two gains is
+not the same as smoothing the position: the straight line from (1, 0) to
+(0, 1) passes through (0.5, 0.5), whose power is exactly -3.01 dB, so a hard
+left to hard right move dips in the middle. Ardour smooths the gains and bounds
+the damage by making the span short, at most 64 samples, which is 1.45 ms at
+44.1 kHz and 1.33 ms at 48 (`panner_1in2out.cc:161-180`); its *automated* pan
+path instead interpolates the position and evaluates the law per sample
+(`panner_1in2out.cc:257-300`). JUCE smooths the gains over 50 ms
+(`juce_Panner.cpp:78-79`), which carries that 3 dB dip for fifty times as long
+and is the worse of the two. This follows Ardour: the gains, over a short span,
+expressed as a time rather than a sample count so it does not change with the
+sample rate the way 64 samples does.
+
+**Ardour's pan ramp itself is not worth copying verbatim, and the researcher
+proved it rather than suspecting it.** `left_interp` is advanced by a delta
+derived from the error in `left`, which lags it through a `0.9` pole, so the
+arrival is a damped oscillation across block boundaries rather than a monotone
+one: simulated for a centre to hard right move at 1024 samples a block, block 1
+crosses zero and spends 1.3 ms at a **negative** left gain, 8.5 per cent of
+full scale, before converging over five or six blocks. The test here asserts
+monotone arrival, which an exact copy of Ardour's code would fail.
+
+**Seed every ramp at the start of a bounce.** Ardour says this twice.
+`disk_reader.cc:348-354` turns the declick off and sets the smoother's state
+directly to the target when `_session.exporting () && !_session.realtime_export ()`,
+and `amp.cc:409-428` reseeds `_current_gain` from the first sample of the
+automation curve whenever the transport is discontinuous, which includes the
+first block of a bounce. `latchSoloRamps` already does exactly this here, for
+the solo ramp and for a device opening, and its comment already carries the
+argument. The new ramps join it, and the function is renamed for what it now
+does.
+
+### What was rejected on the research
+
+- **A one pole, Ardour's own mechanism.** Rejected for the slew limiter it
+  already has, on two grounds. It never arrives, so it needs an epsilon snap
+  bolted on in every place it is read, and a steady fader then sits 1e-5 away
+  from its own gain rather than exactly on it, which costs the bit
+  transparency that makes a mix reproducible. And the studio would then have
+  two smoothing laws, since the solo and monitor ramps are slew limiters, so
+  solo and the fader would move at different shapes through the same multiply.
+- **Interpolating the pan position and evaluating the law per sample**, which
+  is what Ardour's automated pan path does and is exactly constant power at
+  every instant. Rejected for tonight on cost and risk rather than on
+  correctness: `PanLaw::gains` is three sines, two divisions and three square
+  roots under the -4.5 dB law, and it would mean a per sample loop in the
+  mixer where there is now one `applyGainRamp` per channel, which is the one
+  place `CLAUDE.md`'s warning about advancing a smoother through one channel
+  and continuing it into the next could bite. The bounded alternative is
+  measured instead: the test asserts the energy deficit through a full width
+  sweep, so the span is defensible by measurement rather than by assertion.
+- **A dead band, Ardour's 1e-5 absolute in linear gain** (`amp.cc:136`).
+  Not needed by a slew limiter: a change smaller than one block's worth of
+  travel completes inside that block and is applied as a ramp that ends exactly
+  on the target, so there is nothing for a dead band to protect against. Worth
+  recording because it looks like a missing safety net and is not.
+- **Any figure from Reaper, Logic, Cubase or Pro Tools.** None of the four
+  publishes a smoothing time. Pro Tools does publish "Smoothing" and
+  "Thinning", and they are a false friend: both are about how many breakpoints
+  a write pass records, not about gain interpolation. The cross studio numbers
+  that exist, Pro Tools under 0.5 ms through to Studio One at about 320 ms, are
+  one person's rendered measurement (Admiral Bumblebee, "DAW v DAW: Automation
+  part 2") and are recorded as corroboration rather than as specification. The
+  5 ms this studio already uses sits between Logic's measured 5 and Ardour's
+  computed 6.4.
+
+---
+
 ## 2026-11-17: finishing the loopback measurement rather than starting something new
 
 ### What was looked at
