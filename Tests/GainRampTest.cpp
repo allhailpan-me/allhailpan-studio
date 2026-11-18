@@ -473,24 +473,38 @@ static void checkAFaderBeingDragged()
     // only 6 dB an octave where this one falls at twelve.
     //
     // A one pole, which is what Ardour uses, smooths every move over the same
-    // time whatever its size, and at a 6.4 ms time constant would take about
-    // 30 dB off this reading rather than 11.7. It was not taken tonight and
-    // the reason is in Research/BACKLOG.md: it never arrives, so it needs an
-    // epsilon snap wherever it is read, and at a time constant long enough to
-    // be worth having it would also make a mute or a solo slower than the five
-    // milliseconds this studio deliberately chose for them. The measurement is
-    // recorded so that a later night can take that trade with the numbers
-    // already in hand.
+    // time whatever its size, and at its 6.38 ms time constant takes 42.59 dB
+    // off this reading rather than 11.71. That is measured, by
+    // Tests/GainRampProbe.cpp, which runs this same drag through both laws;
+    // an earlier version of this comment estimated it at "about 30" and an
+    // audit found the estimate four times out in amplitude, in the direction
+    // that flattered the law that was kept.
+    //
+    // What the better law costs is in the probe too: it reaches -40 dB of a
+    // mute in 29.3 ms and exact silence in 73.3 ms, against 5.02 ms here, and
+    // five milliseconds is the figure this studio chose for a mute and a solo
+    // on purpose. That is the trade, and it is recorded rather than settled,
+    // so a later night can take it with the numbers in hand.
     check (cases[1].highDb - cases[2].highDb > 8.0,
            "the ramp removes less than 8 dB of the error above 2 kHz: stepped "
                + std::to_string (cases[1].highDb) + " dB, ramped " + std::to_string (cases[2].highDb) + " dB");
 
-    // The ideal is the floor again: a straight line has no error against
-    // itself, so this reading says how much of what is above is the
-    // measurement rather than the artifact.
-    check (cases[0].highDb < cases[2].highDb - 30.0,
-           "the measurement's own floor is within 20 dB of the ramped reading: floor "
-               + std::to_string (cases[0].highDb) + " dB, ramped " + std::to_string (cases[2].highDb) + " dB");
+    // The ideal reads -1000 dB here and that is arithmetic rather than a
+    // measurement: the error is the gain minus the ideal, and for this case
+    // the gain IS the ideal, so the array is identically zero whatever the
+    // transform, the window or the bin range do.
+    //
+    // It is kept as a check on this harness, which is all it ever was, and
+    // labelled as such. An earlier version of it claimed to be the floor of
+    // the measurement, in the manner of the window that `Fx/WaveFolder.h`
+    // records reading -55 dB whatever was put into it, and it could not have
+    // been: a reading that cannot fail cannot stand behind anything. What this
+    // measurement's credibility actually rests on is the floor in
+    // checkTheArtifact, which is a real -122.65 dB against a real -55.40, and
+    // on the stepped reading there landing on the derivation.
+    check (cases[0].highDb == -1000.0,
+           "the harness reports error where the gain is the ideal itself, so something other than "
+           "the gain is being differenced");
 }
 
 // ---------------------------------------------------------------------------
@@ -900,7 +914,15 @@ static void checkTheStrip()
     // is for: each channel computing its own product of three would let them
     // differ by a rounding step in the level as well, and a stereo image that
     // wanders by a rounding step whenever a fader moves is not something
-    // anybody would find.
+    // anybody would find by listening.
+    //
+    // Checked on the moving path as well as the settled one, with generated
+    // values, because the settled check alone could not see it: an audit broke
+    // the grouping inside next and it survived, since the cases here happened
+    // to hold a pan gain at unity or to group the same way. A single rounding
+    // step is inaudible, so this is a claim being held to rather than a bug
+    // being prevented, which is reason enough: a comment that says a thing is
+    // load bearing should be covered or should not say so.
     {
         GainRamp::Strip strip;
         strip.latch ({ 0.3, 0.7, 0.6, 0.8 });
@@ -909,6 +931,27 @@ static void checkTheStrip()
 
         check (gain.left == 0.3 * 0.7 * 0.6 && gain.right == 0.3 * 0.7 * 0.8,
                "a settled strip's two gains are not the level times each pan gain");
+    }
+
+    {
+        std::mt19937 rng (0x51D4u);
+        std::uniform_real_distribution<double> value (0.0, 3.1622776601683795);
+
+        for (int trial = 0; trial < 2000; ++trial)
+        {
+            GainRamp::Strip strip;
+            strip.latch ({ value (rng), value (rng), value (rng), value (rng) });
+
+            const GainRamp::Targets targets { value (rng), value (rng), value (rng), value (rng) };
+            const auto gain = strip.next (targets, levelStep, panStep);
+
+            // The ramps now hold what that sample used, so the two gains are
+            // reconstructible exactly, and only under one grouping.
+            const double level = strip.solo.value * strip.fader.value;
+
+            check (gain.left == level * strip.left.value && gain.right == level * strip.right.value,
+                   "a moving strip's channels are not one level times each pan gain");
+        }
     }
 
     // And the settled path has to agree with the moving one, because the mixer
@@ -997,7 +1040,9 @@ static void checkPanSweep()
         // how much energy a pan move may lose. A full width jump is the worst
         // case the control can be given, and the compensated law travels a
         // factor of root two further, so it takes that much longer and costs
-        // that much more: 3.4 and 4.8 dB ms measured, bounded at 6.
+        // that much more: 2.80 and 3.95 dB ms measured, bounded at 6. Those
+        // two figures are what the printf below prints, and an audit caught
+        // them stale here once already after the measurement moved.
         check (atPan < 6.0,
                "a full width pan jump loses more than 6 dB ms of energy: " + std::to_string (atPan));
 

@@ -63,19 +63,32 @@
     follow, so there is one law rather than two shapes meeting in the same
     multiply.
 
-    What it costs is measured rather than waved away, in GainRampTest's drag
-    check. A slew limiter's smoothing time is proportional to the size of the
-    move, so the small jumps an interface makes while somebody drags a fader,
-    about a twentieth of the travel at sixty a second, are smoothed over
-    thirteen samples. That removes the discontinuity completely, which is the
-    audible part, and takes 11.7 dB off the error that lands above 2 kHz. A one
-    pole smooths every move over the same time whatever its size and would take
-    about 30 dB off instead. The reason it is not here is that at a time
-    constant long enough to be worth having it would make a mute and a solo
-    slower than the five milliseconds this studio deliberately chose for them,
-    and it would need the epsilon machinery. Both numbers are in
-    Research/BACKLOG.md so that trade can be taken later with the measurement
-    already in hand rather than from scratch.
+    What it costs is measured rather than waved away, and the measurement is
+    kept: Tests/GainRampProbe.cpp runs the same fader drag through both laws.
+    A slew limiter's smoothing time is proportional to the size of the move,
+    so the small jumps an interface makes while somebody drags a fader, about
+    a twentieth of the travel at sixty a second, are smoothed over thirteen
+    samples. That removes the discontinuity completely, which is the audible
+    part, and takes 11.71 dB off the error that lands above 2 kHz. A one pole
+    smooths every move over the same time whatever its size and takes 42.59 dB
+    off instead, which is a great deal more.
+
+    It is not here for two reasons, and the honest statement of the trade is
+    that the first is a real cost and the second is only machinery. At Ardour's
+    own time constant a one pole reaches -40 dB of a mute in 29.3 ms and exact
+    silence in 73.3 ms, where the slew limiter is exactly silent in 5.02 ms,
+    and five milliseconds is the figure this studio deliberately chose for a
+    mute and a solo. And it arrives only because of an epsilon snap, which
+    Ardour needs in four separate places.
+
+    So this is the cheaper law, knowingly, and the better one is costed rather
+    than dismissed: the probe is in the tree and the figures are in
+    Research/BACKLOG.md, so a later night can take it with the measurement in
+    hand. An earlier version of this comment estimated the one pole at "about
+    30 dB" and an audit measured 42.59. Worth leaving on the record, because a
+    number that is present, plausible and wrong is what this project keeps
+    meeting, and here it was in the argument rather than in the signal, in the
+    direction that flattered the decision already made.
 
     One thing it does NOT fix, which is worth knowing before trusting it: a
     control that only changes once a block still arrives as a staircase, and a
