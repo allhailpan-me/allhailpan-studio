@@ -349,6 +349,7 @@ braces on their own line.
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
 | `InputSource.h` | Which input channel feeds which mixer insert, Auto-map, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
 | `RealFFT.h` | A radix-2 transform for real signals. No JUCE, so the spectral chain is testable end to end |
+| `Tuner.h` | The chromatic tuner: equal temperament, YIN from the paper, the gate that decides whether to show a number, the pacing of the readings, and the ring the audio thread writes into. No JUCE |
 | `Spectrogram.h` | Short time analysis and weighted overlap-add resynthesis: the window, the hop, and the sum that has to come back flat. No JUCE |
 | `SpectralEdit.h` | A region of the time against frequency plane and the gain applied to it, with tapered edges so a repair does not ring. No JUCE |
 | `WarpMap.h` | Warp markers: the piecewise beat to source mapping. No JUCE, so it can be tested on its own |
@@ -596,6 +597,41 @@ divide out the best fitting scale first. The table normalises by its loudest
 stored sample and a continuous peak sits between samples, so the two differ
 by about a tenth of a percent, which reads as -60 dB and hides everything the
 check is for.
+
+**A requirement on a capacity cannot close a window whose width does not
+depend on the capacity.** `Tuner::InputRing` lets the audio thread write while
+the display reads, with no lock, and detects a reader the writer has run over
+by reading the write counter before and after the copy. The counter is
+published after a block rather than during it, so it understates the writer's
+true position by up to one block, and the check compared against the ring's
+capacity. That accepts any copy the writer had overtaken by less than a block,
+at every capacity, and a torn snapshot is a discontinuity in the middle of the
+buffer that YIN reads as a perfectly plausible and completely wrong period: a
+confident wrong note with nothing on screen to say so.
+
+The header carried `capacity >= snapshot + 2 * block` as the remedy and called
+it a correctness requirement. It was not one. The check subtracts the block
+now, which makes it sound at any capacity, and the capacity figure is kept for
+what it really decides: whether a copy can be accepted at all, since the writer
+advances in whole blocks. Below it a reader is refused every time, so a ring
+that is too small shows nothing rather than something wrong, which is the right
+way round.
+
+Two things about it worth more than the fix. The tear rates quoted beside the
+claim were measured at a capacity far below the requirement and at one nearly
+four times it, so they only ever said that a small ring tears and a large one
+does not. Walking across the boundary the requirement actually names found 6
+torn snapshots in 43129 accepted at it, and 4 in 69697 two blocks above it: **a
+rate that stops falling as the ring grows is a fixed blind window, not a ring
+that is too small**, and reading it as the latter is how this survived two
+audits. And it was never audible, because the shipped ring takes four times the
+snapshot and the margin was carrying it. A number that is present, plausible
+and wrong, in the argument rather than in the signal.
+
+`Tests/TunerProbe.cpp` reproduces it through the shipped ring rather than
+through a copy of it, by passing a block bound of zero, which is the old check
+exactly. A probe that demonstrates a fault against its own reimplementation of
+the code demonstrates nothing.
 
 **A modulation routing is saved in the project, so it is named and not
 numbered.** `Synth/ModMatrix.h` gives every source and destination a stable
