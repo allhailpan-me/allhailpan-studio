@@ -194,6 +194,40 @@ said in bulk is how a gap hides:
   untested, so the invariant is what makes the judgement checkable rather than
   argued.
 
+### The flag found one more thing, in a test nobody was looking at
+
+`main` was already failing CI when this branch started, on `TunerTest`, and
+adding `-D_GLIBCXX_ASSERTIONS` made it fail nearly every time rather than
+sometimes. That is worth separating out, because the flag is not the fault.
+
+The tuner's tear check runs a writer thread against a reader and, at a capacity
+meeting the stated requirement, asserts that at least one snapshot is accepted.
+Without that, the check above it is satisfied by a bound that refuses
+everything, which is a tuner that never shows a note. The loop ran until the
+**writer** had written a fixed amount, and the comment above it said that this
+"makes this slower rather than flaky" on a machine that schedules the two
+threads unevenly.
+
+It does the opposite, and the comment is the thing that was wrong. The writer
+is the thread nothing ever slows down. Anything that slows the reader, a loaded
+runner with two cores, a sanitizer, a bounds check inside the copy, lets the
+writer spend the whole budget while the reader accepts nothing, and the check
+fails against a ring that is working perfectly. Measured here, the accepted
+count went 517, then 2, then 19 across three runs of the same binary, and zero
+on the runner.
+
+Bounded by the reader instead, it runs until 32 snapshots have been accepted,
+with a cap on attempts so that a writer which never starts fails the check
+rather than hanging the suite. 621 and 1144 attempts on two runs, against a cap
+of fifty million.
+
+The general form is worth more than the fix. **A threaded check whose budget is
+spent by the thread it is not measuring is a check about the machine.** It
+passed on fast hardware for a day and was red on the runner the whole time,
+which is also why a red test on `main` should not be left to stand: this one
+had been failing since the morning and the next thing to go red would have had
+nothing to stand out against.
+
 ### What is proven, and what is still only reasoned
 
 The table is proven. Beyond the 33 mechanical mutants, an audit hand built five
