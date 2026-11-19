@@ -663,19 +663,14 @@ static void theHeadOfACaptureIsKeptRatherThanDropped()
 // Everything else here is either a part of that sum pinned to a literal, or
 // the behaviour at an edge that the sum cannot speak for.
 //
-// Two deliberate breakages of placeMidiEvent survive everything below, which
-// is written down here so nobody goes looking for the check that should have
-// caught them. Both are genuinely unobservable rather than gaps:
-//
-//   - Loosening `loopTo > loopFrom` to `loopTo >= loopFrom`. The test that
-//     follows it is strictly stronger: with loopTo equal to loopFrom, no
-//     rawBeat can satisfy `rawBeat >= loopFrom && rawBeat < loopTo`, so the
-//     circular branch is still never entered and the length is never divided
-//     by.
-//   - Removing the opening isfinite test on rawBeat and offsetBeats. IEEE
-//     subtraction with a non-finite operand never produces a finite result,
-//     so every case it rejects is rejected one line later by the isfinite
-//     test on `corrected`. It is a clearer guard, not a second one.
+// One thing this file got wrong the first time, kept here because the shape of
+// it is worth more than the fix. Every check placed a single event, and a rule
+// that is right for every event on its own can still be wrong for a note: the
+// loop wrapping that used to live in placeMidiEvent sent a note on to the top
+// of the cycle and left its note off where it was, and this file blessed that,
+// because it asked where one event goes and never where a note goes. An audit
+// found it. aNoteSurvivesAsANote is the check that closes it, and it is the
+// first thing to add to whenever a rule here grows a new case.
 
 // The trim in samples, written out from the convention rather than read from
 // the header. A test that takes its expected value from the constant it is
@@ -893,9 +888,12 @@ static void theMidiOffsetIsTheSumOfItsParts()
 //
 //     midi - audio == bufferSize + midiInputLatency - inputLatency - trim/2
 //
-// and it is exactly that where neither floor binds. Where one does, the
-// relation is false and the amount it is false by is pinned below rather than
-// the check being loosened until it passes.
+// where neither figure's floor binds, and says that where one does the
+// relation is false rather than approximate. Both halves of that are asserted
+// here: the stated form over generated configurations that keep clear of the
+// floors, and, where a floor binds, the amount it is false by pinned to its
+// own literal rather than the check being loosened until it passes. The
+// universal form the header quotes is the last thing below.
 
 static void theTwoOffsetsStayInStep()
 {
@@ -1172,8 +1170,7 @@ static void aMidiNotePlayedOnTheBeatLandsOnTheBeat()
             int position = 0;
             const double raw = rawBeatForNotePlayedAt (rig, played, position);
 
-            const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats,
-                                                             rig.recordStart, 0.0, 0.0);
+            const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats, rig.recordStart);
 
             check (placed.keep, "a note played after the record point was thrown away");
             checkClose (placed.beat, onTheBeat, 1.0e-9 + std::abs (onTheBeat) * 1.0e-12,
@@ -1222,7 +1219,7 @@ static void aMidiNotePlayedOnTheBeatLandsOnTheBeat()
         int position = 0;
         const double raw   = rawBeatForNotePlayedAt (rig, played, position);
         const auto placed  = RecordAlign::placeMidiEvent (raw, (double) offset * bps,
-                                                          rig.recordStart, 0.0, 0.0);
+                                                          rig.recordStart);
 
         const double onTheBeat = rig.recordStart + (double) played * bps;
         const double outBy     = std::abs (placed.beat - onTheBeat) / bps;
@@ -1266,7 +1263,7 @@ static void aMidiNotePlayedOnTheBeatLandsOnTheBeat()
             int position = 0;
             const double raw = rawBeatForNotePlayedAt (rig, played, position);
             const auto placed = RecordAlign::placeMidiEvent (raw, (double) offset * bps,
-                                                             rig.recordStart, 0.0, 0.0);
+                                                             rig.recordStart);
             const double onTheBeat = rig.recordStart + (double) played * bps;
 
             check (placed.keep, "a note from a silent driver was thrown away");
@@ -1275,56 +1272,24 @@ static void aMidiNotePlayedOnTheBeatLandsOnTheBeat()
         }
     }
 
-    // ---- and round a loop, which is what a pattern is recorded over ----
-    //
-    // A note played in the first few milliseconds of a pass belongs before the
-    // loop start, and the loop start and the loop end are the same musical
-    // instant, so it belongs at the end of the pattern rather than nowhere.
-    {
-        MidiRig rig;
-        rig.sampleRate  = 48000.0;
-        rig.bpm         = 120.0;
-        rig.block       = 256;
-        rig.engine      = 900;
-        rig.reportedOut = 300;
-        rig.reportedIn  = 400;
-        rig.recordStart = 16.0;
-
-        const double bps      = rig.bps();
-        const double loopFrom = 16.0;
-        const double loopTo   = 32.0;
-        const int    offset   = RecordAlign::midiCaptureOffsetSamples (rig.figures());
-        const double offsetBeats = (double) offset * bps;
-
-        // Played a little before the loop came round, so it was heard and
-        // written down just after the transport had gone back to the top.
-        const double before    = 0.5 * offsetBeats;
-        const double belongsAt = loopTo - before;
-        const double raw       = loopFrom + (offsetBeats - before);
-
-        check (raw >= loopFrom && raw < loopTo && before > 0.0,
-               "the loop case was not set up inside its own loop range");
-
-        const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats, rig.recordStart,
-                                                         loopFrom, loopTo);
-
-        check (placed.keep, "a note played at the top of a loop pass was thrown away");
-        checkClose (placed.beat, belongsAt, 1.0e-9,
-                    "a note belonging just before the loop start did not land just before its end");
-    }
 }
 
 // ---------------------------------------------------------------------------
-// A linear transport drops what belongs before the record point, because at
-// that instant the player was hearing music from before it. Both sides of the
-// boundary are pinned: a note exactly on the record point is part of the take.
+// What belongs before the record point is held there rather than dropped.
+//
+// The distinction matters more than it looks, and the header has the argument:
+// a player pushing the downbeat is most players most of the time and the
+// correction is of the same order as the push, so under a drop the first note
+// of a take vanishes more often than not, and MainComponent::finishRecording
+// would drop it a second time anyway. A MIDI clip has no pre-roll to keep it
+// in, the way an audio take does.
 
-static void anEventBeforeTheRecordPointIsDropped()
+static void anEventBeforeTheRecordPointIsHeldThere()
 {
     const double recordStart = 8.0;
     const double offset      = 2.0;
 
-    const auto onIt = RecordAlign::placeMidiEvent (10.0, offset, recordStart, 0.0, 0.0);
+    const auto onIt = RecordAlign::placeMidiEvent (10.0, offset, recordStart);
     check (onIt.keep, "a note landing exactly on the record point was thrown away");
     checkClose (onIt.beat, 8.0, 0.0, "a note landing on the record point did not land exactly there");
 
@@ -1337,260 +1302,198 @@ static void anEventBeforeTheRecordPointIsDropped()
     check (corrected < recordStart && recordStart - corrected < 1.0e-14,
            "the boundary case is not actually one ulp before the record point");
 
-    const auto before = RecordAlign::placeMidiEvent (justBefore, offset, recordStart, 0.0, 0.0);
-    check (! before.keep, "a note from before the record point was kept");
+    const auto before = RecordAlign::placeMidiEvent (justBefore, offset, recordStart);
+    check (before.keep, "a note from a hair before the record point was thrown away");
+    checkClose (before.beat, recordStart, 0.0,
+                "a note from a hair before the record point was not held at it");
 
-    const auto wellBefore = RecordAlign::placeMidiEvent (5.0, offset, recordStart, 0.0, 0.0);
-    check (! wellBefore.keep, "a note from well before the record point was kept");
+    // Well before it, which is the pushed downbeat the clamp exists for: ten
+    // to sixty milliseconds early is a whole beat at these distances, and it
+    // still belongs in the take rather than nowhere.
+    const auto wellBefore = RecordAlign::placeMidiEvent (5.0, offset, recordStart);
+    check (wellBefore.keep, "a note from well before the record point was thrown away");
+    checkClose (wellBefore.beat, recordStart, 0.0,
+                "a note from well before the record point was not held at it");
+
+    // Nothing may ever come back earlier than the record point, whatever it
+    // was handed. That is the one thing finishRecording relies on: it rebases
+    // by the record start and keeps only what is not negative.
+    const auto wayBefore = RecordAlign::placeMidiEvent (-1.0e6, offset, recordStart);
+    check (wayBefore.keep && wayBefore.beat >= recordStart,
+           "a note from a long way before the record point came back before it");
 
     const auto after = RecordAlign::placeMidiEvent (std::nextafter (10.0, 20.0), offset,
-                                                    recordStart, 0.0, 0.0);
-    check (after.keep, "a note one ulp after the record point was thrown away");
+                                                    recordStart);
+    check (after.keep, "a note one ulp after the record point was moved");
+    check (after.beat > recordStart, "a note after the record point was clamped to it");
 
     // A record point that is not a number is a studio that has lost track of
-    // when it started. Keeping what was played is the less destructive answer
-    // and is what the header documents, so it is pinned rather than left to
-    // whichever way the comparison happens to fall.
+    // when it started. There is nothing to clamp against, so the correction
+    // stands on its own rather than everything being flattened onto a number
+    // that is not one.
     for (const double lost : { std::nan (""), std::numeric_limits<double>::infinity(),
                                -std::numeric_limits<double>::infinity() })
     {
-        const auto kept = RecordAlign::placeMidiEvent (10.0, offset, lost, 0.0, 0.0);
-        check (kept.keep, "a record point that is not a number threw the whole take away");
-        checkClose (kept.beat, 8.0, 0.0, "a note was moved by a record point that is not a number");
+        const auto kept = RecordAlign::placeMidiEvent (10.0, offset, lost);
+        check (kept.keep, "a record point that is not a number threw the take away");
+        checkClose (kept.beat, 8.0, 0.0,
+                    "a note was moved by a record point that is not a number");
     }
 
     // A negative offset, which only a trim larger than the whole round trip
-    // can ask for, moves the note later and cannot drop it.
-    const auto later = RecordAlign::placeMidiEvent (10.0, -2.0, recordStart, 0.0, 0.0);
+    // can ask for, moves the note later and cannot be clamped.
+    const auto later = RecordAlign::placeMidiEvent (10.0, -2.0, recordStart);
     check (later.keep && later.beat == 12.0, "a negative offset did not push the note later");
 }
 
 // ---------------------------------------------------------------------------
-// A looping transport is a cycle the player is playing round, so the move
-// wraps inside it rather than falling off the front. Nothing is dropped, the
-// answer is always inside the half open range, and the move is a whole number
-// of cycles: those three together say the wrap is musically right, without
-// restating the arithmetic that produces it.
+// A NOTE SURVIVES AS A NOTE
+//
+// Single event checks cannot see this and the file's first version did not
+// have it, which is how it came to bless a wrap that corrupted note pairs: a
+// note on landing a hair before the loop start was sent to the top of the
+// cycle while its note off, a beat later, was not. Each event was placed
+// perfectly well on its own. What came out was a blip at the far end of the
+// pattern, because MainComponent::collectRecordedMidi pairs the two and can
+// only clamp a reversed pair to a sixty-fourth.
+//
+// So a pair is taken through together here, and what is asserted is the thing
+// a musician would say: the note that comes back is the part of the note that
+// is in the take. Never reversed, never longer than it was played, and shorter
+// only by whatever of it was played before the take began.
 
-static void aLoopingTransportWrapsRatherThanDropping()
+/** What MainComponent::collectRecordedMidi makes of a pair, which is where the
+    symptom of a broken pair actually shows up (MainComponent.cpp:792-801). */
+static double pairedLength (double onBeat, double offBeat)
 {
-    std::mt19937 rng (5150u);
-
-    std::uniform_real_distribution<double> fromDist   (-200.0, 200.0);
-    std::uniform_real_distribution<double> lenDist    (0.01, 64.0);
-    std::uniform_real_distribution<double> unitDist   (0.0, 1.0);
-    std::uniform_real_distribution<double> offsetDist (-20.0, 120.0);
-    std::uniform_real_distribution<double> startDist  (-500.0, 500.0);
-
-    for (int trial = 0; trial < 20000; ++trial)
-    {
-        const double loopFrom = fromDist (rng);
-        const double length   = lenDist (rng);
-        const double loopTo   = loopFrom + length;
-        const double rawBeat  = loopFrom + unitDist (rng) * length;
-        const double offset   = offsetDist (rng);     // often longer than the loop
-        const double start    = startDist (rng);
-
-        if (! (rawBeat >= loopFrom && rawBeat < loopTo))
-            continue;                                 // a rounding put it outside
-
-        const auto placed = RecordAlign::placeMidiEvent (rawBeat, offset, start,
-                                                         loopFrom, loopTo);
-
-        const std::string label = "loop trial " + std::to_string (trial);
-
-        check (placed.keep, label + ": a note was dropped from a looping transport");
-        check (placed.beat >= loopFrom && placed.beat < loopTo,
-               label + ": a wrapped note landed outside the half open loop range");
-
-        // Whole cycles only. The loop start and the loop end are the same
-        // musical instant, so that is the only move a wrap is allowed to make.
-        const double cycles = (placed.beat - (rawBeat - offset)) / length;
-        checkClose (cycles, std::round (cycles), 1.0e-6,
-                    label + ": a wrapped note moved by something other than whole cycles");
-
-        if (failures > 0)
-            return;
-    }
-
-    // Said the way a musician would: a note belonging d beats before the loop
-    // start comes back d beats before the loop end.
-    for (int trial = 0; trial < 20000; ++trial)
-    {
-        const double loopFrom = fromDist (rng);
-        const double length   = lenDist (rng);
-        const double loopTo   = loopFrom + length;
-
-        // Away from both ends of the cycle, because at either end a rounding
-        // of a few parts in 10^16 is the difference between the top of the
-        // pattern and the bottom of it, and that is a property of asking the
-        // question there rather than of the answer.
-        const double d       = (0.1 + 0.8 * unitDist (rng)) * length;
-        const double already = unitDist (rng) * length * 0.99;
-
-        const double rawBeat = loopFrom + already;
-        const double offset  = d + already;
-
-        if (! (rawBeat >= loopFrom && rawBeat < loopTo))
-            continue;
-
-        const auto placed = RecordAlign::placeMidiEvent (rawBeat, offset, loopFrom,
-                                                         loopFrom, loopTo);
-
-        check (placed.keep, "a note belonging before the loop start was dropped");
-        checkClose (placed.beat, loopTo - d, 1.0e-9 + std::abs (loopTo) * 1.0e-12,
-                    "a note belonging d beats before the loop start did not land d before its end");
-
-        if (failures > 0)
-            return;
-    }
-
-    // ---- the half open boundary ----
-
-    // Landing exactly on the loop end belongs at the loop start, not at the
-    // end: the two are the same instant and the range is half open everywhere
-    // else here.
-    {
-        const auto onTheEnd = RecordAlign::placeMidiEvent (4.0, -4.0, 0.0, 0.0, 8.0);
-        check (onTheEnd.keep, "a note landing on the loop end was dropped");
-        checkClose (onTheEnd.beat, 0.0, 0.0, "a note landing on the loop end was left there");
-    }
-
-    // ---- THE HALF OPEN GUARANTEE AT ITS WORST CASE ----
-    //
-    // Found by writing this file, as a fault rather than as a case: the guard
-    // used to sit on `within` alone, and it does not cover the addition after
-    // it. A correction landing one unit in the last place before the loop
-    // start gives a `within` genuinely less than the length, and then
-    // `loopFrom + within` rounds up to exactly loopTo on its own, because
-    // loopFrom is the larger number and its last place is the coarser one.
-    //
-    // What it would have cost: the event comes back at the loop end, a whole
-    // cycle later than it belongs and outside the range everything else here
-    // keeps. Its note off, written down a few beats later, wraps correctly, so
-    // the pair arrives in the wrong order and
-    // MainComponent::collectRecordedMidi can only resolve that by clamping the
-    // note to a sixty-fourth.
-    //
-    // It needs the corrected beat to land inside half of loopTo's last place
-    // below loopFrom, which for a four beat loop at bar 2049 is two
-    // hundredths of a microsecond, so no session was ever going to meet it. It
-    // is pinned because the invariant is stated, not because the window is
-    // wide: an invariant that holds except where nobody looks is the kind this
-    // project keeps being bitten by.
-    {
-        const double loopFrom = 16.0;
-        const double loopTo   = 28.0;                 // a length of 12, not a power of two
-        const double length   = loopTo - loopFrom;
-        const double corrected = std::nextafter (16.0, 0.0);
-        const double shortfall = loopFrom - corrected;
-
-        const double rawBeat = 20.0;
-        const double offset  = rawBeat - corrected;
-
-        // The construction is checked rather than trusted. If any of this
-        // stops rounding the way it does, the case below is proving nothing
-        // and says so instead of passing for the wrong reason.
-        check (rawBeat - offset == corrected, "the boundary case's own arithmetic is not exact");
-        check (shortfall > 0.0 && length - shortfall < length,
-               "the shortfall this case needs no longer survives the length");
-        check (loopFrom + (length - shortfall) == loopTo,
-               "the final addition this case is about no longer rounds up to the loop end");
-
-        const auto placed = RecordAlign::placeMidiEvent (rawBeat, offset, loopFrom,
-                                                         loopFrom, loopTo);
-        check (placed.keep, "a note a hair before the loop start was dropped");
-        check (placed.beat < loopTo,
-               "a correction one ulp before the loop start came back at the loop end");
-        check (placed.beat == loopFrom,
-               "a correction that rounds up to the loop end did not go back to the loop start");
-    }
-
-    // The same at a loop whose start is small enough that the final addition
-    // is exact, which is the other half of the guard and was never broken.
-    {
-        const double loopFrom = 0.0;
-        const double loopTo   = 12.0;
-        const double corrected = -std::nextafter (0.0, 1.0);   // a hair below the start
-        const auto placed = RecordAlign::placeMidiEvent (4.0, 4.0 - corrected, loopFrom,
-                                                         loopFrom, loopTo);
-        check (placed.keep, "a note a hair before the loop start was dropped");
-        check (placed.beat >= loopFrom && placed.beat < loopTo,
-               "a note a hair before the loop start landed outside the half open range");
-    }
-
-    // A loop shorter than the offset wraps round more than once rather than
-    // running a subtract-until loop, and still lands inside the range.
-    {
-        const auto placed = RecordAlign::placeMidiEvent (1.0, 1000.5, 0.0, 0.0, 4.0);
-        check (placed.keep, "a note was dropped from a loop shorter than the offset");
-        check (placed.beat >= 0.0 && placed.beat < 4.0,
-               "a loop shorter than the offset did not wrap into its own range");
-        checkClose (placed.beat, 0.5, 1.0e-9,
-                    "a loop shorter than the offset wrapped to the wrong place");
-    }
-
-    // A degenerate loop is not a loop. An empty or inverted range leaves the
-    // transport linear, which is what the engine passes when nothing is set.
-    for (const double to : { 16.0, 15.0, 0.0, -1.0 })
-    {
-        const auto placed = RecordAlign::placeMidiEvent (20.0, 2.0, 0.0, 16.0, to);
-        check (placed.keep, "a degenerate loop range threw the note away");
-        checkClose (placed.beat, 18.0, 0.0,
-                    "a degenerate loop range wrapped the note instead of leaving it alone");
-    }
+    return std::max (1.0 / 64.0, offBeat - onBeat);
 }
 
-// ---------------------------------------------------------------------------
-// Which timeline applies is decided by where the event was written down, not
-// by a range merely being set. A transport that has not reached the loop yet
-// is still linear, and wrapping there would teleport an event into a range the
-// player had not got to.
-
-static void theLoopIsChosenOnWhereTheEventWasWrittenDown()
+static void aNoteSurvivesAsANote()
 {
-    const double loopFrom = 8.0;
-    const double loopTo   = 16.0;
+    std::mt19937 rng (808u);
 
-    // Written down before the loop. Linear, so it moves back and stays there.
+    std::uniform_real_distribution<double> startDist  (0.0, 400.0);
+    std::uniform_real_distribution<double> offsetDist (0.0, 2.0);
+    std::uniform_real_distribution<double> unitDist   (0.0, 1.0);
+    std::uniform_real_distribution<double> lenDist    (1.0 / 32.0, 4.0);
+
+    int clamped = 0, whollyBefore = 0, untouched = 0;
+
+    for (int trial = 0; trial < 40000; ++trial)
     {
-        const auto placed = RecordAlign::placeMidiEvent (4.0, 1.0, 0.0, loopFrom, loopTo);
-        check (placed.keep, "an event before the loop was dropped");
-        checkClose (placed.beat, 3.0, 0.0,
-                    "an event before the loop was wrapped into a range the player had not reached");
+        const double recordStart = startDist (rng);
+        const double offsetBeats = offsetDist (rng);
+        const double length      = lenDist (rng);
+
+        // The transport is at or after the record point when anything is
+        // written down, so a raw beat never precedes it. Most of the range is
+        // inside the first few offsets of the take, which is where the clamp
+        // bites and where the broken pairs lived.
+        const double reach  = (trial % 4 == 0) ? 40.0 : 3.0 * offsetBeats + 0.05;
+        const double onRaw  = recordStart + unitDist (rng) * reach;
+        const double offRaw = onRaw + length;
+
+        const auto on  = RecordAlign::placeMidiEvent (onRaw,  offsetBeats, recordStart);
+        const auto off = RecordAlign::placeMidiEvent (offRaw, offsetBeats, recordStart);
+
+        const std::string label = "pair trial " + std::to_string (trial);
+
+        check (on.keep && off.keep, label + ": half of a note was thrown away");
+        if (! (on.keep && off.keep))
+            return;
+
+        // In order. This is the one the wrap broke, and it is first because
+        // everything else is meaningless once a note runs backwards.
+        check (off.beat >= on.beat, label + ": a note came back ending before it started");
+
+        // Never longer than it was played, and never reaching before the take.
+        check (on.beat >= recordStart && off.beat >= recordStart,
+               label + ": a note reached back before the record point");
+
+        const double heldFor = off.beat - on.beat;
+        const double tol     = 1.0e-9 + std::abs (recordStart) * 1.0e-12;
+
+        check (heldFor <= length + tol, label + ": a note came back longer than it was played");
+
+        // And shorter only by the part of it that was played before the take
+        // began, which is the part that is not in the take. Anything else is
+        // either lost performance or invented length.
+        const double playedBefore = std::clamp (recordStart - (onRaw - offsetBeats), 0.0, length);
+        checkClose (heldFor, length - playedBefore, tol,
+                    label + ": a note lost something other than the part played before the take");
+
+        // The symptom, modelled where it actually appears. A sixty-fourth is
+        // what collectRecordedMidi falls back to when a pair makes no sense,
+        // so reaching it for a note that still has something left of it is
+        // the fault this check exists for.
+        const double paired = pairedLength (on.beat, off.beat);
+
+        if (heldFor >= 1.0 / 64.0)
+            checkClose (paired, heldFor, tol,
+                        label + ": a note that survived still came back as the sixty-fourth clamp");
+
+        if (playedBefore >= length)
+        {
+            ++whollyBefore;
+            checkClose (heldFor, 0.0, tol,
+                        label + ": a note played entirely before the take kept a length");
+        }
+        else if (playedBefore > 0.0)
+            ++clamped;
+        else
+            ++untouched;
+
+        if (failures > 0)
+            return;
     }
 
-    // The same, where the linear rule drops it and the circular one would have
-    // teleported it to the far end of a pattern that has not been played yet.
+    // The counts are asserted so this cannot quietly stop exercising the case
+    // it exists for. A run that never clamps anything is a run that would have
+    // passed against the wrap as well.
+    std::printf ("  pairs  %d untouched, %d clamped at the record point, %d played entirely before it\n",
+                 untouched, clamped, whollyBefore);
+    check (clamped > 2000 && untouched > 2000 && whollyBefore > 200,
+           "the pair check stopped reaching the cases it is for");
+
+    // ---- the regression itself, with the numbers it was measured at ----
+    //
+    // A player pushing the downbeat of a four bar pattern by two and a half
+    // milliseconds at 120 bpm. Under the wrap this came back as `on 31.995
+    // length 0.01562`, a sixty-fourth at the far end of the pattern. It is
+    // a whole note at the top of it.
     {
-        const auto placed = RecordAlign::placeMidiEvent (4.0, 5.0, 0.0, loopFrom, loopTo);
-        check (! placed.keep,
-               "an event before the loop and before the record point was kept, "
-               "which means it was treated as circular");
+        const double bps         = 120.0 / 60.0 / 48000.0;
+        const double recordStart = 16.0;
+        const double offsetBeats = 1456.0 * bps;          // 300 out, 900 engine, 256 block
+        const double push        = 0.0025 * 2.0;          // 2.5 ms at two beats a second
+
+        const double onRaw  = recordStart - push + offsetBeats;
+        const double offRaw = onRaw + 0.5;
+
+        const auto on  = RecordAlign::placeMidiEvent (onRaw,  offsetBeats, recordStart);
+        const auto off = RecordAlign::placeMidiEvent (offRaw, offsetBeats, recordStart);
+
+        check (on.keep && off.keep, "the pushed downbeat was thrown away");
+        checkClose (on.beat, 16.0, 1.0e-12, "the pushed downbeat did not land on the downbeat");
+        checkClose (pairedLength (on.beat, off.beat), 0.5 - push, 1.0e-9,
+                    "the pushed downbeat did not come back as the note that was played");
+        check (pairedLength (on.beat, off.beat) > 1.0 / 64.0,
+               "the pushed downbeat came back as a blip");
+        check (on.beat < 17.0, "the pushed downbeat was sent somewhere else in the pattern");
     }
 
-    // Written down after the loop end, which is where the transport goes when
-    // a loop range is cleared mid-pass. Still linear.
+    // A note shorter than the offset, played at the very top of a take. Both
+    // ends belong before the record point, so nothing of it is in the take and
+    // a zero length is the honest answer rather than a symptom: the sixty
+    // fourth that collectRecordedMidi then applies is the only thing it can do
+    // with a note that was over before recording began.
     {
-        const auto placed = RecordAlign::placeMidiEvent (20.0, 6.0, 0.0, loopFrom, loopTo);
-        check (placed.keep, "an event after the loop was dropped");
-        checkClose (placed.beat, 14.0, 0.0,
-                    "an event after the loop was wrapped into it");
-    }
-
-    // Exactly on the loop start is inside the loop, and exactly on the loop
-    // end is outside it. Both pinned, because both are one character in the
-    // comparison and neither announces itself.
-    {
-        const auto onStart = RecordAlign::placeMidiEvent (8.0, 2.0, 8.0, loopFrom, loopTo);
-        check (onStart.keep, "an event exactly on the loop start was dropped");
-        checkClose (onStart.beat, 14.0, 1.0e-12,
-                    "an event exactly on the loop start was not treated as inside the loop");
-
-        const auto onEnd = RecordAlign::placeMidiEvent (16.0, 10.0, 0.0, loopFrom, loopTo);
-        check (onEnd.keep, "an event exactly on the loop end was dropped");
-        checkClose (onEnd.beat, 6.0, 1.0e-12,
-                    "an event exactly on the loop end was treated as inside the loop");
+        const auto on  = RecordAlign::placeMidiEvent (8.01, 1.0, 8.0);
+        const auto off = RecordAlign::placeMidiEvent (8.02, 1.0, 8.0);
+        check (on.keep && off.keep, "a note from before the take was thrown away");
+        checkClose (on.beat, 8.0, 0.0, "a note from before the take did not land at its start");
+        checkClose (off.beat, 8.0, 0.0, "a note from before the take did not land at its start");
     }
 }
 
@@ -1610,45 +1513,54 @@ static void hostileFiguresAndPlacements()
     const double inf  = std::numeric_limits<double>::infinity();
 
     const double pool[] = { nan, inf, -inf, 0.0, -0.0, 1.0, -1.0, 4.0, 16.0,
-                            1.0e308, -1.0e308, 5.0e-324 };
+                            1.0e308, -1.0e308, 5.0e-324, 9007199254740992.0,
+                            -9007199254740992.0, 1.0e-300, 0.1, -1.0e6 };
     const int    n = (int) (sizeof (pool) / sizeof (pool[0]));
 
-    int kept = 0;
+    int kept = 0, dropped = 0;
 
     for (int a = 0; a < n; ++a)
       for (int b = 0; b < n; ++b)
         for (int c = 0; c < n; ++c)
-          for (int d = 0; d < n; ++d)
-            for (int e = 0; e < n; ++e)
+        {
+            const auto placed = RecordAlign::placeMidiEvent (pool[a], pool[b], pool[c]);
+
+            if (! placed.keep)
             {
-                const auto placed = RecordAlign::placeMidiEvent (pool[a], pool[b], pool[c],
-                                                                 pool[d], pool[e]);
+                // The only reason to refuse is an input that is not a number.
+                // Anything a transport and a tempo can really produce has to
+                // come back placed somewhere.
+                ++dropped;
 
-                if (! placed.keep)
-                    continue;
-
-                ++kept;
-
-                if (! std::isfinite (placed.beat))
+                if (std::isfinite (pool[a] - pool[b]))
                 {
-                    fail ("a note was kept at a beat that is not a number");
+                    fail ("a note with a perfectly good position was thrown away");
                     return;
                 }
 
-                // Where the loop was usable and the event was written down
-                // inside it, the answer still has to be inside it.
-                if (std::isfinite (pool[d]) && std::isfinite (pool[e]) && pool[e] > pool[d]
-                     && pool[a] >= pool[d] && pool[a] < pool[e])
-                {
-                    if (! (placed.beat >= pool[d] && placed.beat < pool[e]))
-                    {
-                        fail ("a wrapped note landed outside its loop range");
-                        return;
-                    }
-                }
+                continue;
             }
 
-    check (kept > 0, "the hostile sweep kept nothing at all, so it asserted nothing");
+            ++kept;
+
+            if (! std::isfinite (placed.beat))
+            {
+                fail ("a note was kept at a beat that is not a number");
+                return;
+            }
+
+            // Nothing may ever come back before the record point, because
+            // MainComponent::finishRecording rebases by it and keeps only what
+            // is not negative: anything earlier is a note silently deleted.
+            if (std::isfinite (pool[c]) && ! (placed.beat >= pool[c]))
+            {
+                fail ("a note came back before the record point");
+                return;
+            }
+        }
+
+    check (kept > 0 && dropped > 0,
+           "the hostile sweep did not reach both answers, so it asserted less than it looks");
 
     // The same for the figures. Nothing here may overflow an int on the way to
     // an answer, and nothing absurd may come back out of one.
@@ -1696,9 +1608,8 @@ int main()
     theMidiOffsetIsTheSumOfItsParts();
     theTwoOffsetsStayInStep();
     aMidiNotePlayedOnTheBeatLandsOnTheBeat();
-    anEventBeforeTheRecordPointIsDropped();
-    aLoopingTransportWrapsRatherThanDropping();
-    theLoopIsChosenOnWhereTheEventWasWrittenDown();
+    anEventBeforeTheRecordPointIsHeldThere();
+    aNoteSurvivesAsANote();
     hostileFiguresAndPlacements();
 
     if (failures == 0)
