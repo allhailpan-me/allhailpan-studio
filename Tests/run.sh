@@ -34,13 +34,21 @@ CXX="${CXX:-g++}"
 # breakages of that line, including removing it entirely, passed the whole
 # suite until a real writer was put behind it.
 # -D_GLIBCXX_ASSERTIONS turns the subscript on std::array, std::vector and
-# std::string into a checked one. The sanitizers do not cover this: an array
-# that is a member of an object is inside that object's allocation, so reading
-# one past the end of it reads the next member and address sanitizer has
-# nothing to complain about. That is not hypothetical here. Changing one
-# `i < NumVoices` to `i <= NumVoices` in VoiceAllocator.h, which is the
-# ordinary off by one, read past the end of the voice array and passed the
-# whole suite; with this flag it aborts on the line that did it.
+# std::string into a checked one. The sanitizers do not cover this, and the
+# reason is worth knowing rather than taking on trust: an array that is a
+# member of an object lives inside that object's own allocation, so reading one
+# past the end of it reads the next member and address sanitizer has nothing to
+# complain about. Writing past the end of the whole object it does catch.
+#
+# So the two halves of the same mistake behave differently, which is exactly
+# how it hides. VoiceAllocator.h has three loops of the form
+# `for (int i = 0; i < NumVoices; ++i)`. Changing the one in findSilent to
+# `i <=` makes noteOn write voices[NumVoices], past the end of the object, and
+# the suite already caught it. Changing the one in findOldest, or the retrigger
+# loop in noteOn, only reads voices[NumVoices].sounding, which lands inside the
+# counter member sitting after the array, and both passed the whole sanitized
+# suite. So did removing the bounds guard in voiceFinished. With this flag all
+# three abort on the line that did it.
 flags=(-std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
        -fsanitize=address,undefined -fno-omit-frame-pointer
        -fno-sanitize-recover=undefined -D_GLIBCXX_ASSERTIONS -pthread)

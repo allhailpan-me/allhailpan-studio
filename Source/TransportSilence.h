@@ -41,10 +41,11 @@
       clip notes the engine itself is holding, and those only because a clip
       note whose off beat lies past the loop end never reaches its off and would
       hang. Everything else sounding is the continuation of what was just heard.
-      That is not a new opinion: `scheduleMidi` already says exactly this, twice,
-      about this same event, when it declines to drop the delay compensation
-      buffers and declines to step the gain ramps at a wrap. The MIDI half
-      contradicted both of them.
+      That is not a new opinion: the device callback already says exactly this,
+      twice and 33 lines apart, about this same event, when it declines to drop
+      the delay compensation buffers at a wrap and declines to step the gain
+      ramps at one. The MIDI half of the same callback contradicted both of
+      them.
 
     - **A stop or a jump releases, and does not cut.** Note offs for everything
       the engine is tracking, the sustain pedal lifted first so a pedalled note
@@ -56,6 +57,18 @@
       MMA 96.1-4, Appendix, "Hold Pedal and 'All Notes Off'", p. A-5). A tail
       ringing out after Stop is what every other release path in this studio
       already does.
+
+    - **A wrap no longer lifts the sustain pedal either, and that is not a
+      clean win.** It used to, and that was a fault: nothing in the studio
+      tracks the pedal's real position, so lifting it at the loop point turned
+      sustain off for the rest of the pass. Not lifting it has its own cost,
+      which an audit of this change found: the clip note offs that do go out at
+      the wrap are latched by a pedal that is still down, so a clip note near
+      the end of a loop that the next pass does not retrigger rings on until
+      the player lifts their foot. Neither answer is right, because the real
+      fault is that the pedal is not modelled at all. The symptom moved rather
+      than went away, and that is written here rather than left for somebody to
+      find, with the pedal itself in `Research/BACKLOG.md`.
 
     - **Only a panic cuts.** All Sound Off is the one message defined to ignore
       the release: "all notes currently on are turned off and their volume
@@ -83,21 +96,29 @@ struct Event
     bool panicking = false;   /**< somebody asked for silence */
 };
 
-/** What to send. The engine sends them in the order they are declared, which
-    is the order they have to go out in: the pedal has to be lifted before the
-    note offs or a pedalled note is still being held up by it when they
-    arrive. */
+/** What to send, declared in the order it has to go out in.
+
+    The pedal is first because a note it is holding up survives a note off, and
+    survives All Notes Off too, until it is lifted. The two channel mode
+    messages are last, and the gentler one is ahead of the harsher one so that
+    a receiver which knows only the older of the two still does the right
+    thing.
+
+    The order is written down here rather than left to the engine because the
+    engine had it wrong, with a comment above it claiming otherwise, and an
+    audit found that by reading the buffer rather than the comment.
+*/
 struct Action
 {
+    bool sustainUp    = false;   /**< controller 64 to nothing */
     bool clipNoteOffs = false;   /**< note offs for the clip notes the engine holds */
     bool liveNoteOffs = false;   /**< note offs for what is being played in live */
-    bool sustainUp    = false;   /**< controller 64 to nothing */
     bool allNotesOff  = false;   /**< controller 123: release every voice */
     bool allSoundOff  = false;   /**< controller 120: silence every voice at once */
 
     bool anything() const noexcept
     {
-        return clipNoteOffs || liveNoteOffs || sustainUp || allNotesOff || allSoundOff;
+        return sustainUp || clipNoteOffs || liveNoteOffs || allNotesOff || allSoundOff;
     }
 
     /** True when this does everything `other` does. The escalation property
@@ -105,9 +126,9 @@ struct Action
         the same block. */
     bool covers (const Action& other) const noexcept
     {
-        return (clipNoteOffs || ! other.clipNoteOffs)
+        return (sustainUp    || ! other.sustainUp)
+            && (clipNoteOffs || ! other.clipNoteOffs)
             && (liveNoteOffs || ! other.liveNoteOffs)
-            && (sustainUp    || ! other.sustainUp)
             && (allNotesOff  || ! other.allNotesOff)
             && (allSoundOff  || ! other.allSoundOff);
     }

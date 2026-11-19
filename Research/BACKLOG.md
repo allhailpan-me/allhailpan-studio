@@ -79,6 +79,74 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-19: the sustain pedal is not modelled anywhere
+
+Found while separating the two channel mode messages. Nothing in the studio
+tracks the position of controller 64: not `AudioEngine::trackLiveMessage`,
+which tracks notes and controllers 120 and 123 and nothing else, and not
+`PanOne::handle`, which has no branch for it at all.
+
+That is why neither answer at the loop wrap is right. Sending controller 64 at
+nothing there, which is what the engine used to do, turns sustain off for the
+rest of the pass with nothing to put it back. Not sending it, which is what it
+does now, means the clip note offs that do go out are latched by a pedal that
+is still down, so a clip note near the end of a loop that the next pass does
+not retrigger rings on until the player lifts their foot. The symptom moved
+and the cause did not.
+
+The specification half of it is settled and worth writing down now so nobody
+re-derives it: a note off arriving while the pedal is down "must be recognized
+but not acted upon until the release of the hold pedal", and "the same is true
+for the All Notes Off message", while All Sound Off has no pedal exemption at
+all and silences a note the pedal is holding. MIDI 1.0 Detailed Specification
+v4.2.1, MMA 96.1-4, Appendix, "Hold Pedal and 'All Notes Off'", p. A-5.
+
+So the pedal is a piece of per channel state with a defined interaction with
+three messages the studio already sends, and PAN One cannot implement its half
+of All Notes Off correctly until it exists.
+
+## 2026-11-19: unloadInstrument reaches for the panic, which now cuts
+
+`MainComponent::unloadInstrument` calls `engine.panic()`. The panic goes to
+every channel, and since the night that separated the two channel mode
+messages, a panic cuts rather than releases. So unloading a plugin on channel
+three now silences a sounding note on channel seven instead of letting it ring
+out. Before that night it released, because every path released.
+
+`clearSession` calling it is fine, since everything is going away, and
+`stopAll` calling it on the second press of Stop is the point of it. This one
+is not a panic, it is one channel being emptied, and it should stop that
+channel's notes rather than reach for the thing that silences the studio.
+
+Not fixed on the night it was found because the fix is in `MainComponent.cpp`
+and an open pull request is already changing that file.
+
+## 2026-11-19: nothing fades a stolen voice, and the panic cuts too
+
+`VoiceAllocator::noteOn` computes `stolenFrom` and its comment says what it is
+for: "the caller is told what it stole so it can fade that voice out rather
+than cut it, which is the difference between a note ending and a click".
+`PanOne::handle` passes a variable in and has never read it. So every steal
+restarts a sounding voice where it stands, with the oscillator phases reset
+under a level the amplitude envelope deliberately preserves.
+
+Measured, the step a steal puts in the output is about nine times the
+waveform's own largest sample to sample step at that moment, which is a tick
+rather than a bang. `Voice::kill()`, which the panic now reaches for, is the
+louder version: up to 0.234 of full scale at the voice output, approaching full
+scale once sixteen voices are summed.
+
+Both want the same thing, which is a short ramp to zero before the voice is
+reused or dropped, and the steal is the common case. Worth doing as one change
+with a measurement either side, rather than putting a ramp on the panic and
+leaving the steal as it is.
+
+Also in the same area, and smaller: the engine sends each channel mode message
+on all sixteen MIDI channels, and PAN One ignores the channel, so a panic runs
+`allSoundOff` and sixteen `kill()` calls sixteen times over. Measured at about
+41 microseconds per instance per panic against about 3 if it ran once. Only on
+a panic, so not urgent, but it is sixteen times the work the message means.
+
 ## 2026-11-19: a transport edge lost to a failed try lock leaves a note hanging
 
 Found while auditing the silencing policy in `AudioEngine::scheduleMidi` and
