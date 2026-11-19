@@ -286,6 +286,135 @@ with no held note.
   are caused by the audio driver" and never mentions MIDI, and publishes
   neither units nor sign. Recorded as not applicable rather than as support.
 
+### Mutations
+
+**85 distinct breakages, 83 killed**, every one compiled exactly as
+`Tests/run.sh` has them, with address and undefined behaviour sanitizers, on a
+throwaway copy of the tree.
+
+The two survivors are argued no-ops rather than gaps. `loopTo > loopFrom`
+loosened to `>=` while the circular branch still existed, which the strictly
+stronger condition after it already excluded; and the clamp's `<` loosened to
+`<=`, which differs only at exact equality, where both branches return equal
+doubles, and the only bit pattern that separates them is minus zero against
+zero, which nothing downstream can tell apart.
+
+### What the audit found, and it is the important part of the night
+
+The `auditor` agent, over the whole diff, having read `CLAUDE.md` first. It
+confirmed the figure, re-derived the one block term and its sign from the JUCE
+source rather than from the header's account of it, and then found that
+**everything downstream of one correct event was wrong**.
+
+**The loop wrapping shipped broken, and the fault was worse than the symptom.**
+`placeMidiEvent` wrapped each event on its own, so a note on landing a hair
+before the loop start wrapped to the top of the cycle while its note off, a
+beat later, did not. The pair then reaches
+`MainComponent::collectRecordedMidi` out of order and it can only clamp the
+note to a sixty-fourth. Measured through the shipped code at 48 kHz with a 16
+ms offset: a downbeat pushed by two and a half milliseconds came back as
+`on 31.995 length 0.01562`, where before the branch it came back as
+`16.027 length 0.500`. An ordinary slightly early note came back as a blip at
+the far end of the pattern, and the on-screen keyboard hit it every time
+rather than occasionally.
+
+So the change made the thing it was fixing worse, in the exact way this
+project keeps meeting: nothing errors, nothing crackles, a note is simply
+somewhere else and a sixty-fourth long.
+
+Three things about it are worth more than the fix.
+
+**The premise was imported rather than read.** The circular model came from how
+other studios record patterns, and this studio does not do that: for MIDI,
+`finishRecording` builds one clip starting at the record point and long enough
+for the whole take, so loop passes are not folded into a cycle and the timeline
+is continuous. The header's own comment justified the wrap by "the loop start
+and the loop end are the same musical instant", which is true of a pattern
+looper and false of this clip model. CLAUDE.md's rule about reading the
+reference rather than implementing from memory has a counterpart that is not
+written down anywhere: **read your own codebase too**, because a model borrowed
+from another studio can be wrong about this one.
+
+**The header named the failure and then closed only the measure zero case of
+it.** The comment above the half open guard says, in those words, that a
+wrapped note on whose note off did not wrap "would come back out of order,
+which MainComponent::collectRecordedMidi can only resolve by clamping the note
+to a sixty fourth". That was written while fixing a rounding instance of it
+that needs the corrected beat to land within two hundredths of a microsecond of
+the loop start. The ordinary instance, a window the whole offset wide at the
+top of every pass, was described in the same sentence and not noticed. A
+comment that states the consequence of a fault is not the same as a check for
+it, and this one read as though it were.
+
+**The test blessed the fault rather than missing it.** Every check placed a
+single event, and `aLoopingTransportWrapsRatherThanDropping` asserted that "a
+note belonging d beats before the loop start comes back d beats before the loop
+end", which is precisely the behaviour that corrupts the pair. Fifty-one
+mutations had been run against that file and all the real ones were killed, so
+the strength of the mutation score said nothing at all about the property that
+mattered. **A mutation score measures the test against the code, not the code
+against the music.** The new check, `aNoteSurvivesAsANote`, takes a note on and
+its note off through the placement together and models `collectRecordedMidi`'s
+pairing directly, and it kills the restored wrap on the second note it tries.
+
+**The drop became a clamp**, and that came out of the same review. Dropping an
+event corrected to before the record point is Ardour's rule
+(`disk_writer.cc:701-706`) and was cited as such, but it is wrong here for a
+reason about this studio: a player pushing the downbeat is most players most of
+the time, the correction is of the same order as the push, and
+`finishRecording` rebases by the record start and keeps only `n.start >= 0.0`,
+so the note is dropped a second time with no recovery. Under the old rule the
+first note of a take vanished more often than not. The audio path in this same
+header already argues the opposite for itself, that the pre-roll is kept in the
+file precisely so a wrongly set trim cannot take the attack off a take with no
+way back, and the MIDI clip has no pre-roll to keep it in. So the earliest
+point the take can represent is where it goes.
+
+**Three other paths write into the same take and had been left unmoved and
+unmentioned**, which is the half of the audit that would otherwise have shipped
+quietly:
+
+- `Rec: Instrument sound and its notes` would have flammed. Its two halves are
+  the channel's own audio and the notes that drove it, and the audio half
+  cannot be offset because the instrument recorder cannot tell a live
+  performance from a pattern being bounced. Offsetting only the notes makes
+  the two halves of one performance disagree by the whole figure, and the
+  project plays it twice, a flam that moves whenever somebody loads a plugin
+  elsewhere. The tap now holds its offset at zero for exactly that mode. Both
+  late together is the lesser fault and is what every version so far has done.
+- The comment in `startAudioRecording` that said the instrument recorder's
+  ambiguity was "the same open problem as the MIDI tap below" became false the
+  moment the tap was fixed, and had been left pointing at it. Corrected, and
+  recorded here because this is the fault CLAUDE.md lists more than any other.
+- Recorded knob moves were still stamped on the raw transport by
+  `pushRecordedParam`, so a knob moved and a note played in the same instant
+  would have landed a whole offset apart **inside the same clip**. They take
+  the same offset now, published once a block in beats because that function
+  runs on whichever thread a plugin reports on and has no tempo to convert a
+  sample count with.
+- Plugin generated MIDI through `capturePluginMidi` keeps the transport
+  position it was generated at, deliberately: a plugin generates against the
+  transport, so a free running arpeggiator is already on the grid and moving it
+  earlier would drag it off. That is the instrument recorder's reasoning again.
+  One clip can therefore hold both conventions, a chord played in live sitting
+  earlier than the notes the plugin made from it, and that is now said in the
+  code rather than left to be discovered.
+
+The nits were taken too: the header claimed the two offsets differ "exactly" by
+a relation that is false whenever either floor binds, which the test already
+knew and pinned, and `getMidiRecordOffsetSamples` was removed rather than left
+as an unused accessor that would have reported a live figure while the take ran
+under a latched one.
+
+### What is left undone, and named
+
+- **The MIDI figure is not shown anywhere.** The audio one is displayed in the
+  audio settings for the stated reason that somebody should not have to guess
+  whether anything is being applied. This one wants the same, and the panel is
+  fed from `MainComponent`, which #77 holds.
+- **A MIDI loopback measurement**, which is the unlock for
+  `Figures::midiInputLatency` and the only honest way to stop halving the audio
+  trim by convention. Ardour built exactly this and so should this.
 ---
 
 ## 2026-11-18: the fader, the pan and the sends stop stepping
