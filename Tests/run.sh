@@ -33,9 +33,17 @@ CXX="${CXX:-g++}"
 # copy, and single threaded those two reads are the same read: three separate
 # breakages of that line, including removing it entirely, passed the whole
 # suite until a real writer was put behind it.
+# -D_GLIBCXX_ASSERTIONS turns the subscript on std::array, std::vector and
+# std::string into a checked one. The sanitizers do not cover this: an array
+# that is a member of an object is inside that object's allocation, so reading
+# one past the end of it reads the next member and address sanitizer has
+# nothing to complain about. That is not hypothetical here. Changing one
+# `i < NumVoices` to `i <= NumVoices` in VoiceAllocator.h, which is the
+# ordinary off by one, read past the end of the voice array and passed the
+# whole suite; with this flag it aborts on the line that did it.
 flags=(-std=c++20 -O1 -g -Wall -Wextra -Wno-unused-parameter
        -fsanitize=address,undefined -fno-omit-frame-pointer
-       -fno-sanitize-recover=undefined -pthread)
+       -fno-sanitize-recover=undefined -D_GLIBCXX_ASSERTIONS -pthread)
 
 # Halting on the first undefined behaviour rather than carrying on means the
 # exit code is trustworthy. Leak detection stays on; these are small programs
