@@ -169,8 +169,36 @@ namespace RecordAlign
     {
         int    inputLatency  = 0;   /**< what the device reports on the way in */
         int    outputLatency = 0;   /**< and on the way out */
-        int    bufferSize    = 0;   /**< used only when it reports neither */
+
+        /** The device's callback size. A floor under what the driver claims,
+            and, for a MIDI capture, a term of the offset in its own right:
+            see midiCaptureOffsetSamples. */
+        int    bufferSize    = 0;
+
         int    engineLatency = 0;   /**< how far behind the playhead the mix leaves */
+
+        /** What the MIDI path itself delays by, which is not the audio
+            converter's figure and is not any part of it.
+
+            Held at zero, and that is a documented default rather than a claim
+            that it is zero. A note from a hardware keyboard waits on USB MIDI
+            polling, or on DIN MIDI's 320 microseconds a byte, and then on the
+            operating system's MIDI stack, and nothing in JUCE reports any of
+            it: grepping the whole of juce_audio_devices/midi_io for "latency"
+            in 9.0.3 returns nothing at all.
+
+            Ardour is in the same position and answers it the same way. Its
+            backends default the per device systemic MIDI input latency to zero
+            (alsa_audiobackend.h:313-322) and expose it as a user figure
+            (audio_backend.h:509-518), filled from a MIDI loopback measurement
+            with its own Calibrate button, because a number nobody can measure
+            is a number nobody can set correctly.
+
+            So the slot is here and the measurement is what is missing. The
+            unlock is a MIDI loopback probe, the counterpart of LatencyProbe.h.
+            See Research/BACKLOG.md. */
+        int    midiInputLatency = 0;
+
         double sampleRate    = 0.0;
         double trimMs        = 0.0; /**< the user's correction, positive pulling takes earlier */
     };
@@ -248,6 +276,243 @@ namespace RecordAlign
 
         return std::clamp (roundTrip + engine + trim,
                            -AudioDefaults::maxLatencySamples, AudioDefaults::maxLatencySamples);
+    }
+
+
+    //==========================================================================
+    // WHERE A RECORDED MIDI NOTE BELONGS
+    //
+    // The same question as the audio one above, for a note played on a
+    // keyboard rather than a sound played into a socket, and the answer has
+    // the same shape with one term swapped and one term added.
+    //
+    // Everything the audio derivation says still holds: the block rendered in
+    // the callback at transport position P reaches the player's ears
+    // `engine + output` samples later, and the player plays at that moment.
+    // What differs is the way back in.
+    //
+    //  - A MIDI note never passes through the input converter, so the audio
+    //    input latency is not in it. That much was already written down in the
+    //    engine and is what Ardour does: _playback_offset is _signal_latency +
+    //    _output_latency (route.cc:4885) and is subtracted from every captured
+    //    event time (disk_writer.cc:596-604, :701-706), while _capture_offset
+    //    comes from the input port's own latency (route.cc:4890), which for a
+    //    MIDI port is not the converter's figure.
+    //
+    //  - But a whole audio block is, and that is the term the engine's comment
+    //    did not have. juce::MidiMessageCollector re-times every message
+    //    against a wall clock, and it anchors the END of the buffer it fills
+    //    to the instant the callback drained it. Follow the code, 9.0.3:
+    //
+    //      addMessageToQueue           samplePosition = (t_a - t_prev) * fs
+    //      removeNextBlockOfMessages   numSourceSamples = (t_now - t_prev) * fs
+    //                                  startSample = numSamples - numSourceSamples
+    //                                  position = samplePosition + startSample
+    //
+    //    which is position = numSamples - (t_now - t_a) * fs. So sample index
+    //    `numSamples` is the drain instant and sample 0 is one block before
+    //    it: a note played during one block is handed over in the next one and
+    //    is written down a block late. The engine stamps it with
+    //    blockBeats[position], so that block goes straight into the answer.
+    //
+    //    This is not a JUCE defect and copying Ardour verbatim would not avoid
+    //    it. Its ALSA backend has the identical one period lag: alsa_midi.cc
+    //    postpones an event past the window end, and alsa_audiobackend.cc
+    //    calls sync_time after the drain, so during cycle N the window base is
+    //    still cycle N-1's start. Ardour does not subtract it, because it
+    //    expects it to be inside the user's per device MIDI input latency,
+    //    which it has a loopback measurement for and this studio does not.
+    //    Subtracting the part that is derivable is strictly better than
+    //    leaving all of it; see Figures::midiInputLatency for the part that is
+    //    not.
+    //
+    // The direction is an assumption and is worth naming as one, the way
+    // Ardour names it at audioengine.cc:521: "We assume the player listens and
+    // plays along. Recorded region is moved back by playback_latency." A
+    // player monitoring a soft instrument they are playing is the other case
+    // and wants no offset, or Cubase's opposite one, which its per track ASIO
+    // Latency Compensation provides for exactly that reason. Both follow one
+    // rule, that a note belongs at the musical position of whatever the player
+    // was hearing when they played it, and they differ because the players are
+    // listening to different things. This studio's MIDI tap is fed only from
+    // the hardware input and the on-screen keyboard, so it is always the first
+    // case.
+
+    /** The output side of the round trip the device claims.
+
+        The output half of claimedRoundTripSamples, and it floors for the same
+        reason: a reported zero means "the driver did not say" rather than
+        "instant", and every backend JUCE 9.0.3 ships adds at least one period
+        per direction whenever that direction's device exists. The round trip
+        floors at two buffers because it is two directions; one direction
+        floors at one.
+
+        Not written as half of claimedRoundTripSamples, because it is not:
+        max (in + out, 2b) is not max (in, b) + max (out, b), and a MIDI note
+        has no claim about the input side to fall back on.
+    */
+    inline int claimedOutputSamples (const Figures& f) noexcept
+    {
+        const int reported = std::clamp (f.outputLatency,
+                                         -AudioDefaults::maxLatencySamples,
+                                         AudioDefaults::maxLatencySamples);
+
+        const int oneBuffer = std::clamp (f.bufferSize, 0, AudioDefaults::maxLatencySamples);
+
+        return std::max (reported, oneBuffer);
+    }
+
+    /** How many samples a captured live MIDI event belongs earlier than the
+        beat it was written down at.
+
+        Compare captureOffsetSamples, which is the audio answer. The two differ
+        by exactly `bufferSize + midiInputLatency - inputLatency - trim/2`, and
+        that relationship is asserted in the test rather than left to be
+        noticed: the usual way for a pair like this to go wrong is for somebody
+        to edit one of them.
+
+        THE TRIM IS HALVED, AND THAT IS A CONVENTION
+
+        The trim is what a loopback measurement found the device to be
+        misreporting by: measured round trip less claimed round trip, see
+        LatencyProbe::trimMsFor. It is an **audio** measurement and the
+        residual is unattributed, because a loopback cable cannot say which of
+        the two converters the error was in. Only the output half of it sits in
+        front of a MIDI note.
+
+        Ardour splits exactly this residual evenly, and does so for both paths:
+        engine_dialog.cc:3222-3236 computes one_way = (measured - signal_delay)
+        / 2 for audio and writes it into both directions, and :3202-3213 does
+        the same for its MIDI loopback. So half is the published convention for
+        an unattributed round trip residual, and half is what this uses.
+
+        It is a convention and not a derivation, which is said here rather than
+        implied. The only honest way to do better is a second measurement that
+        isolates one direction, which for MIDI means a MIDI loopback, which is
+        the same unlock Figures::midiInputLatency is waiting on.
+    */
+    inline int midiCaptureOffsetSamples (const Figures& f) noexcept
+    {
+        const int output = claimedOutputSamples (f);
+
+        const int engine = std::clamp (f.engineLatency, 0, AudioDefaults::maxLatencySamples);
+
+        // The collector's one block. Latched with everything else, so it is
+        // the device's callback size rather than the size of whichever block
+        // an event happens to arrive in. A device that varies its block size
+        // leaves a residual of the variation, which is smaller than the
+        // wake-up jitter the within-block position already carries.
+        const int block = std::clamp (f.bufferSize, 0, AudioDefaults::maxLatencySamples);
+
+        // Nothing reports this and it is zero until a MIDI loopback can
+        // measure it. Clamped rather than trusted: it reaches here from a
+        // settings file.
+        const int midiIn = std::clamp (f.midiInputLatency, 0, AudioDefaults::maxLatencySamples);
+
+        int trim = 0;
+
+        // Finite first, for the reason captureOffsetSamples gives: clamping a
+        // NaN hands the NaN back and the conversion to int after it is
+        // undefined behaviour rather than a wrong answer.
+        if (std::isfinite (f.trimMs) && f.sampleRate > 0.0)
+            trim = (int) std::lround (0.5 * std::clamp (f.trimMs, minTrimMs, maxTrimMs)
+                                      * std::min (f.sampleRate, 768000.0) / 1000.0);
+
+        return std::clamp (output + engine + block + midiIn + trim,
+                           -AudioDefaults::maxLatencySamples, AudioDefaults::maxLatencySamples);
+    }
+
+    /** Where one captured MIDI event ends up, or that it belongs nowhere. */
+    struct MidiPlacement
+    {
+        bool   keep = false;  /**< false means the event is not part of the take */
+        double beat = 0.0;
+    };
+
+    /** Moves one captured event back by the offset, and says whether it is
+        part of the take at all.
+
+        `rawBeat` is the transport position the event was written down at,
+        `offsetBeats` is midiCaptureOffsetSamples in beats, `recordStartBeat`
+        is the transport position recording began at, and `loopFrom`/`loopTo`
+        are the loop range, with `loopTo <= loopFrom` meaning the transport is
+        not looping.
+
+        Two timelines, and which one applies is decided by where the event was
+        written down rather than by where it ends up:
+
+        A LINEAR TRANSPORT. The event moves back by the offset, and if it then
+        lands before the point recording began it is **dropped**. It is not
+        part of the take: at that instant the player was hearing music from
+        before the record point. This is Ardour's rule and its words, from
+        disk_writer.cc:701-706, which skips an event whose time is below
+        _first_recordable_sample. Dropping a note on and keeping its note off
+        is safe here, because MainComponent::collectRecordedMidi ignores a note
+        off with no held note, and in any case both halves of one note carry
+        the same offset.
+
+        A LOOPING TRANSPORT. The loop is a cycle the player is playing round,
+        so the timeline is circular and the move wraps within it rather than
+        falling off the front. Nothing is dropped: the loop start and the loop
+        end are the same musical instant, so a note played just after the start
+        and belonging just before it belongs at the end of the cycle. The
+        consequence to know about is that this is true of the first pass too,
+        where there is as yet nothing at the end of the cycle: a note played in
+        the first few milliseconds of a loop recording lands at the end of the
+        pattern rather than being dropped. That is the right answer for a
+        pattern being played round and round, which is the only reason to set a
+        loop range while recording, and it is said out loud here because it
+        looks like an edge that was missed.
+
+        The circular treatment is chosen on `rawBeat` being inside the loop,
+        not on a range merely being set. A transport that has not reached the
+        loop yet is still linear, and wrapping there would teleport an event
+        into a range the player had not got to.
+    */
+    inline MidiPlacement placeMidiEvent (double rawBeat, double offsetBeats,
+                                         double recordStartBeat,
+                                         double loopFrom, double loopTo) noexcept
+    {
+        if (! std::isfinite (rawBeat) || ! std::isfinite (offsetBeats))
+            return {};
+
+        const double corrected = rawBeat - offsetBeats;
+
+        if (! std::isfinite (corrected))
+            return {};
+
+        const bool loopUsable = std::isfinite (loopFrom) && std::isfinite (loopTo)
+                                && loopTo > loopFrom;
+
+        if (loopUsable && rawBeat >= loopFrom && rawBeat < loopTo)
+        {
+            const double length = loopTo - loopFrom;
+
+            // fmod rather than a subtract-until loop: an offset longer than
+            // the loop is nonsense a settings file can still produce, and a
+            // loop here would run for as long as it took.
+            double within = std::fmod (corrected - loopFrom, length);
+
+            if (within < 0.0)
+                within += length;
+
+            // fmod of a negative numerator can return -0.0, and adding the
+            // length to that lands exactly on loopTo rather than inside the
+            // range. Everything else here keeps the half open interval, so
+            // this does too.
+            if (! (within < length))
+                within = 0.0;
+
+            return { true, loopFrom + within };
+        }
+
+        // A record point that is not a number is a studio that has lost track
+        // of when it started, and the less destructive answer is to keep what
+        // was played rather than to silently discard all of it.
+        if (std::isfinite (recordStartBeat) && corrected < recordStartBeat)
+            return {};
+
+        return { true, corrected };
     }
 
     /** Splits one continuous capture into the passes a loop recording
