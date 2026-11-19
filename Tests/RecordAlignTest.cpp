@@ -1456,28 +1456,28 @@ static void aLoopingTransportWrapsRatherThanDropping()
         checkClose (onTheEnd.beat, 0.0, 0.0, "a note landing on the loop end was left there");
     }
 
-    // ---- A KNOWN HOLE IN THE HALF OPEN GUARANTEE, FOUND BY WRITING THIS ----
+    // ---- THE HALF OPEN GUARANTEE AT ITS WORST CASE ----
     //
-    // The guard in placeMidiEvent takes `within` back to zero when adding the
-    // length rounded it up to the length. It does not cover the addition after
+    // Found by writing this file, as a fault rather than as a case: the guard
+    // used to sit on `within` alone, and it does not cover the addition after
     // it. A correction landing one unit in the last place before the loop
-    // start gives a `within` that is genuinely less than the length, and then
-    // `loopFrom + within` rounds up to exactly loopTo, because loopFrom is the
-    // larger number and its last place is the coarser one. The event is
-    // returned at the loop end: a whole cycle later than it belongs, and
-    // outside the half open range everything else here keeps. Its note off,
-    // written down a few beats later, wraps correctly, so the pair comes back
-    // in the wrong order and MainComponent::collectRecordedMidi clamps the
+    // start gives a `within` genuinely less than the length, and then
+    // `loopFrom + within` rounds up to exactly loopTo on its own, because
+    // loopFrom is the larger number and its last place is the coarser one.
+    //
+    // What it would have cost: the event comes back at the loop end, a whole
+    // cycle later than it belongs and outside the range everything else here
+    // keeps. Its note off, written down a few beats later, wraps correctly, so
+    // the pair arrives in the wrong order and
+    // MainComponent::collectRecordedMidi can only resolve that by clamping the
     // note to a sixty-fourth.
     //
     // It needs the corrected beat to land inside half of loopTo's last place
-    // below loopFrom, which for a four beat loop at bar 2049 is two hundredths
-    // of a microsecond, so it is a fault in a stated invariant rather than
-    // something a session will meet. It is pinned here as it behaves rather
-    // than fixed, because this file does not own RecordAlign.h: the fix is to
-    // take the result back to loopFrom when the sum reaches loopTo, and when
-    // that lands these two checks become `beat < loopTo` and `beat ==
-    // loopFrom` and the third goes away.
+    // below loopFrom, which for a four beat loop at bar 2049 is two
+    // hundredths of a microsecond, so no session was ever going to meet it. It
+    // is pinned because the invariant is stated, not because the window is
+    // wide: an invariant that holds except where nobody looks is the kind this
+    // project keeps being bitten by.
     {
         const double loopFrom = 16.0;
         const double loopTo   = 28.0;                 // a length of 12, not a power of two
@@ -1500,16 +1500,14 @@ static void aLoopingTransportWrapsRatherThanDropping()
         const auto placed = RecordAlign::placeMidiEvent (rawBeat, offset, loopFrom,
                                                          loopFrom, loopTo);
         check (placed.keep, "a note a hair before the loop start was dropped");
-        checkClose (placed.beat, loopTo, 0.0,
-                    "the known half open hole behaves differently than it did: read the note above");
-        std::printf ("  note  a correction one ulp before the loop start still returns the loop"
-                     " end itself (%.1f, not %.1f): see the note in the source\n",
-                     placed.beat, loopFrom);
+        check (placed.beat < loopTo,
+               "a correction one ulp before the loop start came back at the loop end");
+        check (placed.beat == loopFrom,
+               "a correction that rounds up to the loop end did not go back to the loop start");
     }
 
-    // The guard that IS there, on `within` rather than on the sum, holds for
-    // every loop whose start is small enough that the final addition is exact.
-    // That is the case the comment in the header is about and it works.
+    // The same at a loop whose start is small enough that the final addition
+    // is exact, which is the other half of the guard and was never broken.
     {
         const double loopFrom = 0.0;
         const double loopTo   = 12.0;

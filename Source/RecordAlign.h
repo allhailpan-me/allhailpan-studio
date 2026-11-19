@@ -496,14 +496,36 @@ namespace RecordAlign
             if (within < 0.0)
                 within += length;
 
-            // fmod of a negative numerator can return -0.0, and adding the
-            // length to that lands exactly on loopTo rather than inside the
-            // range. Everything else here keeps the half open interval, so
-            // this does too.
-            if (! (within < length))
-                within = 0.0;
+            double beat = loopFrom + within;
 
-            return { true, loopFrom + within };
+            // The range is half open, and that has to survive the arithmetic
+            // as well as the modulo. Two separate roundings can reach loopTo
+            // from below: `within` can round up to the whole length, and the
+            // addition back to loopFrom can round up on its own, because
+            // loopFrom is the larger number and its last place is the coarser
+            // one. The second is the one that bites: a four beat loop at bar
+            // 2049 lands exactly on loopTo for a correction one unit in the
+            // last place before the loop start, with `within` still honestly
+            // below the length.
+            //
+            // Checking the answer rather than the intermediate is what covers
+            // both. An earlier version guarded `within` alone and justified it
+            // by fmod returning -0.0, which is a path that cannot be taken at
+            // all, since -0.0 < 0.0 is false and the addition above never
+            // fires for it. A guard that is needed for a reason other than the
+            // one written above it is the shape of comment this project keeps
+            // meeting, so it is recorded rather than quietly corrected.
+            //
+            // Landing on loopTo would put the note a whole cycle late and
+            // outside the pattern, and since its note off wraps correctly the
+            // pair would come back out of order, which
+            // MainComponent::collectRecordedMidi can only resolve by clamping
+            // the note to a sixty fourth. The start of the cycle is the same
+            // musical instant as its end, so that is where it goes.
+            if (! (beat < loopTo))
+                beat = loopFrom;
+
+            return { true, beat };
         }
 
         // A record point that is not a number is a studio that has lost track
