@@ -7,6 +7,29 @@ Newest first.
 
 ---
 
+## 2026-11-19: the voice pool, and the panic that was only as fast as the patch
+
+**Target.** `Source/VoiceAllocator.h`, its test, and the one caller that reads
+it, `PanOne::handleMidi`. Picked because a mechanical mutation sweep of the
+allocator left 16 survivors of 50 compiling mutants, and because reading the
+caller to judge those survivors found that the allocator's documented steal
+report is assigned and never read, and that `Synth::Voice::kill()`, whose own
+comment says what it is for, is called by nothing in `Source` at all.
+
+**Status: in progress.**
+
+What is being done:
+
+- Separate All Sound Off from All Notes Off in PAN One. The MIDI 1.0 Detailed
+  Specification gives them different behaviour and the two currently share a
+  branch, so the studio's own panic is only ever as fast as the patch's
+  release. Sources and wording are recorded below as the work lands.
+- Give the allocator the bookkeeping half of All Sound Off, so the decision
+  lives where a test can reach it rather than in the JUCE file where nothing
+  can.
+- Kill the mutation survivors that are gaps rather than no-ops, and write down
+  which each one is.
+
 ## 2026-11-14: the swing half of the groove, which is a number other studios own
 
 ### What is being looked at
