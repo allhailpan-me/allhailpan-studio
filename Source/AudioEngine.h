@@ -16,6 +16,7 @@
 #include "FaderLaw.h"
 #include "GainRamp.h"
 #include "SoloGraph.h"
+#include "TransportSilence.h"
 #include "Tuner.h"
 
 // ---------------------------------------------------------------------------
@@ -866,7 +867,7 @@ private:
                           int numInputChannels, int numSamples);
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
-    void scheduleMidi (int numSamples, bool sendAllOff, bool isRunning);
+    void scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning);
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
     void trackLiveMessage (int slot, const juce::uint8* data, int numBytes);

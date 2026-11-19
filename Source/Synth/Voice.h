@@ -490,8 +490,20 @@ public:
             e.noteOff();
     }
 
-    /** Silences the voice at once, for when there is nothing left to steal
-        and a click is better than a wrong note. */
+    /** Silences the voice at once: for a panic, which is what All Sound Off
+        asks for, and for when there is nothing left to steal and a click is
+        better than a wrong note.
+
+        It does not clear `wasFolding` and `wasDriving`, which decide whether
+        the folder and the saturator are primed with two throwaway evaluations
+        when they come back into circuit. That looks like an omission and was
+        measured rather than argued: a voice killed and then started again
+        produces output identical sample for sample either way, including with
+        an instant attack, because the amplitude envelope and the gate are both
+        at nothing for the first samples of a note and whatever a stale history
+        produces is multiplied by nothing. Left as it is so that a kill is the
+        cheap thing it needs to be on a panic.
+    */
     void kill() noexcept
     {
         for (auto& e : envelopes)

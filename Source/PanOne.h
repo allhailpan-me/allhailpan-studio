@@ -584,8 +584,33 @@ private:
         {
             releaseEvery (message.getNoteNumber());
         }
-        else if (message.isAllNotesOff() || message.isAllSoundOff())
+        else if (message.isAllSoundOff())
         {
+            // Not the same message as All Notes Off and not the same answer,
+            // though they shared this branch until somebody read the
+            // specification. All Sound Off is defined as "all notes currently
+            // on are turned off and their volume envelopes are set to zero as
+            // soon as possible" (MIDI 1.0 Detailed Specification v4.2.1, MMA
+            // 96.1-4, "Channel Mode Messages", p. 25). Released rather than
+            // cut, it is only ever as fast as the patch, which on a pad with a
+            // four second release is not a panic button at all.
+            //
+            // Both halves, or the pool is left believing sixteen silent voices
+            // are still sounding and the next chord steals rather than
+            // finding one free.
+            allocator.allSoundOff();
+
+            for (auto& v : voices)
+                v.kill();
+        }
+        else if (message.isAllNotesOff())
+        {
+            // And this one is a release, which is what it is specified to be:
+            // it "should force voices to go to the release stage of the
+            // envelope, and not terminate the sound of the notes abruptly"
+            // (same document, Appendix, "Hold Pedal and 'All Notes Off'",
+            // p. A-5). So a tail rings out, which is what makes the harsher
+            // message above worth having as something separate.
             allocator.allNotesOff();
 
             for (auto& v : voices)

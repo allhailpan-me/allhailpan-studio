@@ -112,10 +112,31 @@ public:
         return released;
     }
 
+    /** Every key up, which is All Notes Off: the voices carry on sounding and
+        run their releases out. */
     void allNotesOff() noexcept
     {
         for (auto& v : voices)
             v.held = false;
+    }
+
+    /** Every voice back in the pool at once, which is All Sound Off.
+
+        The other half of that message is the instrument silencing the voices
+        themselves, and both halves are needed. Silencing the voices without
+        this leaves the pool believing all sixteen are still sounding, so the
+        next chord steals from voices that are not making any sound, and the
+        symptom turns up on the chord after the one that caused it.
+
+        The counter is left where it is on purpose. It is a sequence rather
+        than state, nothing compares it against anything outside this object,
+        and resetting it here would be saying this is a fresh pool, which is
+        what `reset` is for.
+    */
+    void allSoundOff() noexcept
+    {
+        for (auto& v : voices)
+            v = {};
     }
 
     /** Called when a voice's envelope has finished, which is the only thing

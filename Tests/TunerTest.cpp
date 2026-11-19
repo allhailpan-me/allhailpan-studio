@@ -2102,9 +2102,14 @@ static void testTearBlindBlock()
     // A torn snapshot steps by a whole capacity somewhere in the middle, which
     // is the discontinuity an estimator reads as a plausible wrong pitch.
     //
-    // Bounded by the writer's own progress rather than by a number of attempts
-    // or a clock, so a machine that schedules these two threads unevenly makes
-    // this slower rather than flaky.
+    // Bounded by progress rather than by a clock, so a machine that schedules
+    // these two threads unevenly makes this slower rather than flaky. WHOSE
+    // progress is the whole of it, and this check and the one below it answer
+    // that differently on purpose. Here the question is whether anything
+    // accepted was torn, so running until the WRITER has gone round enough
+    // times is right and accepting nothing is a true answer to it. Below, the
+    // question is whether anything is accepted at all, and that budget has to
+    // be the READER's or a slow reader fails a correct ring.
     {
         constexpr std::uint64_t modulus = 1ull << 20;
 
@@ -2207,13 +2212,35 @@ static void testTearBlindBlock()
 
         std::vector<float> dest ((size_t) snapshot);
 
-        const std::uint64_t startedAt = r.totalWritten();
-        const std::uint64_t budget    = 2000ull * (std::uint64_t) cap;
+        // Bounded by the READER's own progress, which is what this check needs
+        // and is not what it had. It ran until the writer had written a fixed
+        // amount, and the comment above it claimed that made a machine
+        // scheduling the two threads unevenly slow rather than flaky. It does
+        // the opposite: the writer is the thread nothing ever slows down, so
+        // anything that slows the reader lets the writer burn the whole budget
+        // while the reader accepts nothing, and the check then fails on correct
+        // code.
+        //
+        // That is not hypothetical. This went red on main before anything in
+        // this branch touched it, and adding -D_GLIBCXX_ASSERTIONS to the
+        // suite, which puts a bounds check inside the reader's copy, took the
+        // accepted count on one machine from 517 to 2 and then to 19 on the
+        // next run. A check that passes only when the reader wins a race it was
+        // given no help to win is a check about the machine.
+        //
+        // So: run until enough snapshots have been accepted to mean something,
+        // with a generous cap on attempts so that a writer that never starts
+        // fails the check rather than hanging the suite. A slow reader now
+        // takes longer and still arrives.
+        const long long wanted   = 32;
+        const long long maxTries = 50000000;
 
-        long long accepted = 0, torn = 0;
+        long long accepted = 0, torn = 0, attempts = 0;
 
-        while (r.totalWritten() - startedAt < budget)
+        while (accepted < wanted && attempts < maxTries)
         {
+            ++attempts;
+
             if (! r.readLatest (dest))
                 continue;
 
@@ -2234,10 +2261,11 @@ static void testTearBlindBlock()
         stop.store (true, std::memory_order_relaxed);
         writer.join();
 
-        std::printf ("  at the requirement:    %lld accepted, %lld torn\n", accepted, torn);
+        std::printf ("  at the requirement:    %lld accepted, %lld torn, in %lld attempts\n",
+                     accepted, torn, attempts);
 
-        check (accepted > 0,
-               "a capacity meeting the stated requirement accepted no snapshot at all, so the "
+        check (accepted >= wanted,
+               "a capacity meeting the stated requirement accepted almost no snapshot, so the "
                "tuner would show nothing rather than something wrong");
         check (torn == 0, "a torn snapshot was accepted at the stated requirement");
     }

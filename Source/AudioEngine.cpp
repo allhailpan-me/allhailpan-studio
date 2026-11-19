@@ -1602,7 +1602,21 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
-    const bool sendAllOff = jumped || wrapped || (wasRunning && ! isRunning);
+    // What each of these is worth is in TransportSilence.h, deliberately not
+    // here: it used to be, and a wrap quietly got the same answer as a stop.
+    //
+    // Named rather than positional. The engine reading this table by position
+    // would mean somebody reordering the fields of Event silently rewires the
+    // transport, which is the same trade the instrument makes when it saves
+    // every choice by its id rather than its index.
+    const TransportSilence::Event transportEvent
+    {
+        .stopped   = wasRunning && ! isRunning,
+        .jumped    = jumped,
+        .wrapped   = wrapped,
+        .panicking = false,          // read inside scheduleMidi, from the atomic
+    };
+
     wasRunning = isRunning;
 
     // ---- audio recording tap ----
@@ -1769,7 +1783,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
             }
 
-            scheduleMidi (numSamples, sendAllOff, sequencing);
+            scheduleMidi (numSamples, transportEvent, sequencing);
             if (sequencing)
                 applyAutomation (blockStartBeat);
 
@@ -2046,11 +2060,18 @@ void AudioEngine::trackLiveMessage (int slot, const juce::uint8* data, int numBy
         std::fill_n (rows + ch * 128, 128, (juce::uint8) 0);
 }
 
-void AudioEngine::scheduleMidi (int numSamples, bool sendAllOff, bool isRunning)
+void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning)
 {
-    const bool panicking    = panicRequest.exchange (false);
-    const bool releaseAll   = sendAllOff || panicking;
-    const bool editedWhilePlaying = snapshotChanged.exchange (false) && isRunning && ! releaseAll;
+    // The panic is read here, where it always has been, rather than beside the
+    // other three. That is worth more than it looks: this function runs inside
+    // the graph lock, so a panic raised during a block whose try lock failed is
+    // still waiting in the next block that gets through. The other three are
+    // computed outside the lock and are lost with that block, which is a real
+    // fault and is written up in Research/BACKLOG.md rather than fixed here.
+    transportEvent.panicking = panicRequest.exchange (false);
+
+    const auto silence = TransportSilence::actionFor (transportEvent);
+    const bool editedWhilePlaying = snapshotChanged.exchange (false) && isRunning && ! silence.anything();
 
     for (int slot = 0; slot < kNumChannels; ++slot)
     {
@@ -2059,15 +2080,31 @@ void AudioEngine::scheduleMidi (int numSamples, bool sendAllOff, bool isRunning)
         if (c.plugin == nullptr)
             continue;
 
-        if (releaseAll)
-            stopTrackedNotes (slot, true, true);
+        // The pedal first, and in a loop of its own, because it has to arrive
+        // ahead of the note offs rather than after them: a note the pedal is
+        // holding up survives a note off, and survives All Notes Off too,
+        // until the pedal is lifted. Written the other way round, which is how
+        // this was until an audit put a buffer order against the comment that
+        // claimed it, the pedal is lifted after everything it was holding has
+        // already been latched.
+        //
+        // MidiBuffer::addEvent keeps insertion order for events at the same
+        // sample, so the order these are added in is the order they arrive in.
+        if (silence.sustainUp)
+            for (int ch = 1; ch <= 16; ++ch)
+                c.midi.addEvent (juce::MidiMessage::controllerEvent (ch, 64, 0), 0);
 
-        if (releaseAll)
+        if (silence.clipNoteOffs || silence.liveNoteOffs)
+            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs);
+
+        if (silence.allNotesOff || silence.allSoundOff)
             for (int ch = 1; ch <= 16; ++ch)
             {
-                c.midi.addEvent (juce::MidiMessage::controllerEvent (ch, 64, 0), 0);   // sustain pedal up
-                c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
-                c.midi.addEvent (juce::MidiMessage::allSoundOff (ch), 0);
+                if (silence.allNotesOff)
+                    c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
+
+                if (silence.allSoundOff)
+                    c.midi.addEvent (juce::MidiMessage::allSoundOff (ch), 0);
             }
     }
 
@@ -3204,7 +3241,11 @@ bool AudioEngine::renderOffline (double fromBeat, double toBeat, double tailSeco
         for (auto& ins : insertSlots)
             ins.buffer.clear (0, n);
 
-        scheduleMidi (n, false, sequencing);
+        // Nothing happens to the play head during a render: it runs from
+        // fromBeat to the end without looping and without being moved, so
+        // there is nothing to silence. The clean start is the panicRequest
+        // set before this loop, which scheduleMidi still consumes.
+        scheduleMidi (n, {}, sequencing);
         if (sequencing)
             applyAutomation (blockStart);
         applyModulation (blockStart);

@@ -7,6 +7,275 @@ Newest first.
 
 ---
 
+## 2026-11-19: the voice pool, and the panic that was only as fast as the patch
+
+**Target.** `Source/VoiceAllocator.h`, its test, and the one caller that reads
+it, `PanOne::handle`, which led into `AudioEngine::scheduleMidi`.
+
+Picked because a mechanical mutation sweep of the allocator left survivors, and
+because reading the caller in order to judge those survivors found two
+mechanisms wired to nothing: the steal report the allocator computes and
+documents, which `PanOne` assigns to a variable and never reads, and
+`Synth::Voice::kill()`, which carries a comment saying what it is for and had
+no caller anywhere in `Source`.
+
+**Two real faults were found and fixed. Both are audible and neither announces
+itself.**
+
+### Fault one: a chord held across a loop point was killed at the loop point
+
+`AudioEngine::scheduleMidi` silenced everything whenever the play head stopped,
+jumped **or wrapped**. `sendAllOff` was `jumped || wrapped || (wasRunning && !
+isRunning)`, and `wrapped` is set every time the loop comes round, and also
+when an arrangement with no loop range plays past its last bar, because
+`loopTo` falls back to the song end.
+
+What it cost, in the order somebody would notice:
+
+- `stopTrackedNotes (slot, true, true)` passes `includeLive = true`, so a chord
+  held on a controller while a looping arrangement plays was handed note offs
+  at the loop point and nothing brought it back. Playing along with a loop is
+  the ordinary way to use one.
+- The MIDI recorder reads the live input rather than what the engine schedules,
+  so a pad held across the wrap was cut in the monitoring and ran straight
+  through the wrap in the take. What was heard and what was recorded disagreed,
+  which is the thing this studio is least willing to be wrong about.
+- Controller 64 went out at every wrap and nothing anywhere tracks the pedal's
+  real position, so holding the pedal down through a loop point turned sustain
+  off for the rest of that pass.
+
+**The part worth keeping is that this needed no specification to find.**
+`audioDeviceIOCallbackWithContext` already says, in two comments 33 lines apart
+and about this same wrap, that a wrap is a continuation: it is why the delay
+compensation buffers are not dropped there, and why the gain ramps are not
+stepped there. Both guard on `jumped` alone. The MIDI half of the same callback
+folded `wrapped` in with `jumped` and contradicted both of them. A comment that
+says the opposite of the code, in the same function as the code.
+
+### Fault two: the two channel mode messages were one branch
+
+`PanOne::handle` had `else if (message.isAllNotesOff() ||
+message.isAllSoundOff())` and gave both the same gentle answer, releasing every
+voice. The MIDI 1.0 Detailed Specification, version 4.2.1, MMA document 96.1-4,
+gives them different behaviour, and the reason there are two messages at all is
+the difference:
+
+- All Notes Off "should force voices to go to the release stage of the
+  envelope, and not terminate the sound of the notes abruptly" (Appendix, "Hold
+  Pedal and 'All Notes Off'", p. A-5). The code already did this and it was
+  right.
+- All Sound Off turns off all notes currently on and sets "their volume
+  envelopes to zero as soon as possible" ("Channel Mode Messages", p. 25). The
+  code did not do this. Controller 120 was added to the specification after
+  controller 123 precisely because All Notes Off is not allowed to be abrupt.
+
+So the studio's panic was only ever as fast as the patch. `AudioEngine` sends
+the pedal up, then All Notes Off, then All Sound Off, which is the right
+sequence; the last message in it did nothing. On a pad with a four second
+release, asking for silence gave four seconds of pad.
+
+And the escalation it was supposed to feed had been hollowed out from the other
+end. Pressing Stop a second time is documented in `MainComponent` as the panic
+button, for plugins that drone on regardless of note offs. The first press
+already sent the harshest message there is, so the second press had nothing
+left to escalate to.
+
+Worth noting what was **not** true, because the first version of this writeup
+said it and an audit took it out. "A hosted VST3 instrument is chopped dead at
+every loop wrap" is too strong. JUCE 9.0.3's VST3 host turns a controller
+message into a parameter change or drops it, VST3 has no All Notes Off event,
+and JUCE built plugins on `juce::Synthesiser` make the same conflation this
+code did, so they are gentle too. The instruments that really would have been
+cut are Audio Units and LV2, where the bytes are forwarded. The fault at the
+wrap is in the note offs, which reach everything, not in the channel mode
+messages, which may reach nothing. A plausible number in the argument rather
+than in the signal, which is the shape this file keeps recording.
+
+### What was changed
+
+`Source/TransportSilence.h` is new and is the whole of the decision: four
+booleans in, five messages out, no JUCE. It is a header of its own for the
+reason `LatencyGraph.h` and `RecordAlign.h` are. The decision lived in the
+device callback where nothing could reach it, and three faults were living in
+it undisturbed, which is the same post mortem CLAUDE.md already records about
+`finishAudioRecording`: the figure was in the window, where nothing tests it.
+
+The table: a wrap gets note offs for the clip notes and nothing else, because a
+clip note whose off beat lies past the loop end never reaches its off and would
+hang, and everything else sounding is a continuation. A stop or a jump gets the
+pedal up, note offs for everything tracked, and All Notes Off behind them for
+notes the engine is not tracking, which is what a hosted arpeggiator may be
+holding by itself. Only a panic gets All Sound Off.
+
+`PanOne` now gives the two messages the two answers, and All Sound Off reaches
+for `Synth::Voice::kill()`, which is what it was written for.
+`VoiceAllocator::allSoundOff` is the other half of that and is not optional:
+silencing the voices without telling the pool leaves it believing sixteen
+silent voices are still sounding, so the next chord steals rather than finding
+them free, and the symptom turns up on the chord after the one that caused it.
+
+### Mutation testing
+
+All figures from the same harness, so they can be compared. Mutants that do not
+compile are not counted.
+
+| | survivors | of |
+|---|---|---|
+| `VoiceAllocator.h`, as it stood, with the suite's flags as they stood | 14 | 57 |
+| the same, with `-D_GLIBCXX_ASSERTIONS` added and nothing else changed | 11 | 57 |
+| the same, with tonight's tests | 10 | 57 |
+| `TransportSilence.h` with its new test | 0 | 33 |
+
+**Three of those survivors were not survivors.** `-D_GLIBCXX_ASSERTIONS` makes
+the subscript on `std::array` a checked one, and the sanitizers cannot do this:
+an array that is a member of an object lives inside that object's own
+allocation, so reading one past the end of it reads the next member and address
+sanitizer has nothing to complain about. Writing past the end of the whole
+object it does catch, and that difference is what decides which of these hide.
+
+The three the flag caught, named exactly, because the first version of this
+entry got them wrong and an audit measured them:
+
+- the retrigger loop in `noteOn`, `i < NumVoices` to `i <= NumVoices`
+- the same off by one in `findOldest`
+- `index >= NumVoices` to `index > NumVoices`, the bounds guard in
+  `voiceFinished`
+
+The same off by one in `findSilent` is **not** among them: it was already
+caught, without the flag, against the old test. That is not luck and it is the
+useful part. `findSilent` returning `NumVoices` makes `noteOn` **write**
+`voices[NumVoices]`, which is past the end of the whole object and which
+address sanitizer sees. `findOldest` and the retrigger loop only **read**
+`voices[NumVoices]`, which lands inside the `counter` member sitting after the
+array and is invisible. So the same mistake in three loops hides in two of them
+and not the third, which is a poor thing to be relying on.
+
+The flag is now in `Tests/run.sh` and all fifty one tests pass with it.
+
+This is the second time this project has been caught by exactly this. CLAUDE.md
+already records four deliberate breakages of bounds checks that looked like
+survivors and were out of bounds reads the suite caught. Those were in buffers
+the sanitizer can see. A member array is not, and the note in CLAUDE.md was not
+enough on its own to find that out.
+
+**One survivor was a real gap in the test, and it was the steal policy itself.**
+Changing `findOldest (true)` to `findOldest (false)` at the first fallback
+collapses the search to a single pass over everything sounding. The documented
+policy prefers a voice that is already fading over one the player is holding
+down, whatever their ages; the mutant takes the oldest sounding voice of any
+kind. `theOldestReleasingVoiceGoesFirst` released the two **oldest** voices, so
+the longest releasing voice and the oldest voice of any kind were the same
+voice and the two halves of the policy could not be told apart.
+`aFadingVoiceGoesBeforeAHeldOneHoweverYoungItIs` releases the **newest** voice
+instead, which is the case where the two answers differ. The audible difference
+is a note the player is still holding being cut while something was already
+fading away.
+
+**The ten that remain are genuine no-ops.** Said individually, because "no-op"
+said in bulk is how a gap hides:
+
+- `none = -1` to `-2`. The value is never exposed as a number. Every reader
+  either compares it against `none` itself or tests it for being negative, and
+  it is only ever returned at all when the pool has no voices.
+- `Voice::startedAt`'s default, to 1 or to minus one. Only read on a voice that
+  is sounding, and every voice that starts sounding overwrites it from the
+  counter. `findOldest` skips the rest.
+- `counter`'s initial value in `reset` and in the member initialiser, to 1 or to
+  minus one. Only the order of the numbers matters, never the numbers. Minus
+  one on an unsigned counter wraps to zero on the first note and counts up from
+  there, so the order survives even that.
+- `oldest`'s initial value in `findOldest`, to 1 or to minus one. Dead: `best ==
+  none` short circuits on the first qualifying voice and sets both.
+- `v.startedAt < oldest` to `<=`. Two sounding voices can never share an age, so
+  the tie this changes cannot arise. That was an assumption when the sweep found
+  it and it is an assertion now: `invariantsHold` checks that no two sounding
+  voices share a `startedAt`, after every one of the fifty thousand random
+  events. A mutation sweep cannot tell a tie that is impossible from one that is
+  untested, so the invariant is what makes the judgement checkable rather than
+  argued.
+
+### The flag found one more thing, in a test nobody was looking at
+
+`main` was already failing CI when this branch started, on `TunerTest`, and
+adding `-D_GLIBCXX_ASSERTIONS` made it fail nearly every time rather than
+sometimes. That is worth separating out, because the flag is not the fault.
+
+The tuner's tear check runs a writer thread against a reader and, at a capacity
+meeting the stated requirement, asserts that at least one snapshot is accepted.
+Without that, the check above it is satisfied by a bound that refuses
+everything, which is a tuner that never shows a note. The loop ran until the
+**writer** had written a fixed amount, and the comment above it said that this
+"makes this slower rather than flaky" on a machine that schedules the two
+threads unevenly.
+
+It does the opposite, and the comment is the thing that was wrong. The writer
+is the thread nothing ever slows down. Anything that slows the reader, a loaded
+runner with two cores, a sanitizer, a bounds check inside the copy, lets the
+writer spend the whole budget while the reader accepts nothing, and the check
+fails against a ring that is working perfectly. Measured here, the accepted
+count went 517, then 2, then 19 across three runs of the same binary, and zero
+on the runner.
+
+Bounded by the reader instead, it runs until 32 snapshots have been accepted,
+with a cap on attempts so that a writer which never starts fails the check
+rather than hanging the suite. 621 and 1144 attempts on two runs, against a cap
+of fifty million.
+
+The general form is worth more than the fix. **A threaded check whose budget is
+spent by the thread it is not measuring is a check about the machine.** It
+passed on fast hardware for a day and was red on the runner the whole time,
+which is also why a red test on `main` should not be left to stand: this one
+had been failing since the morning and the next thing to go red would have had
+nothing to stand out against.
+
+### What is proven, and what is still only reasoned
+
+The table is proven. Beyond the 33 mechanical mutants, an audit hand built five
+semantic mutations the sweep cannot generate, including the one that caused the
+original fault, putting the wrap branch ahead of the stop branch so the flags
+accumulate again. All five were caught.
+
+**The wiring is not proven, and nothing in `Tests/` can see it**, because
+nothing there compiles `AudioEngine.cpp`. Named breakages that leave all fifty
+one tests green, so that this is a known gap rather than a vague one:
+
+- swapping the two arguments of `stopTrackedNotes (slot, silence.liveNoteOffs,
+  silence.clipNoteOffs)`, which on a wrap sends live note offs and no clip note
+  offs: exactly the fault this night removed, put back
+- deleting the `if (silence.allSoundOff)` line, which hollows the escalation out
+  again
+- `&&` for `||` in the guard above the channel mode loop, after which a stop
+  sends no channel mode message at all
+
+This is the same gap the fader law night recorded as "nothing executes the
+migration's wiring", and the remedy that worked there was a small harness
+stubbing the handful of JUCE calls it needed. Here that is
+`juce::MidiBuffer::addEvent` and the three `MidiMessage` factories, and
+`Tests/juce-stub` is already the precedent. Left for a later night rather than
+done badly at the end of this one.
+
+### Not fixed, and recorded in BACKLOG.md
+
+Four things, all found by auditing this work and all deliberately left:
+
+- **A transport edge lost to a failed try lock.** The edges are computed
+  outside the graph lock, so a stop landing in the same block as a plugin being
+  loaded can leave a clip note sounding until somebody finds the panic button.
+  `panicRequest` is consumed inside the lock and is the shape the others want.
+  Concurrency rather than policy, and worth reviewing on its own.
+- **The sustain pedal is not modelled at all.** It is why neither answer at the
+  loop wrap is right, and why the symptom moved rather than went away.
+- **`unloadInstrument` reaches for the engine's panic**, which now cuts rather
+  than releases, so unloading a plugin on one channel silences a sounding note
+  on another. New as of tonight, and the fix is in `MainComponent.cpp`, which an
+  open pull request is already changing.
+- **Nothing fades a stolen voice, and now nothing fades a killed one either.**
+  Measured, `Voice::kill()` steps up to 0.234 of full scale at the voice output.
+  The allocator has computed and documented `stolenFrom` for exactly this since
+  it was written and `PanOne::handle` has never read it, so a steal already cuts
+  without a ramp. The steal is the common case and the panic is the rare one, so
+  the ramp belongs with the steal, which is a change of its own.
+
 ## 2026-11-14: the swing half of the groove, which is a number other studios own
 
 ### What is being looked at
