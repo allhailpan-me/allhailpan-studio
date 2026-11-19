@@ -410,10 +410,6 @@ int AudioEngine::getRecordOffsetSamples() const
     return RecordAlign::captureOffsetSamples (getRecordFigures());
 }
 
-int AudioEngine::getMidiRecordOffsetSamples() const
-{
-    return RecordAlign::midiCaptureOffsetSamples (getRecordFigures());
-}
 
 // ---------------------------------------------------------------------------
 // Delay compensation
@@ -828,8 +824,15 @@ void AudioEngine::startAudioRecording()
         // are following backing they hear late, so their performance lands
         // late by the same amount a MIDI recording does. The mode cannot tell
         // those apart, and a bounce that drifts off the grid is the worse of
-        // the two, so this stays at zero. It is the same open problem as the
-        // MIDI tap below. See Research/BACKLOG.md.
+        // the two, so this stays at zero.
+        //
+        // This used to say it was the same open problem as the MIDI tap, and
+        // it is not: the tap is fed only from the hardware input and the
+        // keyboard, so it knows it has a live performance and is offset. The
+        // consequence is that the two halves of Rec: Instrument sound and its
+        // notes would disagree with each other, which is worse than both of
+        // them being late together, so the tap holds its offset at zero for
+        // exactly this mode. See the tap for the other end of that.
         recorder.setCaptureOffset (0, bps);
         recorder.begin();
         return;
@@ -1229,6 +1232,7 @@ void AudioEngine::startMidiRecording (int channel)
     // before it: a performance with a step in the middle of it, put there by
     // something that happened on another track.
     midiCaptureOffset.store (RecordAlign::midiCaptureOffsetSamples (getRecordFigures()));
+    midiCaptureOffsetBeats.store (0.0);
 
     midiRecording.store (true);
 }
@@ -1256,7 +1260,22 @@ void AudioEngine::pushRecordedParam (int index, float value)
     if (! midiRecording.load() || ! playing.load())
         return;
 
-    const double beat = beatPosition.load();
+    // Offset with the notes rather than left on the raw transport. A knob
+    // moved while playing is the same gesture following the same late
+    // monitoring, and its points are written into the same clip as the notes,
+    // so leaving it unmoved would split a performance from its own automation
+    // by the whole figure.
+    //
+    // What this does not correct for is the plugin's own reporting delay,
+    // which nothing measures, exactly as the typed keyboard's dispatch delay
+    // is left in the notes.
+    const auto placed = RecordAlign::placeMidiEvent (beatPosition.load(),
+                                                     midiCaptureOffsetBeats.load(),
+                                                     midiRecordStart.load());
+    if (! placed.keep)
+        return;
+
+    const double beat = placed.beat;
     const juce::SpinLock::ScopedTryLockType lock (paramWriteLock);
     if (! lock.isLocked())
         return;
@@ -1663,7 +1682,25 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         if (midiRecordStart.load() < 0.0)
             midiRecordStart.store (blockStartBeat);
 
-        const double offsetBeats = (double) midiCaptureOffset.load() * beatsPerSample;
+        // Held at zero for an instrument take, which is Rec: Instrument sound
+        // and its notes. That take has two halves, the channel's own audio and
+        // the notes that drove it, and the audio half cannot be offset because
+        // the instrument recorder cannot tell a live performance from a
+        // pattern being bounced off the grid. Offsetting only the notes would
+        // make the two halves of one performance disagree by the whole figure,
+        // and the project would then play it as a flam that moves whenever
+        // somebody loads a plugin elsewhere. Both late together is the lesser
+        // fault and is what every version so far has done, so that mode is
+        // left exactly as it was. See startAudioRecording for the other end.
+        const double offsetBeats = recordSource.load() >= 0
+                                     ? 0.0
+                                     : (double) midiCaptureOffset.load() * beatsPerSample;
+
+        // Published for pushRecordedParam, which runs on whichever thread a
+        // plugin reports a knob move on and so has no tempo of its own to
+        // convert a sample count with.
+        midiCaptureOffsetBeats.store (offsetBeats);
+
         const double recordStart = midiRecordStart.load();
 
         for (const auto meta : liveMidi)
@@ -1673,8 +1710,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
             const double raw = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
 
-            const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats, recordStart,
-                                                             loopFrom, loopTo);
+            const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats, recordStart);
 
             // Asked before the FIFO is written to rather than after. A write
             // scope taken and then abandoned is a slot published with whatever
@@ -1965,6 +2001,13 @@ void AudioEngine::capturePluginMidi (int slot, const juce::MidiBuffer& produced,
 
         pluginMidiCaptured.fetch_add (1);
         const auto scope = midiFifo.write (1);
+        // Deliberately not offset, where the live tap is. A plugin generates
+        // against the transport it is handed, so an arpeggiator running free
+        // is already on the grid and moving it earlier would drag it off. That
+        // is the same reason the instrument recorder stays at zero, and it
+        // does mean one clip can hold both conventions: a chord played in live
+        // sits earlier than the notes the plugin made from it. Each is right
+        // in its own frame and neither is guessed at.
         const double beat = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
         scope.forEach ([&] (int index)
         {

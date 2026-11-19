@@ -189,16 +189,6 @@ public:
         whether anything is being applied at all. */
     int    getRecordOffsetSamples() const;
 
-    /** The same, for a live MIDI capture, which is a different figure: no
-        input latency in it, and one audio block that the audio path does not
-        carry. RecordAlign::midiCaptureOffsetSamples has the derivation.
-
-        Not shown anywhere yet, and that is a gap rather than a decision: the
-        audio figure is displayed for the reason given above, and this one
-        wants the same treatment. The panel is fed from MainComponent, which an
-        open pull request holds. See Research/BACKLOG.md. */
-    int    getMidiRecordOffsetSamples() const;
-
     // ---- instrument channels ----
     void setChannelPlugin (int channel, std::unique_ptr<juce::AudioPluginInstance>);
     juce::AudioPluginInstance* getChannelPlugin (int channel) const noexcept;
@@ -1018,6 +1008,11 @@ private:
     // take is written down under one figure however many plugins are loaded
     // while it is running.
     std::atomic<int>    midiCaptureOffset { 0 };
+
+    // The same figure in beats, published once a block by the device callback
+    // so that pushRecordedParam can use it: that runs on whichever thread a
+    // plugin reports a knob move on, and has no tempo to convert with.
+    std::atomic<double> midiCaptureOffsetBeats { 0.0 };
     std::atomic<int>    pluginMidiCaptured { 0 };
     static constexpr int recCapacity = 8192;
     std::vector<RecordedMidi>  midiRing  = std::vector<RecordedMidi> (recCapacity);

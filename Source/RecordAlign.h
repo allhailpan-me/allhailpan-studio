@@ -365,11 +365,19 @@ namespace RecordAlign
     /** How many samples a captured live MIDI event belongs earlier than the
         beat it was written down at.
 
-        Compare captureOffsetSamples, which is the audio answer. The two differ
-        by exactly `bufferSize + midiInputLatency - inputLatency - trim/2`, and
-        that relationship is asserted in the test rather than left to be
-        noticed: the usual way for a pair like this to go wrong is for somebody
-        to edit one of them.
+        Compare captureOffsetSamples, which is the audio answer. Where neither
+        figure's floor is binding the two differ by `bufferSize +
+        midiInputLatency - inputLatency - trim/2`, and that relationship is
+        asserted in the test rather than left to be noticed: the usual way for
+        a pair like this to go wrong is for somebody to edit one of them.
+
+        The floors do bind on a driver that answers for one direction or
+        neither, and then the relation is false rather than approximate: the
+        round trip floors at two buffers where this floors at one, so a silent
+        driver makes the two offsets equal. The test pins that case to its own
+        literal instead of loosening the check, and the universal form it
+        asserts is `midi - audio == block + midiIn - (roundTrip - output) -
+        trimShare`.
 
         THE TRIM IS HALVED, AND THAT IS A CONVENTION
 
@@ -425,114 +433,83 @@ namespace RecordAlign
     /** Where one captured MIDI event ends up, or that it belongs nowhere. */
     struct MidiPlacement
     {
-        bool   keep = false;  /**< false means the event is not part of the take */
+        bool   keep = false;  /**< false only for an input that is not a number */
         double beat = 0.0;
     };
 
-    /** Moves one captured event back by the offset, and says whether it is
-        part of the take at all.
+    /** Moves one captured event back by the offset.
 
         `rawBeat` is the transport position the event was written down at,
-        `offsetBeats` is midiCaptureOffsetSamples in beats, `recordStartBeat`
-        is the transport position recording began at, and `loopFrom`/`loopTo`
-        are the loop range, with `loopTo <= loopFrom` meaning the transport is
-        not looping.
+        `offsetBeats` is midiCaptureOffsetSamples in beats, and
+        `recordStartBeat` is the transport position recording began at.
 
-        Two timelines, and which one applies is decided by where the event was
-        written down rather than by where it ends up:
+        One rule: the event moves back by the offset, and no further back than
+        the point recording began. The clamp is the whole of the subtlety, so
+        it is worth saying what it is not.
 
-        A LINEAR TRANSPORT. The event moves back by the offset, and if it then
-        lands before the point recording began it is **dropped**. It is not
-        part of the take: at that instant the player was hearing music from
-        before the record point. This is Ardour's rule and its words, from
-        disk_writer.cc:701-706, which skips an event whose time is below
-        _first_recordable_sample. Dropping a note on and keeping its note off
-        is safe here, because MainComponent::collectRecordedMidi ignores a note
-        off with no held note, and in any case both halves of one note carry
-        the same offset.
+        WHY THE EARLIEST REPRESENTABLE POINT RATHER THAN A DROP
 
-        A LOOPING TRANSPORT. The loop is a cycle the player is playing round,
-        so the timeline is circular and the move wraps within it rather than
-        falling off the front. Nothing is dropped: the loop start and the loop
-        end are the same musical instant, so a note played just after the start
-        and belonging just before it belongs at the end of the cycle. The
-        consequence to know about is that this is true of the first pass too,
-        where there is as yet nothing at the end of the cycle: a note played in
-        the first few milliseconds of a loop recording lands at the end of the
-        pattern rather than being dropped. That is the right answer for a
-        pattern being played round and round, which is the only reason to set a
-        loop range while recording, and it is said out loud here because it
-        looks like an edge that was missed.
+        Ardour drops: disk_writer.cc:701-706 skips an event whose time is below
+        _first_recordable_sample, "Event out of range". The first version here
+        copied that and it is wrong for this studio, for a reason about this
+        studio rather than about Ardour.
 
-        The circular treatment is chosen on `rawBeat` being inside the loop,
-        not on a range merely being set. A transport that has not reached the
-        loop yet is still linear, and wrapping there would teleport an event
-        into a range the player had not got to.
+        A player pushes the downbeat. That is not an edge case, it is most
+        players most of the time, and the correction is of the same order as
+        the push: ten to sixty milliseconds. So the first note of a take, the
+        one on the count-in's downbeat, lands a hair before the record point
+        more often than not. Dropped, it is gone, and
+        MainComponent::finishRecording would drop it a second time anyway: it
+        rebases every note by the record start and keeps only `n.start >= 0.0`.
+        There is no second chance the way there is for audio, where this header
+        argues at length that the pre-roll is kept in the file precisely so a
+        wrongly set trim cannot take the attack off a take with no way back. A
+        MIDI clip has no pre-roll to keep it in.
+
+        So the earliest point the take can represent is where it goes. The cost
+        is that notes played inside the first `offsetBeats` of a take pile onto
+        its first instant, which for a pushed downbeat is exactly where the
+        player meant it; the alternative cost is losing the note.
+
+        WHY THERE IS NO LOOP WRAPPING HERE
+
+        There was, and it was wrong twice over. It wrapped a corrected beat
+        back inside the loop range on the argument that a loop is a cycle and
+        its start and end are the same musical instant. Both halves failed:
+
+        It broke note pairs. Each event is placed on its own, so a note on
+        landing a hair before the loop start wrapped to the top of the cycle
+        while its note off, a beat later, did not. The pair then reaches
+        MainComponent::collectRecordedMidi out of order and it can only clamp
+        the note to a sixty-fourth. An ordinary slightly early note came back
+        as a blip at the far end of the pattern, which is worse than the
+        lateness being fixed, and the on-screen keyboard hit it every time.
+
+        And the premise was imported rather than read. This studio does not
+        fold loop passes into one cycle for MIDI: finishRecording builds a
+        single clip starting at the record point and long enough for the whole
+        take, so the timeline a recorded MIDI event lives on is continuous and
+        not circular. The circular model came from how other studios record
+        patterns, which is exactly the move CLAUDE.md warns about, and it was
+        caught by an audit rather than by the test, because the test placed
+        single events and so blessed the behaviour that corrupted the pairs.
     */
     inline MidiPlacement placeMidiEvent (double rawBeat, double offsetBeats,
-                                         double recordStartBeat,
-                                         double loopFrom, double loopTo) noexcept
+                                         double recordStartBeat) noexcept
     {
-        if (! std::isfinite (rawBeat) || ! std::isfinite (offsetBeats))
-            return {};
-
         const double corrected = rawBeat - offsetBeats;
 
+        // Covers a non-finite rawBeat and a non-finite offset together: IEEE
+        // subtraction never makes a finite number out of one that is not, so
+        // asking about the result is asking about both operands.
         if (! std::isfinite (corrected))
             return {};
 
-        const bool loopUsable = std::isfinite (loopFrom) && std::isfinite (loopTo)
-                                && loopTo > loopFrom;
-
-        if (loopUsable && rawBeat >= loopFrom && rawBeat < loopTo)
-        {
-            const double length = loopTo - loopFrom;
-
-            // fmod rather than a subtract-until loop: an offset longer than
-            // the loop is nonsense a settings file can still produce, and a
-            // loop here would run for as long as it took.
-            double within = std::fmod (corrected - loopFrom, length);
-
-            if (within < 0.0)
-                within += length;
-
-            double beat = loopFrom + within;
-
-            // The range is half open, and that has to survive the arithmetic
-            // as well as the modulo. Two separate roundings can reach loopTo
-            // from below: `within` can round up to the whole length, and the
-            // addition back to loopFrom can round up on its own, because
-            // loopFrom is the larger number and its last place is the coarser
-            // one. The second is the one that bites: a four beat loop at bar
-            // 2049 lands exactly on loopTo for a correction one unit in the
-            // last place before the loop start, with `within` still honestly
-            // below the length.
-            //
-            // Checking the answer rather than the intermediate is what covers
-            // both. An earlier version guarded `within` alone and justified it
-            // by fmod returning -0.0, which is a path that cannot be taken at
-            // all, since -0.0 < 0.0 is false and the addition above never
-            // fires for it. A guard that is needed for a reason other than the
-            // one written above it is the shape of comment this project keeps
-            // meeting, so it is recorded rather than quietly corrected.
-            //
-            // Landing on loopTo would put the note a whole cycle late and
-            // outside the pattern, and since its note off wraps correctly the
-            // pair would come back out of order, which
-            // MainComponent::collectRecordedMidi can only resolve by clamping
-            // the note to a sixty fourth. The start of the cycle is the same
-            // musical instant as its end, so that is where it goes.
-            if (! (beat < loopTo))
-                beat = loopFrom;
-
-            return { true, beat };
-        }
-
         // A record point that is not a number is a studio that has lost track
-        // of when it started, and the less destructive answer is to keep what
-        // was played rather than to silently discard all of it.
+        // of when it started. Nothing to clamp against, so the correction
+        // stands on its own rather than everything being thrown away.
         if (std::isfinite (recordStartBeat) && corrected < recordStartBeat)
-            return {};
+            return { true, recordStartBeat };
 
         return { true, corrected };
     }
