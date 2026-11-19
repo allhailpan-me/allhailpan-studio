@@ -1602,7 +1602,19 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         }
     }
 
-    const bool sendAllOff = jumped || wrapped || (wasRunning && ! isRunning);
+    // What each of these is worth is in TransportSilence.h, deliberately not
+    // here: it used to be, and a wrap quietly got the same answer as a stop.
+    // The panic is not read here because it is consumed inside scheduleMidi,
+    // which is inside the graph lock, so a panic raised during a contended
+    // block is not thrown away.
+    const TransportSilence::Event transportEvent
+    {
+        wasRunning && ! isRunning,   // stopped
+        jumped,
+        wrapped,
+        false                        // panicking: filled in by scheduleMidi
+    };
+
     wasRunning = isRunning;
 
     // ---- audio recording tap ----
@@ -1769,7 +1781,7 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 }
             }
 
-            scheduleMidi (numSamples, sendAllOff, sequencing);
+            scheduleMidi (numSamples, transportEvent, sequencing);
             if (sequencing)
                 applyAutomation (blockStartBeat);
 
@@ -2046,11 +2058,16 @@ void AudioEngine::trackLiveMessage (int slot, const juce::uint8* data, int numBy
         std::fill_n (rows + ch * 128, 128, (juce::uint8) 0);
 }
 
-void AudioEngine::scheduleMidi (int numSamples, bool sendAllOff, bool isRunning)
+void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning)
 {
-    const bool panicking    = panicRequest.exchange (false);
-    const bool releaseAll   = sendAllOff || panicking;
-    const bool editedWhilePlaying = snapshotChanged.exchange (false) && isRunning && ! releaseAll;
+    // Read here rather than at the top of the callback so that a panic raised
+    // while the message thread holds the graph lock is still waiting in the
+    // next block that gets through, instead of having been exchanged away by
+    // one that was skipped.
+    transportEvent.panicking = panicRequest.exchange (false);
+
+    const auto silence = TransportSilence::actionFor (transportEvent);
+    const bool editedWhilePlaying = snapshotChanged.exchange (false) && isRunning && ! silence.anything();
 
     for (int slot = 0; slot < kNumChannels; ++slot)
     {
@@ -2059,15 +2076,24 @@ void AudioEngine::scheduleMidi (int numSamples, bool sendAllOff, bool isRunning)
         if (c.plugin == nullptr)
             continue;
 
-        if (releaseAll)
-            stopTrackedNotes (slot, true, true);
+        if (silence.clipNoteOffs || silence.liveNoteOffs)
+            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs);
 
-        if (releaseAll)
+        // The pedal first, then the release, then the cut, which is the order
+        // they are declared in and the order they have to arrive in: a note the
+        // pedal is holding up survives a note off and survives All Notes Off
+        // too, until the pedal is lifted.
+        if (silence.sustainUp || silence.allNotesOff || silence.allSoundOff)
             for (int ch = 1; ch <= 16; ++ch)
             {
-                c.midi.addEvent (juce::MidiMessage::controllerEvent (ch, 64, 0), 0);   // sustain pedal up
-                c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
-                c.midi.addEvent (juce::MidiMessage::allSoundOff (ch), 0);
+                if (silence.sustainUp)
+                    c.midi.addEvent (juce::MidiMessage::controllerEvent (ch, 64, 0), 0);
+
+                if (silence.allNotesOff)
+                    c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
+
+                if (silence.allSoundOff)
+                    c.midi.addEvent (juce::MidiMessage::allSoundOff (ch), 0);
             }
     }
 

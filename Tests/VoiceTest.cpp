@@ -1949,6 +1949,92 @@ void nothingUnreasonableBreaksIt()
         }
 }
 
+/** Stopping a voice and killing it are the two different things the two
+    channel mode messages ask for, and the instrument now picks between them,
+    so the difference has to be real.
+
+    All Notes Off "should force voices to go to the release stage of the
+    envelope, and not terminate the sound of the notes abruptly". All Sound Off
+    turns the notes off and sets "their volume envelopes to zero as soon as
+    possible". MIDI 1.0 Detailed Specification v4.2.1, MMA 96.1-4, Appendix
+    p. A-5 and "Channel Mode Messages" p. 25.
+
+    The distinguishing property is not that one is quicker. It is that the time
+    the hard one takes does not depend on the patch at all, and a release with
+    a very short time constant would pass a check that only looked at how long
+    it took on one patch.
+*/
+void stoppingAndKillingAreDifferentThings()
+{
+    std::printf ("a release runs out, and a kill does not wait for it\n");
+
+    for (double releaseSeconds : { 0.010, 0.250, 4.000 })
+    {
+        auto patch = plainPatch();
+        patch.envelopes[0] = { 0.005, 0.100, 0.80, releaseSeconds };
+
+        // Released: the tail is still there a tenth of a second later, which
+        // is the whole point of the gentler message.
+        {
+            Synth::Voice voice;
+            voice.setSampleRate (rate);
+            voice.setBank (&sharedBank());
+            voice.setPatch (patch);
+            voice.start (60, 1.0f);
+
+            for (int i = 0; i < 12000; ++i)
+                voice.nextSample();
+
+            voice.stop();
+
+            std::vector<double> after;
+            for (int i = 0; i < 4800; ++i)
+                after.push_back ((double) voice.nextSample());
+
+            const double tail = rmsOf (after, 2400, 4800);
+
+            if (releaseSeconds > 0.1)
+            {
+                if (! (tail > 1.0e-4))
+                    fail ("a release of " + show (releaseSeconds) + " s was silent a tenth of a"
+                          " second after the note off, so nothing rings out");
+
+                if (! voice.isActive())
+                    fail ("a voice with a release of " + show (releaseSeconds)
+                          + " s reported itself finished while it was still sounding");
+            }
+        }
+
+        // Killed: silent at once, and the same at once whatever the patch
+        // asked for.
+        {
+            Synth::Voice voice;
+            voice.setSampleRate (rate);
+            voice.setBank (&sharedBank());
+            voice.setPatch (patch);
+            voice.start (60, 1.0f);
+
+            for (int i = 0; i < 12000; ++i)
+                voice.nextSample();
+
+            voice.kill();
+
+            if (voice.isActive())
+                fail ("a killed voice still reported itself active, so the pool never gets it back");
+
+            double worst = 0.0;
+            for (int i = 0; i < 4800; ++i)
+                worst = std::fmax (worst, std::fabs ((double) voice.nextSample()));
+
+            // Exactly nothing, not nearly nothing: the envelope is reset
+            // rather than released, so there is no tail to be small.
+            if (worst != 0.0)
+                fail ("a killed voice with a release of " + show (releaseSeconds)
+                      + " s produced " + show (worst) + " afterwards");
+        }
+    }
+}
+
 } // namespace
 
 int main()
@@ -1973,6 +2059,7 @@ int main()
     theGateDefaultYields();
     phaseModulationDoesNotDetune();
     nothingUnreasonableBreaksIt();
+    stoppingAndKillingAreDifferentThings();
 
     std::printf ("\n");
 
