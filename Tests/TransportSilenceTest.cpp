@@ -80,6 +80,68 @@ static void nothingHappenedMeansNothingIsSent()
     check (! action.anything(), "a quiet block sent something");
 }
 
+static void anythingAgreesWithTheTable()
+{
+    std::printf ("the shorthand for \"is there anything to send\" agrees with the table\n");
+
+    // The engine asks this one question rather than five, to decide whether a
+    // block that is already silencing something should also chase an edit, so
+    // it has to mean exactly what the five flags say. A wrap is the case that
+    // catches a wrong answer: it is the one event that asks for a single
+    // message, so anything() built out of the wrong operator reads it as a
+    // quiet block.
+    for (const auto& e : everyEvent())
+    {
+        const auto a = actionFor (e);
+        const bool byHand = a.clipNoteOffs || a.liveNoteOffs || a.sustainUp
+                         || a.allNotesOff  || a.allSoundOff;
+
+        check (a.anything() == byHand, "anything() disagrees with its own flags: " + describe (e));
+
+        const bool happened = e.stopped || e.jumped || e.wrapped || e.panicking;
+        check (a.anything() == happened,
+               "anything() reads " + describe (e) + " the wrong way round");
+    }
+}
+
+static void coversIsAnHonestComparison()
+{
+    std::printf ("covers() is an honest comparison\n");
+
+    // Two of the properties below are written in terms of covers(), so a
+    // covers() that said yes too easily would hollow both of them out without
+    // failing anything. Checked against every pair of hand built actions
+    // rather than against the five the table happens to produce.
+    for (int a = 0; a < 32; ++a)
+        for (int b = 0; b < 32; ++b)
+        {
+            Action x, y;
+            bool* xf[] = { &x.clipNoteOffs, &x.liveNoteOffs, &x.sustainUp, &x.allNotesOff, &x.allSoundOff };
+            bool* yf[] = { &y.clipNoteOffs, &y.liveNoteOffs, &y.sustainUp, &y.allNotesOff, &y.allSoundOff };
+
+            for (int bit = 0; bit < 5; ++bit)
+            {
+                *xf[bit] = (a & (1 << bit)) != 0;
+                *yf[bit] = (b & (1 << bit)) != 0;
+            }
+
+            // x covers y exactly when x has every flag y has.
+            check (x.covers (y) == ((a & b) == b),
+                   "covers() got " + std::to_string (a) + " against " + std::to_string (b)
+                   + " wrong");
+
+            // And anything() over every combination of flags rather than only
+            // the five the table makes today. Checked only against those, it
+            // reads correctly while being written out of the wrong operator,
+            // because every action the table produces happens to send the clip
+            // note offs and that one flag carries the answer on its own. A
+            // helper the engine asks a question of has to be right for any
+            // action, not for the ones that exist this week.
+            check (x.anything() == (a != 0),
+                   "anything() got the flag set " + std::to_string (a) + " wrong");
+        }
+}
+
 static void onlyAPanicCuts()
 {
     std::printf ("All Sound Off goes out for a panic and for nothing else\n");
@@ -245,6 +307,8 @@ int main()
     std::printf ("transport silence\n");
 
     nothingHappenedMeansNothingIsSent();
+    anythingAgreesWithTheTable();
+    coversIsAnHonestComparison();
     onlyAPanicCuts();
     aWrapIsAContinuation();
     aStopReleasesAndDoesNotCut();

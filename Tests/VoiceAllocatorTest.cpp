@@ -22,6 +22,7 @@
 #include "VoiceAllocator.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <set>
 #include <string>
 #include <vector>
@@ -48,10 +49,26 @@ using Pool = VoiceAllocator<8>;
 static bool invariantsHold (const Pool& pool, std::string& why)
 {
     std::set<int> heldNotes;
+    std::set<std::uint64_t> ages;
 
     for (int i = 0; i < Pool::voiceCount; ++i)
     {
         const auto& v = pool.voice (i);
+
+        // No two sounding voices may share an age. The search for the one to
+        // steal breaks ties by whichever it met first, so two voices of the
+        // same age would make the answer depend on where they happen to sit in
+        // the array rather than on what the player did. It holds because every
+        // voice that starts sounding takes the next number off a counter that
+        // only ever goes up, and this is here so that stays true rather than
+        // being assumed: it is the reason the comparison in findOldest can be
+        // a strict one, and a mutation sweep cannot tell a tie that is
+        // impossible from one that is untested.
+        if (v.sounding && ! ages.insert (v.startedAt).second)
+        {
+            why = "voice " + std::to_string (i) + " shares its age with another";
+            return false;
+        }
 
         // A voice that is not sounding must not be claiming a note, or the
         // next search will skip it and the pool slowly shrinks.
@@ -155,6 +172,47 @@ static void theOldestReleasingVoiceGoesFirst()
     check (stolen == 60, "the steal reported " + std::to_string (stolen) + " rather than 60");
     check (pool.countHeld() == Pool::voiceCount - 1,
            "a held note was taken while a releasing one was available");
+}
+
+static void aFadingVoiceGoesBeforeAHeldOneHoweverYoungItIs()
+{
+    std::printf ("a fading voice goes before a held one, however young it is\n");
+
+    // The check above releases the two oldest voices, so the longest
+    // releasing voice and the oldest voice of any kind are the same one and
+    // the two halves of the policy cannot be told apart. Collapsing the
+    // search to a single pass over everything sounding, which is the obvious
+    // simplification and the wrong one, passed it.
+    //
+    // So this releases the newest voice instead. Now the two answers differ:
+    // the policy says take the fading one, and a search that only looks at
+    // age takes the note the player has been holding down since the start of
+    // the bar. Cutting a held note while something is already fading away is
+    // the audible difference between the two.
+    Pool pool;
+    pool.reset();
+
+    int stolen = -1;
+    std::vector<int> used;
+
+    for (int i = 0; i < Pool::voiceCount; ++i)
+        used.push_back (pool.noteOn (60 + i, stolen));
+
+    const int newestNote = 60 + Pool::voiceCount - 1;
+    pool.noteOff (newestNote);
+
+    const int next = pool.noteOn (90, stolen);
+
+    check (next == used[(std::size_t) Pool::voiceCount - 1],
+           "the steal took voice " + std::to_string (next) + " rather than the one that was fading");
+    check (stolen == newestNote,
+           "the steal reported taking note " + std::to_string (stolen) + " rather than "
+           + std::to_string (newestNote) + ", so it interrupted a note still being held");
+    check (pool.countHeld() == Pool::voiceCount,
+           "a held note was taken while a fading one was available");
+
+    std::string why;
+    check (invariantsHold (pool, why), "after stealing the fading voice: " + why);
 }
 
 static void aFullChordStealsTheOldestHeldNote()
@@ -440,6 +498,7 @@ int main()
     aSingleNoteGoesRoundTheWholeCycle();
     retriggeringReusesTheSameVoice();
     theOldestReleasingVoiceGoesFirst();
+    aFadingVoiceGoesBeforeAHeldOneHoweverYoungItIs();
     aFullChordStealsTheOldestHeldNote();
     noteOffsForNotesThatWereNeverOnAreHarmless();
     playingItHardKeepsEveryInvariant();

@@ -10,25 +10,183 @@ Newest first.
 ## 2026-11-19: the voice pool, and the panic that was only as fast as the patch
 
 **Target.** `Source/VoiceAllocator.h`, its test, and the one caller that reads
-it, `PanOne::handleMidi`. Picked because a mechanical mutation sweep of the
-allocator left 16 survivors of 50 compiling mutants, and because reading the
-caller to judge those survivors found that the allocator's documented steal
-report is assigned and never read, and that `Synth::Voice::kill()`, whose own
-comment says what it is for, is called by nothing in `Source` at all.
+it, `PanOne::handleMidi`, which led into `AudioEngine::scheduleMidi`.
 
-**Status: in progress.**
+Picked because a mechanical mutation sweep of the allocator left survivors, and
+because reading the caller in order to judge those survivors found two
+mechanisms wired to nothing: the steal report the allocator computes and
+documents, which `PanOne` assigns to a variable and never reads, and
+`Synth::Voice::kill()`, which carries a comment saying what it is for and had
+no caller anywhere in `Source`.
 
-What is being done:
+**Two real faults were found and fixed. Both are audible and neither announces
+itself.**
 
-- Separate All Sound Off from All Notes Off in PAN One. The MIDI 1.0 Detailed
-  Specification gives them different behaviour and the two currently share a
-  branch, so the studio's own panic is only ever as fast as the patch's
-  release. Sources and wording are recorded below as the work lands.
-- Give the allocator the bookkeeping half of All Sound Off, so the decision
-  lives where a test can reach it rather than in the JUCE file where nothing
-  can.
-- Kill the mutation survivors that are gaps rather than no-ops, and write down
-  which each one is.
+### Fault one: a chord held across a loop point was killed at the loop point
+
+`AudioEngine::scheduleMidi` silenced everything whenever the play head stopped,
+jumped **or wrapped**. `sendAllOff` was `jumped || wrapped || (wasRunning && !
+isRunning)`, and `wrapped` is set every time the loop comes round, and also
+when an arrangement with no loop range plays past its last bar, because
+`loopTo` falls back to the song end.
+
+What it cost, in the order somebody would notice:
+
+- `stopTrackedNotes (slot, true, true)` passes `includeLive = true`, so a chord
+  held on a controller while a looping arrangement plays was handed note offs
+  at the loop point and nothing brought it back. Playing along with a loop is
+  the ordinary way to use one.
+- The MIDI recorder reads the live input rather than what the engine schedules,
+  so a pad held across the wrap was cut in the monitoring and ran straight
+  through the wrap in the take. What was heard and what was recorded disagreed,
+  which is the thing this studio is least willing to be wrong about.
+- Controller 64 went out at every wrap and nothing anywhere tracks the pedal's
+  real position, so holding the pedal down through a loop point turned sustain
+  off for the rest of that pass.
+
+**The part worth keeping is that this needed no specification to find.**
+`scheduleMidi` already says, in two separate comments 170 lines apart and about
+this same wrap, that a wrap is a continuation: it is why the delay compensation
+buffers are not dropped there, and why the gain ramps are not stepped there.
+Both guard on `jumped` alone. The MIDI half folded `wrapped` in with `jumped`
+and contradicted both of them. A comment that says the opposite of the code, in
+the same function as the code.
+
+### Fault two: the two channel mode messages were one branch
+
+`PanOne::handleMidi` had `else if (message.isAllNotesOff() ||
+message.isAllSoundOff())` and gave both the same gentle answer, releasing every
+voice. The MIDI 1.0 Detailed Specification, version 4.2.1, MMA document 96.1-4,
+gives them different behaviour, and the reason there are two messages at all is
+the difference:
+
+- All Notes Off "should force voices to go to the release stage of the
+  envelope, and not terminate the sound of the notes abruptly" (Appendix, "Hold
+  Pedal and 'All Notes Off'", p. A-5). The code already did this and it was
+  right.
+- All Sound Off turns off all notes currently on and sets "their volume
+  envelopes to zero as soon as possible" ("Channel Mode Messages", p. 25). The
+  code did not do this. Controller 120 was added to the specification after
+  controller 123 precisely because All Notes Off is not allowed to be abrupt.
+
+So the studio's panic was only ever as fast as the patch. `AudioEngine` sends
+the pedal up, then All Notes Off, then All Sound Off, which is the right
+sequence; the last message in it did nothing. On a pad with a four second
+release, asking for silence gave four seconds of pad.
+
+And the escalation it was supposed to feed had been hollowed out from the other
+end. Pressing Stop a second time is documented in `MainComponent` as the panic
+button, for plugins that drone on regardless of note offs. The first press
+already sent the harshest message there is, so the second press had nothing
+left to escalate to.
+
+Worth noting what was **not** true, because the first version of this writeup
+said it and an audit took it out. "A hosted VST3 instrument is chopped dead at
+every loop wrap" is too strong. JUCE 9.0.3's VST3 host turns a controller
+message into a parameter change or drops it, VST3 has no All Notes Off event,
+and JUCE built plugins on `juce::Synthesiser` make the same conflation this
+code did, so they are gentle too. The instruments that really would have been
+cut are Audio Units and LV2, where the bytes are forwarded. The fault at the
+wrap is in the note offs, which reach everything, not in the channel mode
+messages, which may reach nothing. A plausible number in the argument rather
+than in the signal, which is the shape this file keeps recording.
+
+### What was changed
+
+`Source/TransportSilence.h` is new and is the whole of the decision: four
+booleans in, five messages out, no JUCE. It is a header of its own for the
+reason `LatencyGraph.h` and `RecordAlign.h` are. The decision lived in the
+device callback where nothing could reach it, and three faults were living in
+it undisturbed, which is the same post mortem CLAUDE.md already records about
+`finishAudioRecording`: the figure was in the window, where nothing tests it.
+
+The table: a wrap gets note offs for the clip notes and nothing else, because a
+clip note whose off beat lies past the loop end never reaches its off and would
+hang, and everything else sounding is a continuation. A stop or a jump gets the
+pedal up, note offs for everything tracked, and All Notes Off behind them for
+notes the engine is not tracking, which is what a hosted arpeggiator may be
+holding by itself. Only a panic gets All Sound Off.
+
+`PanOne` now gives the two messages the two answers, and All Sound Off reaches
+for `Synth::Voice::kill()`, which is what it was written for.
+`VoiceAllocator::allSoundOff` is the other half of that and is not optional:
+silencing the voices without telling the pool leaves it believing sixteen
+silent voices are still sounding, so the next chord steals rather than finding
+them free, and the symptom turns up on the chord after the one that caused it.
+
+### Mutation testing
+
+All figures from the same harness, so they can be compared. Mutants that do not
+compile are not counted.
+
+| | survivors | of |
+|---|---|---|
+| `VoiceAllocator.h`, as it stood, with the suite's flags as they stood | 14 | 57 |
+| the same, with `-D_GLIBCXX_ASSERTIONS` added and nothing else changed | 11 | 57 |
+| the same, with tonight's tests | 10 | 57 |
+| `TransportSilence.h` with its new test | 0 | 33 |
+
+**Three of those survivors were not survivors.** `-D_GLIBCXX_ASSERTIONS` makes
+the subscript on `std::array` a checked one, and the sanitizers cannot do this:
+an array that is a member of an object lives inside that object's own
+allocation, so reading one past the end of it reads the next member and address
+sanitizer has nothing to complain about. The three it caught are the ordinary
+off by one in each of the two search loops, `i < NumVoices` to `i <=
+NumVoices`, and `index >= NumVoices` to `index > NumVoices` in the guard in
+`voiceFinished`, which is a write past the end rather than a read. The flag is
+now in `Tests/run.sh` and all fifty one tests pass with it.
+
+This is the second time this project has been caught by exactly this. CLAUDE.md
+already records four deliberate breakages of bounds checks that looked like
+survivors and were out of bounds reads the suite caught. Those were in buffers
+the sanitizer can see. A member array is not, and the note in CLAUDE.md was not
+enough on its own to find that out.
+
+**One survivor was a real gap in the test, and it was the steal policy itself.**
+Changing `findOldest (true)` to `findOldest (false)` at the first fallback
+collapses the search to a single pass over everything sounding. The documented
+policy prefers a voice that is already fading over one the player is holding
+down, whatever their ages; the mutant takes the oldest sounding voice of any
+kind. `theOldestReleasingVoiceGoesFirst` released the two **oldest** voices, so
+the longest releasing voice and the oldest voice of any kind were the same
+voice and the two halves of the policy could not be told apart.
+`aFadingVoiceGoesBeforeAHeldOneHoweverYoungItIs` releases the **newest** voice
+instead, which is the case where the two answers differ. The audible difference
+is a note the player is still holding being cut while something was already
+fading away.
+
+**The ten that remain are genuine no-ops.** Said individually, because "no-op"
+said in bulk is how a gap hides:
+
+- `none = -1` to `-2`. The value is never exposed as a number. Every reader
+  either compares it against `none` itself or tests it for being negative, and
+  it is only ever returned at all when the pool has no voices.
+- `Voice::startedAt`'s default, to 1 or to minus one. Only read on a voice that
+  is sounding, and every voice that starts sounding overwrites it from the
+  counter. `findOldest` skips the rest.
+- `counter`'s initial value in `reset` and in the member initialiser, to 1 or to
+  minus one. Only the order of the numbers matters, never the numbers. Minus
+  one on an unsigned counter wraps to zero on the first note and counts up from
+  there, so the order survives even that.
+- `oldest`'s initial value in `findOldest`, to 1 or to minus one. Dead: `best ==
+  none` short circuits on the first qualifying voice and sets both.
+- `v.startedAt < oldest` to `<=`. Two sounding voices can never share an age, so
+  the tie this changes cannot arise. That was an assumption when the sweep found
+  it and it is an assertion now: `invariantsHold` checks that no two sounding
+  voices share a `startedAt`, after every one of the fifty thousand random
+  events. A mutation sweep cannot tell a tie that is impossible from one that is
+  untested, so the invariant is what makes the judgement checkable rather than
+  argued.
+
+### Not fixed, and recorded in BACKLOG.md
+
+An audit of this work found a separate fault in the same function that is a
+concurrency change rather than a policy one, and changing it alongside this
+would have made both harder to review: the transport edges are computed
+outside the graph lock and are lost if that block's try lock fails, so a
+transport stop that lands in the same block as a plugin being loaded can leave
+a clip note sounding until somebody finds the panic button. `panicRequest` is
+consumed inside the lock and is the shape the others want. Written up there.
 
 ## 2026-11-14: the swing half of the groove, which is a number other studios own
 

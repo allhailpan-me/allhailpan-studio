@@ -79,6 +79,37 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-19: a transport edge lost to a failed try lock leaves a note hanging
+
+Found while auditing the silencing policy in `AudioEngine::scheduleMidi` and
+deliberately not fixed alongside it: that change is policy and this one is
+concurrency, and putting them in one pull request would have made both harder
+to review.
+
+`wasRunning = isRunning` and the `rewind` and `locateRequest` exchanges all run
+outside the graph lock. `scheduleMidi` is called inside it, and there is no
+branch for a block whose try lock failed. So if the message thread is holding
+the lock for the block in which the transport stops, the edge is consumed and
+thrown away: `wasRunning` is already false by the next block, nothing says the
+transport stopped, and `scheduleMidi` returns early because it is not running.
+
+Concrete: a clip note is sounding whose off beat lies past the end of the
+arrangement, and the user presses Stop in the same few milliseconds as
+something that takes the lock properly. `resetInstruments` is the dangerous one,
+since it calls `releaseResources` and `preparePlugin` on every instrument and
+can hold for hundreds of milliseconds. The note never gets its off and sounds
+until somebody finds the panic button.
+
+`panicRequest` is already the right shape and is the reason this is worth
+copying rather than inventing: it is a sticky atomic consumed inside
+`scheduleMidi`, so a panic raised during a contended block is still waiting in
+the next block that gets through. The three transport edges want to be the
+same: sticky atomics set where they are detected and consumed where
+`panicRequest` is consumed, rather than locals computed outside the lock.
+
+Worth doing with the auditor on it, because the failure only happens on a
+contended block and nothing in `Tests/` can reach a device callback.
+
 ---
 
 ## 2026-11-19: where a recorded MIDI note belongs, after eight deferrals
