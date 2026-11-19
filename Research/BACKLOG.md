@@ -81,6 +81,342 @@ blindly. Newest first.
 
 ---
 
+## 2026-11-19: where a recorded MIDI note belongs, after eight deferrals
+
+### What was looked at
+
+The open pull requests decide the area first, as they have every night. Nine
+hardening branches hold `Project.h`, `MainComponent.cpp`, both editors,
+`Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`,
+`NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`, and `Source/Synth` and `Source/Fx` are being
+built by hand. `Project.h` rules out any new saved state and `LatencyGraph.h`
+rules out any change to the signal topology, which between them rule out the
+three things the 11-18 entry wanted next: the per strip polarity and delay, a
+subgroup, and pre fader sends. All three stay deferred by the same lock, which
+is the right lock.
+
+| Candidate | Verdict |
+|---|---|
+| **MIDI record alignment** | **Chosen.** Deferred on eight separate nights, every one of them with the same one line reason. |
+| Polarity invert and a per strip delay | Deferred again, `LatencyGraph.h` held by #72. Unchanged from 11-18. |
+| A subgroup | Deferred again, same lock, same reasoning. |
+| Pre fader sends | Deferred again. Nothing new. |
+| A user settable MIDI input latency | **Deferred with the unlock named**, and it is a real remaining gap rather than a tidy one. See below. |
+
+### Why the eighth deferral was wrong, which is the point of this entry
+
+The reason given on all eight nights, verbatim across most of them, was: "the
+figure is easy and knowing whether the keyboard is being played live or a
+pattern is being bounced off the grid is not."
+
+That reason is sound. It is also about a different code path from the one it
+was used to defer.
+
+There are two MIDI capture paths in the engine and they are not the same thing:
+
+- The **MIDI recording tap**, `AudioEngine.cpp:1638`, which writes whatever is
+  in `liveMidi`. `liveMidi` is filled at `AudioEngine.cpp:1496-1498` from
+  exactly two places: `midiCollector.removeNextBlockOfMessages`, which is the
+  hardware MIDI input, and `keyboardState.processNextMidiBuffer`, which is the
+  on-screen piano and the typing keyboard. **Both are somebody playing, live,
+  now.** A pattern playing off the arrangement never passes through either.
+- The **instrument recorder**, `AudioEngine.cpp:811-830`, which taps a
+  channel's own output inside the mixer. This one genuinely cannot tell a live
+  performance from a pattern being bounced, which is what its own comment says
+  and why it is held at an offset of zero.
+
+So the ambiguity is real, and it belongs to the instrument recorder, which is
+not being changed. The tap has no ambiguity in it at all. Eight nights of
+deferral attached the second path's hard question to the first path's easy one
+and then declined to answer either.
+
+Worth recording in exactly those terms, because it is the same shape as the
+standing release question answered on 11-17: a reason that is equally good on
+every occasion stops being a reason and becomes a habit. The difference here is
+that the reason was not merely stale, it was about something else, and eight
+readings of it never checked which path it described.
+
+### What made it urgent rather than merely overdue
+
+The 11-12 entry, which aligned the audio capture, left this comment at
+`AudioEngine.cpp:1621-1637` and it has been true since:
+
+> The consequence to know about is Rec: Audio and MIDI, which captures a socket
+> and a keyboard in one take. The audio half is now aligned and the MIDI half
+> is not, so the two sit apart by the compensation plus the output latency,
+> where before they sat apart by the output latency alone.
+
+Aligning the audio made the MIDI gap worse, by the engine's own compensation.
+That is a regression that the change which caused it wrote down and left. It
+is also the owner's case: he records guitar through a UMC1820 and builds
+patterns, so a take with a socket and a keyboard in it is an ordinary thing for
+him to do.
+
+### What the research settled, and the thing it caught
+
+The `dsp-researcher` agent read Ardour at `3cbecec3` and JUCE at 9.0.3 rather
+than any summary of them.
+
+**The structure of the answer is confirmed.** Ardour applies the same sum to
+MIDI as to audio, by a different mechanism because MIDI cannot be aligned by
+not writing samples. `disk_writer.cc:596-604` says so in a comment, and
+`disk_writer.cc:701-706` subtracts `_accumulated_capture_offset` from every
+event time. That accumulator converges to exactly `_capture_offset +
+_playback_offset`, which is the audio figure: it starts at zero, adds `nframes`
+per whole cycle and `rec_offset` for the straddling one, totalling
+`_first_recordable_sample - _capture_start_sample`, which `disk_writer.cc:186`
+defines as that sum. There is no MIDI specific offset anywhere in Ardour.
+
+`_playback_offset` is `_signal_latency + _output_latency` (`route.cc:4885`),
+which is this studio's `engine + output`. `_capture_offset` is the input
+port's own latency (`route.cc:4890`), and for a MIDI port that is **not** the
+audio converter's figure: `MidiPort` has no latency handling of its own, and
+the backends report a per device systemic MIDI input latency that defaults to
+**zero** and is user set (`alsa_audiobackend.h:313-322`,
+`audio_backend.h:509-518`).
+
+Ardour also writes down the assumption, at `audioengine.cc:518-523`: "We assume
+the player listens and plays along. Recorded region is moved back by
+playback_latency." That is this scenario exactly, and it is worth noting that
+Ardour states it as an assumption rather than a law.
+
+**And the thing the research caught, which is the reason to have sent it:
+`juce::MidiMessageCollector` carries exactly one block of lag by construction,
+and the figure is therefore `engine + output + blockSize`, not `engine +
+output`.** The reasoning this night started from, and the comment in the engine
+that has stood since 11-12, both had it as `engine + output`. Verified against
+the JUCE source directly rather than taken on the agent's word:
+
+`juce_MidiMessageCollector.cpp:73` stamps an arriving message
+`(timeStamp - 0.001 * lastCallbackTime) * sampleRate`, where `lastCallbackTime`
+is the instant of the **previous** drain. `removeNextBlockOfMessages` then sets
+`startSample = numSamples - numSourceSamples` and places each message at
+`samplePosition + startSample`. Writing `t_prev` and `t_now` for the two drain
+instants and `t_a` for the arrival:
+
+```
+samplePosition = (t_a - t_prev) * fs
+numSourceSamples = (t_now - t_prev) * fs
+position = numSamples - (t_now - t_a) * fs
+```
+
+So sample index `numSamples`, the **end** of the buffer, is the instant the
+callback drained the collector, and sample 0 is one block earlier. A note
+played during block N is delivered in block N+1. The engine stamps it with
+`blockBeats[position]`, so it is written down one whole block later than the
+audio convention assumes. The scaling branch anchors the same way.
+
+This is not a JUCE defect and Ardour's ALSA backend has the identical one
+period lag (`alsa_midi.cc:172-228` postpones an event past the window end, and
+`alsa_audiobackend.cc:1883-1889` calls `sync_time` after the drain, so the
+window base is still the previous cycle's start). Ardour does not subtract it;
+it expects it to be in the user's per device MIDI input latency, which is what
+its Calibrate button measures. This studio has no MIDI loopback measurement, so
+subtracting the part that is derivable is strictly better than leaving all of
+it, and the part that is not derivable is recorded below as the remaining gap.
+
+**The trim is halved.** The user's trim is `measured - claimed` round trip from
+the audio loopback (`LatencyProbe.h:725-734`), an unattributed residual that
+could belong to either converter. Only the output half is in front of a MIDI
+note. Ardour's published convention for exactly this residual is to split it
+evenly: `engine_dialog.cc:3202-3213` for MIDI and `:3222-3236` for audio both
+compute `one_way = (measured - signal_delay) / 2` and write it into both
+directions. So the MIDI offset carries `trim / 2`. That is a convention and not
+a derivation, and the header says so rather than implying otherwise.
+
+**Dropping, not clamping, for an event that lands before the record point.**
+`disk_writer.cc:701-706`: "Event out of range, skip". A note played before
+recording began is not part of the take. Keeping a note off whose note on was
+dropped is safe here: `MainComponent::collectRecordedMidi` ignores a note off
+with no held note.
+
+### What was rejected, or deferred with the unlock named
+
+- **A user settable MIDI input latency.** This is the honest remaining gap and
+  it is deferred rather than quietly dropped. The MIDI hardware path has a real
+  delay that nothing reports: USB MIDI polling, DIN MIDI's 320 microseconds a
+  byte, and whatever the operating system's MIDI stack adds. Ardour exposes it
+  per device, defaults it to zero, and fills it from a **MIDI loopback
+  measurement** with its own Calibrate button, because a number nobody can
+  measure is a number nobody can set correctly. The unlock is therefore a MIDI
+  loopback probe, the MIDI counterpart of `LatencyProbe.h`, and that is a night
+  of its own. Adding the control without the measurement would be offering a
+  dial whose correct value is unknowable, which is worse than a documented
+  zero. `midiInputLatency` is a named field in `Figures` set to zero, so the
+  slot exists and the measurement is the only thing missing.
+- **Treating the typing keyboard differently from the hardware input.** They
+  are genuinely on different timebases and the research is right that no single
+  offset is exactly right for both. `MidiKeyboardState::processNextMidiBuffer`
+  with `injectIndirectEvents` puts a lone pending note at sample 0 of the
+  current block (`juce_MidiKeyboardState.cpp:157-167`: with one event,
+  `firstEventToAdd == getLastEventTime()`, so `pos` rounds to 0), where the
+  collector anchors to the end of the block. So the typed keyboard's correct
+  offset is one block smaller. Rejected anyway, and the reason is that the
+  difference is one block while the typed path's own uncertainty, the message
+  thread's dispatch delay before the note is even queued, is unmeasured and of
+  the same order or larger. Giving it a second, different offset would claim a
+  precision that is not there. It shares the one offset, which leaves it right
+  to within a block where it was previously late by the whole compensation plus
+  the output latency, and the header says that plainly.
+  The other route, routing the keyboard state through the collector so the two
+  share a timebase, was rejected on risk: it changes how every typed note
+  reaches the synth, double delivery is the obvious failure, and JUCE cannot be
+  compiled here to find out.
+- **Changing the instrument recorder.** Explicitly out of scope, and this is
+  the path the eight deferrals were really about. It taps a channel's output
+  inside the mixer, there is no socket and no round trip in front of it, and it
+  cannot tell a live performance from a pattern being bounced. It stays at
+  zero.
+- **Cubase's per track ASIO Latency Compensation**, which moves recorded events
+  **later** rather than earlier (Steinberg, Cubase Pro/Artist 9 preferences:
+  "By activating this option, all recorded events are moved by the current
+  latency"). Not a contradiction and worth recording so nobody reads it as one:
+  Cubase's premise is a player monitoring a soft instrument **through** the
+  latency path, who therefore anticipates and plays early. Ardour's premise, and
+  this studio's, is a player listening to existing material. Both follow the
+  same rule, that a note belongs at the musical position of whatever the player
+  was hearing. The two cases want opposite signs because the players are doing
+  different things.
+- **Reaper's figures.** Could not be obtained. reaper.fm is blocked to this
+  session and the PDF user guide truncated before the relevant sections. No
+  quote, so no claim: the sections to chase if somebody can open it are 3.28
+  "Preserve PDC Delayed Monitoring in Recorded Items", 3.31 and 13.37.
+- **Logic's Recording Delay.** Apple documents it as compensating "delays that
+  are caused by the audio driver" and never mentions MIDI, and publishes
+  neither units nor sign. Recorded as not applicable rather than as support.
+
+### Mutations
+
+**85 distinct breakages, 83 killed**, every one compiled exactly as
+`Tests/run.sh` has them, with address and undefined behaviour sanitizers, on a
+throwaway copy of the tree.
+
+The two survivors are argued no-ops rather than gaps. `loopTo > loopFrom`
+loosened to `>=` while the circular branch still existed, which the strictly
+stronger condition after it already excluded; and the clamp's `<` loosened to
+`<=`, which differs only at exact equality, where both branches return equal
+doubles, and the only bit pattern that separates them is minus zero against
+zero, which nothing downstream can tell apart.
+
+### What the audit found, and it is the important part of the night
+
+The `auditor` agent, over the whole diff, having read `CLAUDE.md` first. It
+confirmed the figure, re-derived the one block term and its sign from the JUCE
+source rather than from the header's account of it, and then found that
+**everything downstream of one correct event was wrong**.
+
+**The loop wrapping shipped broken, and the fault was worse than the symptom.**
+`placeMidiEvent` wrapped each event on its own, so a note on landing a hair
+before the loop start wrapped to the top of the cycle while its note off, a
+beat later, did not. The pair then reaches
+`MainComponent::collectRecordedMidi` out of order and it can only clamp the
+note to a sixty-fourth. Measured through the shipped code at 48 kHz with a 16
+ms offset: a downbeat pushed by two and a half milliseconds came back as
+`on 31.995 length 0.01562`, where before the branch it came back as
+`16.027 length 0.500`. An ordinary slightly early note came back as a blip at
+the far end of the pattern, and the on-screen keyboard hit it every time
+rather than occasionally.
+
+So the change made the thing it was fixing worse, in the exact way this
+project keeps meeting: nothing errors, nothing crackles, a note is simply
+somewhere else and a sixty-fourth long.
+
+Three things about it are worth more than the fix.
+
+**The premise was imported rather than read.** The circular model came from how
+other studios record patterns, and this studio does not do that: for MIDI,
+`finishRecording` builds one clip starting at the record point and long enough
+for the whole take, so loop passes are not folded into a cycle and the timeline
+is continuous. The header's own comment justified the wrap by "the loop start
+and the loop end are the same musical instant", which is true of a pattern
+looper and false of this clip model. CLAUDE.md's rule about reading the
+reference rather than implementing from memory has a counterpart that is not
+written down anywhere: **read your own codebase too**, because a model borrowed
+from another studio can be wrong about this one.
+
+**The header named the failure and then closed only the measure zero case of
+it.** The comment above the half open guard says, in those words, that a
+wrapped note on whose note off did not wrap "would come back out of order,
+which MainComponent::collectRecordedMidi can only resolve by clamping the note
+to a sixty fourth". That was written while fixing a rounding instance of it
+that needs the corrected beat to land within two hundredths of a microsecond of
+the loop start. The ordinary instance, a window the whole offset wide at the
+top of every pass, was described in the same sentence and not noticed. A
+comment that states the consequence of a fault is not the same as a check for
+it, and this one read as though it were.
+
+**The test blessed the fault rather than missing it.** Every check placed a
+single event, and `aLoopingTransportWrapsRatherThanDropping` asserted that "a
+note belonging d beats before the loop start comes back d beats before the loop
+end", which is precisely the behaviour that corrupts the pair. Fifty-one
+mutations had been run against that file and all the real ones were killed, so
+the strength of the mutation score said nothing at all about the property that
+mattered. **A mutation score measures the test against the code, not the code
+against the music.** The new check, `aNoteSurvivesAsANote`, takes a note on and
+its note off through the placement together and models `collectRecordedMidi`'s
+pairing directly, and it kills the restored wrap on the second note it tries.
+
+**The drop became a clamp**, and that came out of the same review. Dropping an
+event corrected to before the record point is Ardour's rule
+(`disk_writer.cc:701-706`) and was cited as such, but it is wrong here for a
+reason about this studio: a player pushing the downbeat is most players most of
+the time, the correction is of the same order as the push, and
+`finishRecording` rebases by the record start and keeps only `n.start >= 0.0`,
+so the note is dropped a second time with no recovery. Under the old rule the
+first note of a take vanished more often than not. The audio path in this same
+header already argues the opposite for itself, that the pre-roll is kept in the
+file precisely so a wrongly set trim cannot take the attack off a take with no
+way back, and the MIDI clip has no pre-roll to keep it in. So the earliest
+point the take can represent is where it goes.
+
+**Three other paths write into the same take and had been left unmoved and
+unmentioned**, which is the half of the audit that would otherwise have shipped
+quietly:
+
+- `Rec: Instrument sound and its notes` would have flammed. Its two halves are
+  the channel's own audio and the notes that drove it, and the audio half
+  cannot be offset because the instrument recorder cannot tell a live
+  performance from a pattern being bounced. Offsetting only the notes makes
+  the two halves of one performance disagree by the whole figure, and the
+  project plays it twice, a flam that moves whenever somebody loads a plugin
+  elsewhere. The tap now holds its offset at zero for exactly that mode. Both
+  late together is the lesser fault and is what every version so far has done.
+- The comment in `startAudioRecording` that said the instrument recorder's
+  ambiguity was "the same open problem as the MIDI tap below" became false the
+  moment the tap was fixed, and had been left pointing at it. Corrected, and
+  recorded here because this is the fault CLAUDE.md lists more than any other.
+- Recorded knob moves were still stamped on the raw transport by
+  `pushRecordedParam`, so a knob moved and a note played in the same instant
+  would have landed a whole offset apart **inside the same clip**. They take
+  the same offset now, published once a block in beats because that function
+  runs on whichever thread a plugin reports on and has no tempo to convert a
+  sample count with.
+- Plugin generated MIDI through `capturePluginMidi` keeps the transport
+  position it was generated at, deliberately: a plugin generates against the
+  transport, so a free running arpeggiator is already on the grid and moving it
+  earlier would drag it off. That is the instrument recorder's reasoning again.
+  One clip can therefore hold both conventions, a chord played in live sitting
+  earlier than the notes the plugin made from it, and that is now said in the
+  code rather than left to be discovered.
+
+The nits were taken too: the header claimed the two offsets differ "exactly" by
+a relation that is false whenever either floor binds, which the test already
+knew and pinned, and `getMidiRecordOffsetSamples` was removed rather than left
+as an unused accessor that would have reported a live figure while the take ran
+under a latched one.
+
+### What is left undone, and named
+
+- **The MIDI figure is not shown anywhere.** The audio one is displayed in the
+  audio settings for the stated reason that somebody should not have to guess
+  whether anything is being applied. This one wants the same, and the panel is
+  fed from `MainComponent`, which #77 holds.
+- **A MIDI loopback measurement**, which is the unlock for
+  `Figures::midiInputLatency` and the only honest way to stop halving the audio
+  trim by convention. Ardour built exactly this and so should this.
+---
+
 ## 2026-11-18: the fader, the pan and the sends stop stepping
 
 ### What was looked at

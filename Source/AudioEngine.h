@@ -1003,6 +1003,16 @@ private:
     std::atomic<bool>   midiRecording { false };
     std::atomic<int>    midiRecordChannel { 0 };
     std::atomic<double> midiRecordStart { -1.0 };
+
+    // Latched in startMidiRecording and read by the audio thread, so that one
+    // take is written down under one figure however many plugins are loaded
+    // while it is running.
+    std::atomic<int>    midiCaptureOffset { 0 };
+
+    // The same figure in beats, published once a block by the device callback
+    // so that pushRecordedParam can use it: that runs on whichever thread a
+    // plugin reports a knob move on, and has no tempo to convert with.
+    std::atomic<double> midiCaptureOffsetBeats { 0.0 };
     std::atomic<int>    pluginMidiCaptured { 0 };
     static constexpr int recCapacity = 8192;
     std::vector<RecordedMidi>  midiRing  = std::vector<RecordedMidi> (recCapacity);

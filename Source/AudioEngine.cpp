@@ -410,6 +410,7 @@ int AudioEngine::getRecordOffsetSamples() const
     return RecordAlign::captureOffsetSamples (getRecordFigures());
 }
 
+
 // ---------------------------------------------------------------------------
 // Delay compensation
 //
@@ -823,8 +824,15 @@ void AudioEngine::startAudioRecording()
         // are following backing they hear late, so their performance lands
         // late by the same amount a MIDI recording does. The mode cannot tell
         // those apart, and a bounce that drifts off the grid is the worse of
-        // the two, so this stays at zero. It is the same open problem as the
-        // MIDI tap below. See Research/BACKLOG.md.
+        // the two, so this stays at zero.
+        //
+        // This used to say it was the same open problem as the MIDI tap, and
+        // it is not: the tap is fed only from the hardware input and the
+        // keyboard, so it knows it has a live performance and is offset. The
+        // consequence is that the two halves of Rec: Instrument sound and its
+        // notes would disagree with each other, which is worse than both of
+        // them being late together, so the tap holds its offset at zero for
+        // exactly this mode. See the tap for the other end of that.
         recorder.setCaptureOffset (0, bps);
         recorder.begin();
         return;
@@ -1215,6 +1223,17 @@ void AudioEngine::startMidiRecording (int channel)
     midiRecordChannel.store (juce::jlimit (0, kNumChannels - 1, channel));
     pluginMidiCaptured.store (0);
     midiRecordStart.store (-1.0);
+
+    // Latched once, here, for the same reason startAudioRecording latches the
+    // audio one and Ardour refuses an alignment change while a DiskWriter is
+    // running (session.cc:8156-8163). The figure moves whenever somebody
+    // loads a plugin anywhere in the mixer, and a figure that moved partway
+    // through a take would shift the notes after the change against the notes
+    // before it: a performance with a step in the middle of it, put there by
+    // something that happened on another track.
+    midiCaptureOffset.store (RecordAlign::midiCaptureOffsetSamples (getRecordFigures()));
+    midiCaptureOffsetBeats.store (0.0);
+
     midiRecording.store (true);
 }
 
@@ -1241,7 +1260,22 @@ void AudioEngine::pushRecordedParam (int index, float value)
     if (! midiRecording.load() || ! playing.load())
         return;
 
-    const double beat = beatPosition.load();
+    // Offset with the notes rather than left on the raw transport. A knob
+    // moved while playing is the same gesture following the same late
+    // monitoring, and its points are written into the same clip as the notes,
+    // so leaving it unmoved would split a performance from its own automation
+    // by the whole figure.
+    //
+    // What this does not correct for is the plugin's own reporting delay,
+    // which nothing measures, exactly as the typed keyboard's dispatch delay
+    // is left in the notes.
+    const auto placed = RecordAlign::placeMidiEvent (beatPosition.load(),
+                                                     midiCaptureOffsetBeats.load(),
+                                                     midiRecordStart.load());
+    if (! placed.keep)
+        return;
+
+    const double beat = placed.beat;
     const juce::SpinLock::ScopedTryLockType lock (paramWriteLock);
     if (! lock.isLocked())
         return;
@@ -1619,37 +1653,76 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     // ---- MIDI recording tap ----
-    // Deliberately not aligned, and worth saying so because the audio tap
-    // above now is. A MIDI note never passes through the input converter, so
-    // its offset is a different and smaller figure: the studio's own
-    // compensation plus the output latency, with no input latency in it,
-    // which is what Ardour uses on its MIDI path. Left for its own change
-    // rather than guessed at here.
+    // Aligned, by RecordAlign::midiCaptureOffsetSamples, which has the whole
+    // derivation and the sources. The figure is the studio's own compensation
+    // plus the output latency plus one audio block, with no input latency in
+    // it, and it is latched in startMidiRecording rather than read here.
     //
-    // The consequence to know about is Rec: Audio and MIDI, which captures a
-    // socket and a keyboard in one take. The audio half is now aligned and
-    // the MIDI half is not, so the two sit apart by the compensation plus the
-    // output latency, where before they sat apart by the output latency
-    // alone. Both are wrong and the gap is not zero on any device, because no
-    // device has an output latency of zero. Rec: Instrument sound and its
-    // notes is not affected: neither half of that one is offset, so the two
-    // agree with each other, and they are late against the arrangement
-    // together. See Research/BACKLOG.md.
+    // Everything in liveMidi is somebody playing, now: it is filled a few
+    // hundred lines above from the hardware MIDI input and from the on-screen
+    // and typing keyboard, and a pattern playing off the arrangement never
+    // reaches it. That is what makes the offset unambiguous here, and it is
+    // what distinguishes this path from the instrument recorder in
+    // startAudioRecording, which taps a channel's output inside the mixer,
+    // cannot tell a live performance from a bounce, and stays at zero.
+    //
+    // The on-screen and typing keyboard shares this offset and is right to
+    // within a block rather than exactly, which is worth saying rather than
+    // leaving to be discovered. MidiKeyboardState::processNextMidiBuffer puts
+    // a lone pending note at sample 0 of the current block where the collector
+    // anchors to the end of it, so the typed path's own correct offset is one
+    // block smaller. It is not given a second figure because the difference is
+    // one block while the message thread's dispatch delay in front of it is
+    // unmeasured and of the same order: two offsets would claim a precision
+    // that is not there. Before this it was late by the whole compensation
+    // plus the output latency, so a block is the residual of a fix rather
+    // than a fault introduced.
     if (midiRecording.load() && sequencing && n > 0)
     {
         if (midiRecordStart.load() < 0.0)
             midiRecordStart.store (blockStartBeat);
 
+        // Held at zero for an instrument take, which is Rec: Instrument sound
+        // and its notes. That take has two halves, the channel's own audio and
+        // the notes that drove it, and the audio half cannot be offset because
+        // the instrument recorder cannot tell a live performance from a
+        // pattern being bounced off the grid. Offsetting only the notes would
+        // make the two halves of one performance disagree by the whole figure,
+        // and the project would then play it as a flam that moves whenever
+        // somebody loads a plugin elsewhere. Both late together is the lesser
+        // fault and is what every version so far has done, so that mode is
+        // left exactly as it was. See startAudioRecording for the other end.
+        const double offsetBeats = recordSource.load() >= 0
+                                     ? 0.0
+                                     : (double) midiCaptureOffset.load() * beatsPerSample;
+
+        // Published for pushRecordedParam, which runs on whichever thread a
+        // plugin reports a knob move on and so has no tempo of its own to
+        // convert a sample count with.
+        midiCaptureOffsetBeats.store (offsetBeats);
+
+        const double recordStart = midiRecordStart.load();
+
         for (const auto meta : liveMidi)
         {
             if (meta.numBytes < 1 || meta.numBytes > 3)
                 continue;
+
+            const double raw = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
+
+            const auto placed = RecordAlign::placeMidiEvent (raw, offsetBeats, recordStart);
+
+            // Asked before the FIFO is written to rather than after. A write
+            // scope taken and then abandoned is a slot published with whatever
+            // the last take left in it.
+            if (! placed.keep)
+                continue;
+
             const auto scope = midiFifo.write (1);
-            const double beat = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
             scope.forEach ([&] (int index)
             {
                 auto& r = midiRing[(size_t) index];
-                r.beat = beat;
+                r.beat = placed.beat;
                 r.size = meta.numBytes;
                 for (int b = 0; b < 3; ++b)
                     r.bytes[b] = b < meta.numBytes ? meta.data[b] : (juce::uint8) 0;
@@ -1928,6 +2001,13 @@ void AudioEngine::capturePluginMidi (int slot, const juce::MidiBuffer& produced,
 
         pluginMidiCaptured.fetch_add (1);
         const auto scope = midiFifo.write (1);
+        // Deliberately not offset, where the live tap is. A plugin generates
+        // against the transport it is handed, so an arpeggiator running free
+        // is already on the grid and moving it earlier would drag it off. That
+        // is the same reason the instrument recorder stays at zero, and it
+        // does mean one clip can hold both conventions: a chord played in live
+        // sits earlier than the notes the plugin made from it. Each is right
+        // in its own frame and neither is guessed at.
         const double beat = blockBeats[(size_t) juce::jlimit (0, n - 1, meta.samplePosition)];
         scope.forEach ([&] (int index)
         {
