@@ -1,6 +1,45 @@
-Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+Notes you play in on a keyboard now land where you played them instead of a few milliseconds behind, and a guitar and a keyboard recorded in one pass line up with each other. Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.1
+
+**Notes you play in now land where you played them.** If you played a keyboard
+part into this studio it came back late, every time, and not by a fixed amount
+you could learn to play against: it moved with your buffer size, with your
+driver, and with whatever plugins happened to be loaded on the master that day.
+
+The reason is worth a sentence because it is the same reason recorded audio
+used to land late. You are playing along to what you hear out of the speakers,
+and what you hear left the studio a little while ago: it has been through the
+delay compensation, through anything on the master, and out of the converters.
+So you play in time with something that is already a few milliseconds old, and
+your notes get written down where the transport is now rather than where the
+music you were following is. That was fixed for audio takes a few weeks ago.
+Now it is fixed for notes, and for the knob moves recorded beside them.
+
+There is a part of it that only applies to MIDI, which is why this took its own
+go: the way the app collects notes from your keyboard, a note is handed over in
+the block after the one you played it in, so there is an extra buffer's worth
+of lateness in a MIDI part that is not in an audio take. That is now taken off
+as well.
+
+**If you record a guitar and a keyboard in one pass, the two now line up.**
+That one had got worse rather than better: when audio takes were corrected and
+notes were not, the gap between the two halves of such a take grew by the whole
+of the studio's own compensation. They agree now.
+
+Two things deliberately left alone, so nothing moves that you did not ask to
+move. Bouncing an instrument channel to audio along with its notes is
+untouched: that mode cannot tell whether you are playing live or printing a
+pattern that is already on the grid, and dragging a printed pattern off the
+grid would be worse than what it does now. And notes that a plugin generates
+itself, an arpeggiator say, stay exactly where the plugin put them, because
+they were already on the beat.
+
+What is not done yet: the correction assumes the only delay in front of your
+keyboard is the one the audio driver reports. USB and DIN MIDI add a little of
+their own that nothing measures, so if your parts still feel a hair late there
+is a known figure missing, and measuring it wants a MIDI cable looped back the
+way the audio round trip measurement works. That is the next piece.
 
 **Moving a fader while something is playing no longer makes a noise.** Nor does
 moving a pan knob, or a send, and nor does a volume or pan automation curve
