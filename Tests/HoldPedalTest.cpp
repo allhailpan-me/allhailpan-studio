@@ -35,6 +35,18 @@
 // most test tones. The check asserts over every reachable state that no
 // message the header emits is a controller 64 above 63.
 //
+// THE ROW THE RECEIVER COMPARISON CANNOT SEE
+//
+// The agreement check above drives the player's row, because a note from the
+// wire only ever reaches the player's row. That left the arrangement's row
+// compared against nothing, and a mutation run found two faults hiding there:
+// `setPedal` not releasing the arrangement's latched notes, and a wire note
+// written into the arrangement's row as well as the player's. Neither shows up
+// in a receiver, because both rows reach the same voices, so both have their
+// own checks: `theArrangementRowObeysTheSamePedal` drives the other row the
+// way the engine drives it, and `aNoteFromTheWireNeverTouchesTheArrangement`
+// asserts the separation directly.
+//
 //   ./Tests/run.sh
 // ---------------------------------------------------------------------------
 
@@ -312,6 +324,19 @@ static void theThresholdIsSixtyFour()
         HoldPedal::receive (c, on, 3);
         HoldPedal::receive (c, off, 3);
 
+        // And what `setPedal` reports, which is the only part of it a caller
+        // can read without looking at the rows. Nothing in the engine uses
+        // the return value yet, so inverting it changed no state at all and
+        // survived the first mutation run: an unread contract is where the
+        // next caller's bug goes.
+        Storage r;
+        check (HoldPedal::setPedal (r.channel(), value) == expected,
+               "setPedal reported the wrong position at a value of "
+                 + std::to_string (value));
+        check (r.channel().pedalDown() == expected,
+               "setPedal wrote the wrong pedal byte at a value of "
+                 + std::to_string (value));
+
         check (s.live[60] == (expected ? HoldPedal::latched : HoldPedal::silent),
                "a note off was " + std::string (expected ? "acted on" : "deferred")
                  + " at a pedal value of " + std::to_string (value));
@@ -414,7 +439,7 @@ static void theReleaseNeverPressesThePedal()
     std::uniform_int_distribution<int> aChannel (1, 16);
     std::bernoulli_distribution half (0.5);
 
-    int pedalLifts = 0, noteOffs = 0, backstops = 0;
+    int pedalLifts = 0, noteOffs = 0, backstops = 0, liftsWithheld = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -423,6 +448,7 @@ static void theReleaseNeverPressesThePedal()
         const auto c = s.channel (withClip);
 
         s.down = half (rng) ? 1 : 0;
+        const bool pedalWasDown = s.down != 0;
 
         for (int note = 0; note < HoldPedal::kNotes; ++note)
         {
@@ -494,8 +520,19 @@ static void theReleaseNeverPressesThePedal()
         }
 
         check ((backstopAt >= 0) == backstop, "the backstop was not sent as asked");
-        check (pedalAt >= 0 || ! liftAlways,
-               "an unconditional lift was asked for and not sent");
+
+        // Both directions, because only one of them was asserted to begin
+        // with and `lift = true` therefore survived the first mutation run.
+        // A lift nobody asked for is a controller change the player did not
+        // make: on a receiver that is already holding the pedal for its own
+        // reasons, or on a second device daisy chained behind this one, it
+        // damps notes this release was never about.
+        check ((pedalAt >= 0) == (liftAlways || pedalWasDown),
+               liftAlways || pedalWasDown ? "a lift was wanted and not sent"
+                                          : "a lift was sent for a pedal this model says is up");
+
+        if (! liftAlways && ! pedalWasDown)
+            ++liftsWithheld;
 
         // And the model is left with nothing owing a note off, because the
         // offs have just gone out.
@@ -518,8 +555,17 @@ static void theReleaseNeverPressesThePedal()
              + std::to_string (pedalLifts) + " lifts, " + std::to_string (noteOffs)
              + " note offs, " + std::to_string (backstops) + " backstops");
 
-    std::printf ("       %d lifts, %d note offs and %d backstops emitted over 20000 states\n",
-                 pedalLifts, noteOffs, backstops);
+    // The half of the lift assertion that fails on an unwanted lift is only
+    // reached where neither the caller nor the model wants one, so the count
+    // of those is what says it was reached at all.
+    check (liftsWithheld > 1000,
+           "the generator almost never asked for a release with the pedal already up, "
+           "which is the only state an unwanted lift shows up in: "
+             + std::to_string (liftsWithheld));
+
+    std::printf ("       %d lifts, %d note offs and %d backstops emitted over 20000 states, "
+                 "%d releases wanted no lift\n",
+                 pedalLifts, noteOffs, backstops, liftsWithheld);
 }
 
 /** A release that will not fit is refused rather than truncated.
@@ -719,6 +765,298 @@ static void theModelAgreesWithAConformantReceiver()
                  ringingAtRelease, latchedSeen, deferredAno);
 }
 
+/** The arrangement's own notes obey the same pedal, against the same receiver.
+
+    The randomised check above drives the live row only, because a note from
+    the wire only ever reaches the live row. So nothing was comparing the
+    arrangement row against anything, and `setPedal` forgetting to release the
+    arrangement's latched notes survived a mutation run: the engine would have
+    gone on believing it was holding notes a conformant receiver had already
+    let go, and sent their offs again at the next stop.
+
+    This drives the other row the way the engine drives it, which is directly
+    through `noteOn` and `noteOff` where it schedules a clip, with the pedal
+    and the channel mode messages still arriving from the wire. The player
+    touches nothing, so one row against one receiver is unambiguous: the whole
+    point of the clip row is that it reaches the same voices through the same
+    cable.
+*/
+static void theArrangementRowObeysTheSamePedal()
+{
+    std::mt19937 rng (0xc11b64u);
+
+    // The notes of one stream are drawn from one octave of a randomly placed
+    // window rather than from the whole keyboard, and the window moves from
+    // stream to stream so the whole range is still covered. Drawn from all
+    // 128 keys a release almost never lands on a key the stream is still
+    // holding, and the state this check is about, a clip note released while
+    // the pedal holds it up, was reached a few hundred times in 8000 streams
+    // instead of a few thousand. The counter at the bottom is what said so.
+    std::uniform_int_distribution<int> aBase (0, 116);
+    std::uniform_int_distribution<int> anOffset (0, 11);
+
+    // Notes outnumber the channel mode messages, because All Notes Off and
+    // All Sound Off each act on the whole row and a stream made mostly of
+    // them spends its time wiping the state the check is about.
+    std::uniform_int_distribution<int> aKind (0, 17);
+    std::uniform_int_distribution<int> aValue (0, 127);
+    std::uniform_int_distribution<int> aStream (1, 40);
+    std::bernoulli_distribution half (0.5);
+
+    int latchedSeen = 0, ringingAtRelease = 0, releasedByTheFoot = 0;
+
+    for (int trial = 0; trial < 8000; ++trial)
+    {
+        Storage s;
+        Receiver reference;
+        const auto c = s.channel();
+
+        const int messages = aStream (rng);
+        const int base = aBase (rng);
+
+        for (int m = 0; m < messages; ++m)
+        {
+            const int kind = aKind (rng);
+
+            if (kind <= 11)
+            {
+                // A clip note, scheduled and recorded in one place, which is
+                // what `renderMidiClips` and `releaseStaleClipNotes` do.
+                const int note = base + anOffset (rng);
+                const bool on  = kind <= 5;
+
+                // How often a clip note was released while the pedal was
+                // holding it up, which is the loop wrap this header was found
+                // by, counted before the move that defers it.
+                if (! on && c.pedalDown() && HoldPedal::needsNoteOff (s.clip[note]))
+                    ++releasedByTheFoot;
+
+                if (on)
+                {
+                    HoldPedal::noteOn (s.clip, note);
+                    reference.noteOn (note);
+                }
+                else
+                {
+                    HoldPedal::noteOff (s.clip, note, c.pedalDown());
+                    reference.noteOff (note);
+                }
+            }
+            else
+            {
+                unsigned char data[3] { 0xb0, 0, 0 };
+
+                if (kind <= 14)
+                {
+                    data[1] = 64;
+                    data[2] = (unsigned char) (half (rng) ? aValue (rng)
+                                                          : (half (rng) ? 127 : 0));
+                }
+                else if (kind == 15) data[1] = 123;
+                else if (kind == 16) data[1] = 120;
+                else               { data[1] = 121; data[2] = (unsigned char) aValue (rng); }
+
+                HoldPedal::receive (c, data, 3);
+                reference.receive (data, 3);
+            }
+
+            check (c.pedalDown() == reference.pedal,
+                   "the model and the receiver disagree about the pedal");
+
+            for (int note = 0; note < HoldPedal::kNotes; ++note)
+            {
+                if (HoldPedal::needsNoteOff (s.clip[note]) != reference.ringing[note])
+                {
+                    fail ("the arrangement row and the receiver disagree about note "
+                            + std::to_string (note) + ": the model says "
+                            + (HoldPedal::needsNoteOff (s.clip[note]) ? "sounding" : "silent")
+                            + " and the receiver says "
+                            + (reference.ringing[note] ? "sounding" : "silent"));
+                    break;
+                }
+
+                if (s.clip[note] == HoldPedal::latched)
+                    ++latchedSeen;
+            }
+
+            // The player's row is not the arrangement's, so nothing here may
+            // have reached it.
+            for (int note = 0; note < HoldPedal::kNotes; ++note)
+                if (s.live[note] != HoldPedal::silent)
+                {
+                    fail ("scheduling the arrangement's notes reached the player's row");
+                    break;
+                }
+        }
+
+        if (reference.soundingCount() > 0)
+            ++ringingAtRelease;
+
+        HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+        const int count = HoldPedal::releaseSequence (c, 1, true, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+        check (count >= 0, "the release was refused with room for everything");
+
+        for (int i = 0; i < count; ++i)
+        {
+            const unsigned char bytes[3] { out[i].status, out[i].data1, out[i].data2 };
+            reference.receive (bytes, 3);
+        }
+
+        if (reference.soundingCount() != 0)
+            fail ("the release left " + std::to_string (reference.soundingCount())
+                    + " of the arrangement's notes sounding in a conformant receiver");
+    }
+
+    check (latchedSeen > 5000,
+           "the generator barely ever latched one of the arrangement's notes: "
+             + std::to_string (latchedSeen));
+    check (ringingAtRelease > 4000,
+           "too few streams had anything left sounding when the release came: "
+             + std::to_string (ringingAtRelease));
+    check (releasedByTheFoot > 2000,
+           "the generator almost never released a clip note under the pedal, which is "
+           "the loop wrap this header was found by: " + std::to_string (releasedByTheFoot));
+
+    std::printf ("       %d latched clip keys seen, %d of 8000 streams sounding at the release, "
+                 "%d clip notes released under the pedal\n",
+                 latchedSeen, ringingAtRelease, releasedByTheFoot);
+}
+
+/** A note from the wire never touches the arrangement row.
+
+    The two rows exist because the engine knows where each note came from, and
+    a note it did not schedule is not one it is holding. Written as its own
+    check because the receiver comparisons cannot see it: both rows reach the
+    same voices, so a duplicate entry sends a duplicate note off and a
+    conformant receiver is left silent either way. What it costs is in the
+    engine, where `releaseStaleClipNotes` sends an off for any key of the clip
+    row no clip is holding. A live note copied into that row is therefore cut
+    off mid-phrase at the next block, by the arrangement, for a note the
+    arrangement never played. Two mutations that copied a wire note into the
+    clip row passed everything else in this file.
+*/
+static void aNoteFromTheWireNeverTouchesTheArrangement()
+{
+    std::mt19937 rng (0x57a9eu);
+    std::uniform_int_distribution<int> aNote (0, 127);
+    std::uniform_int_distribution<int> aState (0, 2);
+    std::uniform_int_distribution<int> aKind (0, 2);
+    std::uniform_int_distribution<int> aStream (1, 20);
+    std::bernoulli_distribution half (0.5);
+
+    int collisions = 0;
+
+    for (int trial = 0; trial < 4000; ++trial)
+    {
+        Storage s;
+        const auto c = s.channel();
+
+        // The pedal is set directly rather than by message, because lifting
+        // it is entitled to release the arrangement's latched notes and this
+        // check is about note messages alone.
+        s.down = half (rng) ? 1 : 0;
+        const bool pedalWas = s.down != 0;
+
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            s.clip[note] = (unsigned char) aState (rng);
+
+        unsigned char before[HoldPedal::kNotes];
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            before[note] = s.clip[note];
+
+        const int messages = aStream (rng);
+
+        for (int m = 0; m < messages; ++m)
+        {
+            const int note = aNote (rng);
+            unsigned char data[3] { 0x90, (unsigned char) note, 0 };
+
+            switch (aKind (rng))
+            {
+                case 0:  data[2] = (unsigned char) (1 + note % 126); break;   // struck
+                case 1:  data[2] = 0;                                break;   // released at nought
+                default: data[0] = 0x80;                             break;   // released properly
+            }
+
+            if (s.clip[note] != HoldPedal::silent)
+                ++collisions;
+
+            HoldPedal::receive (c, data, 3);
+        }
+
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            if (s.clip[note] != before[note])
+            {
+                fail ("a note from the wire changed the arrangement's row at note "
+                        + std::to_string (note));
+                break;
+            }
+
+        // Against what was written before the stream, not against
+        // `c.pedalDown()`: that reads the same byte, so the comparison would
+        // have held whatever the header did to it.
+        check ((s.down != 0) == pedalWas, "a note message moved the pedal");
+    }
+
+    // The assertion is only about keys the wire note could have overwritten,
+    // so the count of notes that landed on an occupied key is what says it was
+    // asked anything at all.
+    check (collisions > 2000,
+           "the generator almost never aimed a wire note at a key the arrangement holds: "
+             + std::to_string (collisions));
+
+    std::printf ("       %d wire notes aimed at a key the arrangement was holding\n", collisions);
+}
+
+/** A row that arrives already latched with the pedal up is repaired.
+
+    `HoldPedal.h` says plainly that everything latched is released whenever the
+    pedal is not down, rather than only on a transition from down, and that
+    the two differ only in a state it cannot itself produce. They do: a note
+    off and a pedal lift both go through the pedal's own position, so nothing
+    in the header leaves a latched key behind an up pedal. Driven over 1.6
+    million randomised steps the two versions are byte for byte identical, so
+    this is not a fault the header can reach.
+
+    It is pinned anyway, because the rows are the engine's and the engine
+    writes them by hand in three places. An unreachable state nobody tests is
+    where the next caller's bug lives, and a repair that quietly becomes a
+    no-op is how a decision written down in a comment gets undone.
+*/
+static void aRowThatArrivesLatchedWithThePedalUpIsRepaired()
+{
+    {
+        Storage s;
+        const auto c = s.channel();
+
+        s.down = 0;
+        s.live[60] = HoldPedal::latched;
+        s.clip[72] = HoldPedal::latched;
+
+        const unsigned char pedalUp[] = { 0xb0, 64, 0 };
+        HoldPedal::receive (c, pedalUp, 3);
+
+        check (s.live[60] == HoldPedal::silent,
+               "a pedal already up left a latched key latched, so nothing can ever release it");
+        check (s.clip[72] == HoldPedal::silent,
+               "a pedal already up left a latched arrangement key latched");
+    }
+
+    {
+        // And the other way into the same state: a release arriving for a key
+        // that is latched while the pedal is up has to let it go, not decide
+        // the key was not sounding.
+        Storage s;
+        s.down = 0;
+        s.live[60] = HoldPedal::latched;
+
+        HoldPedal::noteOff (s.live, 60, false);
+        check (s.live[60] == HoldPedal::silent,
+               "a note off with the pedal up ignored a latched key");
+    }
+}
+
 /** A channel with no arrangement row, which is every MIDI channel but the
     first, must be left alone rather than walked. Driven on its own as well as
     inside the randomised streams, because an out of bounds read through a
@@ -810,9 +1148,12 @@ int main()
     aRetriggerUnderThePedalIsSoundingAgain();
     aChannelWithNoArrangementRowIsLeftAlone();
     anInvalidChannelIsRefused();
+    aRowThatArrivesLatchedWithThePedalUpIsRepaired();
     theReleaseNeverPressesThePedal();
     aReleaseThatWillNotFitIsRefused();
     theModelAgreesWithAConformantReceiver();
+    theArrangementRowObeysTheSamePedal();
+    aNoteFromTheWireNeverTouchesTheArrangement();
 
     if (failures == 0)
         std::printf ("  ok\n");
