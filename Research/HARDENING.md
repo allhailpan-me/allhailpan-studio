@@ -73,9 +73,23 @@ see the omission.
 That is not an academic gap, because the production path is the other one.
 `Synth/WaveTable.h` builds every mipmap level of every wavetable by handing
 `inverse` a spectrum it assembled itself, harmonic by harmonic, and never
-calls `forward` at all. Under the skip-bin-one mutation the fundamental of
-each table's first frame is missing entirely and every later frame carries the
-previous frame's fundamental, and the suite stays green.
+calls `forward` at all.
+
+Measured rather than argued, because the first version of this paragraph
+reasoned that the skipped bin would carry the previous frame's value and that
+is not what happens. A table built the way `WaveTable` builds one, three
+frames through one transform, asking for a fundamental of 1.0: the shipped
+header gives 1.0000, 1.0000, 1.0000, and under the skip-bin-one breakage it
+gives 0.0000, 0.0000, 0.0001. The fundamental is simply absent. What sits in
+that slot after the first call is not the previous frame's spectrum but
+whatever that call's butterflies left there, which measures as nothing in
+particular.
+
+So every wavetable the instrument ships with would have been built with no
+fundamental at all, which is not subtle: it is the bottom missing from every
+patch. And the suite stayed green, because the only check that reached
+`inverse` reached it through a `forward` that had already written the answer
+into the buffer.
 
 **A refused size leaves a transform that was already usable running at the old
 length.** The guard in `setSize` sets `n = 0` before returning. Removing that
