@@ -1078,8 +1078,8 @@ private:
     // while the pedal is down is deferred by the receiver and the note is
     // still sounding: see HoldPedal.h for the specification and for what
     // believing otherwise cost. Every test of these rows is
-    // HoldPedal::needsNoteOff, which is true for a latched key as well as a
-    // struck one.
+    // HoldPedal, which decides whether a key needs a note off sent for it
+    // from what the release is doing with the pedal.
     static constexpr int midiChannels = 16;
     std::vector<juce::uint8> clipNotes = std::vector<juce::uint8> ((size_t) kNumChannels * 128);
     std::vector<juce::uint8> liveNotes = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels * 128);

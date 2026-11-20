@@ -79,11 +79,14 @@
       rings on until the player lifts their foot.
 
       What changed is that the studio now knows it is holding that note
-      instead of having forgotten it. `HoldPedal::releaseSequence` records a
-      note it released under a held pedal as latched, so the next lift of the
-      foot, or the next stop, releases it properly, where before nothing but
-      the panic could reach it. It also sends it no second note off, since the
-      receiver is required to be holding the first one.
+      instead of having forgotten it. The note was always going to be released
+      by the next lift of the foot, with or without the model, because its
+      note off is sitting in the receiver and the receiver is required to be
+      holding it; that much an audit corrected in an earlier draft of this
+      paragraph. What the model buys is that a release which does lift the
+      pedal, which is every one except this wrap, now sends an off for it as
+      well, and that the wrap sends it nothing, where a version of this change
+      re-sent its off on every pass for as long as the foot stayed down.
 
       Which answer a wrap should give is a real disagreement between studios
       rather than something a specification settles: Ardour lifts the pedal at

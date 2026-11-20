@@ -238,9 +238,12 @@ static void aPedalledNoteOffIsDeferred()
            "a note off under the pedal was acted on instead of deferred");
     check (HoldPedal::isSounding (s.live[60]),
            "a latched note was reported as silent, which is the fault exactly");
-    check (! HoldPedal::needsNoteOff (s.live[60]),
-           "a latched note was reported as needing another note off: its off is already with "
-           "the receiver, which is required to be holding it");
+    check (! HoldPedal::needsNoteOff (s.live[60], false),
+           "a latched note was said to need another note off from a release that is leaving "
+           "the pedal down: its off is already with the receiver, waiting on that same pedal");
+    check (HoldPedal::needsNoteOff (s.live[60], true),
+           "a latched note was said to need no note off from a release that is lifting the "
+           "pedal, which is the one the specification asks for");
 
     HoldPedal::receive (c, pedalUp, 3);
     check (s.live[60] == HoldPedal::silent, "lifting the pedal did not let the release through");
@@ -311,7 +314,8 @@ static void aChannelModeMessageFromTheWireIsNotActedOn()
 
         // And what the engine still owes for them is unchanged, which is the
         // point: the next release sends their offs.
-        check (HoldPedal::needsNoteOff (s.live[60]) && HoldPedal::needsNoteOff (s.clip[72]),
+        check (HoldPedal::needsNoteOff (s.live[60], false)
+                 && HoldPedal::needsNoteOff (s.clip[72], false),
                "a channel mode message left the engine owing no release");
     }
 }
@@ -503,10 +507,10 @@ static void theReleaseNeverPressesThePedal()
         int owed[HoldPedal::kNotes] {};
         for (int note = 0; note < HoldPedal::kNotes; ++note)
         {
-            if (rows.live && HoldPedal::needsNoteOff (s.live[note]))
+            if (rows.live && HoldPedal::needsNoteOff (s.live[note], liftPedal))
                 ++owed[note];
 
-            if (withClip && rows.clip && HoldPedal::needsNoteOff (s.clip[note]))
+            if (withClip && rows.clip && HoldPedal::needsNoteOff (s.clip[note], liftPedal))
                 ++owed[note];
         }
 
@@ -617,7 +621,7 @@ static void theReleaseNeverPressesThePedal()
                 // A key that was already latched gets no message at all, and
                 // only the pedal can move it. Sending it another off is what
                 // put one out for every finished note at every loop wrap.
-                if (selected && HoldPedal::needsNoteOff (was))
+                if (selected && HoldPedal::needsNoteOff (was, liftPedal))
                     expected = stillDown ? HoldPedal::latched : HoldPedal::silent;
                 else if (liftPedal && was == HoldPedal::latched)
                     expected = HoldPedal::silent;
@@ -867,6 +871,14 @@ static void theModelAgreesWithAConformantReceiver()
         const auto c = s.channel (withClip);
         bool modeMessageSeen = false;
 
+        // A third of the streams carry no channel mode message at all, so
+        // that the half of this property which asserts EQUALITY is carried by
+        // a decent share of the run rather than by whatever is left over.
+        // Drawn freely, a stream of up to sixty messages almost always
+        // contains one, and the exact comparison was down to 1652 of 20000
+        // against a threshold of 1000.
+        const bool modeFree = trial % 3 == 0;
+
         const int messages = aStream (rng);
 
         for (int m = 0; m < messages; ++m)
@@ -894,11 +906,11 @@ static void theModelAgreesWithAConformantReceiver()
                     break;
 
                 case 8:                                       // All Notes Off
-                    data[0] = 0xb0; data[1] = 123; data[2] = 0;
+                    data[0] = 0xb0; data[1] = (unsigned char) (modeFree ? 7 : 123); data[2] = 0;
                     break;
 
                 case 9:                                       // All Sound Off
-                    data[0] = 0xb0; data[1] = 120; data[2] = 0;
+                    data[0] = 0xb0; data[1] = (unsigned char) (modeFree ? 10 : 120); data[2] = 0;
                     break;
 
                 case 10:                                      // Reset All Controllers
@@ -911,6 +923,13 @@ static void theModelAgreesWithAConformantReceiver()
                     data[1] = (unsigned char) aByte (rng);
                     data[2] = (unsigned char) aByte (rng);
                     numBytes = aLength (rng);
+
+                    // Junk reaches a receiver masked, so a byte of 0xf8 is
+                    // controller 120. In a mode free stream it has to be
+                    // moved, or the stream is not mode free and the equality
+                    // comparison is applied to one that is not.
+                    if (modeFree && (data[1] & 0x7f) >= 120 && (data[1] & 0x7f) <= 127)
+                        data[1] = 7;
                     break;
             }
 
@@ -984,8 +1003,13 @@ static void theModelAgreesWithAConformantReceiver()
         unsigned char owedLive[HoldPedal::kNotes], owedClip[HoldPedal::kNotes];
         for (int note = 0; note < HoldPedal::kNotes; ++note)
         {
-            owedLive[note] = (unsigned char) (HoldPedal::needsNoteOff (s.live[note]) ? 1 : 0);
-            owedClip[note] = (unsigned char) (withClip && HoldPedal::needsNoteOff (s.clip[note]) ? 1 : 0);
+            // `true`, because this release lifts the pedal, and then
+            // everything sounding gets an off: a latched key too, where a
+            // conformant receiver already has its release and a badly
+            // implemented one may have dropped it.
+            owedLive[note] = (unsigned char) (HoldPedal::needsNoteOff (s.live[note], true) ? 1 : 0);
+            owedClip[note] = (unsigned char)
+                (withClip && HoldPedal::needsNoteOff (s.clip[note], true) ? 1 : 0);
         }
 
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
@@ -1041,7 +1065,7 @@ static void theModelAgreesWithAConformantReceiver()
     check (latchedSeen > 2000,
            "the generator barely ever latched a note, which is the state this header exists for: "
              + std::to_string (latchedSeen));
-    check (exactStreams > 1000 && upperBoundOnly > 1000,
+    check (exactStreams > 5000 && upperBoundOnly > 5000,
            "the generator did not produce both kinds of stream: " + std::to_string (exactStreams)
              + " exact and " + std::to_string (upperBoundOnly) + " upper bound only");
     check (offsMatched > 50000,
@@ -1053,6 +1077,9 @@ static void theModelAgreesWithAConformantReceiver()
     std::printf ("       %d of 20000 streams were still sounding at the release, "
                  "%d latched keys seen, %d pedalled All Notes Off\n",
                  ringingAtRelease, latchedSeen, deferredAno);
+    std::printf ("       %d streams compared exactly, %d as an upper bound, "
+                 "%d note offs matched to the key that owed them\n",
+                 exactStreams, upperBoundOnly, offsMatched);
 }
 
 /** The arrangement's own notes obey the same pedal, against the same receiver.

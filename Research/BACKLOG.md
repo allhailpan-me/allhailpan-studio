@@ -251,6 +251,26 @@ loop wrap is not where the hanging note lives:
   The lift and the note offs are one call now, which is what the header said
   it was for before the engine went and separated them.
 
+  **And a second round of the audit found that fixing it still did not
+  deliver this bullet**, which is worth the space because it is the same
+  mistake in a quieter form. With the lift and the offs fused, the offs that
+  went out were for keys in the `sounding` state only, and a pedalled note is
+  by definition latched rather than sounding, so a stop still sent it nothing
+  and the engine's output was still byte for byte what `main` sent. The file
+  then argued both sides of its own main question, 350 lines apart: the bullet
+  promised the offs and `needsNoteOff` explained why they would be a no-op.
+
+  The decision was to deliver them. `needsNoteOff` now takes the release's own
+  answer about the pedal: lifting it, everything sounding gets an off, a
+  latched key included; leaving it down, only a key that has not already been
+  told to stop. The latched off is belt over braces, since a conformant
+  receiver is holding the first one, and it covers the receiver that
+  implements the pedal badly enough to drop it. The specification recommends
+  exactly that trade in the same situation for Reset All Controllers: "should
+  send what they believe to be the initial state of all controllers first,
+  followed by this message". And the wrap, which does not lift, still sends
+  nothing redundant, so the duplicates stay dead.
+
 The wrap keeps the policy it has, deliberately, and now keeps a true record
 of what it left latched, so the notes it defers are released by the next
 foot lift or by the next stop rather than being forgotten by the engine and
@@ -369,11 +389,16 @@ Two further gaps in the test, both proved by mutation rather than argued:
 
 - **`setChannelPlugin` does not clear the note rows or the pedal for the
   slot.** Swap a plugin while the pedal is physically held and the model
-  credits the new plugin with a pedal it never heard. The wire effect is extra
-  note offs, so it is harmless, and it is a pre-existing gap for the two note
-  rows rather than something this change introduces. Left alone deliberately:
-  clearing the rows there changes what the old plugin is sent on its way out,
-  which is a separate decision.
+  credits the new plugin with a pedal it never heard, so a clip note off is
+  recorded as latched while the new plugin has already acted on it. Left
+  alone, and the reason matters: that puts the model ABOVE what the receiver
+  is sounding, which is the safe side of the invariant this design rests on,
+  and it converges at the next lift of the foot. The cost is at most a
+  redundant note off and never a missing one. A first version of this entry
+  said the reason was that clearing the rows would change what the old plugin
+  is sent on its way out, and the auditor pointed out that is wrong: the old
+  plugin is released and destroyed on that path, so nothing is sent to it
+  either way.
 - **Switching the live channel while holding the pedal now dampens the clip
   notes on the channel being left.** The All Notes Off that path has always
   sent was previously deferred by the still down pedal; with the lift ahead of

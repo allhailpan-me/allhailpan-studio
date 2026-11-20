@@ -1967,7 +1967,11 @@ void AudioEngine::releaseStaleClipNotes (double beat)
 
         for (int note = 0; note < 128; ++note)
         {
-            if (! HoldPedal::needsNoteOff (row[note]))
+            // `false`, because an edit to a clip somewhere in the arrangement
+            // is no reason to take the player's foot off the pedal, and a key
+            // whose off is already waiting on that pedal needs nothing from
+            // here.
+            if (! HoldPedal::needsNoteOff (row[note], false))
                 continue;
 
             bool stillHeld = false;
@@ -2093,16 +2097,17 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
         if (c.plugin == nullptr)
             continue;
 
-        // The pedal first, and in a loop of its own, because it has to arrive
-        // ahead of the note offs rather than after them: a note the pedal is
-        // holding up survives a note off, and survives All Notes Off too,
-        // until the pedal is lifted. Written the other way round, which is how
-        // this was until an audit put a buffer order against the comment that
-        // claimed it, the pedal is lifted after everything it was holding has
-        // already been latched.
+        // The pedal has to arrive ahead of the note offs rather than after
+        // them: a note the pedal is holding up survives a note off, and
+        // survives All Notes Off too, until the pedal is lifted. Written the
+        // other way round, which is how this was until an audit put a buffer
+        // order against the comment that claimed it, the pedal is lifted
+        // after everything it was holding has already been latched.
         //
-        // MidiBuffer::addEvent keeps insertion order for events at the same
-        // sample, so the order these are added in is the order they arrive in.
+        // `stopTrackedNotes` is what keeps that order, in one call, for the
+        // reason its own comment gives at length. MidiBuffer::addEvent keeps
+        // insertion order for events at the same sample, so what goes in
+        // first arrives first.
         // One call, so the lift cannot be separated from the note offs it is
         // there to let through. TransportSilence only ever asks for the lift
         // alongside both sets of note offs, and the condition says so rather
@@ -2136,7 +2141,10 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
         // down, and the lift, when the player's foot eventually comes up, is
         // routed to the newly selected channel, because that is where live
         // MIDI goes: the channel being left here would never hear it at all,
-        // so the note rang until somebody found the panic button.
+        // so the note rang until the transport was next touched. The next
+        // stop, rewind or click in the ruler lifts the pedal on every slot,
+        // which is a long time while tracking over a stopped transport and
+        // can be the whole of a take.
         //
         // The same call the stop path makes, with the same answer to the
         // lift. A wrap deliberately answers it the other way.

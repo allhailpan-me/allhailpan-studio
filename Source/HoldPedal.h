@@ -32,16 +32,26 @@
     Specifications, 1995, at
     https://www.lim.di.unimi.it/IEEE/MIDI/SOT5.HTM.
 
-    PROVENANCE, SAID RATHER THAN IMPLIED. The MMA printing of v4.2.1 could
-    not be opened from the sandbox, so a section heading is the citation here
-    and nowhere does this file quote a page number. Three of the four quotes
-    below were read on the page cited beside them. The fourth, "Since
-    recognition of All Notes Off is not required of the receiver", is from the
-    Channel Mode Messages section of the same specification, and an audit
-    looked for it on both of the pages this file cites and found it on
-    neither; the page that carries it could not be reached. It is load bearing,
-    since it is the whole reason individual note offs go out ahead of All Notes
-    Off, so it is marked rather than left looking checked.
+    PROVENANCE, SAID RATHER THAN IMPLIED. The MMA printing of v4.2.1 could not
+    be opened from the sandbox, so a section heading is the citation here and
+    nowhere does this file quote a page number.
+
+    Read, verbatim, on the page cited beside them: the three hold pedal
+    sentences above and the "release stage of the envelope" sentence, on
+    SOT5.HTM, and the receiver threshold sentence below, on SOT1.HTM.
+
+    **Not verified**, and the only one in this file that is not: "Since
+    recognition of All Notes Off is not required of the receiver, all notes
+    should first be turned off by transmitting individual Note Off messages",
+    from the Channel Mode Messages section. An audit looked for it on both
+    pages this file cites and found it on neither, and the page that carries
+    that section could not be reached from the sandbox. It is load bearing
+    twice over, since it is the reason individual note offs go out ahead of
+    All Notes Off and the reason this model does not act on an incoming All
+    Notes Off at all, so it is marked rather than left looking checked. The
+    Reset All Controllers advice below, and everything quoted from AMEI/MMA
+    M2-113-UM, came back through a research agent rather than from a page read
+    here, and is attributed to its document and section for the same reason.
 
     So a note ringing on after the engine has released it is a conformant
     synth doing what it is required to do, and the engine sending a message it
@@ -63,14 +73,16 @@
       the whole of a take. The fix turns that into released now.
 
     - **At a stop, no note off was sent for a pedalled note at all**, because
-      the engine had already forgotten it. That path works today only because
-      the blanket pedal lift is ahead of it and All Notes Off is behind it, and
-      the specification is explicit that the second of those is not something
-      to lean on: "Since recognition of All Notes Off is not required of the
+      the engine had already forgotten it. That path worked only because the
+      pedal lift is ahead of it and All Notes Off is behind it, and the
+      specification is explicit that the second of those is not something to
+      lean on: "Since recognition of All Notes Off is not required of the
       receiver, all notes should first be turned off by transmitting individual
-      Note Off messages" (Channel Mode Messages; see the provenance note
-      above, this is the one quote here that could not be verified on a page
-      that was readable).
+      Note Off messages" (Channel Mode Messages; the one quote in this file
+      that could not be verified, see the provenance note above). The offs now
+      go out, which is what `needsNoteOff` asking about the pedal is for: a
+      release that lifts the pedal sends one for everything sounding, and the
+      wrap, which does not lift, sends nothing it would have to send again.
 
     - **At a loop wrap the clip note offs are latched**, which is where this
       was found. The policy there is unchanged and deliberately so: see below.
@@ -134,10 +146,30 @@
 
     This studio keeps its own position, which is that a loop wrap is a
     continuation, so the pedal is not lifted there. What changes is that the
-    wrap now keeps a true record of what it left latched, so those notes are
-    released by the next lift of the foot, which is what a pedal means, or by
-    the next stop, which lifts the pedal properly. Before, the engine forgot
-    them, and a forgotten note can only be got rid of with a panic.
+    wrap keeps a true record of what it left latched, which is worth being
+    exact about, because an earlier draft of this paragraph overstated it and
+    an audit measured the difference.
+
+    A note the wrap leaves latched was always going to be released by the next
+    lift of the foot, with or without this header, because its note off is
+    sitting in the receiver and the receiver is required to be holding it. The
+    engine's memory is not what releases it. What the memory buys is that the
+    engine can now say what it is holding, so a release that lifts the pedal
+    sends an off for it as well, and so the next feature along, recording the
+    pedal into a take, has something true to read.
+
+    WHERE THE POLICY ACTUALLY LIVES, WHICH IS WORTH KNOWING BEFORE CHANGING IT
+
+    Two boolean literals in `AudioEngine::scheduleMidi`, which is the one file
+    here that cannot be compiled in the sandbox and has no test over it:
+    `silence.sustainUp` for the transport events, and a bare `true` for the
+    live channel switch. `TransportSilenceTest` pins the table that produces
+    the first, and `HoldPedalTest` pins what `releaseSequence` does with
+    either answer, and nothing joins the two up. So turning that `true` into a
+    `false` quietly restores the original fault, and turning the wrap's answer
+    into a `true` quietly takes the player's foot off the pedal at every loop.
+    Written down because an audit went looking for where the residual risk
+    sits after all of this, and that is where.
 
     WHAT IS NOT MODELLED, SAID RATHER THAN IMPLIED
 
@@ -189,11 +221,11 @@ inline bool isDown (int value) noexcept
 /** What one key is doing.
 
     `latched` is the state that did not exist before and is the whole point:
-    the note has had its release asked for and the pedal is holding it up, so
-    it is still sounding and it still needs a note off of its own once the
-    pedal is out of the way. Stored as a byte so it can live in the rows the
-    engine already keeps, and ordered so that the test every release path
-    already uses, "is this anything other than nought", keeps its meaning. */
+    the note has had its release asked for, the pedal is holding it up, and it
+    is still sounding. What it needs is the pedal rather than another note off,
+    which is why `needsNoteOff` asks what the release is doing with the pedal
+    before answering. Stored as a byte so it can live in the rows the engine
+    already keeps. */
 enum Key : unsigned char
 {
     silent   = 0,
@@ -208,18 +240,35 @@ inline bool isSounding (unsigned char key) noexcept
     return key != silent;
 }
 
-/** Whether this key still needs a note off SENT for it, which is not the same
-    question and the difference matters.
+/** Whether a release should send a note off for this key, which is not the
+    same question as whether it is sounding, and the answer depends on what
+    the release is doing with the pedal.
 
-    A latched key is sounding and has already had its note off sent: the
-    receiver is required to be holding that release and to act on it the moment
-    the pedal comes up. So sending another is a message that can do nothing,
-    and a release that re-sent them put one out for every finished note at
-    every loop wrap, for as long as the foot stayed down. What a latched key
-    needs is the pedal, not another off. */
-inline bool needsNoteOff (unsigned char key) noexcept
+    **If the pedal is coming up, everything sounding gets one.** A latched key
+    has already had an off sent and the receiver is required to be holding it,
+    so this one is belt over braces: it costs a message that a conformant
+    receiver ignores, and it covers the receiver that implements the pedal
+    badly enough to drop the release it was holding. That is the trade the
+    specification itself recommends in the same situation, for Reset All
+    Controllers: "Sequencers that wish to implement Reset All Controllers, but
+    want to accommodate devices that do not implement this command, should
+    send what they believe to be the initial state of all controllers first,
+    followed by this message."
+
+    **If the pedal is staying down, only a key that has not already been told
+    to stop gets one.** A second off for a latched key cannot do anything at
+    all there, because the first one is still waiting on the same pedal, and
+    sending it anyway means one message per finished note at every loop wrap
+    for as long as the foot stays down. An audit measured five per wrap on a
+    five note pattern, repeating forever.
+
+    So the engine sends the offs the specification asks for at every release
+    that lifts the pedal, which is a stop, a jump, a panic and switching the
+    live channel, and sends nothing redundant at the one release that does
+    not, which is the loop wrap. */
+inline bool needsNoteOff (unsigned char key, bool pedalComingUp) noexcept
 {
-    return key == sounding;
+    return pedalComingUp ? isSounding (key) : key == sounding;
 }
 
 //==============================================================================
@@ -313,11 +362,10 @@ inline bool setPedal (const Channel& c, int value) noexcept
 
     A note from the wire only ever reaches the live row: the arrangement's
     notes are the engine's own doing and are recorded where it schedules them.
-    A channel mode message reaches both, and has to. If a control surface
-    sends All Notes Off, the plugin releases the arrangement's notes along
-    with the player's, so an engine that kept its clip row would go on
-    believing it was holding notes that are already gone and would send their
-    offs again at the next stop.
+
+    A channel mode message reaches neither, which is the one place this model
+    deliberately declines to follow a conformant receiver, and the reason is
+    inside the function.
 */
 inline void receive (const Channel& c, const unsigned char* data, int numBytes) noexcept
 {
@@ -364,15 +412,20 @@ inline void receive (const Channel& c, const unsigned char* data, int numBytes) 
     // obvious reading is that they clear everything.
     //
     // The model exists so that nothing is forgotten. "While MIDI devices
-    // should be able to receive All Notes Off messages" there "is no
-    // equirement that a receiver recognize it" (the typo is the
-    // specification's), so a model that cleared itself when one went past
-    // would be guessing, and the two guesses are not equally bad. Keep
-    // believing and the worst case is a note off nobody needed, which costs
-    // nothing. Forget, and a plugin that ignored the message is left with a
-    // note that no later stop will send an off for, reachable only by a
-    // panic. That is the exact failure this header was written to end, so it
-    // is not reintroduced for tidiness.
+    // specification does not require a receiver to recognise All Notes Off at
+    // all, which is the same sentence the ordering in `releaseSequence` rests
+    // on and carries the same provenance note. So a model that cleared itself
+    // when one went past would be guessing, and the two guesses are not
+    // equally bad. Keep believing and the worst case is a note off nobody
+    // needed, which costs nothing. Forget, and a plugin that ignored the
+    // message is left with a note that no later stop will send an off for.
+    // That is the exact failure this header was written to end, so it is not
+    // reintroduced for tidiness.
+    //
+    // It is also what the studio did before the pedal was modelled, for the
+    // player's keys on one MIDI channel. Clearing the arrangement's keys as
+    // well, which a version of this did, was a regression rather than a
+    // tidying.
     //
     // So what the rows hold is an upper bound on what is sounding, and the
     // test asserts it as one: everything a conformant receiver still has
@@ -435,13 +488,13 @@ struct Rows
     pedal stays down, the note offs this writes are deferred by the receiver,
     so the keys become `latched` and are still sounding. Recording them as
     silent is exactly the lie the studio used to tell: the engine forgot them,
-    so nothing could reach them afterwards but a panic.
+    so it could neither send their offs at the next stop nor say that it was
+    still holding anything.
 
-    A key that is already latched gets no message at all. Its off is with the
-    receiver, which is required to be holding it, so another one can achieve
-    nothing: what it is waiting for is the pedal. An earlier version of this
-    sent one anyway, and the cost was an off for every finished note at every
-    loop wrap for as long as the foot stayed down.
+    A key that is already latched gets an off only when this release is lifting
+    the pedal, which is the `needsNoteOff` rule and is argued there. Where the
+    pedal stays down it gets nothing, because the off it is waiting on is
+    waiting on the same pedal.
 
     `backstop` writes All Notes Off and nothing else: it does not clear the
     rows, because recognising it is not required of a receiver and a model
@@ -474,7 +527,7 @@ inline int releaseSequence (const Channel& c, int midiChannel, Rows rows,
     for (auto* keys : selected)
         if (keys != nullptr)
             for (int note = 0; note < kNotes; ++note)
-                if (needsNoteOff (keys[note]))
+                if (needsNoteOff (keys[note], liftPedal))
                     ++needed;
 
     if (needed > capacity)
@@ -495,7 +548,7 @@ inline int releaseSequence (const Channel& c, int midiChannel, Rows rows,
 
         for (int note = 0; note < kNotes; ++note)
         {
-            if (! needsNoteOff (keys[note]))
+            if (! needsNoteOff (keys[note], liftPedal))
                 continue;
 
             out[count++] = { (unsigned char) (0x80 | channel), (unsigned char) note, 0 };
