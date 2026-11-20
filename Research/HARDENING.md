@@ -36,12 +36,91 @@ at the same time, and the checks would still pass. It is the exact shape this
 project keeps meeting, a number that is present, plausible and wrong, sitting
 under the instrument that reads the numbers.
 
+### Mutation testing: 44 breakages, 38 caught
+
+Each one compiled with the sanitizers exactly as `Tests/run.sh` has them, and
+the harness verified that the unmutated header passes first.
+
+The forward path is covered about as well as a transform can be, and the
+reason is one check: `agreesWithTheDefinition` computes the same answer from
+the defining sum and compares. Every one of the 16 breakages of `transform`
+and `forward` died, including three that died on a sanitizer rather than on a
+comparison, which is the reminder that a plain `-O2` mutation harness would
+have reported them as survivors:
+
+| Where | Tried | Caught |
+|---|---|---|
+| `transform`, the bit reversal and the butterflies | 15 | 15 |
+| `forward` | 5 | 5 |
+| `setSize`, the twiddle table and the scratch | 7 | 7 |
+| `setSize`, the refusal of an impossible size | 4 | 3 |
+| `inverse` | 13 | 8 |
+
+All six survivors are in `inverse` or in `setSize`'s refusal, and they split
+three and three.
+
+### Three survivors that are real gaps
+
+**`inverse` was never run on a transform whose scratch was cold.** Making the
+mirror loop start at 2 instead of 1, so the lowest mirrored bin is never
+written, survived the whole file. So did stopping it one bin early. The reason
+is that the only check that exercised `inverse` at all was the round trip, and
+a round trip calls `forward` first, which leaves the complete spectrum sitting
+in the very `scratch` buffer the rebuild is supposed to fill. A bin the
+rebuild skips is already correct from the call before it, so the test cannot
+see the omission.
+
+That is not an academic gap, because the production path is the other one.
+`Synth/WaveTable.h` builds every mipmap level of every wavetable by handing
+`inverse` a spectrum it assembled itself, harmonic by harmonic, and never
+calls `forward` at all. Under the skip-bin-one mutation the fundamental of
+each table's first frame is missing entirely and every later frame carries the
+previous frame's fundamental, and the suite stays green.
+
+**A refused size leaves a transform that was already usable running at the old
+length.** The guard in `setSize` sets `n = 0` before returning. Removing that
+one line, so a rejected size merely returns, survived: the existing check only
+ever constructs a fresh object, where `n` is already 0 and nothing had to
+clear it. Reuse of one transform across sizes is exactly what
+`Spectrogram::prepare` does, and it decides whether the size was accepted by
+comparing `fft.getSize()` against what it asked for.
+
+### Three survivors that are genuine no-ops, and one of them is a finding
+
+Keeping the imaginary part of the direct current bin, keeping the imaginary
+part of the Nyquist bin, and letting the mirror loop run through Nyquist all
+survived, and all three really do nothing. Verified rather than reasoned: the
+shipped rebuild and each variant were run over 200 random spectra at sizes 2,
+4, 8, 64 and 256, with imaginary parts deliberately placed on both of the bins
+that cannot have one, and the outputs agreed to the last bit. The mirror case
+is an ordering accident, since the write at Nyquist is overwritten immediately
+afterwards.
+
+The two bins are the finding. `theOutputIsRealWhateverTheBinsSay` was written
+to assert that an imaginary part on either of them is dropped rather than
+leaking through as a phantom, and it cannot fail in that direction, because
+that is not what delivers the guarantee. `inverse` takes `.real()` of every
+sample on the way out, and a purely imaginary component on direct current or
+on Nyquist contributes nothing to the real part of any sample: both have real
+basis functions, 1 and (-1) to the i. So the output was always going to be the
+nearest real spectrum whatever those two lines did. The header's comment
+credits the two assignments with the result and is the same shape of fault
+this project keeps finding in its own comments: not wrong about the behaviour,
+wrong about the mechanism, which is how the next person deletes the line that
+is load bearing and keeps the one that is not.
+
+### Also uncovered, found while reading for the mutations
+
+The production sizes were outside the tested range in both directions. The
+comparison against the defining sum stopped at 1024 and the round trip at
+2048, while `inverse` runs at 512 up to 8192 for every wavetable level and
+`forward` runs at 16384 for every waveform `Synth/WaveBank.h` defines as a
+function of phase. Neither production extreme was exercised at all.
+
 ### What is left to do
 
-Mutation testing of the existing `Tests/RealFFTTest.cpp`, which is strong
-where it compares against the defining sum and visibly thinner on `inverse`,
-on reuse of one transform across sizes, and on what is written outside the
-bins a caller asked for. Then the checks the survivors ask for.
+The checks the three real gaps ask for, the correction to the comment, and the
+production sizes.
 
 ---
 
