@@ -7,6 +7,44 @@ Newest first.
 
 ---
 
+## 2026-11-20: the transform every spectral measurement is taken through
+
+### What is being looked at
+
+`Source/RealFFT.h`, which has never appeared in this log. It is picked for
+leverage rather than for suspicion.
+
+It is JUCE free, it is 184 lines of pure arithmetic, and it is used in two
+different ways that both matter:
+
+- In the studio, `Synth/WaveBank.h` takes the spectrum of every waveform it
+  defines as a function of phase by transforming it, and `Synth/WaveTable.h`
+  builds every mipmap level of every wavetable by inverse transforming a
+  spectrum. So every band limited wavetable the instrument ships with comes
+  out of this file. `Spectrogram.h` runs its analysis and its resynthesis
+  through it too.
+- In `Tests/`, it is the measuring instrument. Nine test files take a
+  spectrum through it: `WaveBankTest`, `WaveTableTest`, `SaturatorTest`,
+  `TiltTest`, `DitherTest`, `GainRampTest`, `ClipFadeTest` and two probes.
+  Several of the measured figures quoted in CLAUDE.md are readings taken
+  through this transform.
+
+That second use is the reason to audit it ahead of something more obviously
+dangerous. A fault here would not read as a fault: it would move the
+wavetables and move the measurements of the wavetables in the same direction
+at the same time, and the checks would still pass. It is the exact shape this
+project keeps meeting, a number that is present, plausible and wrong, sitting
+under the instrument that reads the numbers.
+
+### What is left to do
+
+Mutation testing of the existing `Tests/RealFFTTest.cpp`, which is strong
+where it compares against the defining sum and visibly thinner on `inverse`,
+on reuse of one transform across sizes, and on what is written outside the
+bins a caller asked for. Then the checks the survivors ask for.
+
+---
+
 ## 2026-11-19: the voice pool, and the panic that was only as fast as the patch
 
 **Target.** `Source/VoiceAllocator.h`, its test, and the one caller that reads
