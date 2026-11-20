@@ -131,10 +131,79 @@ comparison against the defining sum stopped at 1024 and the round trip at
 `forward` runs at 16384 for every waveform `Synth/WaveBank.h` defines as a
 function of phase. Neither production extreme was exercised at all.
 
-### What is left to do
+### What was written
 
-The checks the three real gaps ask for, the correction to the comment, and the
-production sizes.
+- **`theInverseAgreesWithTheDefinition`.** The inverse compared against
+  additive synthesis: the real inverse transform written out as its sum of
+  cosines and sines, in terms of only the bins a caller supplies, so the
+  reference has no mirroring step of its own to agree with the code about. A
+  reference that rebuilt the upper half the same way `inverse` does would agree
+  with it about the one thing most likely to be wrong. Run at seven sizes from
+  2 to 1024 and from three callers: a transform used for nothing else, one that
+  has just run a `forward`, and one that has just run another `inverse`, which
+  is what `WaveTable` does on every frame after the first.
+- **`oneHarmonicComesBackAtTheAmplitudeItAsksFor`.** The convention
+  `Synth/WaveTable.h` builds every wavetable on, that a harmonic of amplitude
+  A at bin h is a bin of A * n / 2, asserted against the transform that owns it
+  rather than only against the table that comes out of it. At two sizes, four
+  harmonics and three phases.
+- **`theProductionSizesAreCovered`.** 512 to 16384, which is where the studio
+  actually runs and where this file used to stop at 2048. Four partials with a
+  known closed form, checked for amplitude, phase and what spilled anywhere
+  else. Against a closed form rather than the direct sum because the direct sum
+  at 16384 is a hundred million trigonometric calls, and a handful of partials
+  still drives every pass of butterflies at the real length.
+- **`aRefusedSizeClearsATransformThatWorked`.** A usable transform handed six
+  impossible sizes in turn, each time checked for a cleared size and bin count,
+  called into to prove it is safe, and set up again.
+- **`oneTransformReusedAcrossSizesMatchesAFreshOne`.** `Spectrogram::prepare`'s
+  arrangement: one transform set to seven lengths in an order that grows,
+  shrinks and grows again, required to agree bit for bit with a fresh
+  transform of the same length, forward and inverse.
+
+`theOutputIsRealWhateverTheBinsSay` is kept and its comment now says what it
+can and cannot see, since two of the survivors proved it is not a check on the
+lines it reads like a check on.
+
+The whole file still builds and runs in a little over three seconds with the
+sanitizers on.
+
+### Mutation testing again, against the stronger file
+
+The same 44 breakages: **41 caught, 3 survived**, and the three are the three
+that were verified to do nothing. Both of the skipped-bin breakages and the
+one that left a refused size in place now die on a comparison rather than on a
+sanitizer, which is the right way round for arithmetic.
+
+### One comment corrected rather than made true
+
+The doc comment on `inverse` credited the two assignments that drop the
+imaginary part of direct current and Nyquist with making the output real. They
+do not, `.real()` on the way out does, and the comment now says so and says why
+the distinction is worth the paragraph: a reader who believes those two lines
+are the guarantee, and who is later told that the rebuild already makes the
+spectrum Hermitian so taking the real part is redundant, deletes the line that
+is load bearing and keeps the two that are not.
+
+### What is now proven that was not
+
+- The inverse transform is correct against an independent closed form, from a
+  cold transform and from a dirty one, which is the arrangement every wavetable
+  in the instrument is built in and the one arrangement nothing checked.
+- The transform is correct at the lengths the studio runs it at, rather than
+  only up to an eighth of the longest.
+- The scaling convention `WaveTable` depends on is pinned in the file that
+  owns it.
+- A size that cannot work leaves no usable transform behind, on reuse as well
+  as on construction.
+
+### Nothing in it was wrong
+
+No fault was found in `RealFFT.h`. The forward path was already covered about
+as well as a transform can be, by the one check that compares against the
+defining sum, and the arithmetic is right at every size tried. What was wrong
+was the coverage of the inverse and one comment's account of its own
+mechanism.
 
 ---
 
