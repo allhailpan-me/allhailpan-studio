@@ -1923,27 +1923,32 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     beatPosition.store (position);
 }
 
-void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClips)
+void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClips, bool liftPedal)
 {
     auto& midi = channelSlots[(size_t) slot].midi;
     const HoldPedal::Rows rows { includeLive, includeClips };
 
-    // The decision is HoldPedal's, which is tested, and this is left with the
-    // translation into JUCE. Written out here as two loops over the rows, as
-    // it was, it has to get right what a key becomes when the pedal is still
-    // down, and it had that wrong: it recorded the keys as silent, which is
-    // the lie the whole header exists to end. The pedal is not lifted from
-    // here, because whether it should come up is a policy that differs
-    // between the callers: see `liftSustain` and the two that use it.
+    // THE PEDAL AND THE NOTE OFFS ARE ONE SEQUENCE AND CANNOT BE TWO CALLS.
+    // The first version of this had the lift in a function of its own, called
+    // by the two paths that want it, immediately before this one. It compiled,
+    // it sent the right bytes in the right order, and it defeated the whole
+    // change: lifting the pedal releases every key the pedal was holding up,
+    // so by the time this ran there was nothing left that needed an off and
+    // the individual note offs the specification asks for were never sent.
+    // Byte for byte what the studio sent before the pedal was modelled at
+    // all, with a model underneath it that nothing could read. An audit found
+    // it by running the two versions side by side; nothing about it looked
+    // wrong.
     //
-    // On the stack rather than a member, because the audio thread must not
-    // allocate and 774 bytes of stack is nothing.
+    // So the decision is HoldPedal's, which is tested, and this is left with
+    // the translation into JUCE. On the stack rather than a member, because
+    // the audio thread must not allocate and 774 bytes of stack is nothing.
     HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
 
     for (int ch = 1; ch <= midiChannels; ++ch)
     {
         const int count = HoldPedal::releaseSequence (pedalChannel (slot, ch), ch, rows,
-                                                      false, false,
+                                                      liftPedal, false,
                                                       out, HoldPedal::kMaxReleaseMessages);
 
         for (int i = 0; i < count; ++i)
@@ -2056,22 +2061,6 @@ HoldPedal::Channel AudioEngine::pedalChannel (int slot, int midiChannel) noexcep
     return c;
 }
 
-void AudioEngine::liftSustain (int slot)
-{
-    auto& midi = channelSlots[(size_t) slot].midi;
-
-    for (int ch = 1; ch <= midiChannels; ++ch)
-    {
-        midi.addEvent (juce::MidiMessage::controllerEvent (ch, HoldPedal::kController, 0), 0);
-
-        // Nothing but zero, ever. Putting the pedal back down re-catches
-        // every note whose level is above its envelope sustain level, which
-        // on a piano is every note just released: HoldPedal.h carries the
-        // specification text and the measurement.
-        HoldPedal::setPedal (pedalChannel (slot, ch), 0);
-    }
-}
-
 void AudioEngine::trackLiveMessage (int slot, const juce::uint8* data, int numBytes)
 {
     if (data == nullptr || numBytes < 2)
@@ -2114,14 +2103,15 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
         //
         // MidiBuffer::addEvent keeps insertion order for events at the same
         // sample, so the order these are added in is the order they arrive in.
-        if (silence.sustainUp)
-            liftSustain (slot);
-
-        if (silence.clipNoteOffs || silence.liveNoteOffs)
-            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs);
+        // One call, so the lift cannot be separated from the note offs it is
+        // there to let through. TransportSilence only ever asks for the lift
+        // alongside both sets of note offs, and the condition says so rather
+        // than assuming it.
+        if (silence.sustainUp || silence.clipNoteOffs || silence.liveNoteOffs)
+            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs, silence.sustainUp);
 
         if (silence.allNotesOff || silence.allSoundOff)
-            for (int ch = 1; ch <= 16; ++ch)
+            for (int ch = 1; ch <= midiChannels; ++ch)
             {
                 if (silence.allNotesOff)
                     c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
@@ -2148,11 +2138,10 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
         // MIDI goes: the channel being left here would never hear it at all,
         // so the note rang until somebody found the panic button.
         //
-        // The same call the stop path makes, rather than a second way of
-        // doing it. A wrap deliberately does not make it.
-        liftSustain (liveChannel);
-        stopTrackedNotes (liveChannel, true, false);
-        for (int ch = 1; ch <= 16; ++ch)
+        // The same call the stop path makes, with the same answer to the
+        // lift. A wrap deliberately answers it the other way.
+        stopTrackedNotes (liveChannel, true, false, true);
+        for (int ch = 1; ch <= midiChannels; ++ch)
             channelSlots[(size_t) liveChannel].midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
         liveChannel = selected;
     }

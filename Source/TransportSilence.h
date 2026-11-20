@@ -53,28 +53,52 @@
       is not tracking, which is what a hosted arpeggiator or sequencer may be
       holding by itself. All Notes Off is specified as a release: it "should
       force voices to go to the release stage of the envelope, and not terminate
-      the sound of the notes abruptly" (MIDI 1.0 Detailed Specification v4.2.1,
-      MMA 96.1-4, Appendix, "Hold Pedal and 'All Notes Off'", p. A-5). A tail
-      ringing out after Stop is what every other release path in this studio
-      already does.
+      the sound of the notes abruptly" (MIDI 1.0 Detailed Specification,
+      Appendix, "The Relationship Between the Hold Pedal and 'All Notes
+      Off'"). A tail ringing out after Stop is what every other release path
+      in this studio already does.
 
-    - **A wrap no longer lifts the sustain pedal either, and that is not a
-      clean win.** It used to, and that was a fault: nothing in the studio
-      tracks the pedal's real position, so lifting it at the loop point turned
-      sustain off for the rest of the pass. Not lifting it has its own cost,
-      which an audit of this change found: the clip note offs that do go out at
-      the wrap are latched by a pedal that is still down, so a clip note near
-      the end of a loop that the next pass does not retrigger rings on until
-      the player lifts their foot. Neither answer is right, because the real
-      fault is that the pedal is not modelled at all. The symptom moved rather
-      than went away, and that is written here rather than left for somebody to
-      find, with the pedal itself in `Research/BACKLOG.md`.
+      The page number this carried, and the one further down, were removed
+      rather than corrected: the MMA printing of v4.2.1 cannot be opened from
+      the sandbox, so neither was ever verified. The heading was wrong too,
+      missing its first four words. A heading that can be checked is worth
+      more than a page number that cannot, and `HoldPedal.h` carries the
+      provenance for every quote in this area.
+
+    - **A wrap does not lift the sustain pedal, and the pedal is modelled now,
+      which is what makes that answer defensible.** It used to lift it, and
+      that was a fault: nothing tracked the pedal's real position, so lifting
+      it at the loop point turned sustain off for the rest of the pass.
+
+      Not lifting it had its own cost while the pedal was still unmodelled,
+      and this paragraph used to end by saying the pedal was not modelled at
+      all and was waiting in `Research/BACKLOG.md`. It is not waiting any
+      more: `HoldPedal.h` is it. What remains true is that the clip note offs
+      going out at the wrap are latched by a pedal that is still down, so a
+      clip note near the end of a loop that the next pass does not retrigger
+      rings on until the player lifts their foot.
+
+      What changed is that the studio now knows it is holding that note
+      instead of having forgotten it. `HoldPedal::releaseSequence` records a
+      note it released under a held pedal as latched, so the next lift of the
+      foot, or the next stop, releases it properly, where before nothing but
+      the panic could reach it. It also sends it no second note off, since the
+      receiver is required to be holding the first one.
+
+      Which answer a wrap should give is a real disagreement between studios
+      rather than something a specification settles: Ardour lifts the pedal at
+      every wrap by default, Reaper offers it as a preference, and Logic
+      chases rather than panicking. This studio keeps its own position, that a
+      wrap is a continuation.
 
     - **Only a panic cuts.** All Sound Off is the one message defined to ignore
       the release: "all notes currently on are turned off and their volume
       envelopes are set to zero as soon as possible" (same document, "Channel
-      Mode Messages", p. 25). That is the user's literal request when they ask
-      for silence and it is wrong as an answer to anything else.
+      Mode Messages"). That is the user's literal request when they ask for
+      silence and it is wrong as an answer to anything else. That it is not
+      latched by the hold pedal either is universally believed and is not in
+      the specification's own words, which `HoldPedal.h` says plainly rather
+      than implying an authority for it.
 
     The escalation is the property to hold on to: a panic does everything a stop
     does and more, so pressing Stop twice is always strictly stronger than

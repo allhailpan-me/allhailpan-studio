@@ -869,8 +869,21 @@ private:
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning);
-    void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
+
+    /** Release what the engine is holding on one slot, and lift the pedal
+        with it if asked.
+
+        The two are one call rather than two deliberately. Lifting the pedal
+        releases every key it was holding up, so a lift in a call of its own
+        ahead of this one leaves nothing here that needs a note off, and the
+        individual offs the specification asks for are silently never sent.
+        That is what the first version of this did. `liftPedal` is the
+        caller's answer to a policy question: a stop, a jump, a panic and
+        switching the live channel all lift it, and a loop wrap does not,
+        because a wrap is a continuation. */
+    void stopTrackedNotes (int slot, bool includeLive, bool includeClips, bool liftPedal);
+
     void trackLiveMessage (int slot, const juce::uint8* data, int numBytes);
 
     /** One receiver's worth of state: the keys and the pedal for one MIDI
@@ -883,12 +896,7 @@ private:
         sentence. */
     HoldPedal::Channel pedalChannel (int slot, int midiChannel) noexcept;
 
-    /** Lift controller 64 on every MIDI channel of one slot, and record that
-        it was lifted. Both halves together, because the receiver releases
-        everything the pedal was holding up the moment this goes out, and a
-        model that did not follow would then send note offs for notes that are
-        already gone and, worse, keep believing it held them. */
-    void liftSustain (int slot);
+
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
     void applyCurve (const AutoCurveRT&, double beat);

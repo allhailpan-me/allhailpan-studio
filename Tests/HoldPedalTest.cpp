@@ -236,8 +236,11 @@ static void aPedalledNoteOffIsDeferred()
     HoldPedal::receive (c, off, 3);
     check (s.live[60] == HoldPedal::latched,
            "a note off under the pedal was acted on instead of deferred");
-    check (HoldPedal::needsNoteOff (s.live[60]),
-           "a latched note was reported as owing no note off, which is the fault exactly");
+    check (HoldPedal::isSounding (s.live[60]),
+           "a latched note was reported as silent, which is the fault exactly");
+    check (! HoldPedal::needsNoteOff (s.live[60]),
+           "a latched note was reported as needing another note off: its off is already with "
+           "the receiver, which is required to be holding it");
 
     HoldPedal::receive (c, pedalUp, 3);
     check (s.live[60] == HoldPedal::silent, "lifting the pedal did not let the release through");
@@ -251,16 +254,32 @@ static void aPedalledNoteOffIsDeferred()
            "lifting the pedal silenced a key the player is still holding down");
 }
 
-/** All Notes Off is latched identically, and All Sound Off is not latched at
-    all. If these two measure the same, one of them is wrong, and this pair is
-    the only thing that separates them.
-*/
-static void theTwoChannelModeMessagesDifferUnderThePedal()
-{
-    for (int which = 0; which < 2; ++which)
-    {
-        const bool soundOff = which == 1;
+/** A channel mode message arriving from the wire leaves the model alone.
 
+    This is the one place the model deliberately declines to follow a
+    conformant receiver, so it is asserted directly rather than left to the
+    randomised streams, which hold it only as an upper bound.
+
+    All Notes Off is latched by the pedal exactly as an individual note off is,
+    and All Sound Off is not latched at all. Both are true of a receiver and
+    neither is something the engine may rely on, because "there is no
+    equirement that a receiver recognize" All Notes Off (the typo is the
+    specification's) and a plugin that ignores it leaves the notes sounding.
+    A model that cleared itself on the strength of the message would then have
+    forgotten notes that nothing afterwards sends an off for, which is the
+    whole failure this header exists to end. Keeping them costs a note off
+    nobody needed.
+
+    An earlier version of this change did clear both rows here, and that was a
+    regression against what the studio did before the pedal was modelled at
+    all: it used to clear only the player's keys on that one MIDI channel, and
+    clearing the arrangement's as well put the arrangement's notes beyond the
+    reach of the next stop.
+*/
+static void aChannelModeMessageFromTheWireIsNotActedOn()
+{
+    for (const int controller : { 120, 123 })
+    {
         Storage s;
         const auto c = s.channel();
 
@@ -273,22 +292,27 @@ static void theTwoChannelModeMessagesDifferUnderThePedal()
             HoldPedal::receive (c, on, 3);
         }
 
+        const unsigned char off[] = { 0x80, 48, 0 };
+        HoldPedal::receive (c, off, 3);     // one of them latched
+
         // The arrangement is holding something too, on this same channel,
         // which is how a loop wrap gets into this state.
         s.clip[72] = HoldPedal::sounding;
 
-        const unsigned char mode[] = { 0xb0, (unsigned char) (soundOff ? 120 : 123), 0 };
+        const unsigned char mode[] = { 0xb0, (unsigned char) controller, 0 };
         HoldPedal::receive (c, mode, 3);
 
-        for (int note : { 48, 60, 67 })
-            check (s.live[note] == (soundOff ? HoldPedal::silent : HoldPedal::latched),
-                   soundOff ? "All Sound Off left a note sounding under the pedal"
-                            : "All Notes Off was not latched by the pedal");
-
-        check (s.clip[72] == (soundOff ? HoldPedal::silent : HoldPedal::latched),
-               "a channel mode message from the wire did not reach the arrangement's notes");
-
+        check (s.live[48] == HoldPedal::latched, "a channel mode message moved a latched key");
+        check (s.live[60] == HoldPedal::sounding && s.live[67] == HoldPedal::sounding,
+               "a channel mode message forgot a key the engine may still have to release");
+        check (s.clip[72] == HoldPedal::sounding,
+               "a channel mode message from the wire reached the arrangement's keys");
         check (c.pedalDown(), "a channel mode message lifted the player's foot off the pedal");
+
+        // And what the engine still owes for them is unchanged, which is the
+        // point: the next release sends their offs.
+        check (HoldPedal::needsNoteOff (s.live[60]) && HoldPedal::needsNoteOff (s.clip[72]),
+               "a channel mode message left the engine owing no release");
     }
 }
 
@@ -439,7 +463,8 @@ static void theReleaseNeverPressesThePedal()
     std::uniform_int_distribution<int> aChannel (1, 16);
     std::bernoulli_distribution half (0.5);
 
-    int pedalLifts = 0, noteOffs = 0, backstops = 0, liftsWithheld = 0, leftLatched = 0;
+    int pedalLifts = 0, noteOffs = 0, backstops = 0, liftsWithheld = 0;
+    int becameLatched = 0, latchedLeftAlone = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -473,6 +498,18 @@ static void theReleaseNeverPressesThePedal()
         // test.
         const bool stillDown = pedalWasDown && ! liftPedal;
 
+        // Which keys owed an off, worked out before the call. A latched key
+        // owes nothing: its off is already with the receiver.
+        int owed[HoldPedal::kNotes] {};
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+        {
+            if (rows.live && HoldPedal::needsNoteOff (s.live[note]))
+                ++owed[note];
+
+            if (withClip && rows.clip && HoldPedal::needsNoteOff (s.clip[note]))
+                ++owed[note];
+        }
+
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
         const int count = HoldPedal::releaseSequence (c, midiChannel, rows, liftPedal, backstop,
                                                       out, HoldPedal::kMaxReleaseMessages);
@@ -484,6 +521,7 @@ static void theReleaseNeverPressesThePedal()
         }
 
         int firstNoteOff = -1, lastNoteOff = -1, pedalAt = -1, backstopAt = -1;
+        int sent[HoldPedal::kNotes] {};
 
         for (int i = 0; i < count; ++i)
         {
@@ -508,6 +546,7 @@ static void theReleaseNeverPressesThePedal()
                     firstNoteOff = i;
                 lastNoteOff = i;
                 ++noteOffs;
+                ++sent[m.data1 & 0x7f];
             }
             else if ((m.status & 0xf0) == 0xb0 && m.data1 == HoldPedal::kAllNotesOff)
             {
@@ -570,9 +609,15 @@ static void theReleaseNeverPressesThePedal()
 
                 unsigned char expected = was;
 
+                // A key that owed an off has had it sent, so it is silent, or
+                // LATCHED if the pedal is still down: the receiver defers
+                // that off and the note is still sounding. Recording it as
+                // gone is the lie this header exists to end.
+                //
+                // A key that was already latched gets no message at all, and
+                // only the pedal can move it. Sending it another off is what
+                // put one out for every finished note at every loop wrap.
                 if (selected && HoldPedal::needsNoteOff (was))
-                    expected = stillDown ? HoldPedal::latched : HoldPedal::silent;
-                else if (backstop && HoldPedal::needsNoteOff (was))
                     expected = stillDown ? HoldPedal::latched : HoldPedal::silent;
                 else if (liftPedal && was == HoldPedal::latched)
                     expected = HoldPedal::silent;
@@ -587,13 +632,38 @@ static void theReleaseNeverPressesThePedal()
                     break;
                 }
 
-                if (now == HoldPedal::latched)
-                    ++leftLatched;
+                // THE COUNTER HAS TO BE ABOUT WHAT THE CALL DID, not about
+                // what is lying around afterwards. The first version counted
+                // every key that was latched at the end, which includes the
+                // ones the randomised initialiser made latched and the
+                // release never touched: an audit set the pedal up so that
+                // nothing could possibly be latched BY the release, and the
+                // count still read 160537 against a threshold of 100000. With
+                // the counter blind, putting back the old lie,
+                // `keys[note] = silent` for a key released under a held
+                // pedal, survived the whole file.
+                if (expected == HoldPedal::latched && was != HoldPedal::latched)
+                    ++becameLatched;
+
+                if (was == HoldPedal::latched && expected == HoldPedal::latched)
+                    ++latchedLeftAlone;
             }
         }
 
         check (c.pedalDown() == stillDown,
                "the model disagrees with where the release left the pedal");
+
+        // And exactly the keys that owed an off got one. Per key rather than
+        // in total: every off sent one key too high passed a check on the
+        // total, and that is the worst thing this code can do, because at a
+        // stop it hangs every tracked note and cuts a neighbour instead.
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            if (sent[note] != owed[note])
+            {
+                fail ("note " + std::to_string (note) + " was sent " + std::to_string (sent[note])
+                        + " note offs where " + std::to_string (owed[note]) + " were owed");
+                break;
+            }
     }
 
     check (pedalLifts > 1000 && noteOffs > 100000 && backstops > 1000,
@@ -609,18 +679,106 @@ static void theReleaseNeverPressesThePedal()
            "which is the only state an unwanted lift shows up in: "
              + std::to_string (liftsWithheld));
 
-    // And the state the whole header exists for: a release that leaves the
-    // pedal where it was, so the offs it just sent are deferred rather than
-    // acted on. That is the loop wrap. Without it the expectation above
-    // collapses to "everything is silent", which is what the studio used to
-    // believe and the reason a note could survive a release at all.
-    check (leftLatched > 100000,
-           "the generator almost never left a key latched, so the one state this header "
-           "exists to represent went unchecked: " + std::to_string (leftLatched));
+    // And the two states the whole header exists for. A key the release
+    // LATCHED, which is a release that left the pedal down, so the off it
+    // just sent is deferred rather than acted on: that is the loop wrap. And
+    // a key that arrived latched and was left alone, which is the one that
+    // must get no second off.
+    check (becameLatched > 50000,
+           "the release never latched a key, so the one state this header exists to represent "
+           "went unchecked: " + std::to_string (becameLatched));
+    check (latchedLeftAlone > 50000,
+           "the release never left an already latched key alone, so nothing checked that it "
+           "does not send a second off for one: " + std::to_string (latchedLeftAlone));
 
     std::printf ("       %d lifts, %d note offs and %d backstops emitted over 20000 states, "
-                 "%d releases wanted no lift, %d keys left latched\n",
-                 pedalLifts, noteOffs, backstops, liftsWithheld, leftLatched);
+                 "%d releases wanted no lift\n",
+                 pedalLifts, noteOffs, backstops, liftsWithheld);
+    std::printf ("       %d keys latched BY the release, %d already latched and left alone\n",
+                 becameLatched, latchedLeftAlone);
+}
+
+/** The loop wrap, as the engine asks for it, and the thing it must not do
+    twice.
+
+    A wrap releases the arrangement's notes and nothing else, and does not
+    lift the pedal, because a wrap is a continuation and taking the player's
+    foot off for the rest of the pass is a worse answer than the ringing note
+    it would fix. That is this studio's own position rather than the field's,
+    which disagrees: Ardour lifts it at every wrap by default and Logic
+    chases instead.
+
+    So a clip note released while the pedal is down is latched, and the wrap
+    must leave it alone. An earlier version of this change re-sent its note
+    off at every wrap for as long as the foot stayed down, which an audit
+    measured at five redundant offs per wrap on a five note pattern. Harmless
+    on a conformant receiver, which defers them again, and it is also how the
+    128 entry echo filter that keeps a recorded take from doubling its own
+    notes gets filled with messages nobody needed.
+*/
+static void aWrapDoesNotSendTheSameNoteOffTwice()
+{
+    Storage s;
+    const auto c = s.channel();
+
+    const unsigned char pedalDown[] = { 0xb0, 64, 127 };
+    HoldPedal::receive (c, pedalDown, 3);
+
+    // A pattern whose notes all start and finish inside the pass, which is
+    // the ordinary case: the engine schedules each one and records it.
+    const int pattern[] = { 36, 38, 42, 46, 60 };
+
+    for (const int note : pattern)
+    {
+        HoldPedal::noteOn (s.clip, note);
+        HoldPedal::noteOff (s.clip, note, c.pedalDown());
+        check (s.clip[note] == HoldPedal::latched,
+               "a clip note released under the pedal was not latched");
+    }
+
+    // And one that is still held as the loop comes round, which is the note
+    // the wrap exists for: its off beat lies past the loop end, so it would
+    // never reach its own release.
+    HoldPedal::noteOn (s.clip, 67);
+
+    HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+    const HoldPedal::Rows arrangementOnly { false, true };
+
+    for (int wrap = 0; wrap < 3; ++wrap)
+    {
+        const int count = HoldPedal::releaseSequence (c, 1, arrangementOnly, false, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+
+        if (wrap == 0)
+        {
+            check (count == 1, "the first wrap should release the one note still held, and only it");
+            check (count >= 1 && (out[0].status & 0xf0) == 0x80 && out[0].data1 == 67,
+                   "the first wrap released the wrong note");
+        }
+        else
+        {
+            check (count == 0, "a later wrap sent a message for a note it had already released");
+        }
+
+        check (c.pedalDown(), "the wrap lifted the player's foot off the pedal");
+
+        for (const int note : pattern)
+            check (s.clip[note] == HoldPedal::latched,
+                   "the wrap moved a key whose off is already with the receiver");
+
+        check (s.clip[67] == HoldPedal::latched,
+               "the note the wrap released is not recorded as latched, so nothing will release it "
+               "when the foot comes up");
+    }
+
+    // The foot comes up, and everything the pedal was holding goes together.
+    const unsigned char pedalUp[] = { 0xb0, 64, 0 };
+    HoldPedal::receive (c, pedalUp, 3);
+
+    for (const int note : pattern)
+        check (s.clip[note] == HoldPedal::silent, "lifting the foot did not release the pattern");
+
+    check (s.clip[67] == HoldPedal::silent, "lifting the foot did not release the held note");
 }
 
 /** A release that will not fit is refused rather than truncated.
@@ -638,9 +796,11 @@ static void aReleaseThatWillNotFitIsRefused()
     for (int note : { 40, 50, 60, 70 })
     {
         s.live[note] = HoldPedal::sounding;
-        s.clip[note] = HoldPedal::latched;
+        s.clip[note] = HoldPedal::sounding;
     }
 
+    // Both rows sounding rather than one of them latched, because a latched
+    // key owes no note off and so does not count towards the room needed.
     const int needed = 1 + 8 + 1;   // the lift, eight note offs, the backstop
 
     for (int capacity = 0; capacity < needed; ++capacity)
@@ -653,7 +813,7 @@ static void aReleaseThatWillNotFitIsRefused()
                               + " messages was not refused");
 
         for (int note : { 40, 50, 60, 70 })
-            check (s.live[note] == HoldPedal::sounding && s.clip[note] == HoldPedal::latched,
+            check (s.live[note] == HoldPedal::sounding && s.clip[note] == HoldPedal::sounding,
                    "a refused release changed the model anyway");
 
         check (c.pedalDown(), "a refused release lifted the pedal anyway");
@@ -694,6 +854,7 @@ static void theModelAgreesWithAConformantReceiver()
     std::bernoulli_distribution half (0.5);
 
     int ringingAtRelease = 0, latchedSeen = 0, deferredAno = 0;
+    int exactStreams = 0, upperBoundOnly = 0, offsMatched = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -704,6 +865,7 @@ static void theModelAgreesWithAConformantReceiver()
         // other than 1. A null row must be left alone rather than walked.
         const bool withClip = half (rng);
         const auto c = s.channel (withClip);
+        bool modeMessageSeen = false;
 
         const int messages = aStream (rng);
 
@@ -761,18 +923,38 @@ static void theModelAgreesWithAConformantReceiver()
             if (wasAno)
                 ++deferredAno;
 
+            // A channel mode message is the one thing the model declines to
+            // follow, because recognising All Notes Off is not required of a
+            // receiver and forgetting is the costly guess. From the first one
+            // onward the model is an upper bound rather than a match, and the
+            // assertion says which of the two it is checking rather than
+            // quietly weakening for the whole run.
+            // Masked, as a receiver masks it. Unmasked, a junk byte of 0xf8
+            // reaches the receiver as controller 120 and did not register
+            // here, so the exact comparison was applied to a stream that had
+            // had a channel mode message in it after all.
+            if (numBytes >= 3 && (data[0] & 0xf0) == 0xb0
+                              && ((data[1] & 0x7f) == 120 || (data[1] & 0x7f) == 123))
+                modeMessageSeen = true;
+
             check (c.pedalDown() == reference.pedal,
                    "the model and the receiver disagree about the pedal");
 
             for (int note = 0; note < HoldPedal::kNotes; ++note)
             {
-                if (HoldPedal::needsNoteOff (s.live[note]) != reference.ringing[note])
+                const bool model = HoldPedal::isSounding (s.live[note]);
+                const bool real  = reference.ringing[note];
+
+                if (modeMessageSeen ? (real && ! model) : (model != real))
                 {
-                    fail ("the model and the receiver disagree about note "
+                    fail (std::string (modeMessageSeen
+                                         ? "the model has forgotten a note the receiver is still "
+                                           "sounding, which it may never do: note "
+                                         : "the model and the receiver disagree about note ")
                             + std::to_string (note) + ": the model says "
-                            + (HoldPedal::needsNoteOff (s.live[note]) ? "sounding" : "silent")
+                            + (model ? "sounding" : "silent")
                             + " and the receiver says "
-                            + (reference.ringing[note] ? "sounding" : "silent"));
+                            + (real ? "sounding" : "silent"));
                     break;
                 }
 
@@ -781,21 +963,64 @@ static void theModelAgreesWithAConformantReceiver()
             }
         }
 
+        if (modeMessageSeen)
+            ++upperBoundOnly;
+        else
+            ++exactStreams;
+
         if (reference.soundingCount() > 0)
             ++ringingAtRelease;
 
-        // And now the thing a release has to achieve. The sequence goes into
-        // the receiver exactly as the engine would send it.
+        // And now the thing a release has to achieve, in THE CONFIGURATION THE
+        // ENGINE ACTUALLY USES: both rows, the pedal lifted, and no backstop.
+        //
+        // The backstop was the mistake in the first version of this check. All
+        // Notes Off at the end of the sequence silences a conformant receiver
+        // by itself, so "nothing is left sounding" held however wrong the
+        // individual note offs were: an audit broke every one of them, sending
+        // each off one key too high, and this check passed. Asked for without
+        // the backstop, the lift and the individual offs are the only things
+        // that can do it, and that is also the configuration a stop sends.
+        unsigned char owedLive[HoldPedal::kNotes], owedClip[HoldPedal::kNotes];
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+        {
+            owedLive[note] = (unsigned char) (HoldPedal::needsNoteOff (s.live[note]) ? 1 : 0);
+            owedClip[note] = (unsigned char) (withClip && HoldPedal::needsNoteOff (s.clip[note]) ? 1 : 0);
+        }
+
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
+        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, false,
                                                       out, HoldPedal::kMaxReleaseMessages);
 
         check (count >= 0, "the release was refused with room for everything");
+
+        // Exactly the keys that owed an off got one, and nothing else did.
+        // Counted per key rather than in total, because a total cannot tell
+        // the right number of wrong notes from the right ones: every off sent
+        // one key too high passed a check on the total.
+        int sent[HoldPedal::kNotes] {};
 
         for (int i = 0; i < count; ++i)
         {
             const unsigned char bytes[3] { out[i].status, out[i].data1, out[i].data2 };
             reference.receive (bytes, 3);
+
+            if ((out[i].status & 0xf0) == 0x80)
+                ++sent[out[i].data1 & 0x7f];
+        }
+
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+        {
+            const int wanted = (int) owedLive[note] + (int) owedClip[note];
+
+            if (sent[note] != wanted)
+            {
+                fail ("note " + std::to_string (note) + " was sent " + std::to_string (sent[note])
+                        + " note offs where " + std::to_string (wanted) + " were owed");
+                break;
+            }
+
+            offsMatched += wanted;
         }
 
         if (reference.soundingCount() != 0)
@@ -809,9 +1034,18 @@ static void theModelAgreesWithAConformantReceiver()
     check (ringingAtRelease > 10000,
            "too few streams had anything left sounding when the release came: "
              + std::to_string (ringingAtRelease));
-    check (latchedSeen > 10000,
+    // Lower than it was, and deliberately. A pedalled All Notes Off used to
+    // latch every sounding key in the model at once, which inflated this; the
+    // model no longer acts on one at all, so a latched key now only ever comes
+    // from an individual note off under the pedal.
+    check (latchedSeen > 2000,
            "the generator barely ever latched a note, which is the state this header exists for: "
              + std::to_string (latchedSeen));
+    check (exactStreams > 1000 && upperBoundOnly > 1000,
+           "the generator did not produce both kinds of stream: " + std::to_string (exactStreams)
+             + " exact and " + std::to_string (upperBoundOnly) + " upper bound only");
+    check (offsMatched > 50000,
+           "almost no note off was matched to the key that owed it: " + std::to_string (offsMatched));
     check (deferredAno > 500,
            "All Notes Off was almost never sent into a pedal that was holding something: "
              + std::to_string (deferredAno));
@@ -866,6 +1100,7 @@ static void theArrangementRowObeysTheSamePedal()
         Storage s;
         Receiver reference;
         const auto c = s.channel();
+        bool modeMessageSeen = false;
 
         const int messages = aStream (rng);
         const int base = aBase (rng);
@@ -884,7 +1119,7 @@ static void theArrangementRowObeysTheSamePedal()
                 // How often a clip note was released while the pedal was
                 // holding it up, which is the loop wrap this header was found
                 // by, counted before the move that defers it.
-                if (! on && c.pedalDown() && HoldPedal::needsNoteOff (s.clip[note]))
+                if (! on && c.pedalDown() && HoldPedal::isSounding (s.clip[note]))
                     ++releasedByTheFoot;
 
                 if (on)
@@ -912,6 +1147,14 @@ static void theArrangementRowObeysTheSamePedal()
                 else if (kind == 16) data[1] = 120;
                 else               { data[1] = 121; data[2] = (unsigned char) aValue (rng); }
 
+                // From the first channel mode message onward the model is
+                // deliberately an upper bound rather than a match: it does not
+                // act on one, because recognising All Notes Off is not
+                // required of a receiver and forgetting a note is the costly
+                // guess. See `aChannelModeMessageFromTheWireIsNotActedOn`.
+                if (data[1] == 120 || data[1] == 123)
+                    modeMessageSeen = true;
+
                 HoldPedal::receive (c, data, 3);
                 reference.receive (data, 3);
             }
@@ -921,13 +1164,19 @@ static void theArrangementRowObeysTheSamePedal()
 
             for (int note = 0; note < HoldPedal::kNotes; ++note)
             {
-                if (HoldPedal::needsNoteOff (s.clip[note]) != reference.ringing[note])
+                const bool model = HoldPedal::isSounding (s.clip[note]);
+                const bool real  = reference.ringing[note];
+
+                if (modeMessageSeen ? (real && ! model) : (model != real))
                 {
-                    fail ("the arrangement row and the receiver disagree about note "
+                    fail (std::string (modeMessageSeen
+                                         ? "the arrangement row has forgotten a note the receiver "
+                                           "is still sounding, which it may never do: note "
+                                         : "the arrangement row and the receiver disagree about note ")
                             + std::to_string (note) + ": the model says "
-                            + (HoldPedal::needsNoteOff (s.clip[note]) ? "sounding" : "silent")
+                            + (model ? "sounding" : "silent")
                             + " and the receiver says "
-                            + (reference.ringing[note] ? "sounding" : "silent"));
+                            + (real ? "sounding" : "silent"));
                     break;
                 }
 
@@ -1180,8 +1429,6 @@ static void anInvalidChannelIsRefused()
     // it schedules the arrangement's notes.
     HoldPedal::noteOn (nullptr, 60);
     HoldPedal::noteOff (nullptr, 60, true);
-    HoldPedal::allNotesOff (nullptr, true);
-    HoldPedal::allSoundOff (nullptr);
 
     HoldPedal::noteOn (keys, -1);
     HoldPedal::noteOn (keys, 128);
@@ -1198,7 +1445,7 @@ int main()
     std::printf ("HoldPedal\n");
 
     aPedalledNoteOffIsDeferred();
-    theTwoChannelModeMessagesDifferUnderThePedal();
+    aChannelModeMessageFromTheWireIsNotActedOn();
     theThresholdIsSixtyFour();
     resetAllControllersLiftsThePedal();
     aMalformedMessageIsIgnored();
@@ -1207,6 +1454,7 @@ int main()
     anInvalidChannelIsRefused();
     aRowThatArrivesLatchedWithThePedalUpIsRepaired();
     theReleaseNeverPressesThePedal();
+    aWrapDoesNotSendTheSameNoteOffTwice();
     aReleaseThatWillNotFitIsRefused();
     theModelAgreesWithAConformantReceiver();
     theArrangementRowObeysTheSamePedal();
