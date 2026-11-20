@@ -17,6 +17,7 @@
 #include "GainRamp.h"
 #include "SoloGraph.h"
 #include "TransportSilence.h"
+#include "HoldPedal.h"
 #include "Tuner.h"
 
 // ---------------------------------------------------------------------------
@@ -871,6 +872,23 @@ private:
     void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
     void trackLiveMessage (int slot, const juce::uint8* data, int numBytes);
+
+    /** One receiver's worth of state: the keys and the pedal for one MIDI
+        channel of one plugin. `midiChannel` is one to sixteen.
+
+        The arrangement's own notes all go out on MIDI channel 1, so that is
+        the only channel given a clip row. A pedal pressed there latches the
+        arrangement's notes as well as the player's, because both reach one
+        plugin through one cable, and that is the loop wrap fault in one
+        sentence. */
+    HoldPedal::Channel pedalChannel (int slot, int midiChannel) noexcept;
+
+    /** Lift controller 64 on every MIDI channel of one slot, and record that
+        it was lifted. Both halves together, because the receiver releases
+        everything the pedal was holding up the moment this goes out, and a
+        model that did not follow would then send note offs for notes that are
+        already gone and, worse, keep believing it held them. */
+    void liftSustain (int slot);
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
     void applyCurve (const AutoCurveRT&, double beat);
@@ -1047,10 +1065,20 @@ private:
     double sampleRate = 44100.0;
     int    blockSize  = 512;
 
-    // audio-thread-only: every note the engine has started, so none can hang
+    // audio-thread-only: every note the engine has started, so none can hang.
+    // The bytes are HoldPedal::Key rather than a flag, because a note off sent
+    // while the pedal is down is deferred by the receiver and the note is
+    // still sounding: see HoldPedal.h for the specification and for what
+    // believing otherwise cost. Every test of these rows is
+    // HoldPedal::needsNoteOff, which is true for a latched key as well as a
+    // struck one.
     static constexpr int midiChannels = 16;
     std::vector<juce::uint8> clipNotes = std::vector<juce::uint8> ((size_t) kNumChannels * 128);
     std::vector<juce::uint8> liveNotes = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels * 128);
+    // Controller 64 per channel slot and MIDI channel. Nothing tracked this
+    // before, which is why the rows above were wrong whenever a pedal was
+    // down.
+    std::vector<juce::uint8> livePedal = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels);
     int liveChannel = 0;
     // What we sent into the recorded plugin this block, so notes it echoes back
     // aren't recorded twice
