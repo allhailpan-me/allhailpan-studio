@@ -79,6 +79,168 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-20: the hold pedal, modelled at last, and the re-press that the specification forbids
+
+### What was looked at
+
+The open pull requests decide the area, as every night. Nine hardening
+branches hold `Project.h`, `MainComponent.cpp`, both editors, `Meter.h`,
+`SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`,
+`NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`. `Source/Synth` and `Source/Fx` had work
+merged into them yesterday, in #86, so both are off limits under the lane
+rule. `Project.h` being held rules out any new saved state, and
+`MainComponent.cpp` being held rules out any new wiring in the window, which
+between them rule out most of what a feature usually needs.
+
+`AudioEngine.{h,cpp}` is clear, and so is `TransportSilence.h`.
+
+| Candidate | Verdict |
+|---|---|
+| **The hold pedal, modelled in the engine** | **Chosen.** Written up yesterday as the cause of a fault whose symptom had been moved rather than removed, and the one thing in the studio's MIDI path with a normative specification that nothing implements |
+| The three transport edges lost to a failed try lock | Deferred. It is concurrency rather than policy, nothing in `Tests/` can reach a device callback, and yesterday's entry asks for the auditor on it as its own change |
+| `unloadInstrument` reaching for the panic | Blocked. The fix is one line in `MainComponent.cpp`, which #77 holds |
+| Fading a stolen voice | Blocked. `VoiceAllocator.h` and `PanOne` both had work merged yesterday |
+| Per strip polarity and delay, a subgroup, pre fader sends | Deferred for the third night by the same lock: all three need `Project.h` |
+
+### What the specification actually says, and the thing it says not to do
+
+`dsp-researcher` went to the primary sources. The normative text is in the
+MIDI 1.0 Detailed Specification's appendix, under the heading "The
+Relationship Between the Hold Pedal and 'All Notes Off'", read from the IEEE
+Computer Society Press reprint of the specification body (Haus, ed., *Notes
+About MIDI Specifications*, 1995), at
+https://www.lim.di.unimi.it/IEEE/MIDI/SOT5.HTM. The MMA printing of v4.2.1
+itself could not be opened from here, so the section headings are cited and
+the printed page numbers quoted in `TransportSilence.h` are **not** verified.
+That is worth correcting there rather than leaving.
+
+Three sentences decide the whole design:
+
+> "If Note Off messages are received while the hold pedal (controller 64
+> (40H)) is 'on' ... they must be recognized but not acted upon until the
+> release of the hold pedal."
+
+> "The same is true for the All Notes Off message."
+
+> "A Hold or Sustain pedal 'On' message takes priority over Note Off and All
+> Notes Off until it is released."
+
+So the ringing note at the loop wrap is not a misbehaving synth. It is a
+conformant synth doing what the specification requires, and the engine
+sending a message it has no reason to believe took effect.
+
+The threshold has one answer once transmitter and receiver are separated, and
+both halves are in one paragraph of the Control Change section
+(https://www.lim.di.unimi.it/IEEE/MIDI/SOT1.HTM). A transmitter *may* send 0
+and 127; a receiver **must** read 0 to 63 as off and 64 to 127 as on, and the
+specification gives its reason: "a receiver has no way of knowing whether the
+message information is from a switch or a continuous controller". The later
+restatement, AMEI/MMA M2-113-UM v1.0 section 6, keeps only the receiver rule.
+So the engine reads incoming CC64 by threshold and emits only 0.
+
+**And the obvious fix is specified to misbehave.** The design this entry
+started out intending was: at a loop wrap, lift the pedal, send the clip note
+offs, then put the pedal back down, because the player's foot still is.
+M2-113-UM section 6 says what a receiver does with the third of those:
+
+> "If the level of a note that has been released ... is greater than the
+> envelope Sustain level, the device should switch back to the Decay or
+> Sustain portion of the envelope ... So, for example, an Organ note, having
+> received a note-off followed by a Damper ON, will not be 'caught' by the
+> damper. A piano note, however, with its Sustain level of zero, would be
+> 'caught.'"
+
+A piano's sustain level is zero, so every note just released is still above
+it, so every one of them is specified to be re-caught, with its decay
+restarted. The sequence is a no-op on the instrument people use a sustain
+pedal with, and worse than a no-op because it restarts the envelope. It would
+have measured as working on anything with a non-zero sustain level, which is
+most test tones, and failed on a piano.
+
+That is the night's most useful result and it cost nothing but asking: the
+plausible fix, built from intuition, would have been wrong in exactly the way
+CLAUDE.md's research section describes, and wrong only on the material where
+it matters.
+
+### What the other studios do, which is that they disagree
+
+- **Ardour** lifts the pedal and leaves it up, with the same ordering this
+  studio already has, and its code says why: `MidiPort::resolve_notes`,
+  `libs/ardour/midi_port.cc`, sends CC64 at nothing on all sixteen channels
+  ahead of All Notes Off, commented "we need to send all notes off AND turn
+  the sustain/damper pedal off to handle synths that prioritize sustain over
+  AllNotesOff". At a loop wrap it does the whole panic, by default:
+  `midi_panic_when_looping` is `true`, switchable in Preferences under
+  "Output Port Panic". Six places in Ardour write CC64 and **every one of
+  them writes zero**.
+- **Reaper** offers the reset at the loop boundary as a preference, "Reset
+  MIDI CC/Pitch on playback start and/or playback stop and/or playback
+  loop/skip", and separates the hardware path, where "pitch/sustain" is a
+  named reset category, from the plugin path.
+- **Logic** chases rather than panics, and is the only one that names this
+  exact case: its chase options include "Notes: Sustained", described as
+  "Sends any notes that are still playing at the playback start point (due to
+  a sustain pedal event)", and a separate "Chase on Cycle Jump".
+- **Cubase** has "Chase Events" and a "Never Reset Chased Controllers"
+  preference, whose existence says its default is to reset chased controllers
+  to nothing on stop and on locate. Its cycle boundary behaviour is not in
+  the pages that could be read, and is recorded here as unverified rather
+  than guessed.
+
+Chasing itself is convention and not specification: there is no normative
+text anywhere about what a sequencer re-sends when the play head moves, which
+was checked against the MMA addenda list as well as the specification. So the
+comment in the new header says the field disagrees, and does not imply an
+authority that is not there.
+
+### What is being built
+
+Not a change of policy at the wrap, which is where this looked like it was
+going. The engine's fault is one level under that: **it does not know what is
+still sounding**, because it clears its own note rows on a note off and on
+All Notes Off whether or not a pedal is holding those notes up. Every release
+path downstream then reasons from a model that is wrong exactly when the
+pedal is down.
+
+`Source/HoldPedal.h`, no JUCE, is the receiver's own rule: the threshold, the
+three states a key can be in (silent, sounding, latched by the pedal), the
+transitions for note on, note off, CC64, CC120, CC123 and CC121, and the
+sequence of messages that leaves a conformant receiver silent. The engine
+keeps only the pointer arithmetic over the rows it already has.
+
+Two consequences are worth stating as the user visible part, because the
+loop wrap is not where the hanging note lives:
+
+- **The live channel switch leaves a pedalled note sounding for ever
+  today.** `scheduleMidi` sends note offs and All Notes Off to the channel
+  being left, and no pedal lift. Both are latched by a pedal that is down.
+  And the lift, when the player's foot eventually comes up, is routed to the
+  newly selected channel, so the channel that was left never hears it at
+  all. That note rings until somebody finds the panic button. This is the
+  unconditional fault, it needs no loop and no clip, and it is what the fix
+  is for.
+- **At a stop, the note offs for pedalled notes are not sent at all
+  today**, and the path works only because All Notes Off is behind them and
+  the pedal lift is ahead of them. The specification is explicit that this
+  is not good enough: "Since recognition of All Notes Off is not required of
+  the receiver, all notes should first be turned off by transmitting
+  individual Note Off messages". With the model true, those note offs go
+  out.
+
+The wrap keeps the policy it has, deliberately, and now keeps a true record
+of what it left latched, so the notes it defers are released by the next
+foot lift or by the next stop rather than being forgotten by the engine and
+releasable only by a panic. Ardour's louder default is cited beside it as
+the alternative that was considered and not taken, because "a loop wrap is a
+continuation" is this studio's own documented position and lifting the pedal
+there breaks the player's pedal for the rest of the pass.
+
+PAN One's half of this is deliberately not in scope: the instrument has no
+branch for controller 64 at all, and `Source/Synth` and `PanOne` are being
+built by hand. The engine's half is what every hosted VST3 instrument needs,
+and it is what makes the engine stop lying.
+
 ## 2026-11-19: the sustain pedal is not modelled anywhere
 
 Found while separating the two channel mode messages. Nothing in the studio
