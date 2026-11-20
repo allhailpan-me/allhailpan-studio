@@ -384,6 +384,18 @@ struct Message
     every key of both rows, and the backstop. */
 inline constexpr int kMaxReleaseMessages = 1 + kNotes + kNotes + 1;
 
+/** Which of a channel's two sets of keys a release is about.
+
+    They are separate because the engine's reasons for releasing them are
+    separate: switching the live channel releases what the player is holding
+    and leaves the arrangement playing, and a loop wrap is the other way
+    round. */
+struct Rows
+{
+    bool live = true;   /**< what the player is holding */
+    bool clip = true;   /**< what the arrangement is holding */
+};
+
 /** The messages that leave a conformant receiver with nothing sounding on this
     channel, in the order they have to go out, and the model updated to match.
 
@@ -399,51 +411,65 @@ inline constexpr int kMaxReleaseMessages = 1 + kNotes + kNotes + 1;
     messages". Then All Notes Off last, if a backstop is wanted, for whatever a
     hosted arpeggiator is holding that the engine never saw.
 
-    `midiChannel` is one to sixteen. `liftAlways` sends the pedal lift even
-    where this model says the pedal is up, which is what a panic wants: the
-    user has asked for silence and the model is not worth trusting over them.
-    Everything else should leave it false, so that a release does not send a
-    controller change the player did not make.
+    `midiChannel` is one to sixteen.
+
+    `liftPedal` decides whether the pedal comes up as part of this, and it is
+    the caller's to decide because the answer is a policy and differs between
+    them. A stop lifts it. Switching the live channel has to, because the
+    channel being left can never hear the lift afterwards. A loop wrap does
+    not, because a wrap is a continuation and taking the player's foot off for
+    the rest of the pass is a worse answer than the one it fixes. A caller
+    that wants it lifted only where this model says it is down can ask
+    `pedalDown()` first, which is cheaper than a wrong default.
+
+    **What the pedal is doing decides what the keys become, which is the
+    reason this is one function rather than a loop at each call site.** If the
+    pedal stays down, the note offs this writes are deferred by the receiver,
+    so the keys become `latched` and still owe a release. Recording them as
+    silent is exactly the lie the studio used to tell: the engine forgot them,
+    so nothing sent their offs again and nothing but a panic could reach them.
 
     Returns how many messages were written, or -1 if `capacity` could not hold
     them, in which case nothing is written and nothing is changed. Refused
     rather than truncated: a truncated release is a silently dropped note off,
     which is the fault this whole header is about.
 */
-inline int releaseSequence (const Channel& c, int midiChannel, bool backstop,
-                            bool liftAlways, Message* out, int capacity) noexcept
+inline int releaseSequence (const Channel& c, int midiChannel, Rows rows,
+                            bool liftPedal, bool backstop,
+                            Message* out, int capacity) noexcept
 {
     if (! c.valid() || out == nullptr)
         return 0;
 
     const unsigned char channel = (unsigned char) ((midiChannel - 1) & 0x0f);
-    const bool lift = liftAlways || c.pedalDown();
 
-    int needed = (lift ? 1 : 0) + (backstop ? 1 : 0);
+    // Where the pedal is left, which is what the keys this releases become.
+    const bool stillDown = c.pedalDown() && ! liftPedal;
 
-    for (int note = 0; note < kNotes; ++note)
-    {
-        if (needsNoteOff (c.live[note]))
-            ++needed;
+    unsigned char* const selected[2] { rows.clip ? c.clip : nullptr,
+                                       rows.live ? c.live : nullptr };
 
-        if (c.clip != nullptr && needsNoteOff (c.clip[note]))
-            ++needed;
-    }
+    int needed = (liftPedal ? 1 : 0) + (backstop ? 1 : 0);
+
+    for (auto* keys : selected)
+        if (keys != nullptr)
+            for (int note = 0; note < kNotes; ++note)
+                if (needsNoteOff (keys[note]))
+                    ++needed;
 
     if (needed > capacity)
         return -1;
 
     int count = 0;
 
-    if (lift)
+    if (liftPedal)
         out[count++] = { (unsigned char) (0xb0 | channel), (unsigned char) kController, 0 };
 
     // A note off per key, the arrangement's before the player's only so that
-    // the order is fixed and reviewable. Both rows reach the same voices.
-    for (int row = 0; row < 2; ++row)
+    // the order is fixed and reviewable. Both rows reach the same voices, so
+    // no receiver can tell the two orders apart.
+    for (auto* keys : selected)
     {
-        unsigned char* keys = row == 0 ? c.clip : c.live;
-
         if (keys == nullptr)
             continue;
 
@@ -453,17 +479,27 @@ inline int releaseSequence (const Channel& c, int midiChannel, bool backstop,
                 continue;
 
             out[count++] = { (unsigned char) (0x80 | channel), (unsigned char) note, 0 };
-            keys[note] = silent;
+            keys[note] = stillDown ? latched : silent;
         }
     }
 
     if (backstop)
         out[count++] = { (unsigned char) (0xb0 | channel), (unsigned char) kAllNotesOff, 0 };
 
-    // The pedal is recorded as up only where it was actually lifted. Asked to
-    // lift unconditionally, it was, so it is up either way.
-    if (lift)
-        *c.down = 0;
+    // The lift goes through the pedal's own rule rather than writing the byte,
+    // because lifting it releases everything it was holding up, on BOTH rows,
+    // including a row this release was not even about. The receiver does that
+    // whether the model follows or not.
+    if (liftPedal)
+        setPedal (c, 0);
+
+    // And the backstop reaches both rows too: a receiver cannot tell which of
+    // its sounding notes the engine thinks belong to the arrangement.
+    if (backstop)
+    {
+        allNotesOff (c.live, c.pedalDown());
+        allNotesOff (c.clip, c.pedalDown());
+    }
 
     return count;
 }

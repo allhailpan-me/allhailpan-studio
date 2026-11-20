@@ -1926,53 +1926,30 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClips)
 {
     auto& midi = channelSlots[(size_t) slot].midi;
+    const HoldPedal::Rows rows { includeLive, includeClips };
 
-    // THE PEDAL FIRST, or none of what follows arrives. A note off received
-    // while controller 64 is on "must be recognized but not acted upon until
-    // the release of the hold pedal", and "the same is true for the All Notes
-    // Off message": MIDI 1.0 Detailed Specification, appendix, "The
-    // Relationship Between the Hold Pedal and 'All Notes Off'". So a release
-    // that does not lift the pedal releases nothing at all.
+    // The decision is HoldPedal's, which is tested, and this is left with the
+    // translation into JUCE. Written out here as two loops over the rows, as
+    // it was, it has to get right what a key becomes when the pedal is still
+    // down, and it had that wrong: it recorded the keys as silent, which is
+    // the lie the whole header exists to end. The pedal is not lifted from
+    // here, because whether it should come up is a policy that differs
+    // between the callers: see `liftSustain` and the two that use it.
     //
-    // Done here rather than at each call site because there are four of them
-    // and only the two that go through TransportSilence::sustainUp were
-    // getting it. Lifting it also releases whatever the pedal was holding up
-    // on this slot, the arrangement's notes included, which is why the model
-    // is updated through HoldPedal rather than by hand: those keys need no
-    // note off of their own afterwards, and a hand written version of this
-    // would have sent one and then kept believing it held them.
+    // On the stack rather than a member, because the audio thread must not
+    // allocate and 774 bytes of stack is nothing.
+    HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+
     for (int ch = 1; ch <= midiChannels; ++ch)
     {
-        const auto channel = pedalChannel (slot, ch);
+        const int count = HoldPedal::releaseSequence (pedalChannel (slot, ch), ch, rows,
+                                                      false, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
 
-        if (! channel.pedalDown())
-            continue;
-
-        midi.addEvent (juce::MidiMessage::controllerEvent (ch, HoldPedal::kController, 0), 0);
-        HoldPedal::setPedal (channel, 0);
-    }
-
-    if (includeClips)
-    {
-        auto* row = clipNotes.data() + (size_t) slot * 128;
-        for (int note = 0; note < 128; ++note)
-            if (HoldPedal::needsNoteOff (row[note]))
-            {
-                midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
-                row[note] = HoldPedal::silent;
-            }
-    }
-
-    if (includeLive)
-    {
-        auto* rows = liveNotes.data() + (size_t) slot * midiChannels * 128;
-        for (int ch = 0; ch < midiChannels; ++ch)
-            for (int note = 0; note < 128; ++note)
-                if (HoldPedal::needsNoteOff (rows[ch * 128 + note]))
-                {
-                    midi.addEvent (juce::MidiMessage::noteOff (ch + 1, note), 0);
-                    rows[ch * 128 + note] = HoldPedal::silent;
-                }
+        for (int i = 0; i < count; ++i)
+            midi.addEvent (juce::MidiMessage ((int) out[i].status,
+                                              (int) out[i].data1,
+                                              (int) out[i].data2), 0);
     }
 }
 
@@ -2164,13 +2141,16 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
     const int selected = selectedChannel.load();
     if (selected != liveChannel)
     {
-        // The pedal comes up first, and this is the path that needed it most.
+        // THE PEDAL COMES UP FIRST, and this is the path that needed it most.
         // A note off and All Notes Off are both latched by a pedal that is
         // down, and the lift, when the player's foot eventually comes up, is
-        // routed to the newly selected channel: the channel being left here
-        // would never hear it at all, so the note rang until somebody found
-        // the panic button. `stopTrackedNotes` does the lifting, so every
-        // caller of it gets this right rather than only this one.
+        // routed to the newly selected channel, because that is where live
+        // MIDI goes: the channel being left here would never hear it at all,
+        // so the note rang until somebody found the panic button.
+        //
+        // The same call the stop path makes, rather than a second way of
+        // doing it. A wrap deliberately does not make it.
+        liftSustain (liveChannel);
         stopTrackedNotes (liveChannel, true, false);
         for (int ch = 1; ch <= 16; ++ch)
             channelSlots[(size_t) liveChannel].midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);

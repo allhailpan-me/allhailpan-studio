@@ -439,7 +439,7 @@ static void theReleaseNeverPressesThePedal()
     std::uniform_int_distribution<int> aChannel (1, 16);
     std::bernoulli_distribution half (0.5);
 
-    int pedalLifts = 0, noteOffs = 0, backstops = 0, liftsWithheld = 0;
+    int pedalLifts = 0, noteOffs = 0, backstops = 0, liftsWithheld = 0, leftLatched = 0;
 
     for (int trial = 0; trial < 20000; ++trial)
     {
@@ -456,12 +456,25 @@ static void theReleaseNeverPressesThePedal()
             s.clip[note] = (unsigned char) aState (rng);
         }
 
+        unsigned char beforeLive[HoldPedal::kNotes], beforeClip[HoldPedal::kNotes];
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+        {
+            beforeLive[note] = s.live[note];
+            beforeClip[note] = s.clip[note];
+        }
+
         const int midiChannel = aChannel (rng);
         const bool backstop   = half (rng);
-        const bool liftAlways = half (rng);
+        const bool liftPedal  = half (rng);
+        const HoldPedal::Rows rows { half (rng), half (rng) };
+
+        // Where the pedal is left is what the keys this releases become, so it
+        // is worked out here too rather than read back off the thing under
+        // test.
+        const bool stillDown = pedalWasDown && ! liftPedal;
 
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-        const int count = HoldPedal::releaseSequence (c, midiChannel, backstop, liftAlways,
+        const int count = HoldPedal::releaseSequence (c, midiChannel, rows, liftPedal, backstop,
                                                       out, HoldPedal::kMaxReleaseMessages);
 
         if (count < 0)
@@ -527,27 +540,60 @@ static void theReleaseNeverPressesThePedal()
         // make: on a receiver that is already holding the pedal for its own
         // reasons, or on a second device daisy chained behind this one, it
         // damps notes this release was never about.
-        check ((pedalAt >= 0) == (liftAlways || pedalWasDown),
-               liftAlways || pedalWasDown ? "a lift was wanted and not sent"
-                                          : "a lift was sent for a pedal this model says is up");
+        check ((pedalAt >= 0) == liftPedal,
+               liftPedal ? "a lift was wanted and not sent"
+                         : "a lift was sent that nobody asked for");
 
-        if (! liftAlways && ! pedalWasDown)
+        if (! liftPedal)
             ++liftsWithheld;
 
-        // And the model is left with nothing owing a note off, because the
-        // offs have just gone out.
+        // What each key must now be, worked out from the contract rather than
+        // from the answer. A row this release was about has had its offs sent,
+        // so its keys are silent, or LATCHED if the pedal is still down: the
+        // receiver defers those offs, and recording them as gone is the exact
+        // lie this header was written to end. A row it was not about is
+        // untouched, except that lifting the pedal releases whatever it was
+        // holding up there, because the receiver does that whether the model
+        // follows or not. And the backstop reaches both rows.
         for (int note = 0; note < HoldPedal::kNotes; ++note)
         {
-            check (s.live[note] == HoldPedal::silent,
-                   "a key still owed a note off after the release");
+            for (int row = 0; row < 2; ++row)
+            {
+                const bool isClip = row == 1;
 
-            if (withClip)
-                check (s.clip[note] == HoldPedal::silent,
-                       "an arrangement key still owed a note off after the release");
+                if (isClip && ! withClip)
+                    continue;
+
+                const bool selected = isClip ? rows.clip : rows.live;
+                const unsigned char was = isClip ? beforeClip[note] : beforeLive[note];
+                const unsigned char now = isClip ? s.clip[note] : s.live[note];
+
+                unsigned char expected = was;
+
+                if (selected && HoldPedal::needsNoteOff (was))
+                    expected = stillDown ? HoldPedal::latched : HoldPedal::silent;
+                else if (backstop && HoldPedal::needsNoteOff (was))
+                    expected = stillDown ? HoldPedal::latched : HoldPedal::silent;
+                else if (liftPedal && was == HoldPedal::latched)
+                    expected = HoldPedal::silent;
+
+                if (now != expected)
+                {
+                    fail (std::string (isClip ? "an arrangement key" : "a key")
+                            + " is " + std::to_string ((int) now) + " where it should be "
+                            + std::to_string ((int) expected)
+                            + (selected ? " after being released" : " without being released")
+                            + (stillDown ? " under a pedal that is still down" : ""));
+                    break;
+                }
+
+                if (now == HoldPedal::latched)
+                    ++leftLatched;
+            }
         }
 
-        if (pedalAt >= 0)
-            check (! c.pedalDown(), "the model still thinks the pedal is down after lifting it");
+        check (c.pedalDown() == stillDown,
+               "the model disagrees with where the release left the pedal");
     }
 
     check (pedalLifts > 1000 && noteOffs > 100000 && backstops > 1000,
@@ -563,9 +609,18 @@ static void theReleaseNeverPressesThePedal()
            "which is the only state an unwanted lift shows up in: "
              + std::to_string (liftsWithheld));
 
+    // And the state the whole header exists for: a release that leaves the
+    // pedal where it was, so the offs it just sent are deferred rather than
+    // acted on. That is the loop wrap. Without it the expectation above
+    // collapses to "everything is silent", which is what the studio used to
+    // believe and the reason a note could survive a release at all.
+    check (leftLatched > 100000,
+           "the generator almost never left a key latched, so the one state this header "
+           "exists to represent went unchecked: " + std::to_string (leftLatched));
+
     std::printf ("       %d lifts, %d note offs and %d backstops emitted over 20000 states, "
-                 "%d releases wanted no lift\n",
-                 pedalLifts, noteOffs, backstops, liftsWithheld);
+                 "%d releases wanted no lift, %d keys left latched\n",
+                 pedalLifts, noteOffs, backstops, liftsWithheld, leftLatched);
 }
 
 /** A release that will not fit is refused rather than truncated.
@@ -591,7 +646,8 @@ static void aReleaseThatWillNotFitIsRefused()
     for (int capacity = 0; capacity < needed; ++capacity)
     {
         std::vector<HoldPedal::Message> out ((size_t) needed, HoldPedal::Message {});
-        const int count = HoldPedal::releaseSequence (c, 1, true, false, out.data(), capacity);
+        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
+                                                      out.data(), capacity);
 
         check (count == -1, "a release with room for only " + std::to_string (capacity)
                               + " messages was not refused");
@@ -604,7 +660,7 @@ static void aReleaseThatWillNotFitIsRefused()
     }
 
     std::vector<HoldPedal::Message> out ((size_t) needed, HoldPedal::Message {});
-    check (HoldPedal::releaseSequence (c, 1, true, false, out.data(), needed) == needed,
+    check (HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true, out.data(), needed) == needed,
            "a release with exactly enough room was refused");
 }
 
@@ -731,7 +787,7 @@ static void theModelAgreesWithAConformantReceiver()
         // And now the thing a release has to achieve. The sequence goes into
         // the receiver exactly as the engine would send it.
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-        const int count = HoldPedal::releaseSequence (c, 1, true, false,
+        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
                                                       out, HoldPedal::kMaxReleaseMessages);
 
         check (count >= 0, "the release was refused with room for everything");
@@ -893,7 +949,7 @@ static void theArrangementRowObeysTheSamePedal()
             ++ringingAtRelease;
 
         HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-        const int count = HoldPedal::releaseSequence (c, 1, true, false,
+        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
                                                       out, HoldPedal::kMaxReleaseMessages);
         check (count >= 0, "the release was refused with room for everything");
 
@@ -1086,7 +1142,7 @@ static void aChannelWithNoArrangementRowIsLeftAlone()
            "a channel with no arrangement row reached one anyway");
 
     HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-    const int count = HoldPedal::releaseSequence (c, 3, true, false,
+    const int count = HoldPedal::releaseSequence (c, 3, HoldPedal::Rows {}, true, true,
                                                   out, HoldPedal::kMaxReleaseMessages);
     check (count >= 0, "the release was refused");
     check (s.clip[60] == HoldPedal::sounding, "the release reached a row it was not given");
@@ -1106,7 +1162,8 @@ static void anInvalidChannelIsRefused()
     check (! HoldPedal::setPedal (empty, 127), "an empty channel took a pedal press");
 
     HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
-    check (HoldPedal::releaseSequence (empty, 1, true, true, out, HoldPedal::kMaxReleaseMessages) == 0,
+    check (HoldPedal::releaseSequence (empty, 1, HoldPedal::Rows {}, true, true,
+                                       out, HoldPedal::kMaxReleaseMessages) == 0,
            "an empty channel emitted messages");
 
     unsigned char keys[HoldPedal::kNotes] {};
