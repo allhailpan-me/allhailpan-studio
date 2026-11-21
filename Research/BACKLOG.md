@@ -253,6 +253,29 @@ files, found a third time.
   because reading it as the final state is the mistake it would otherwise
   invite.
 
+### The release question, answered rather than drifted past
+
+Not cut tonight, and recorded as a decision because the standing question
+above is about exactly this drifting. **v0.8.0 was cut on 2026-11-18**, three
+days ago, and `main` is seven commits past it: three hardening branches, one
+feature, and three release note commits. The lesson of the standing question
+was that a reason which is equally good on every occasion is not a reason to
+wait, and the pile it was protecting had grown to a time signature, a tuner
+and punch recording. That is not the situation here. One feature three days
+after a release is not a pile, and the hardening branches strengthen tests
+over code already shipped.
+
+What was found while writing the notes is worth more than the decision.
+**v0.8.0 was cut from the "Since v0.7.1" section, and two write-ups had since
+been added to that same section**: the MIDI record alignment from 11-19 and
+this night's hold pedal. So the section describing what v0.8.0 gave somebody
+was advertising two features no released build contains. Fixed by moving the
+heading rather than the text, and it is the same shape as everything else in
+this entry: a document that is present, plausible and says something untrue,
+with nothing about it looking wrong. Worth a check on any night that writes
+release notes, since the instruction to file under the version a change comes
+after exists because this keeps happening.
+
 ### What is still not done, carried forward
 
 - **Controller 64 is not recorded into a take and not written to an `.ahp`.**
