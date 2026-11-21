@@ -1,6 +1,49 @@
-Notes you play in on a keyboard now land where you played them instead of a few milliseconds behind, and a guitar and a keyboard recorded in one pass line up with each other. Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
+If you play with a sustain pedal, the note that used to hang when you switched channels with your foot down is gone, and pressing Stop now releases what the pedal was holding instead of hoping the plugin understands a catch all message. Notes you play in on a keyboard now land where you played them instead of a few milliseconds behind, and a guitar and a keyboard recorded in one pass line up with each other. Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
 ## Since v0.7.1
+
+**Your sustain pedal works properly now, and the note that used to hang is
+gone.** If you play with a sustain pedal, there were two places this studio
+let you down, and both of them looked like the plugin's fault rather than
+ours.
+
+The one you would actually have run into: hold the pedal down, play
+something, then click a different channel in the rack to play a different
+sound. The note you were holding kept ringing, and nothing you did with your
+foot would stop it. Lifting the pedal did nothing, because by then the studio
+was sending your pedal to the new channel and the old one never heard it. The
+note stayed until you next pressed Stop or clicked in the ruler, which if you
+were working over a stopped transport could be the whole of a take.
+
+The other one you would not have noticed until it bit you: when you pressed
+Stop while the pedal was down, the studio was not actually telling the
+instrument to release the notes it was holding. It leaned on one catch all
+message at the end instead, and a plugin is not required to understand that
+message at all. On the ones that do not, the notes hung.
+
+Both come from the same thing. A synth is required to ignore a note release
+while your sustain pedal is down and act on it when you lift your foot, which
+is the whole point of a sustain pedal. The studio never knew where your pedal
+was, so the moment it told a plugin to release a note it crossed that note off
+its own list, at exactly the moment the plugin is required to be still holding
+it. Everything downstream was then working from a list that was wrong whenever
+your foot was down. It knows where the pedal is now, and it keeps an honest
+list of what is still ringing.
+
+Worth saying what has deliberately not changed: a loop still does not take
+your foot off the pedal when it comes round. Some studios do lift it there and
+it is a real disagreement rather than a right answer, but a loop is meant to
+be a continuation, and having your pedal go dead for the rest of every pass is
+worse than the thing it fixes. What is different is that the studio now
+remembers what the loop left ringing, so the next time you lift your foot, or
+press Stop, it gets released properly.
+
+Not done yet, and you will notice it: a pedal press is still not recorded
+into a take. Play a part with the pedal and you will hear it as you play, but
+the pedal is not kept in the clip the way your notes are, so playing the part
+back will not sustain. That is the other half of this and it needs a change to
+the project file, which something else is in the middle of.
+
 
 **Notes you play in now land where you played them.** If you played a keyboard
 part into this studio it came back late, every time, and not by a fixed amount
