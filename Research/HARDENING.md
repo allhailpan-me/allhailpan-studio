@@ -7,6 +7,30 @@ Newest first.
 
 ---
 
+## 2026-11-21: the modulation matrix, which decides what every patch is wired to
+
+### What is being looked at
+
+`Source/Synth/ModMatrix.h`, 548 lines, and `Tests/ModMatrixTest.cpp`, 745 of
+them. Never audited here before, and the thinnest test to source ratio of
+anything JUCE free that is not pure data.
+
+It is picked for what a fault in it would do rather than for its size. A
+routing is saved in an `.ahp` and in every PAN One patch, it is evaluated per
+sample on the audio thread, and the whole argument for naming sources and
+destinations rather than numbering them is that the failure mode here is a
+patch that loads, plays, and is wrong. Nothing in it can fail loudly.
+
+### What is left to do
+
+- Mutation test `ModMatrixTest.cpp` against deliberate breakages of
+  `ModMatrix.h`, with the sanitizers on as `Tests/run.sh` has them.
+- Decide for each survivor whether it is a gap or a genuine no-op.
+- Strengthen the test where the survivors say to.
+- Fix anything that turns out to be actually wrong.
+
+---
+
 ## 2026-11-20: the transform every spectral measurement is taken through
 
 ### What is being looked at
