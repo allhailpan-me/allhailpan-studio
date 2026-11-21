@@ -79,6 +79,197 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-21: finishing the hold pedal, and the message no conformant receiver can see
+
+### Status: finished, mutation tested a second time, audited a third time
+
+Not a new feature. The open draft pull requests were listed first, as the
+instructions say, and #87 was there: the hold pedal, from the night of
+11-20, with the research written, the header built, the engine wired and two
+audit rounds done, left as a draft when that run was cut off. Finishing it
+was the night's one improvement. Nothing new was started.
+
+`main` had moved by two merges, #86 and #88, both in `Source/Synth` and
+`Source/RealFFT.h`, neither touching anything on this branch. The merge was
+clean.
+
+### What was still missing, which was the verification rather than the code
+
+The two commits that closed the second audit round changed the most important
+function in the file after the mutation run had already been done, so the
+78 mutations recorded in the 11-20 entry were measured against a version of
+`needsNoteOff` that no longer existed. That is the gap this night was for.
+
+Forty five fresh mutations were run against the final state, each compiled
+against the real test with the sanitizers `Tests/run.sh` uses and an
+unmutated control opening the batch. **Forty two caught, three survived**,
+and the three divide into one real gap and two proved no-ops. Two of the
+caught ones are caught only because the sanitizers are on: dropping either
+note number bounds check is an out of bounds read that exits zero at a plain
+`-O2`, which is the third time this project has reproduced CLAUDE.md's
+warning about a weak mutation harness.
+
+**The real gap was the MIDI channel nibble.** Every other call in the test
+file asks for channel 1, where `(midiChannel - 1) & 0x0f` and
+`midiChannel - 1` are the same byte, so removing the mask entirely survived
+1496 lines of test. It matters twice: the engine calls `releaseSequence` once
+per MIDI channel of a slot, so a nibble that did not follow its argument
+would send all sixteen channels' note offs to one channel and hang the other
+fifteen, and the mask is also what keeps the status byte a legal MIDI message
+if a channel outside one to sixteen ever reaches it. Without it the number
+runs into the status nibble and a note off becomes some other kind of message
+entirely, which is worse than landing on the wrong channel.
+`everyMessageCarriesTheChannelItWasAskedFor` now walks all sixteen and five
+out of range values.
+
+The two survivors that are genuine no-ops:
+`stillDown = c.pedalDown()` without `&& ! liftPedal`, because the trailing
+`setPedal (c, 0)` turns every remaining latched key silent anyway; and
+swapping the two rows in `selected[2]`, which the header already documents as
+unobservable because both rows reach the same voices through one cable. Both
+were proved rather than argued, the first by the auditor independently.
+
+### The audit, which found the main claim had no oracle that could see it
+
+The `auditor` was launched on the whole diff and found no fault in the
+arithmetic. It confirmed `releaseSequence` exhaustively rather than randomly,
+over every combination of rows, lift, backstop, pedal state and key state
+against a separately written receiver, and found no state where the model
+calls a key silent that a receiver still sounds. It re-confirmed the JUCE
+uses against the real 9.0.3 headers, the pointer arithmetic against every row
+size, that the audio thread neither allocates nor locks, and that
+`renderOffline` goes through the same `scheduleMidi` so a bounce cannot
+diverge from playback.
+
+Then it found the thing this night is really about, and it is a test fault
+rather than a code fault, which makes it the harder kind to notice.
+
+**The belt over braces note off was pinned by one assertion, and that
+assertion was a restatement of the expression under test.** `needsNoteOff`
+answers `isSounding` when the pedal is coming up, so a latched key gets an
+off it does not strictly need, and that message is **invisible to a
+conformant receiver by construction**: the lift goes out ahead of it and a
+conformant receiver releases everything the pedal was holding on the lift, so
+the off behind it changes nothing it could observe. Both randomised checks in
+the file compare against a conformant receiver, so both agreed with the
+header whether the message was sent or not. The only thing holding it was
+`check (needsNoteOff (s.live[60], true))`, which is the function's body in
+English.
+
+Measured, not argued. With `needsNoteOff` cut back to `key == sounding`,
+which is what the second audit round had just moved it off, and the one
+assertion removed, the whole 1496 line file stayed green and the engine sent
+at a stop byte for byte what it sent before the pedal was modelled at all.
+That is the regression the branch exists to prevent, surviving the branch's
+own test.
+
+**The oracle has to be the receiver the header names as the reason for the
+message.** The header says the off "covers the receiver that implements the
+pedal badly enough to drop the release it was holding", and that is the only
+thing in the world that can tell whether it was sent.
+`aReleaseSilencesAReceiverThatDropsWhatItDeferred` is that receiver: it
+defers a note off under the pedal, as required, and then forgets it on the
+lift rather than acting on it, which is a real half implementation and not an
+invented one. A plugin written that way sounds correct until somebody uses a
+pedal and then hangs the chord. The check runs with no All Notes Off backstop,
+which would silence any receiver by itself and hide the whole question, and it
+measures that 8755 keys across its streams would hang without the message
+rather than assuming any would.
+
+Confirmed afterwards, by running each check alone against the mutation: the
+conformant receiver check **survives** it, and the sloppy receiver check
+catches it on its own. The audit's diagnosis was exactly right.
+
+### Two more gaps, both about a number nothing compared
+
+**`kMaxReleaseMessages` was load bearing and unchecked.**
+`AudioEngine::stopTrackedNotes` puts an array of that length on the stack and
+reads the returned count, and a refusal there is not a safe failure: the loop
+runs zero times, so every note off **and** the pedal lift for that MIDI
+channel are dropped with nothing in the signal to say so. At a stop that is
+every tracked note on the channel hanging, which is a louder version of the
+fault the whole change exists to end. Cutting the constant by one, which is
+the backstop's slot, left the suite green, because both randomised generators
+draw each key independently from three states and never once produce all 256
+keys sounding. `theWorstCaseFitsExactly` writes that case out by hand, and
+the engine now asserts the answer is not a refusal rather than letting the
+loop swallow it.
+
+**Nothing compared the room counted up front against the room used.**
+`releaseSequence` counts what it will write, refuses if it will not fit, and
+then writes it, and every existing check handed over a buffer with room to
+spare, so the two loops agreeing was never tested. Changing the counting
+loop's question from "does this key need an off, given what the pedal is
+doing" to "is this key sounding" survived the file.
+`theRoomCountedIsTheRoomUsed` gives every release a buffer exactly as long as
+the number of messages due, with the expectation built from the key states
+rather than by asking the function under test, so a count that is too high is
+a refusal at a capacity that should have sufficed and a count that is too low
+runs off the end of a buffer that is exactly the right length, which address
+sanitizer reports on the line that did it. 60000 releases now run at exact
+capacity.
+
+### Comments that said what the code and the companion file do not
+
+The same class of fault this change had already found twice in its own
+files, found a third time.
+
+- **`TransportSilence.h` claimed `HoldPedal.h` "carries the provenance for
+  every quote in this area".** It does not. `HoldPedal.h` enumerates exactly
+  what was read on a page, and the All Sound Off quote `TransportSilence.h`
+  leans on is not among them: it comes from the Channel Mode Messages
+  section, which is the one section both files record as unreachable from the
+  sandbox. So the single quote in the pair taken from a page nobody could
+  open was the one left looking checked, by a diff whose whole purpose was
+  adding caveats. It now carries its own note. The claim beside it, that All
+  Sound Off is not latched by the pedal either, was also attributed to
+  `HoldPedal.h`, which says nothing about it anywhere: it is written down
+  where it is made, as a belief with no normative sentence behind it, and
+  with the note that nothing rests on it because a panic lifts the pedal
+  first.
+- **The sentence about removing an unverified page number understated what it
+  removed**, having also dropped the document version and the MMA number.
+- **`HoldPedal.h`'s inventory of where the release policy lives was one
+  literal short.** It named two booleans in `scheduleMidi` and missed the
+  `false` in `releaseStaleClipNotes`. A section whose stated purpose is
+  saying where the residual risk sits is the wrong place for an incomplete
+  list, and that is now said in the section.
+- **"the one release that does not lift the pedal" is two**, the loop wrap
+  and `releaseStaleClipNotes`.
+- **`stillDown`'s dead term is now documented as dead**, and the comment says
+  which line actually keeps the lift path correct. The risk was never the
+  term: it was somebody reading it as load bearing and deleting the trailing
+  `setPedal` as redundant, which is a real fault and one the test does catch.
+- **A sentence in `AudioEngine.h` had lost a word across a line break**, the
+  second instance in the same diff of the fault the previous commit on the
+  branch was titled after.
+- Two justifications in the test cited things that do not exist: a
+  `renderMidiClips` function, and a second MIDI device daisy chained behind
+  this one, when the engine's MIDI only ever reaches hosted plugins.
+- **The 11-20 entry argued both sides of its own main question**, 70 lines
+  apart, for the second time: the audit section still described
+  `needsNoteOff` as `sounding` alone, which the second audit round had
+  already superseded. Kept with the correction attached rather than rewritten,
+  because reading it as the final state is the mistake it would otherwise
+  invite.
+
+### What is still not done, carried forward
+
+- **Controller 64 is not recorded into a take and not written to an `.ahp`.**
+  A clip carries notes and automation lanes, so a pedal pressed while
+  recording is heard and not kept. That is the other half of this feature and
+  it needs `Project.h`, which an open pull request still holds.
+- **PAN One has no branch for controller 64 at all.** `Source/Synth` and
+  `PanOne` are being built by hand, so the instrument's half is out of lane.
+  Every hosted VST3 instrument is covered by the engine's half.
+- **`setChannelPlugin` does not clear the rows or the pedal for the slot**,
+  deliberately, because that leaves the model above what the receiver is
+  sounding, which is the safe side of the invariant, and it converges at the
+  next lift of the foot. The reasoning is in the 11-20 entry.
+- **Swapping the four arguments of `stopTrackedNotes` is still untestable
+  here**, which `Research/HARDENING.md` already names as a known gap. It now
+  has a fourth argument, so the gap is wider than when it was written down.
+
 ## 2026-11-20: the hold pedal, modelled at last, and the re-press that the specification forbids
 
 ### What was looked at
