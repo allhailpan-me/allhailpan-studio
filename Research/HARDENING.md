@@ -7,6 +7,206 @@ Newest first.
 
 ---
 
+## 2026-11-20: the transform every spectral measurement is taken through
+
+### What is being looked at
+
+`Source/RealFFT.h`, which has never appeared in this log. It is picked for
+leverage rather than for suspicion.
+
+It is JUCE free, it is 184 lines of pure arithmetic, and it is used in two
+different ways that both matter:
+
+- In the studio, `Synth/WaveBank.h` takes the spectrum of every waveform it
+  defines as a function of phase by transforming it, and `Synth/WaveTable.h`
+  builds every mipmap level of every wavetable by inverse transforming a
+  spectrum. So every band limited wavetable the instrument ships with comes
+  out of this file. `Spectrogram.h` runs its analysis and its resynthesis
+  through it too.
+- In `Tests/`, it is the measuring instrument. Nine test files take a
+  spectrum through it: `WaveBankTest`, `WaveTableTest`, `SaturatorTest`,
+  `TiltTest`, `DitherTest`, `GainRampTest`, `ClipFadeTest` and two probes.
+  Several of the measured figures quoted in CLAUDE.md are readings taken
+  through this transform.
+
+That second use is the reason to audit it ahead of something more obviously
+dangerous. A fault here would not read as a fault: it would move the
+wavetables and move the measurements of the wavetables in the same direction
+at the same time, and the checks would still pass. It is the exact shape this
+project keeps meeting, a number that is present, plausible and wrong, sitting
+under the instrument that reads the numbers.
+
+### Mutation testing: 44 breakages, 38 caught
+
+Each one compiled with the sanitizers exactly as `Tests/run.sh` has them, and
+the harness verified that the unmutated header passes first.
+
+The forward path is covered about as well as a transform can be, and the
+reason is one check: `agreesWithTheDefinition` computes the same answer from
+the defining sum and compares. Every one of the 16 breakages of `transform`
+and `forward` died, including three that died on a sanitizer rather than on a
+comparison, which is the reminder that a plain `-O2` mutation harness would
+have reported them as survivors:
+
+| Where | Tried | Caught |
+|---|---|---|
+| `transform`, the bit reversal and the butterflies | 15 | 15 |
+| `forward` | 5 | 5 |
+| `setSize`, the twiddle table and the scratch | 7 | 7 |
+| `setSize`, the refusal of an impossible size | 4 | 3 |
+| `inverse` | 13 | 8 |
+
+All six survivors are in `inverse` or in `setSize`'s refusal, and they split
+three and three.
+
+### Three survivors that are real gaps
+
+**`inverse` was never run on a transform whose scratch was cold.** Making the
+mirror loop start at 2 instead of 1, so the lowest mirrored bin is never
+written, survived the whole file. So did stopping it one bin early. The reason
+is that the only check that exercised `inverse` at all was the round trip, and
+a round trip calls `forward` first, which leaves the complete spectrum sitting
+in the very `scratch` buffer the rebuild is supposed to fill. A bin the
+rebuild skips is already correct from the call before it, so the test cannot
+see the omission.
+
+That is not an academic gap, because the production path is the other one.
+`Synth/WaveTable.h` builds every mipmap level of every wavetable by handing
+`inverse` a spectrum it assembled itself, harmonic by harmonic, and never
+calls `forward` at all.
+
+Measured rather than argued, because the first version of this paragraph
+reasoned that the skipped bin would carry the previous frame's value and that
+is not what happens. A table built the way `WaveTable` builds one, three
+frames through one transform, asking for a fundamental of 1.0: the shipped
+header gives 1.0000, 1.0000, 1.0000, and under the skip-bin-one breakage it
+gives 0.0000, 0.0000, 0.0001. The fundamental is simply absent. What sits in
+that slot after the first call is not the previous frame's spectrum but
+whatever that call's butterflies left there, which measures as nothing in
+particular.
+
+So every wavetable the instrument ships with would have been built with no
+fundamental at all, which is not subtle: it is the bottom missing from every
+patch. And the suite stayed green, because the only check that reached
+`inverse` reached it through a `forward` that had already written the answer
+into the buffer.
+
+**A refused size leaves a transform that was already usable running at the old
+length.** The guard in `setSize` sets `n = 0` before returning. Removing that
+one line, so a rejected size merely returns, survived: the existing check only
+ever constructs a fresh object, where `n` is already 0 and nothing had to
+clear it. Reuse of one transform across sizes is exactly what
+`Spectrogram::prepare` does, and it decides whether the size was accepted by
+comparing `fft.getSize()` against what it asked for.
+
+### Three survivors that are genuine no-ops, and one of them is a finding
+
+Keeping the imaginary part of the direct current bin, keeping the imaginary
+part of the Nyquist bin, and letting the mirror loop run through Nyquist all
+survived, and all three really do nothing. Verified rather than reasoned: the
+shipped rebuild and each variant were run over 200 random spectra at sizes 2,
+4, 8, 64 and 256, with imaginary parts deliberately placed on both of the bins
+that cannot have one, and the outputs agreed to the last bit. The mirror case
+is an ordering accident, since the write at Nyquist is overwritten immediately
+afterwards.
+
+The two bins are the finding. `theOutputIsRealWhateverTheBinsSay` was written
+to assert that an imaginary part on either of them is dropped rather than
+leaking through as a phantom, and it cannot fail in that direction, because
+that is not what delivers the guarantee. `inverse` takes `.real()` of every
+sample on the way out, and a purely imaginary component on direct current or
+on Nyquist contributes nothing to the real part of any sample: both have real
+basis functions, 1 and (-1) to the i. So the output was always going to be the
+nearest real spectrum whatever those two lines did. The header's comment
+credits the two assignments with the result and is the same shape of fault
+this project keeps finding in its own comments: not wrong about the behaviour,
+wrong about the mechanism, which is how the next person deletes the line that
+is load bearing and keeps the one that is not.
+
+### Also uncovered, found while reading for the mutations
+
+The production sizes were outside the tested range in both directions. The
+comparison against the defining sum stopped at 1024 and the round trip at
+2048, while `inverse` runs at 512 up to 8192 for every wavetable level and
+`forward` runs at 16384 for every waveform `Synth/WaveBank.h` defines as a
+function of phase. Neither production extreme was exercised at all.
+
+### What was written
+
+- **`theInverseAgreesWithTheDefinition`.** The inverse compared against
+  additive synthesis: the real inverse transform written out as its sum of
+  cosines and sines, in terms of only the bins a caller supplies, so the
+  reference has no mirroring step of its own to agree with the code about. A
+  reference that rebuilt the upper half the same way `inverse` does would agree
+  with it about the one thing most likely to be wrong. Run at seven sizes from
+  2 to 1024 and from three callers: a transform used for nothing else, one that
+  has just run a `forward`, and one that has just run another `inverse`, which
+  is what `WaveTable` does on every frame after the first.
+- **`oneHarmonicComesBackAtTheAmplitudeItAsksFor`.** The convention
+  `Synth/WaveTable.h` builds every wavetable on, that a harmonic of amplitude
+  A at bin h is a bin of A * n / 2, asserted against the transform that owns it
+  rather than only against the table that comes out of it. At two sizes, four
+  harmonics and three phases.
+- **`theProductionSizesAreCovered`.** 512 to 16384, which is where the studio
+  actually runs and where this file used to stop at 2048. Four partials with a
+  known closed form, checked for amplitude, phase and what spilled anywhere
+  else. Against a closed form rather than the direct sum because the direct sum
+  at 16384 is a hundred million trigonometric calls, and a handful of partials
+  still drives every pass of butterflies at the real length.
+- **`aRefusedSizeClearsATransformThatWorked`.** A usable transform handed six
+  impossible sizes in turn, each time checked for a cleared size and bin count,
+  called into to prove it is safe, and set up again.
+- **`oneTransformReusedAcrossSizesMatchesAFreshOne`.** `Spectrogram::prepare`'s
+  arrangement: one transform set to seven lengths in an order that grows,
+  shrinks and grows again, required to agree bit for bit with a fresh
+  transform of the same length, forward and inverse.
+
+`theOutputIsRealWhateverTheBinsSay` is kept and its comment now says what it
+can and cannot see, since two of the survivors proved it is not a check on the
+lines it reads like a check on.
+
+The whole file still builds and runs in a little over three seconds with the
+sanitizers on.
+
+### Mutation testing again, against the stronger file
+
+The same 44 breakages: **41 caught, 3 survived**, and the three are the three
+that were verified to do nothing. Both of the skipped-bin breakages and the
+one that left a refused size in place now die on a comparison rather than on a
+sanitizer, which is the right way round for arithmetic.
+
+### One comment corrected rather than made true
+
+The doc comment on `inverse` credited the two assignments that drop the
+imaginary part of direct current and Nyquist with making the output real. They
+do not, `.real()` on the way out does, and the comment now says so and says why
+the distinction is worth the paragraph: a reader who believes those two lines
+are the guarantee, and who is later told that the rebuild already makes the
+spectrum Hermitian so taking the real part is redundant, deletes the line that
+is load bearing and keeps the two that are not.
+
+### What is now proven that was not
+
+- The inverse transform is correct against an independent closed form, from a
+  cold transform and from a dirty one, which is the arrangement every wavetable
+  in the instrument is built in and the one arrangement nothing checked.
+- The transform is correct at the lengths the studio runs it at, rather than
+  only up to an eighth of the longest.
+- The scaling convention `WaveTable` depends on is pinned in the file that
+  owns it.
+- A size that cannot work leaves no usable transform behind, on reuse as well
+  as on construction.
+
+### Nothing in it was wrong
+
+No fault was found in `RealFFT.h`. The forward path was already covered about
+as well as a transform can be, by the one check that compares against the
+defining sum, and the arithmetic is right at every size tried. What was wrong
+was the coverage of the inverse and one comment's account of its own
+mechanism.
+
+---
+
 ## 2026-11-19: the voice pool, and the panic that was only as fast as the patch
 
 **Target.** `Source/VoiceAllocator.h`, its test, and the one caller that reads
