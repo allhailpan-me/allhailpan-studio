@@ -58,12 +58,18 @@
       Off'"). A tail ringing out after Stop is what every other release path
       in this studio already does.
 
-      The page number this carried, and the one further down, were removed
-      rather than corrected: the MMA printing of v4.2.1 cannot be opened from
-      the sandbox, so neither was ever verified. The heading was wrong too,
-      missing its first four words. A heading that can be checked is worth
-      more than a page number that cannot, and `HoldPedal.h` carries the
-      provenance for every quote in this area.
+      The page numbers this citation and the one further down carried were
+      removed rather than corrected, and so were the document version and MMA
+      number beside them: the MMA printing cannot be opened from the sandbox,
+      so none of it was ever verified. The heading was wrong too, missing its
+      first four words. A heading that can be checked is worth more than a page
+      number that cannot.
+
+      This quote is the one in this file that was read on a page: it is on
+      SOT5.HTM of the IEEE Computer Society Press reprint of the specification
+      body, Haus (ed.), Notes About MIDI Specifications, 1995, which is where
+      `HoldPedal.h` reads its three hold pedal sentences. The All Sound Off
+      quote further down is NOT: see the note against it.
 
     - **A wrap does not lift the sustain pedal, and the pedal is modelled now,
       which is what makes that answer defensible.** It used to lift it, and
@@ -98,10 +104,21 @@
       the release: "all notes currently on are turned off and their volume
       envelopes are set to zero as soon as possible" (same document, "Channel
       Mode Messages"). That is the user's literal request when they ask for
-      silence and it is wrong as an answer to anything else. That it is not
-      latched by the hold pedal either is universally believed and is not in
-      the specification's own words, which `HoldPedal.h` says plainly rather
-      than implying an authority for it.
+      silence and it is wrong as an answer to anything else.
+
+      **Not verified, and said rather than implied.** The page carrying the
+      Channel Mode Messages section could not be reached from the sandbox, so
+      this quote came back through a research agent rather than from a page
+      read here, and it is attributed to its section for that reason. It is
+      the same provenance as the sentence `HoldPedal.h` marks as its one
+      unverified quote, and for the same reason: the same unreachable section.
+
+      That All Sound Off is not latched by the hold pedal either is a separate
+      claim, it is universally believed, and no normative sentence for it was
+      found anywhere in MIDI 1.0 or its addenda. It is written down here as a
+      belief rather than as a quotation. Nothing in this studio rests on it: a
+      panic lifts the pedal before All Sound Off goes out, so whether a
+      receiver would have latched it never decides anything.
 
     The escalation is the property to hold on to: a panic does everything a stop
     does and more, so pressing Stop twice is always strictly stronger than

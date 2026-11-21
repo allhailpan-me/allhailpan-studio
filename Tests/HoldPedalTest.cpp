@@ -580,9 +580,11 @@ static void theReleaseNeverPressesThePedal()
         // Both directions, because only one of them was asserted to begin
         // with and `lift = true` therefore survived the first mutation run.
         // A lift nobody asked for is a controller change the player did not
-        // make: on a receiver that is already holding the pedal for its own
-        // reasons, or on a second device daisy chained behind this one, it
-        // damps notes this release was never about.
+        // make. At a loop wrap it takes the player's foot off the pedal for
+        // the rest of the pass, which is the behaviour this studio decided
+        // against and Ardour decided for, and it damps every note the pedal
+        // was holding up, including the ones this release was never about:
+        // lifting it releases both rows, not just the selected one.
         check ((pedalAt >= 0) == liftPedal,
                liftPedal ? "a lift was wanted and not sent"
                          : "a lift was sent that nobody asked for");
@@ -1139,7 +1141,8 @@ static void theArrangementRowObeysTheSamePedal()
             if (kind <= 11)
             {
                 // A clip note, scheduled and recorded in one place, which is
-                // what `renderMidiClips` and `releaseStaleClipNotes` do.
+                // what the clip scheduling in AudioEngine::scheduleMidi and
+                // releaseStaleClipNotes do.
                 const int note = base + anOffset (rng);
                 const bool on  = kind <= 5;
 
@@ -1467,6 +1470,453 @@ static void anInvalidChannelIsRefused()
 }
 
 //===========================================================================
+//===========================================================================
+/** The receiver the belt over braces note off exists for, which is the only
+    oracle that can see whether it was sent.
+
+    `needsNoteOff` answers `isSounding` rather than `key == sounding` when the
+    pedal is coming up, so a latched key gets a note off it does not strictly
+    need. Against a conformant receiver that message is invisible by
+    construction: the lift goes out first and a conformant receiver releases
+    everything the pedal was holding on the lift, so the note off behind it
+    changes nothing and both randomised checks in this file agree with the
+    header whether it was sent or not.
+
+    An audit measured that and it is worth stating as the gap it was: deleting
+    the asymmetry from `needsNoteOff` left the whole of the rest of this file
+    green, and the engine then sent, at a stop, byte for byte what it sent
+    before the pedal was modelled at all. The one assertion holding it was a
+    restatement of the expression under test.
+
+    So the oracle has to be the receiver the header names as the reason:
+
+        "it covers the receiver that implements the pedal badly enough to drop
+        the release it was holding"
+
+    This is that receiver, and it is a real half implementation rather than an
+    invented one. It defers a note off while the pedal is down, as required,
+    and then forgets it on the lift instead of acting on it. A plugin written
+    that way sounds correct for as long as nobody uses a pedal and hangs the
+    chord the moment somebody does, which is the hardest kind of wrong to
+    diagnose and exactly what a belt over braces release is insurance against.
+
+    The property asserted is the one a player would notice: after the
+    sequence, with no All Notes Off backstop allowed to rescue it, this
+    receiver has nothing sounding either.
+*/
+struct SloppyReceiver
+{
+    bool pedal = false;
+    bool ringing[HoldPedal::kNotes] {};
+
+    void noteOn (int note)  { ringing[note] = true; }
+
+    void noteOff (int note)
+    {
+        // Deferred, as required. And then dropped rather than remembered,
+        // which is the half of the rule this receiver gets wrong.
+        if (! pedal)
+            ringing[note] = false;
+    }
+
+    void receive (const unsigned char* data, int numBytes)
+    {
+        if (numBytes < 3)
+            return;
+
+        const int status = data[0] & 0xf0;
+        const int first  = data[1] & 0x7f;
+
+        if (status == 0x90)
+        {
+            if ((data[2] & 0x7f) != 0)
+                noteOn (first);
+            else
+                noteOff (first);
+        }
+        else if (status == 0x80)
+        {
+            noteOff (first);
+        }
+        else if (status == 0xb0 && (first == 64 || first == 121))
+        {
+            pedal = first == 64 ? (data[2] & 0x7f) >= 64 : false;
+        }
+    }
+
+    int soundingCount() const
+    {
+        int n = 0;
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            if (ringing[note])
+                ++n;
+        return n;
+    }
+};
+
+static void aReleaseSilencesAReceiverThatDropsWhatItDeferred()
+{
+    std::mt19937 rng (0x5e11a7u);
+    std::uniform_int_distribution<int> aNote (0, HoldPedal::kNotes - 1);
+    std::uniform_int_distribution<int> aCoin (0, 1);
+
+    int hungWithoutTheOffs = 0, streamsWithLatchedKeys = 0;
+
+    for (int stream = 0; stream < 4000; ++stream)
+    {
+        Storage s;
+        const auto c = s.channel();
+        SloppyReceiver sloppy;
+
+        // A pedal down, some keys struck, some of them released under it.
+        // Everything goes through the wire so that the model and the receiver
+        // see exactly the same bytes.
+        const unsigned char press[3] { 0xb0, 64, 127 };
+        HoldPedal::receive (c, press, 3);
+        sloppy.receive (press, 3);
+
+        const int howMany = 1 + (int) (rng() % 8);
+
+        for (int i = 0; i < howMany; ++i)
+        {
+            const int note = aNote (rng);
+            const unsigned char on[3] { 0x90, (unsigned char) note, 100 };
+            HoldPedal::receive (c, on, 3);
+            sloppy.receive (on, 3);
+
+            if (aCoin (rng) != 0)
+            {
+                const unsigned char off[3] { 0x80, (unsigned char) note, 0 };
+                HoldPedal::receive (c, off, 3);
+                sloppy.receive (off, 3);
+            }
+        }
+
+        int latched = 0;
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            if (s.live[note] == HoldPedal::latched)
+                ++latched;
+
+        if (latched > 0)
+            ++streamsWithLatchedKeys;
+
+        // What this receiver is left ringing, ON THE LATCHED KEYS ONLY, if the
+        // release sends the lift and then no off for them, which is what it
+        // sends if `needsNoteOff` stops asking about the pedal. Measured
+        // rather than assumed, so the check cannot pass by there being nothing
+        // to find, and counted per key rather than over the whole receiver: a
+        // key that was never released is still ringing after a lift for an
+        // ordinary reason, so counting those would saturate this figure and
+        // say nothing about the property under test.
+        {
+            SloppyReceiver liftOnly = sloppy;
+            const unsigned char lift[3] { 0xb0, 64, 0 };
+            liftOnly.receive (lift, 3);
+
+            // The release that drops the asymmetry still sends an off for
+            // every key it calls `sounding`, so those are not what would hang.
+            for (int note = 0; note < HoldPedal::kNotes; ++note)
+                if (s.live[note] == HoldPedal::sounding)
+                    liftOnly.noteOff (note);
+
+            hungWithoutTheOffs += liftOnly.soundingCount();
+        }
+
+        // The release the engine makes at a stop, with no backstop: the
+        // backstop would silence any receiver by itself and hide the whole
+        // question.
+        HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+        const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+
+        check (count >= 0, "the release was refused");
+
+        for (int i = 0; i < count; ++i)
+        {
+            const unsigned char bytes[3] { out[i].status, out[i].data1, out[i].data2 };
+            sloppy.receive (bytes, 3);
+        }
+
+        check (sloppy.soundingCount() == 0,
+               "a receiver that drops the release it deferred was left ringing after a stop");
+    }
+
+    // The check is only worth anything if the thing it is insurance against
+    // really does happen in these streams.
+    check (hungWithoutTheOffs > 1000,
+           "dropping the belt over braces off hangs almost nothing here, so the check proves nothing");
+    check (streamsWithLatchedKeys > 1000,
+           "almost no stream latched a key, so the belt over braces off was never exercised");
+
+    std::printf ("       %d keys would hang without the belt over braces off, %d of 4000 streams latched something\n",
+                 hungWithoutTheOffs, streamsWithLatchedKeys);
+}
+
+//===========================================================================
+/** The worst case fits in `kMaxReleaseMessages`, exactly, and one less is
+    refused.
+
+    `AudioEngine::stopTrackedNotes` puts a `kMaxReleaseMessages` array on the
+    stack and reads the returned count. A refusal there is not a safe failure:
+    the engine's loop runs zero times, so every note off and the pedal lift
+    for that MIDI channel are dropped with nothing in the signal to say so,
+    which at a stop is every tracked note on that channel hanging. So the
+    constant being big enough is load bearing, and nothing checked it: an
+    audit cut it by one, which is the backstop's slot, and the whole of the
+    rest of this file stayed green, because both randomised generators draw
+    each key independently and never once produce all 256 keys sounding.
+
+    This is that case, written out rather than generated.
+*/
+static void theWorstCaseFitsExactly()
+{
+    Storage s;
+    const auto c = s.channel();
+
+    // Both rows sounding, every key, and the pedal down so that the lift has
+    // something to do. Sounding rather than latched because a latched key
+    // owes no note off where the pedal stays down, and the most a release can
+    // ever write is the case where every key owes one.
+    s.down = 1;
+    for (int note = 0; note < HoldPedal::kNotes; ++note)
+    {
+        s.live[note] = HoldPedal::sounding;
+        s.clip[note] = HoldPedal::sounding;
+    }
+
+    const int worst = 1 + HoldPedal::kNotes + HoldPedal::kNotes + 1;
+
+    check (HoldPedal::kMaxReleaseMessages == worst,
+           "kMaxReleaseMessages is not the lift, both rows and the backstop");
+
+    {
+        std::vector<HoldPedal::Message> out ((size_t) worst, HoldPedal::Message {});
+        check (HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
+                                           out.data(), worst - 1) == -1,
+               "a release one message short of the worst case was not refused");
+
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+            check (s.live[note] == HoldPedal::sounding && s.clip[note] == HoldPedal::sounding,
+                   "a refused release changed the model anyway");
+
+        check (c.pedalDown(), "a refused release lifted the pedal anyway");
+    }
+
+    // Exactly the room the constant promises, and a buffer exactly that long,
+    // so that writing one message more is an overrun the sanitizers catch
+    // rather than a number nobody compares.
+    std::vector<HoldPedal::Message> out ((size_t) HoldPedal::kMaxReleaseMessages,
+                                         HoldPedal::Message {});
+    const int count = HoldPedal::releaseSequence (c, 1, HoldPedal::Rows {}, true, true,
+                                                  out.data(), HoldPedal::kMaxReleaseMessages);
+
+    check (count == worst, "the worst case did not write what the constant promises");
+
+    // And it is the engine's configuration, with no backstop, that the engine
+    // actually has to fit: one less than the constant.
+    Storage s2;
+    const auto c2 = s2.channel();
+    s2.down = 1;
+    for (int note = 0; note < HoldPedal::kNotes; ++note)
+    {
+        s2.live[note] = HoldPedal::sounding;
+        s2.clip[note] = HoldPedal::sounding;
+    }
+
+    std::vector<HoldPedal::Message> out2 ((size_t) HoldPedal::kMaxReleaseMessages,
+                                          HoldPedal::Message {});
+    check (HoldPedal::releaseSequence (c2, 1, HoldPedal::Rows {}, true, false,
+                                        out2.data(), HoldPedal::kMaxReleaseMessages)
+             == worst - 1,
+           "the release the engine makes did not fit the engine's own buffer");
+}
+
+//===========================================================================
+/** Every release runs with a buffer exactly as long as the number of messages
+    it should produce, over randomised states.
+
+    This is the check that the room `releaseSequence` counts up front is the
+    room it then uses, and it catches a disagreement in both directions
+    without needing to see the private figure. Count too much and the call is
+    refused at a capacity that should have been enough. Count too little and
+    the write runs off the end of a buffer that is exactly the right length,
+    which address sanitizer reports on the line that did it.
+
+    An audit changed the counting loop's question from "does this key need an
+    off, given what the pedal is doing" to "is this key sounding" and the rest
+    of this file could not see it, because every other check hands over a
+    buffer with room to spare.
+
+    The expectation is built from the key states directly rather than by
+    calling `needsNoteOff`, because a check that asks the function under test
+    how many messages to expect agrees with it whatever it answers.
+*/
+static void theRoomCountedIsTheRoomUsed()
+{
+    std::mt19937 rng (0xf17c0u);
+    std::uniform_int_distribution<int> aState (0, 2);
+    std::uniform_int_distribution<int> aCoin (0, 1);
+
+    int atCapacity = 0;
+
+    for (int trial = 0; trial < 60000; ++trial)
+    {
+        Storage s;
+        const bool withClip = aCoin (rng) != 0;
+        const auto c = s.channel (withClip);
+
+        s.down = (unsigned char) aCoin (rng);
+
+        for (int note = 0; note < HoldPedal::kNotes; ++note)
+        {
+            s.live[note] = (unsigned char) aState (rng);
+            s.clip[note] = (unsigned char) aState (rng);
+        }
+
+        // A key cannot be latched with the pedal up: that state is unreachable
+        // from the wire and is repaired elsewhere, so it is not generated here.
+        if (s.down == 0)
+            for (int note = 0; note < HoldPedal::kNotes; ++note)
+            {
+                if (s.live[note] == HoldPedal::latched) s.live[note] = HoldPedal::sounding;
+                if (s.clip[note] == HoldPedal::latched) s.clip[note] = HoldPedal::sounding;
+            }
+
+        const HoldPedal::Rows rows { aCoin (rng) != 0, aCoin (rng) != 0 };
+        const bool lift     = aCoin (rng) != 0;
+        const bool backstop = aCoin (rng) != 0;
+
+        // What should go out, from the states themselves. A note off for every
+        // key of a selected row that the receiver has not already been told to
+        // stop, plus the latched ones too where the pedal is coming up.
+        int expected = (lift ? 1 : 0) + (backstop ? 1 : 0);
+
+        for (int which = 0; which < 2; ++which)
+        {
+            const unsigned char* keys = which == 0 ? (withClip && rows.clip ? s.clip : nullptr)
+                                                   : (rows.live ? s.live : nullptr);
+            if (keys == nullptr)
+                continue;
+
+            for (int note = 0; note < HoldPedal::kNotes; ++note)
+            {
+                if (keys[note] == HoldPedal::sounding)
+                    ++expected;
+                else if (keys[note] == HoldPedal::latched && lift)
+                    ++expected;
+            }
+        }
+
+        // Exactly that long, so one message too many is an overrun and not a
+        // spare slot nobody looks at.
+        std::vector<HoldPedal::Message> out ((size_t) (expected > 0 ? expected : 1),
+                                             HoldPedal::Message {});
+
+        // Taken before the call, because the call moves the keys it sends an
+        // off for and the one short check has to start from the same state.
+        Storage again = s;
+
+        const int count = HoldPedal::releaseSequence (c, 1, rows, lift, backstop,
+                                                      out.data(), expected);
+
+        check (count == expected,
+               "a release given exactly the room it needs wrote " + std::to_string (count)
+                 + " where " + std::to_string (expected) + " was due");
+
+        if (count == expected)
+            ++atCapacity;
+
+        // And one message short is refused, every time, which is the other
+        // half of the same figure: a count that is too low would have fitted
+        // here and overrun the buffer above.
+        if (expected > 0)
+        {
+            const auto c2 = again.channel (withClip);
+            std::vector<HoldPedal::Message> small ((size_t) expected, HoldPedal::Message {});
+
+            check (HoldPedal::releaseSequence (c2, 1, rows, lift, backstop,
+                                                small.data(), expected - 1) == -1,
+                   "a release one message short of what it needs was not refused");
+        }
+    }
+
+    check (atCapacity > 50000, "almost nothing ran at exact capacity");
+
+    std::printf ("       %d releases ran with a buffer exactly as long as they needed\n",
+                 atCapacity);
+}
+
+//===========================================================================
+/** Every message a release writes carries the MIDI channel it was asked for.
+
+    Nothing checked this: every other call in this file asks for channel 1,
+    where the nibble is nought and dropping the mask entirely changes no byte.
+    A mutation run removed `& 0x0f` and the whole file stayed green.
+
+    It matters for two separate reasons. The engine calls this once per MIDI
+    channel of a slot, so a nibble that did not follow the argument would send
+    all sixteen channels' note offs to one channel and hang the other fifteen.
+    And the mask is what keeps the status byte legal if a caller ever hands
+    over a channel outside one to sixteen: without it, the number runs into the
+    status nibble and a note off becomes some other kind of message entirely,
+    which is a far worse failure than being sent to the wrong channel.
+*/
+static void everyMessageCarriesTheChannelItWasAskedFor()
+{
+    for (int midiChannel = 1; midiChannel <= 16; ++midiChannel)
+    {
+        Storage s;
+        const auto c = s.channel();
+
+        s.down = 1;
+        s.live[60] = HoldPedal::sounding;
+        s.live[64] = HoldPedal::latched;
+        s.clip[67] = HoldPedal::sounding;
+
+        HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+        const int count = HoldPedal::releaseSequence (c, midiChannel, HoldPedal::Rows {},
+                                                      true, true,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+
+        check (count == 1 + 3 + 1, "the release did not write what the state owed");
+
+        const unsigned char want = (unsigned char) (midiChannel - 1);
+
+        for (int i = 0; i < count; ++i)
+        {
+            check ((out[i].status & 0x0f) == want,
+                   "a message went out on MIDI channel "
+                     + std::to_string ((out[i].status & 0x0f) + 1) + " rather than "
+                     + std::to_string (midiChannel));
+
+            const int kind = out[i].status & 0xf0;
+            check (kind == 0x80 || kind == 0xb0,
+                   "a release wrote something that is neither a note off nor a controller");
+        }
+    }
+
+    // A channel outside one to sixteen is masked rather than allowed to run
+    // into the status nibble. The engine cannot produce one, so this is about
+    // the byte staying a legal MIDI message rather than about where it lands.
+    for (int midiChannel : { -7, 0, 17, 33, 1000 })
+    {
+        Storage s;
+        const auto c = s.channel();
+
+        s.down = 0;
+        s.live[72] = HoldPedal::sounding;
+
+        HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
+        const int count = HoldPedal::releaseSequence (c, midiChannel, HoldPedal::Rows {},
+                                                      false, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+
+        check (count == 1, "the release did not write the one note off that was owed");
+        check ((out[0].status & 0xf0) == 0x80,
+               "an out of range channel turned a note off into another kind of message");
+    }
+}
+
 int main()
 {
     std::printf ("HoldPedal\n");
@@ -1483,6 +1933,10 @@ int main()
     theReleaseNeverPressesThePedal();
     aWrapDoesNotSendTheSameNoteOffTwice();
     aReleaseThatWillNotFitIsRefused();
+    theWorstCaseFitsExactly();
+    everyMessageCarriesTheChannelItWasAskedFor();
+    theRoomCountedIsTheRoomUsed();
+    aReleaseSilencesAReceiverThatDropsWhatItDeferred();
     theModelAgreesWithAConformantReceiver();
     theArrangementRowObeysTheSamePedal();
     aNoteFromTheWireNeverTouchesTheArrangement();

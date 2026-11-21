@@ -1951,6 +1951,23 @@ void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClip
                                                       liftPedal, false,
                                                       out, HoldPedal::kMaxReleaseMessages);
 
+        // A REFUSAL HERE WOULD NOT BE A SAFE FAILURE, which is why it is
+        // asserted rather than left to the loop below. `releaseSequence`
+        // returns -1 when the room it was given could not hold the messages,
+        // and writes nothing: the loop then runs zero times, so every note
+        // off AND the pedal lift for this MIDI channel are dropped with
+        // nothing in the signal to say so. At a stop that is every tracked
+        // note on this channel hanging, which is a louder version of the
+        // fault this whole change exists to end.
+        //
+        // It cannot happen: the array is `kMaxReleaseMessages` long, which is
+        // the most a release can ever write, and `theWorstCaseFitsExactly` in
+        // HoldPedalTest pins that constant against a release with every key
+        // of both rows sounding. An audit cut the constant by one and the rest
+        // of the suite stayed green, which is why that check exists and why
+        // this assertion names it.
+        jassert (count >= 0);
+
         for (int i = 0; i < count; ++i)
             midi.addEvent (juce::MidiMessage ((int) out[i].status,
                                               (int) out[i].data1,

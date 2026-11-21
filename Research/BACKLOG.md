@@ -336,9 +336,18 @@ pattern, forever. Harmless on a conformant receiver, which defers them again,
 but it is a behaviour change at the wrap this change said it was not making.
 Fixed by the thing the specification already implies: a latched key has
 already had its off sent and the receiver is required to be holding it, so
-another one can achieve nothing. `needsNoteOff` now means "needs one sent",
-which is `sounding` alone, and `isSounding` is the separate question the
-receiver comparison asks.
+another one can achieve nothing. `needsNoteOff` became "needs one sent",
+which at that point was `sounding` alone, and `isSounding` is the separate
+question the receiver comparison asks.
+
+**Superseded seventy lines above, and this sentence is kept with the
+correction rather than rewritten**, because reading it as the final state is
+the mistake it would otherwise invite. The second round of the audit found
+that `sounding` alone does not deliver the stop bullet either, so
+`needsNoteOff` takes the release's own answer about the pedal: coming up,
+everything sounding gets an off, a latched key included; staying down, only a
+key that has not already been told to stop. The wrap still sends nothing
+redundant, which is what this finding asked for.
 
 **An incoming All Notes Off wiped the arrangement's keys**, which was a
 regression against what the studio did before: it used to clear only the

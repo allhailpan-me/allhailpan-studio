@@ -160,16 +160,19 @@
 
     WHERE THE POLICY ACTUALLY LIVES, WHICH IS WORTH KNOWING BEFORE CHANGING IT
 
-    Two boolean literals in `AudioEngine::scheduleMidi`, which is the one file
-    here that cannot be compiled in the sandbox and has no test over it:
-    `silence.sustainUp` for the transport events, and a bare `true` for the
-    live channel switch. `TransportSilenceTest` pins the table that produces
+    Three boolean literals in `AudioEngine.cpp`, which is the one file here
+    that cannot be compiled in the sandbox and has no test over it:
+    `silence.sustainUp` for the transport events and a bare `true` for the
+    live channel switch, both in `scheduleMidi`, and a bare `false` in
+    `releaseStaleClipNotes`, which an audit found missing from an earlier
+    draft of this list. `TransportSilenceTest` pins the table that produces
     the first, and `HoldPedalTest` pins what `releaseSequence` does with
     either answer, and nothing joins the two up. So turning that `true` into a
     `false` quietly restores the original fault, and turning the wrap's answer
     into a `true` quietly takes the player's foot off the pedal at every loop.
     Written down because an audit went looking for where the residual risk
-    sits after all of this, and that is where.
+    sits after all of this, and that is where. An inventory that is one short
+    is worse than none, which is how this paragraph earned its correction.
 
     WHAT IS NOT MODELLED, SAID RATHER THAN IMPLIED
 
@@ -264,8 +267,9 @@ inline bool isSounding (unsigned char key) noexcept
 
     So the engine sends the offs the specification asks for at every release
     that lifts the pedal, which is a stop, a jump, a panic and switching the
-    live channel, and sends nothing redundant at the one release that does
-    not, which is the loop wrap. */
+    live channel, and sends nothing redundant at the two that do not, which
+    are the loop wrap and `releaseStaleClipNotes`, where a clip has been
+    edited under the play head. */
 inline bool needsNoteOff (unsigned char key, bool pedalComingUp) noexcept
 {
     return pedalComingUp ? isSounding (key) : key == sounding;
@@ -505,6 +509,19 @@ struct Rows
     them, in which case nothing is written and nothing is changed. Refused
     rather than truncated: a truncated release is a silently dropped note off,
     which is the fault this whole header is about.
+
+    A caller that cannot act on a refusal must not hand over less room than
+    `kMaxReleaseMessages`, because -1 read as a count is zero messages sent,
+    which is every note off on that channel dropped in silence. The engine
+    hands over exactly `kMaxReleaseMessages` and asserts the answer is not a
+    refusal, and `theWorstCaseFitsExactly` pins the constant against a release
+    with every key of both rows sounding.
+
+    **An unusable channel or a null buffer returns 0 rather than -1**, which
+    is the one place the two answers differ in meaning: there is nothing to
+    send, as against a release that was refused. A slot with no plugin and a
+    channel whose rows were never attached both land there, and both are
+    ordinary rather than a mistake.
 */
 inline int releaseSequence (const Channel& c, int midiChannel, Rows rows,
                             bool liftPedal, bool backstop,
@@ -516,6 +533,16 @@ inline int releaseSequence (const Channel& c, int midiChannel, Rows rows,
     const unsigned char channel = (unsigned char) ((midiChannel - 1) & 0x0f);
 
     // Where the pedal is left, which is what the keys this releases become.
+    //
+    // `&& ! liftPedal` is dead and is kept for what it says rather than what
+    // it does: on a lift the `setPedal (c, 0)` at the end of this function
+    // turns every remaining `latched` back to `silent` anyway, so dropping the
+    // term changes no byte, which an audit proved by mutation. THE TRAILING
+    // `setPedal` IS WHAT MAKES THE LIFT PATH CORRECT, not this term. Anybody
+    // reading this line as the thing that handles a lift, and removing that
+    // call as redundant, has it exactly backwards and would leave every
+    // latched key of a row this release was not even about recorded as
+    // sounding for ever.
     const bool stillDown = c.pedalDown() && ! liftPedal;
 
     unsigned char* const selected[2] { rows.clip ? c.clip : nullptr,

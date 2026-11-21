@@ -1077,7 +1077,7 @@ private:
     // The bytes are HoldPedal::Key rather than a flag, because a note off sent
     // while the pedal is down is deferred by the receiver and the note is
     // still sounding: see HoldPedal.h for the specification and for what
-    // believing otherwise cost. Every test of these rows is
+    // believing otherwise cost. Every read of these rows goes through
     // HoldPedal, which decides whether a key needs a note off sent for it
     // from what the release is doing with the pedal.
     static constexpr int midiChannels = 16;
