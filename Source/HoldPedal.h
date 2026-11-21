@@ -411,16 +411,15 @@ inline void receive (const Channel& c, const unsigned char* data, int numBytes) 
     // THE WIRE, which is a change of mind worth writing down because the
     // obvious reading is that they clear everything.
     //
-    // The model exists so that nothing is forgotten. "While MIDI devices
-    // specification does not require a receiver to recognise All Notes Off at
-    // all, which is the same sentence the ordering in `releaseSequence` rests
-    // on and carries the same provenance note. So a model that cleared itself
-    // when one went past would be guessing, and the two guesses are not
-    // equally bad. Keep believing and the worst case is a note off nobody
-    // needed, which costs nothing. Forget, and a plugin that ignored the
-    // message is left with a note that no later stop will send an off for.
-    // That is the exact failure this header was written to end, so it is not
-    // reintroduced for tidiness.
+    // The model exists so that nothing is forgotten. The specification does
+    // not require a receiver to recognise All Notes Off at all, which is the
+    // same sentence the ordering in `releaseSequence` rests on and carries
+    // the same provenance note. So a model that cleared itself when one went
+    // past would be guessing, and the two guesses are not equally bad. Keep
+    // believing and the worst case is a note off nobody needed, which costs
+    // nothing. Forget, and a plugin that ignored the message is left with a
+    // note that no later stop will send an off for. That is the exact failure
+    // this header was written to end, so it is not reintroduced for tidiness.
     //
     // It is also what the studio did before the pedal was modelled, for the
     // player's keys on one MIDI channel. Clearing the arrangement's keys as
