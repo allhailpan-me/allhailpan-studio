@@ -53,28 +53,72 @@
       is not tracking, which is what a hosted arpeggiator or sequencer may be
       holding by itself. All Notes Off is specified as a release: it "should
       force voices to go to the release stage of the envelope, and not terminate
-      the sound of the notes abruptly" (MIDI 1.0 Detailed Specification v4.2.1,
-      MMA 96.1-4, Appendix, "Hold Pedal and 'All Notes Off'", p. A-5). A tail
-      ringing out after Stop is what every other release path in this studio
-      already does.
+      the sound of the notes abruptly" (MIDI 1.0 Detailed Specification,
+      Appendix, "The Relationship Between the Hold Pedal and 'All Notes
+      Off'"). A tail ringing out after Stop is what every other release path
+      in this studio already does.
 
-    - **A wrap no longer lifts the sustain pedal either, and that is not a
-      clean win.** It used to, and that was a fault: nothing in the studio
-      tracks the pedal's real position, so lifting it at the loop point turned
-      sustain off for the rest of the pass. Not lifting it has its own cost,
-      which an audit of this change found: the clip note offs that do go out at
-      the wrap are latched by a pedal that is still down, so a clip note near
-      the end of a loop that the next pass does not retrigger rings on until
-      the player lifts their foot. Neither answer is right, because the real
-      fault is that the pedal is not modelled at all. The symptom moved rather
-      than went away, and that is written here rather than left for somebody to
-      find, with the pedal itself in `Research/BACKLOG.md`.
+      The page numbers this citation and the one further down carried were
+      removed rather than corrected, and so were the document version and MMA
+      number beside them: the MMA printing cannot be opened from the sandbox,
+      so none of it was ever verified. The heading was wrong too, missing its
+      first four words. A heading that can be checked is worth more than a page
+      number that cannot.
+
+      This quote is the one in this file that was read on a page: it is on
+      SOT5.HTM of the IEEE Computer Society Press reprint of the specification
+      body, Haus (ed.), Notes About MIDI Specifications, 1995, which is where
+      `HoldPedal.h` reads its three hold pedal sentences. The All Sound Off
+      quote further down is NOT: see the note against it.
+
+    - **A wrap does not lift the sustain pedal, and the pedal is modelled now,
+      which is what makes that answer defensible.** It used to lift it, and
+      that was a fault: nothing tracked the pedal's real position, so lifting
+      it at the loop point turned sustain off for the rest of the pass.
+
+      Not lifting it had its own cost while the pedal was still unmodelled,
+      and this paragraph used to end by saying the pedal was not modelled at
+      all and was waiting in `Research/BACKLOG.md`. It is not waiting any
+      more: `HoldPedal.h` is it. What remains true is that the clip note offs
+      going out at the wrap are latched by a pedal that is still down, so a
+      clip note near the end of a loop that the next pass does not retrigger
+      rings on until the player lifts their foot.
+
+      What changed is that the studio now knows it is holding that note
+      instead of having forgotten it. The note was always going to be released
+      by the next lift of the foot, with or without the model, because its
+      note off is sitting in the receiver and the receiver is required to be
+      holding it; that much an audit corrected in an earlier draft of this
+      paragraph. What the model buys is that a release which does lift the
+      pedal, which is every one except this wrap, now sends an off for it as
+      well, and that the wrap sends it nothing, where a version of this change
+      re-sent its off on every pass for as long as the foot stayed down.
+
+      Which answer a wrap should give is a real disagreement between studios
+      rather than something a specification settles: Ardour lifts the pedal at
+      every wrap by default, Reaper offers it as a preference, and Logic
+      chases rather than panicking. This studio keeps its own position, that a
+      wrap is a continuation.
 
     - **Only a panic cuts.** All Sound Off is the one message defined to ignore
       the release: "all notes currently on are turned off and their volume
       envelopes are set to zero as soon as possible" (same document, "Channel
-      Mode Messages", p. 25). That is the user's literal request when they ask
-      for silence and it is wrong as an answer to anything else.
+      Mode Messages"). That is the user's literal request when they ask for
+      silence and it is wrong as an answer to anything else.
+
+      **Not verified, and said rather than implied.** The page carrying the
+      Channel Mode Messages section could not be reached from the sandbox, so
+      this quote came back through a research agent rather than from a page
+      read here, and it is attributed to its section for that reason. It is
+      the same provenance as the sentence `HoldPedal.h` marks as its one
+      unverified quote, and for the same reason: the same unreachable section.
+
+      That All Sound Off is not latched by the hold pedal either is a separate
+      claim, it is universally believed, and no normative sentence for it was
+      found anywhere in MIDI 1.0 or its addenda. It is written down here as a
+      belief rather than as a quotation. Nothing in this studio rests on it: a
+      panic lifts the pedal before All Sound Off goes out, so whether a
+      receiver would have latched it never decides anything.
 
     The escalation is the property to hold on to: a panic does everything a stop
     does and more, so pressing Stop twice is always strictly stronger than

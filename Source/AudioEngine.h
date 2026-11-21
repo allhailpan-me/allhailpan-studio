@@ -17,6 +17,7 @@
 #include "GainRamp.h"
 #include "SoloGraph.h"
 #include "TransportSilence.h"
+#include "HoldPedal.h"
 #include "Tuner.h"
 
 // ---------------------------------------------------------------------------
@@ -868,9 +869,34 @@ private:
     void measureMix (const juce::AudioBuffer<float>&, int numSamples, bool isRunning);
     void renderAudioClips (int numSamples);
     void scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning);
-    void stopTrackedNotes (int slot, bool includeLive, bool includeClips);
     void releaseStaleClipNotes (double beat);
+
+    /** Release what the engine is holding on one slot, and lift the pedal
+        with it if asked.
+
+        The two are one call rather than two deliberately. Lifting the pedal
+        releases every key it was holding up, so a lift in a call of its own
+        ahead of this one leaves nothing here that needs a note off, and the
+        individual offs the specification asks for are silently never sent.
+        That is what the first version of this did. `liftPedal` is the
+        caller's answer to a policy question: a stop, a jump, a panic and
+        switching the live channel all lift it, and a loop wrap does not,
+        because a wrap is a continuation. */
+    void stopTrackedNotes (int slot, bool includeLive, bool includeClips, bool liftPedal);
+
     void trackLiveMessage (int slot, const juce::uint8* data, int numBytes);
+
+    /** One receiver's worth of state: the keys and the pedal for one MIDI
+        channel of one plugin. `midiChannel` is one to sixteen.
+
+        The arrangement's own notes all go out on MIDI channel 1, so that is
+        the only channel given a clip row. A pedal pressed there latches the
+        arrangement's notes as well as the player's, because both reach one
+        plugin through one cable, and that is the loop wrap fault in one
+        sentence. */
+    HoldPedal::Channel pedalChannel (int slot, int midiChannel) noexcept;
+
+
     void capturePluginMidi (int slot, const juce::MidiBuffer&, int numSamples);
     void applyAutomation (double beat);
     void applyCurve (const AutoCurveRT&, double beat);
@@ -1047,10 +1073,20 @@ private:
     double sampleRate = 44100.0;
     int    blockSize  = 512;
 
-    // audio-thread-only: every note the engine has started, so none can hang
+    // audio-thread-only: every note the engine has started, so none can hang.
+    // The bytes are HoldPedal::Key rather than a flag, because a note off sent
+    // while the pedal is down is deferred by the receiver and the note is
+    // still sounding: see HoldPedal.h for the specification and for what
+    // believing otherwise cost. Every read of these rows goes through
+    // HoldPedal, which decides whether a key needs a note off sent for it
+    // from what the release is doing with the pedal.
     static constexpr int midiChannels = 16;
     std::vector<juce::uint8> clipNotes = std::vector<juce::uint8> ((size_t) kNumChannels * 128);
     std::vector<juce::uint8> liveNotes = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels * 128);
+    // Controller 64 per channel slot and MIDI channel. Nothing tracked this
+    // before, which is why the rows above were wrong whenever a pedal was
+    // down.
+    std::vector<juce::uint8> livePedal = std::vector<juce::uint8> ((size_t) kNumChannels * midiChannels);
     int liveChannel = 0;
     // What we sent into the recorded plugin this block, so notes it echoes back
     // aren't recorded twice

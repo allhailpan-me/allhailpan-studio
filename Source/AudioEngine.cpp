@@ -1058,6 +1058,7 @@ void AudioEngine::resetInstruments()
     }
     std::fill (clipNotes.begin(), clipNotes.end(), (juce::uint8) 0);
     std::fill (liveNotes.begin(), liveNotes.end(), (juce::uint8) 0);
+    std::fill (livePedal.begin(), livePedal.end(), (juce::uint8) 0);
 }
 
 void AudioEngine::setChannelSumsOutputs (int channel, bool shouldSum) noexcept
@@ -1922,31 +1923,55 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     beatPosition.store (position);
 }
 
-void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClips)
+void AudioEngine::stopTrackedNotes (int slot, bool includeLive, bool includeClips, bool liftPedal)
 {
     auto& midi = channelSlots[(size_t) slot].midi;
+    const HoldPedal::Rows rows { includeLive, includeClips };
 
-    if (includeClips)
-    {
-        auto* row = clipNotes.data() + (size_t) slot * 128;
-        for (int note = 0; note < 128; ++note)
-            if (row[note] != 0)
-            {
-                midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
-                row[note] = 0;
-            }
-    }
+    // THE PEDAL AND THE NOTE OFFS ARE ONE SEQUENCE AND CANNOT BE TWO CALLS.
+    // The first version of this had the lift in a function of its own, called
+    // by the two paths that want it, immediately before this one. It compiled,
+    // it sent the right bytes in the right order, and it defeated the whole
+    // change: lifting the pedal releases every key the pedal was holding up,
+    // so by the time this ran there was nothing left that needed an off and
+    // the individual note offs the specification asks for were never sent.
+    // Byte for byte what the studio sent before the pedal was modelled at
+    // all, with a model underneath it that nothing could read. An audit found
+    // it by running the two versions side by side; nothing about it looked
+    // wrong.
+    //
+    // So the decision is HoldPedal's, which is tested, and this is left with
+    // the translation into JUCE. On the stack rather than a member, because
+    // the audio thread must not allocate and 774 bytes of stack is nothing.
+    HoldPedal::Message out[HoldPedal::kMaxReleaseMessages];
 
-    if (includeLive)
+    for (int ch = 1; ch <= midiChannels; ++ch)
     {
-        auto* rows = liveNotes.data() + (size_t) slot * midiChannels * 128;
-        for (int ch = 0; ch < midiChannels; ++ch)
-            for (int note = 0; note < 128; ++note)
-                if (rows[ch * 128 + note] != 0)
-                {
-                    midi.addEvent (juce::MidiMessage::noteOff (ch + 1, note), 0);
-                    rows[ch * 128 + note] = 0;
-                }
+        const int count = HoldPedal::releaseSequence (pedalChannel (slot, ch), ch, rows,
+                                                      liftPedal, false,
+                                                      out, HoldPedal::kMaxReleaseMessages);
+
+        // A REFUSAL HERE WOULD NOT BE A SAFE FAILURE, which is why it is
+        // asserted rather than left to the loop below. `releaseSequence`
+        // returns -1 when the room it was given could not hold the messages,
+        // and writes nothing: the loop then runs zero times, so every note
+        // off AND the pedal lift for this MIDI channel are dropped with
+        // nothing in the signal to say so. At a stop that is every tracked
+        // note on this channel hanging, which is a louder version of the
+        // fault this whole change exists to end.
+        //
+        // It cannot happen: the array is `kMaxReleaseMessages` long, which is
+        // the most a release can ever write, and `theWorstCaseFitsExactly` in
+        // HoldPedalTest pins that constant against a release with every key
+        // of both rows sounding. An audit cut the constant by one and the rest
+        // of the suite stayed green, which is why that check exists and why
+        // this assertion names it.
+        jassert (count >= 0);
+
+        for (int i = 0; i < count; ++i)
+            midi.addEvent (juce::MidiMessage ((int) out[i].status,
+                                              (int) out[i].data1,
+                                              (int) out[i].data2), 0);
     }
 }
 
@@ -1955,9 +1980,15 @@ void AudioEngine::releaseStaleClipNotes (double beat)
     for (int slot = 0; slot < kNumChannels; ++slot)
     {
         auto* row = clipNotes.data() + (size_t) slot * 128;
+        const bool pedalDown = pedalChannel (slot, 1).pedalDown();
+
         for (int note = 0; note < 128; ++note)
         {
-            if (row[note] == 0)
+            // `false`, because an edit to a clip somewhere in the arrangement
+            // is no reason to take the player's foot off the pedal, and a key
+            // whose off is already waiting on that pedal needs nothing from
+            // here.
+            if (! HoldPedal::needsNoteOff (row[note], false))
                 continue;
 
             bool stillHeld = false;
@@ -1978,7 +2009,12 @@ void AudioEngine::releaseStaleClipNotes (double beat)
             if (! stillHeld)
             {
                 channelSlots[(size_t) slot].midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
-                row[note] = 0;
+
+                // Deferred rather than acted on if the pedal is down, because
+                // that is what the receiver will do with it. The pedal is not
+                // lifted here: an edit to a clip somewhere in the arrangement
+                // is no reason to take the player's foot off.
+                HoldPedal::noteOff (row, note, pedalDown);
             }
         }
     }
@@ -2034,30 +2070,28 @@ void AudioEngine::capturePluginMidi (int slot, const juce::MidiBuffer& produced,
     }
 }
 
+HoldPedal::Channel AudioEngine::pedalChannel (int slot, int midiChannel) noexcept
+{
+    const int s  = juce::jlimit (0, kNumChannels - 1, slot);
+    const int ch = juce::jlimit (1, midiChannels, midiChannel) - 1;
+
+    HoldPedal::Channel c;
+    c.live = liveNotes.data() + ((size_t) s * midiChannels + (size_t) ch) * 128;
+    c.clip = ch == 0 ? clipNotes.data() + (size_t) s * 128 : nullptr;
+    c.down = livePedal.data() + (size_t) s * midiChannels + (size_t) ch;
+    return c;
+}
+
 void AudioEngine::trackLiveMessage (int slot, const juce::uint8* data, int numBytes)
 {
     if (data == nullptr || numBytes < 2)
         return;
 
-    const int  status  = data[0] & 0xf0;
-    const int  channel = (data[0] & 0x0f) + 1;
-    const int  note    = data[1] & 0x7f;
-    // Note on with a velocity of zero means note off, which is how a lot of
-    // hardware sends releases. Three bytes required for both, as a note
-    // message without a velocity is malformed.
-    const bool isNoteOn  = numBytes >= 3 && status == 0x90 && (data[2] & 0x7f) != 0;
-    const bool isNoteOff = numBytes >= 3 && (status == 0x80
-                                             || (status == 0x90 && (data[2] & 0x7f) == 0));
-
-    auto* rows = liveNotes.data() + (size_t) slot * midiChannels * 128;
-    const int ch = juce::jlimit (1, 16, channel) - 1;
-
-    if (isNoteOn)
-        rows[ch * 128 + note] = 1;
-    else if (isNoteOff)
-        rows[ch * 128 + note] = 0;
-    else if (status == 0xb0 && (note == 120 || note == 123))   // all sound off, all notes off
-        std::fill_n (rows + ch * 128, 128, (juce::uint8) 0);
+    // The whole rule, including the pedal, is HoldPedal.h's, which is tested.
+    // This is left with the one thing it is for, which is working out whose
+    // keys these are.
+    const int channel = (data[0] & 0x0f) + 1;
+    HoldPedal::receive (pedalChannel (slot, channel), data, numBytes);
 }
 
 void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transportEvent, bool isRunning)
@@ -2080,25 +2114,26 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
         if (c.plugin == nullptr)
             continue;
 
-        // The pedal first, and in a loop of its own, because it has to arrive
-        // ahead of the note offs rather than after them: a note the pedal is
-        // holding up survives a note off, and survives All Notes Off too,
-        // until the pedal is lifted. Written the other way round, which is how
-        // this was until an audit put a buffer order against the comment that
-        // claimed it, the pedal is lifted after everything it was holding has
-        // already been latched.
+        // The pedal has to arrive ahead of the note offs rather than after
+        // them: a note the pedal is holding up survives a note off, and
+        // survives All Notes Off too, until the pedal is lifted. Written the
+        // other way round, which is how this was until an audit put a buffer
+        // order against the comment that claimed it, the pedal is lifted
+        // after everything it was holding has already been latched.
         //
-        // MidiBuffer::addEvent keeps insertion order for events at the same
-        // sample, so the order these are added in is the order they arrive in.
-        if (silence.sustainUp)
-            for (int ch = 1; ch <= 16; ++ch)
-                c.midi.addEvent (juce::MidiMessage::controllerEvent (ch, 64, 0), 0);
-
-        if (silence.clipNoteOffs || silence.liveNoteOffs)
-            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs);
+        // `stopTrackedNotes` is what keeps that order, in one call, for the
+        // reason its own comment gives at length. MidiBuffer::addEvent keeps
+        // insertion order for events at the same sample, so what goes in
+        // first arrives first.
+        // One call, so the lift cannot be separated from the note offs it is
+        // there to let through. TransportSilence only ever asks for the lift
+        // alongside both sets of note offs, and the condition says so rather
+        // than assuming it.
+        if (silence.sustainUp || silence.clipNoteOffs || silence.liveNoteOffs)
+            stopTrackedNotes (slot, silence.liveNoteOffs, silence.clipNoteOffs, silence.sustainUp);
 
         if (silence.allNotesOff || silence.allSoundOff)
-            for (int ch = 1; ch <= 16; ++ch)
+            for (int ch = 1; ch <= midiChannels; ++ch)
             {
                 if (silence.allNotesOff)
                     c.midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
@@ -2118,8 +2153,20 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
     const int selected = selectedChannel.load();
     if (selected != liveChannel)
     {
-        stopTrackedNotes (liveChannel, true, false);
-        for (int ch = 1; ch <= 16; ++ch)
+        // THE PEDAL COMES UP FIRST, and this is the path that needed it most.
+        // A note off and All Notes Off are both latched by a pedal that is
+        // down, and the lift, when the player's foot eventually comes up, is
+        // routed to the newly selected channel, because that is where live
+        // MIDI goes: the channel being left here would never hear it at all,
+        // so the note rang until the transport was next touched. The next
+        // stop, rewind or click in the ruler lifts the pedal on every slot,
+        // which is a long time while tracking over a stopped transport and
+        // can be the whole of a take.
+        //
+        // The same call the stop path makes, with the same answer to the
+        // lift. A wrap deliberately answers it the other way.
+        stopTrackedNotes (liveChannel, true, false, true);
+        for (int ch = 1; ch <= midiChannels; ++ch)
             channelSlots[(size_t) liveChannel].midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
         liveChannel = selected;
     }
@@ -2164,17 +2211,28 @@ void AudioEngine::scheduleMidi (int numSamples, TransportSilence::Event transpor
             };
             auto* active = clipNotes.data() + (size_t) clip.channel * 128;
 
+            // The arrangement goes out on MIDI channel 1, so the pedal that
+            // can latch its releases is the player's pedal on that channel of
+            // this same slot. One plugin, one cable, one receiver.
+            const bool pedalDown = pedalChannel (clip.channel, 1).pedalDown();
+
             for (const auto& note : clip.notes)
             {
                 if (note.on >= a && note.on < b)
                 {
                     slot.midi.addEvent (juce::MidiMessage::noteOn (1, note.note, note.velocity), sampleFor (note.on));
-                    active[note.note] = 1;
+                    HoldPedal::noteOn (active, note.note);
                 }
                 if (note.off >= a && note.off < b)
                 {
                     slot.midi.addEvent (juce::MidiMessage::noteOff (1, note.note), sampleFor (note.off));
-                    active[note.note] = 0;
+
+                    // Not forgotten while the pedal holds it up. Forgetting it
+                    // is what left a note at a loop wrap releasable only by a
+                    // panic: the engine believed it had gone, so the next stop
+                    // sent no note off for it and leaned on All Notes Off,
+                    // which a receiver is not required to recognise at all.
+                    HoldPedal::noteOff (active, note.note, pedalDown);
                 }
             }
         }
