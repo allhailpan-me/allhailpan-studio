@@ -1816,6 +1816,18 @@ void theGateDefaultYields()
     // row and requiring the two to be identical rather than merely similar.
     // A row that drives nothing has nothing to contribute, so anything other
     // than an exact match means it contributed something.
+    //
+    // The patch to compare against is this one with its matrix emptied, not
+    // `unpatched`, so that the row really is the only difference. Envelope 4
+    // is set here to the one that falls straight to nothing, and all four
+    // envelopes are ticked whatever is reading them, so comparing against
+    // `unpatched` would be comparing two patches that differ in two things
+    // and relying on nobody reading the second one.
+    //
+    // It is insurance rather than a check that can fire alone: the only
+    // breakage that reaches it, `anyRouteTo` ignoring the switch, trips the
+    // silence check on the line above at the same time. It is here for the
+    // breakage that moves the sound without silencing it.
     auto switchedOff = plainPatch();
     Synth::ModMatrix::Route off;
     off.source = env4;
@@ -1825,8 +1837,11 @@ void theGateDefaultYields()
     switchedOff.matrix.add (off);
     switchedOff.envelopes[3] = { 0.001, 0.001, 0.0, 0.001 };
 
+    auto noRow = switchedOff;
+    noRow.matrix.clear();
+
     const auto withTheRowOff = play (switchedOff, 45, (int) (rate * 0.2));
-    const auto withNoRowAtAll = play (unpatched, 45, (int) (rate * 0.2));
+    const auto withNoRowAtAll = play (noRow, 45, (int) (rate * 0.2));
 
     double worst = 0.0;
 

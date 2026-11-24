@@ -582,8 +582,10 @@ void nothingInAPatchCanBreakIt()
     // plus or minus two thousand the chance of a row reaching a given bound
     // at all is two draws of one in four thousand at once: 0.69 rows in a
     // whole run, which `theBoundsAreTriedAtTheirEdge` has the measurement
-    // for. Drawn from plus or minus forty it is thousands of rows. The wide
-    // range is kept for what it is really good at, which is counts and
+    // for. Drawn narrow four times in five it is about eleven hundred rows.
+    // Both figures count the mean of 20.1 rows a trial that the count
+    // distribution really produces, not the thirty two it looks like. The
+    // wide range is kept for what it is really good at, which is counts and
     // indices far enough out to catch arithmetic that overflows rather than
     // arithmetic that is off by one.
     std::uniform_int_distribution<int> nearIndex (-40, 40);
@@ -853,9 +855,13 @@ void aSwitchedOffRowIsNotARouting()
         MM::Patch patch;
         patch.add (env1, cutoff, 0.5f);
 
-        patch.routes[20].source = env1;
-        patch.routes[20].destination = gate;
-        patch.routes[20].depth = 1.0f;
+        // Written at the first row past the count, not somewhere comfortably
+        // beyond it. A row twenty rows up is out of reach of a walk that goes
+        // one row too far, so it would pin nothing: the same lesson as the
+        // index draw below, in the block that exists for this bound.
+        patch.routes[patch.count].source = env1;
+        patch.routes[patch.count].destination = gate;
+        patch.routes[patch.count].depth = 1.0f;
 
         if (patch.anyRouteTo (gate))
             fail ("a row above the count counted as a routing");
@@ -887,12 +893,19 @@ void aSwitchedOffRowIsNotARouting()
     // because it cannot read a source value for it; this has to agree, or a
     // project saved by a later version comes back with its gate held shut by
     // a row whose source this version has never heard of.
+    //
+    // Tried on the bound as well as past it. Fifty past the end is the easy
+    // case and the first index past the end is the only one an off by one
+    // admits, so a check that only tries the easy one leaves the guard it is
+    // aimed at free to be wrong by one.
+    for (int source : { MM::numSources(), MM::numSources() + 1, MM::numSources() + 50 })
     {
         MM::Patch patch;
-        patch.add (MM::numSources() + 50, gate, 1.0f);
+        patch.add (source, gate, 1.0f);
 
         if (patch.anyRouteTo (gate))
-            fail ("a row whose source does not exist counted as a routing");
+            fail ("a row whose source is " + std::to_string (source)
+                  + ", which does not exist, counted as a routing");
 
         auto sums = noDestinations();
         MM::evaluate (patch, values.data(), (int) values.size(),
@@ -1092,19 +1105,51 @@ void theBoundsAreTriedAtTheirEdge()
     // And a caller whose arrays are shorter than the tables: a row pointed at
     // the first index past the end of the array it was given, rather than
     // past the end of the table.
+    //
+    // One end on its bound at a time, with the other end well inside. A row
+    // with both ends past the end proves nothing, because the tests run in
+    // order and the row is refused on the first of them: written that way,
+    // the destination bound hides the source bound completely, and an off by
+    // one in the source bound is a heap overflow that nothing notices.
     {
-        MM::Patch patch;
-        patch.add (4, 4, 1.0f);
+        MM::Patch onTheSource;
+        onTheSource.add (4, 0, 1.0f);
+
+        MM::Patch onTheDestination;
+        onTheDestination.add (0, 4, 1.0f);
 
         std::vector<float> fourSources (4, 1.0f);
-        std::vector<float> fourDestinations (4, 0.0f);
 
-        MM::evaluate (patch, fourSources.data(), (int) fourSources.size(),
-                      fourDestinations.data(), (int) fourDestinations.size());
+        for (const MM::Patch* p : { &onTheSource, &onTheDestination })
+        {
+            std::vector<float> fourDestinations (4, 0.0f);
 
-        for (float s : fourDestinations)
-            if (s != 0.0f)
-                fail ("a row on the edge of a short array moved something");
+            MM::evaluate (*p, fourSources.data(), (int) fourSources.size(),
+                          fourDestinations.data(), (int) fourDestinations.size());
+
+            for (float s : fourDestinations)
+                if (s != 0.0f)
+                    fail ("a row on the edge of a short array moved something");
+        }
+    }
+
+    // The other way round: a caller with more room than the tables have
+    // entries, which is what a caller built against a later version would
+    // hand over. Here the array bound is no protection and the table bound is
+    // the only thing refusing the row, so this is the one case that tests it.
+    {
+        MM::Patch patch;
+        patch.add (MM::numSources(), MM::destinationFromId ("amp"), 1.0f);
+        patch.add (MM::sourceFromId ("env1"), MM::destinationFromId ("amp"), 0.5f);
+
+        std::vector<float> roomySources ((std::size_t) MM::numSources() + 8, 1.0f);
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, roomySources.data(), (int) roomySources.size(),
+                      sums.data(), (int) sums.size());
+
+        expectNear (sums[(std::size_t) MM::destinationFromId ("amp")], 0.5, 1e-6,
+                    "a source past the end of the table, in an array with room for it");
     }
 }
 

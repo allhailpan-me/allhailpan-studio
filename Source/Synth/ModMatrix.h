@@ -424,8 +424,19 @@ struct Patch
         {
             const Route& route = routes[i];
 
-            // The same three tests `evaluate` applies, in the same order, so
-            // that the two cannot disagree about a row.
+            // `evaluate`'s tests, in `evaluate`'s order, as far as they can be
+            // applied here. Worth being exact about how far that is, because
+            // the agreement is the point and it does not come from this
+            // function alone: `evaluate` bounds a row's source against both
+            // the table and the length of the array its caller handed over,
+            // and bounds the destination against that array's length too,
+            // while this has no arrays and can only reach the tables. So the
+            // two agree for as long as the caller's arrays cover the tables,
+            // which is a property of the caller: `Synth/Voice.h` keeps room
+            // for sixty four of each and `VoiceTest` asserts that both tables
+            // fit in it. Grow a table past that room and this would call a
+            // row live that `evaluate` never reaches, which on the gate is
+            // the silence this function was fixed for.
             if (! route.enabled || ! route.isWired())
                 continue;
 

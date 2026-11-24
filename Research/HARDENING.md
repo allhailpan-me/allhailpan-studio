@@ -162,22 +162,72 @@ shipped fault as a deliberate regression.
 | `Patch`, `anyRouteTo` included | 12 | 11 | 4 of 8 |
 | the tables | 5 | 5 | 2 |
 
-### The one survivor, and it is a genuine no-op
+### The survivors, and both are genuine no-ops
 
 **`Patch::clear` clearing only the rows in use rather than all of them.** The
 rows above `count` keep whatever they held, and nothing can read them: both
 readers stop at the count, and `add` overwrites a row before it is used.
-`clear()` also has no caller anywhere in `Source`, so it is unreachable twice
+`clear()` also had no caller anywhere in `Source`, so it is unreachable twice
 over. Not a gap, and not worth a check: a test for it would be asserting
 something about memory nothing looks at.
 
-Said plainly because the two that were judged no-ops on the first pass were
-not. The null source array check in `evaluate` reads as dead code, since a
-count of nothing already refuses every row through the bound on its own
-source, and it is the one thing that catches a caller whose count and pointer
-disagree, which is now checked. And the negative destination guard in
-`anyRouteTo` was unreachable only while `isWired` happened to exclude the same
-rows; the generated patches reach it now.
+**The `destination < 0` half of `anyRouteTo`'s guard.** Remove it and nothing
+anywhere notices, because `isWired()` requires a row's destination to be at
+least zero, so no row can ever equal a negative argument however the generated
+patches are built. Genuinely unreachable, and it stays because the two halves
+of one bound belong together.
+
+The null source array check in `evaluate` reads like a third of these and is
+not. A count of nothing already refuses every row through the bound on its own
+source, so the check looks like dead code, and it is the only thing standing
+between a caller whose count and pointer disagree and a null dereference on
+the audio thread. There is now a case for exactly that.
+
+### What the auditor found, because this is the part worth keeping
+
+The fix was handed to the auditor before merging, the way CLAUDE.md says
+anything touching the audio thread has to be. It could not break the fix:
+`enabled` is the right direction, nothing depends on the old answer,
+`PanOneBreed` and `PanOneParams` already agreed with the new one, and nothing
+on the audio thread was made unsafe. What it did break was four of the checks
+written to close the gaps, and the shape is the same one in all four:
+
+**A new check aimed at a bound, placed where it cannot reach that bound.**
+`theBoundsAreTriedAtTheirEdge` had a row with both ends one past the end at
+once. The tests run in order, so the row was refused on its destination and
+the source bound was never reached: an off by one there is a heap overflow and
+it survived the whole suite. One end on its bound at a time, with the other
+well inside, kills it.
+
+**The new guard tried fifty past its edge and never on it.** The row with a
+source that does not exist used `numSources() + 50`. An off by one admits
+exactly one index, so two mutations of the one line the fix adds survived,
+including the one that counts destinations instead of sources, which is the
+shipped fault resurrected by a different route.
+
+**The stale row placed nineteen rows beyond the bound it pins.** Written at
+`routes[20]` with a count of one, so walking one row too far reads
+`routes[1]` and finds nothing. Written at `routes[count]` it dies.
+
+**A bit for bit comparison between two patches differing in two things.** The
+switched off render also set envelope 4, and matched only because nothing
+reads an envelope no live row points at. It compares against the same patch
+with its matrix emptied now, which is what the comment always claimed.
+
+Which is the same lesson as the fuzz width, three more times: it is not enough
+to aim a check at a bound, it has to be placed where the bound is the only
+thing that can refuse it. A check one index or one row away from what it is
+testing passes for the wrong reason, and reads in the diff exactly like one
+that works.
+
+It also caught a claim in this entry that did not reproduce, now corrected
+above, and it was right that the figures through the voice came from a harness
+that was not in the repository. They are `Tests/ModMatrixGateProbe.cpp` now.
+
+### Mutation testing, final: 61 breakages, 59 caught
+
+The seven the auditor wrote are included. The two survivors are the two
+no-ops above.
 
 ---
 
