@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <vector>
 
+#include "SendTap.h"
+
 //==============================================================================
 /** Solo, as arithmetic: which inserts stay audible when something is soloed.
 
@@ -188,10 +190,20 @@
     post fader sends** cut. The second half is the one that is easy to miss and
     it is load bearing: without it a guitar silenced by a vocal solo still
     feeds the reverb bus, the reverb bus is audible because the vocal soloed it
-    upstream, and the guitar is heard through the reverb. One gain per insert
-    is enough to get both here only because this mixer's sends are taken post
-    fader out of the same buffer the fader was applied to. If a pre fader send
-    is ever added, this is the comment that says it needs its own figure.
+    upstream, and the guitar is heard through the reverb.
+
+    One gain per insert was enough to get both only while every send in this
+    mixer was taken post fader out of the same buffer the fader was applied to.
+    A pre fader send is copied before that multiply, so it needs a figure of its
+    own, which is `State::preFaderSendGain`, and the setting that decides what
+    goes into it is `Settings::muteAffectsPreFaderSends`. The reachability
+    matrix is untouched by any of this and that is a finding rather than a
+    convenience: Ardour's `Route::direct_feeds_according_to_reality`
+    (`route.cc:3979`) walks the processors and tests whether each feeds the
+    other with no reference to `_pre_fader` or to placement anywhere in it. So a
+    pre fader send is a propagation edge exactly as a post fader one is, it
+    keeps its destination audible, and it carries solo both ways. Only the gain
+    applied at the tap differs.
 */
 namespace SoloGraph
 {
@@ -254,6 +266,45 @@ namespace SoloGraph
             somebody set by hand is an instruction, and a solo somewhere else
             is a temporary audition. */
         bool soloOverridesMute = false;
+
+        /** Whether a mute, or somebody else's solo, reaches this insert's
+            **pre fader** sends.
+
+            Ardour's `mute-affects-pre-fader`, and deliberately one flag rather
+            than two. In Ardour the same `_mute_point` bitmask is consulted for
+            mute by self, mute by masters and `muted_by_others_soloing_at`
+            alike (`mute_master.cc:92,173`), so there is no separate "solo
+            affects pre fader sends" anywhere in it. Splitting them would be two
+            controls where the published model has one, and they would
+            contradict each other the first time somebody muted a strip that was
+            also soloed out.
+
+            **This default is the opposite of Ardour's, and the reason is this
+            engine rather than taste.** Ardour ships it false
+            (`rc_configuration_vars.inc.h:129`), so an Ardour track silenced by
+            somebody else's solo keeps feeding its pre fader sends at full
+            level. That is right there, because a pre fader send is the cue
+            path: Avid's own words for one are "Pre-fader sends: Independent of
+            the track's volume fader (useful for headphone mixes)", and a
+            headphone mix that rebalances itself every time the engineer
+            auditions something is useless to the player wearing it.
+
+            This studio has exactly one output path. There is no monitor
+            section, no second bus to assign and no headphone mix for the
+            setting to be protecting, so false here would buy the cost of the
+            feature without the feature: solo a vocal, and a guitar with a pre
+            fader send is still heard at full level through the reverb bus the
+            solo is keeping audible. A solo that is not a solo is worse, for
+            somebody mixing their own playing through one pair of outputs, than
+            a cue mix that moves.
+
+            So it ships true, which is Reaper's behaviour: Reaper has no such
+            preference at all, because its mute is applied at the head of the
+            chain as well as the end, so a muted track there feeds nothing from
+            any tap. The flag exists so that somebody who wants Ardour's answer
+            can have it, and so that this disagreement is written down at the
+            setting rather than discovered from the mix. */
+        bool muteAffectsPreFaderSends = true;
     };
 
     struct Setup
@@ -269,6 +320,23 @@ namespace SoloGraph
         /** What to multiply that insert's output by, which carries its post
             fader sends with it. Unity, the solo mute gain, or exactly zero. */
         float gain = 1.0f;
+
+        /** What to multiply a **pre fader** send's copy by, which is a separate
+            figure because a pre fader send is taken before the multiply `gain`
+            is applied in, so nothing has reached it yet.
+
+            Either the same number as `gain` or exactly unity, depending on
+            `Settings::muteAffectsPreFaderSends`, and never anything else: the
+            pre fader point is either in the mute set or it is not. Ardour
+            reaches the same two answers through the same one bitmask, in
+            `MuteMaster::mute_gain_at` (`mute_master.cc:92`), where every mute
+            term is `&&`ed with `(_mute_point & mp)` so that a point outside the
+            set returns `GAIN_COEFF_UNITY` however loudly something else is
+            soloed.
+
+            Unity for insert 0 like everything else, and for the same reason:
+            the master has no send of its own. */
+        float preFaderSendGain = 1.0f;
 
         /** Audible because of somebody else's solo rather than its own: rules
             2 and 3 above. The interface needs this and cannot derive it:
@@ -431,6 +499,28 @@ namespace SoloGraph
     }
 
     //==========================================================================
+    /** The pre fader point's gain, from the main one.
+
+        One function, called from both places `compute` settles an insert, so
+        the two cannot drift. It is written over the main gain rather than
+        recomputing `gainFor` with different arguments because the two points
+        are not two different questions: Ardour's `mute_gain_at` asks the same
+        question and then drops every mute term for a point outside the set,
+        which leaves unity. So the pre fader figure is the main one or it is
+        unity, and there is no third answer for a bug to arrive at.
+
+        Which tap carries the cut is `SendTap`'s table rather than a comparison
+        written out again here, so that the behaviour and the thing the mixer's
+        menu claims about it come from one place.
+    */
+    inline float preFaderSendGainFor (float mainGain, const Settings& settings) noexcept
+    {
+        return SendTap::carriesStripCut (SendTap::Tap::preFader,
+                                         settings.muteAffectsPreFaderSends)
+                 ? mainGain : 1.0f;
+    }
+
+    //==========================================================================
     /** Fills in `result`, reusing whatever storage it already has.
 
         That reuse is the point rather than a tidiness, and it is the same
@@ -532,8 +622,11 @@ namespace SoloGraph
             for (int i = 0; i < n; ++i)
             {
                 const auto& in = setup.inserts[(std::size_t) i];
-                result.inserts[(std::size_t) i].gain =
-                    gainFor (in.muted, false, false, i >= 1 && in.isolated, false, setup.settings);
+                auto& state = result.inserts[(std::size_t) i];
+
+                state.gain = gainFor (in.muted, false, false,
+                                      i >= 1 && in.isolated, false, setup.settings);
+                state.preFaderSendGain = preFaderSendGainFor (state.gain, setup.settings);
             }
 
             return;
@@ -594,6 +687,7 @@ namespace SoloGraph
             state.mutedByOthersSoloing = ! selfSoloed && ! byOthers && ! isolated;
             state.gain                 = gainFor (in.muted, selfSoloed, byOthers,
                                                   isolated, true, setup.settings);
+            state.preFaderSendGain     = preFaderSendGainFor (state.gain, setup.settings);
         }
     }
 
