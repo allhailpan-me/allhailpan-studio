@@ -79,6 +79,177 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-24: where a send is tapped off a strip, and the mute point that decides what solo does to it
+
+### What was looked at
+
+Ten open pull requests, every one of them a `harden/` branch, so there was no
+draft of this lane's own to finish and the choice was free. What those ten hold
+between them is `Project.h`, `MainComponent.cpp`, both editors, `Meter.h`,
+`SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`, `NoteSelection.h`,
+`LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`, `Fx/Svf.h` and
+`Fx/BellMatch.h`, and `Source/Synth` and `Source/Fx` are being built by hand.
+`Project.h` rules out new project state, `LatencyGraph.h` rules out any change
+to the signal topology, and `MainComponent.cpp` rules out a new menu item.
+
+So this is the second night running inside the mixer strip, where the state is
+`AudioEngine::InsertControls` and the files are `AudioEngine.{h,cpp}`,
+`SoloGraph.h`, `ProjectIO.cpp` and `MixerComponent.h`, none of which any open
+branch touches.
+
+The candidate did not have to be found, because two comments already in the
+repository name it:
+
+- The 11-18 entry's own table deferred "pre fader sends, and Ardour's mute
+  point" as "deferred rather than rejected: well specified in
+  `libs/ardour/delivery.cc` and a real mixing control".
+- `SoloGraph.h`, in the middle of explaining what its one gain per insert
+  covers: "One gain per insert is enough to get both here only because this
+  mixer's sends are taken post fader out of the same buffer the fader was
+  applied to. **If a pre fader send is ever added, this is the comment that
+  says it needs its own figure.**"
+
+A night that picks the thing a header already predicted it would need is worth
+more than a night that picks the thing nothing has asked for.
+
+| Candidate | Verdict |
+|---|---|
+| **A tap point per send: post fader or pre fader** | **Chosen.** Every send in this mixer is taken after the one multiply that applies the fader, the pan and the solo answer, so there is no way to have a reverb whose level does not follow the fader. Every studio looked at has this control and four of the six have no other send option at all. It touches no held file and, crucially, no latency figure. |
+| A pre FX tap as well, which is Reaper's third mode | **Rejected for tonight, and the reason is a measurement rather than a preference.** It is the only tap that moves a compensation figure: taken above the effect slots it leaves at `inLat[i]` rather than `outLat[i]`, so it needs `LatencyGraph.h`, which #72 holds. Four of the six studios have no pre FX tap at all. Deferred with its unlock named: that file, plus a test of its own for the figure. |
+| Per send pan, and per send polarity | Deferred. Established (Ardour's `link-send-and-route-panner`, Cubase's Link Panners, Pro Tools' FMP, Reaper's `B_PHASE`) and cheap once a send has its own gain stage, but it is a second feature and the tap point is the one that is missing. |
+| Polarity invert and a trim on each strip | Still deferred, and still for the reason the 11-18 entry gave: the half that fixes comb filtering is a per strip delay, which is `LatencyGraph.h`. |
+| A subgroup, an insert feeding another insert | Still deferred by the same lock, and still the right lock. |
+
+### What the research settled, and the three things it corrected
+
+The `dsp-researcher` agent was launched first. It read the Ardour tree as bytes
+(sparse clone, master `e5e3257bdbae91e6c81e4d264ba46ade58693e23`) and the
+Reaper, Logic, Cubase, Pro Tools, Studio One, Mixbus and Yamaha QL manuals
+through a fetch tool with a 125 character quote cap, and it said which class
+each source was in rather than presenting them as equal. Three of its findings
+changed what is being built.
+
+**The tap points, and the fact that the studios disagree about what the third
+one is for.** Reaper's User Guide section 5.12: "There are three types of send
+- Post-Fader (Post Pan), Pre-Fader (Post FX) and Pre FX." Logic also has three
+and spends the third on pan rather than on FX: "If you choose Post Pan, the
+signal is not only post fader, but also post pan", and its pre fader tap is
+explicitly "pre fader, post EQ", so Logic has no pre FX send at all. Cubase,
+Pro Tools and Studio One are binary, pre or post fader, with no third option.
+Ardour has no mode enumeration whatever: a send is a processor in a list and
+`Route::set_processor_positions` (`route.cc:5469`) calls everything before the
+Amp pre fader, so an Ardour pre fader send is pre FX or post FX depending only
+on where the user dropped it. The one tap every studio has is the pre fader,
+post FX one, which is what this builds.
+
+**Do not apply the pan at the pre fader tap, and the existing post fader send
+already has a name.** Not one of the six studios reads a post pan buffer for a
+pre fader send, and none mono sums one. In Ardour it is structurally
+impossible: the panner lives inside the Main Outs delivery, which
+`route.cc:5762` pushes onto the end of the processor list after every send, so
+every Ardour send taps upstream of the strip pan. The other studios answer the
+pan question with a separate follow switch (Pro Tools' "FMP (Follow Main Pan)",
+Cubase's Link Panners, Ardour's `link-send-and-route-panner`, default true),
+which is the proof that the pan question is not the fader question. What this
+settles for here: because this engine copies the send out of the buffer the one
+multiply has already been applied to, **its existing send is a post fader, post
+pan send in Reaper's exact sense**, which is a named, documented, default
+behaviour rather than an accident. The new tap skips the whole multiply, which
+is Reaper's "Pre-Fader (Post FX)" exactly. The asymmetry, post fader sends
+carrying the pan and pre fader ones not, is not a wart to apologise for: it is
+precisely what Reaper's two names assert.
+
+**The mute point governs mute and solo together, and that is one control
+rather than two.** Ardour's `MutePoint` (`mute_master.h:44`) has five members
+and `Delivery::target_gain` (`delivery.cc:689`) picks `PreFader` or `PostFader`
+from the send's own position and asks `mute_gain_at` for that point. The same
+bitmask is consulted for mute by self, mute by masters and
+`muted_by_others_soloing_at` (`mute_master.cc:92,173`), so there is no separate
+"solo affects pre fader sends" setting and an implementation that decides mute
+and solo in two places has built two controls that will contradict each other
+the first time somebody mutes a track that is also soloed out. The researcher
+also corrected the preference wording this night started with: the current
+labels are "Mute affects pre-fader sends" and so on
+(`rc_option_editor.cc:4770`), not the Ardour 2 vocabulary, and there are five
+points now, not four.
+
+### The one place this deliberately departs from Ardour, and why
+
+`mute-affects-pre-fader` ships **false** in Ardour
+(`rc_configuration_vars.inc.h:129`), so out of the box an Ardour track silenced
+by somebody else's solo keeps feeding its pre fader sends at full level. That
+is deliberate there and the reason is documented in Avid's words for what a pre
+fader send is for: "Pre-fader sends: Independent of the track's volume fader
+(useful for headphone mixes)". A cue mix that rebalances itself every time the
+engineer auditions something is useless to the player wearing it.
+
+**This studio ships the point on, which is Reaper's behaviour, and the reason
+is this engine rather than taste.** There is exactly one output path here.
+There is no monitor section, no second bus to assign and no headphone mix for a
+pre fader send to be protecting, so the only thing Ardour's default would buy
+is the failure without the feature it pays for: solo a vocal and the guitar is
+still heard through its pre fader reverb, at full level, because the reverb bus
+is audible from upstream. A solo that is not a solo is worse than a cue mix
+that moves, for somebody mixing their own guitar through one pair of outputs.
+
+So the setting exists, it carries Ardour's name and Ardour's exact semantics
+(one flag, governing mute and solo mute together at that point), and its
+default is the opposite of Ardour's, with the disagreement written down at the
+flag rather than discovered. Reaper has no such preference at all: its mute is
+applied at the head of the chain as well as the end, so a muted track there
+feeds nothing, pre fader or pre FX.
+
+### Latency: nothing moves, and that is a finding rather than an assumption
+
+Ardour computes a send's compensation from its real position, walking the
+processor list in reverse and accumulating what is still downstream of the tap
+(`route.cc:4820`, `send.cc:163`). Between a post FX pre fader tap and a post
+fader tap sit the Amp and nothing else, and a gain multiply and a pair of pan
+gains have no latency, so the figure is identical at both. Here the same thing
+holds for the same reason: all eight effect slots are before the fader, and the
+only thing between the two taps is one multiply.
+
+**So a send's tap point does not join the list of things that must call
+`updateLatency`, and `LatencyGraph.h` takes no new input.** Written into
+`SendTap.h` as a statement with its derivation, because the next person to add
+a pre FX tap needs to know that it is the one tap for which this stops being
+true.
+
+### What is being built
+
+- **`Source/SendTap.h`**, no JUCE: the two taps, their stable string ids for
+  the project file, what each one carries, the composition of a send's ramp
+  target, and the latency statement above.
+- **`SoloGraph.h`**: `Settings::muteAffectsPreFaderSends` and a second gain per
+  insert, `State::preFaderSendGain`, which is exactly the figure the header's
+  own comment said a pre fader send would need. The reachability matrix does
+  not change at all: Ardour's `direct_feeds_according_to_reality`
+  (`route.cc:3979`) ignores placement entirely, so a pre fader send keeps its
+  destination audible and propagates solo both ways exactly as a post fader one
+  does.
+- **The engine**: the tap latched once per block in `processInsert`, a pre
+  fader copy taken after the effect slots and before the multiply, and
+  `routeSends` reading the latched tap rather than the atomic, so the two
+  functions cannot disagree about which buffer a send is coming out of inside
+  one block. The tap change fades from zero like a destination change.
+- **`ProjectIO.cpp`**: the tap saved by id and the mute point saved, reset and
+  restored.
+- **`MixerComponent.h`**: the choice on the send's own menu, named "Post fader
+  (post pan)" and "Pre fader (post FX)" after Reaper.
+
+### What is deliberately not built
+
+- **No pre FX tap.** See the table above. Its unlock is `LatencyGraph.h` free
+  plus a test for `inLat[i]`.
+- **No per send pan and no per send polarity.** Established, cheap later, and a
+  separate feature.
+- **The mute point is one setting for the project, not one per insert.**
+  Ardour's is a preference supplying the default for a per route saved bitmask.
+  Sixteen copies of a flag whose whole purpose is to answer one question about
+  the studio's single output path would be fifteen more ways for a session to
+  be confusing, and the pan law is already kept project wide here for the same
+  reason.
+
 ## 2026-11-21: finishing the hold pedal, and the message no conformant receiver can see
 
 ### Status: finished, mutation tested a second time, audited a third time
