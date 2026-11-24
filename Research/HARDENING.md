@@ -7,7 +7,7 @@ Newest first.
 
 ---
 
-## 2026-11-21: the modulation matrix, which decides what every patch is wired to
+## 2026-11-24: the modulation matrix, which decides what every patch is wired to
 
 ### What is being looked at
 
@@ -20,6 +20,9 @@ routing is saved in an `.ahp` and in every PAN One patch, it is evaluated per
 sample on the audio thread, and the whole argument for naming sources and
 destinations rather than numbering them is that the failure mode here is a
 patch that loads, plays, and is wrong. Nothing in it can fail loudly.
+
+Started on the 21st and finished on the 24th: the first night got as far as
+picking the target and was cut off before it broke anything.
 
 ### Mutation testing: 50 breakages, 37 caught
 
@@ -45,11 +48,136 @@ transform to a source that is already in that polarity.
 The thirteen survivors are not spread evenly. Four of them are every single
 breakage of `anyRouteTo`, and that is where the finding is.
 
-### What is left to do
+### The fault: a row switched off still counted as a routing
 
-- Judge the remaining survivors, gap by gap.
-- Strengthen the test where they say to.
-- Fix what is actually wrong.
+`Patch::anyRouteTo` answered yes for a row whose own on/off control was off.
+
+That function has exactly one caller, and it is the worst possible one to be
+wrong for. `Synth/Voice.h` asks it whether anything drives the gate, and opens
+the gate from the amplitude envelope when nothing does, so that an instrument
+nobody has patched still makes a sound. A switched off row pointed at the gate
+therefore took the envelope away and put the matrix sum in its place, and
+`evaluate` skips a switched off row, so that sum is nothing. The gate sits in
+series with everything the voice produces.
+
+Measured through the real voice rather than read off the source, because the
+size of it is the point. The patch is the same in all three renders, and the
+routing is env 1 at full depth on the gate, which is what the default already
+does, so the only difference between the first two is whether the row exists:
+
+| | loudest tenth of a second |
+|---|---|
+| no gate routing at all | 0.160530 |
+| the routing switched on | 0.160530 |
+| the same routing switched off | 0.000000 |
+
+Not quieter. Silent. And a row's on/off is one of the 240 saved parameters, so
+a host can automate it: this is a thing that moves while somebody is playing,
+and the only thing on screen to explain the silence would be a row they had
+just turned off.
+
+The fix is that `anyRouteTo` now applies the same three tests `evaluate`
+applies, in the same order, so the two cannot disagree about which rows are
+live. The bound on the source is part of that: a row pointing at a source this
+version has never heard of drives nothing, and `evaluate` already read it that
+way. `evaluate` itself was right throughout; every one of its breakages that
+involved `enabled` died on the existing test.
+
+### Why nothing had caught it
+
+`anyRouteTo` had no check pointed at it. Not a weak one: none. The word
+`anyRouteTo` did not appear in `ModMatrixTest.cpp`, which is why all four of
+its breakages survived, and the one place that does exercise the behaviour
+end to end, `VoiceTest::theGateDefaultYields`, builds its gate routings with
+`Patch::add`, which leaves `enabled` at its default of true.
+
+So the gap was not in the arithmetic anybody thought to check. It was a
+function whose answer is a yes or a no, in a file where everything else
+produces a number, and the numbers had all the attention.
+
+### The second finding: a wider fuzz was a weaker one
+
+`nothingInAPatchCanBreakIt` draws row indices from minus two thousand to two
+thousand over twenty thousand trials, and it looks like thorough coverage of
+the bounds. It is not. An off by one in a bound admits exactly one index, so
+for a row to reach the source bound at all its source has to land on that one
+value **and** its destination has to land anywhere inside the table at the
+same time: two independent draws of about one in four thousand. That works out
+at 0.69 rows in a whole run, and the destination bound at 0.47.
+
+Which is to say the suite caught those two off by ones on a coin toss, and on
+the run that matters it lost. Both survived. Narrowing the draw to plus or
+minus forty killed both immediately, which is the measurement that settles it:
+
+| index range | the source bound off by one | the destination bound off by one |
+|---|---|---|
+| plus or minus 2000 | survived | survived |
+| plus or minus 40 | caught, on a sanitizer | caught, on a sanitizer |
+
+**A wider fuzz is not a stronger one when what it has to hit is a single exact
+value.** The range is drawn narrow four times in five now, with the wide draw
+kept for what it is actually good at, which is arithmetic that overflows rather
+than arithmetic that is off by one, and the exact edges are tried deliberately
+in a check of their own rather than left to arrive.
+
+The same gap, in a plainer form, is why the off by ones in `apply` and
+`sourceId` survived: both are only ever called with hand picked indices, and
+nobody had picked the first index past the end.
+
+### The third finding: two columns of the tables that nothing read
+
+The existing check on `apply` compares against the range it reads out of the
+same table it is testing, so halving the cutoff's declared range survived the
+whole file, and with it every saved patch's filter sweep. Declaring an envelope
+bipolar survived too: it halves the movement of every routing from that
+envelope that asked to be bipolar, and the envelope still looks and sounds like
+an envelope.
+
+Neither can be derived from anything, so both are now pinned by name, the way
+`PanOneParamsTest` pins the presets, and the check says in its own comment that
+this is a pin and not a proof: it does not show the numbers are right, it makes
+changing one a deliberate act that appears in a diff.
+
+And swapping the ids of two destinations survived, which is precisely the
+failure the whole file exists to prevent: every id still resolves to an index
+that resolves back to the same id, nothing is duplicated or empty, and every
+patch anybody saved now modulates the other oscillator. What does change is
+that the row reading "Osc 1 pitch" carries the id `osc2pitch`, so the menu and
+the project file have stopped agreeing. Where an id carries a number the name
+now has to carry the same one, which catches any swap inside a numbered family,
+and those are the only swaps a copy and paste produces.
+
+### Mutation testing again: 54 breakages, 53 caught
+
+Four of the original fifty had to be rewritten against the fixed
+`anyRouteTo`, and four more were added aimed at the fix itself, including the
+shipped fault as a deliberate regression.
+
+| Where | Tried | Caught | Before |
+|---|---|---|---|
+| `shaped` | 10 | 10 | 10 |
+| `evaluate` | 14 | 14 | 11 |
+| `apply` | 6 | 6 | 5 |
+| the id lookups | 7 | 7 | 6 |
+| `Patch`, `anyRouteTo` included | 12 | 11 | 4 of 8 |
+| the tables | 5 | 5 | 2 |
+
+### The one survivor, and it is a genuine no-op
+
+**`Patch::clear` clearing only the rows in use rather than all of them.** The
+rows above `count` keep whatever they held, and nothing can read them: both
+readers stop at the count, and `add` overwrites a row before it is used.
+`clear()` also has no caller anywhere in `Source`, so it is unreachable twice
+over. Not a gap, and not worth a check: a test for it would be asserting
+something about memory nothing looks at.
+
+Said plainly because the two that were judged no-ops on the first pass were
+not. The null source array check in `evaluate` reads as dead code, since a
+count of nothing already refuses every row through the bound on its own
+source, and it is the one thing that catches a caller whose count and pointer
+disagree, which is now checked. And the negative destination guard in
+`anyRouteTo` was unreachable only while `isWired` happened to exclude the same
+rows; the generated patches reach it now.
 
 ---
 

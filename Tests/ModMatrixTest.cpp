@@ -687,6 +687,17 @@ void nothingInAPatchCanBreakIt()
 
         MM::evaluate (patch, nullptr, 0, nullptr, 0);   // must simply return
         MM::evaluate (patch, sums.data(), (int) sums.size(), nullptr, 0);
+
+        // And a caller that says it has sources and hands over nothing, which
+        // is what the null check is there for and the only thing that can
+        // reach it: with a count of nothing every row is already refused by
+        // the bound on its own source, so the check reads as dead code until
+        // the count and the pointer disagree.
+        MM::evaluate (patch, nullptr, MM::numSources(), sums.data(), (int) sums.size());
+
+        for (float s : sums)
+            if (s != 0.0f)
+                fail ("a caller that promised sources and gave none moved a destination");
     }
 }
 
