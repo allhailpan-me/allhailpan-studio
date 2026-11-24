@@ -700,6 +700,14 @@ void nothingInAPatchCanBreakIt()
         for (float s : sums)
             if (s != 0.0f)
                 fail ("a caller that promised sources and gave none moved a destination");
+
+        // The same the other way round, for the same reason. The destination
+        // check is the mirror of the source one and had no case of its own:
+        // with a count of nothing every row is refused by the bound on its
+        // own destination, so only a count that disagrees with the pointer
+        // reaches the check, and it stands between that caller and a null
+        // write on the audio thread.
+        MM::evaluate (patch, sums.data(), (int) sums.size(), nullptr, MM::numDestinations());
     }
 }
 
@@ -1131,6 +1139,30 @@ void theBoundsAreTriedAtTheirEdge()
                 if (s != 0.0f)
                     fail ("a row on the edge of a short array moved something");
         }
+
+        // The via column on the same edge, which the two rows above cannot
+        // reach. A via is bounded twice, against the table and against the
+        // array, and the table bound hides the array bound for every array
+        // as long as the table: with the whole table handed over, a via one
+        // past the end of it is refused by the table bound whatever the
+        // array bound says, so an off by one in the array bound reads as
+        // covered and is a heap overflow. A short array is the only place
+        // the array bound is the one doing the refusing.
+        //
+        // The row itself is good, so what is checked is not that nothing
+        // moved but that it moved by its full depth: a via that cannot be
+        // resolved is ignored rather than scaling the routing to nothing or
+        // dropping it.
+        MM::Patch onTheVia;
+        onTheVia.add (0, 0, 1.0f, MM::Shape::asIs, 4);
+
+        std::vector<float> fourDestinations (4, 0.0f);
+
+        MM::evaluate (onTheVia, fourSources.data(), (int) fourSources.size(),
+                      fourDestinations.data(), (int) fourDestinations.size());
+
+        expectNear (fourDestinations[0], 1.0, 1e-6,
+                    "a via on the edge of a short array did not leave its row at full depth");
     }
 
     // The other way round: a caller with more room than the tables have
