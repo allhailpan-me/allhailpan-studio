@@ -257,12 +257,15 @@ true.
 
 ### Outcome
 
-Merged as #90, squashed, with `tests`, `ubuntu-latest` and `windows-latest`
-green and macOS still building, which is the threshold the brief sets. Two
-audit rounds, four real faults, all fixed; the counts and the findings are in
-the pull request.
+Merged as #90, squashed, on `tests`, `ubuntu-latest` and `windows-latest`
+green, which is the threshold the brief sets. **macOS came green afterwards on
+the same tree**, so all four jobs passed on exactly what was merged, and the
+written-down threshold was never actually leaned on. Two audit rounds, four
+real faults, all fixed; the counts and the findings are in the pull request.
 
-**No release cut.** v0.8.0 was cut six days ago on 11-18 and `main` is a
+**No release cut**, and with all three platforms green the precondition for
+cutting one was met, so this is a decision rather than a block. v0.8.0 was cut
+six days ago on 11-18 and `main` is a
 handful of commits past it, mostly hardening branches that strengthen tests
 over code already shipped. One feature six days after a release is not the
 pile the standing question above was about, and the lesson recorded there was
