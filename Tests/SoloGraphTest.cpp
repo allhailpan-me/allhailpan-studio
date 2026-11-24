@@ -1449,6 +1449,7 @@ void testReuseAndEdges()
         SoloGraph::Settings s;
         s.soloMuteGain      = unit (rng) < 0.5 ? 0.0f : 0.3f;
         s.soloOverridesMute = unit (rng) < 0.5;
+        s.muteAffectsPreFaderSends = unit (rng) < 0.5;
 
         SoloGraph::compute (m.setup (s), reused);
 
@@ -1464,6 +1465,7 @@ void testReuseAndEdges()
 
         for (std::size_t i = 0; i < fresh.inserts.size(); ++i)
             if (reused.inserts[i].gain != fresh.inserts[i].gain
+                || reused.inserts[i].preFaderSendGain != fresh.inserts[i].preFaderSendGain
                 || reused.inserts[i].soloedByOthers != fresh.inserts[i].soloedByOthers
                 || reused.inserts[i].mutedByOthersSoloing != fresh.inserts[i].mutedByOthersSoloing)
                 ++stale;
@@ -1528,6 +1530,342 @@ void testReuseAndEdges()
     std::printf ("  2000 reuses agree with a fresh result, and the edges hold\n");
 }
 
+// ---------------------------------------------------------------------------
+// The pre fader tap.
+//
+// A send can now be copied out of the buffer before the fader, the pan and the
+// cut, which is one new figure per insert and one new setting. The regression
+// guard comes first and is worth more than everything after it: the setting
+// may change that figure and nothing else at all.
+//
+// That is a finding rather than a convenience. Ardour's
+// `Route::direct_feeds_according_to_reality` (`route.cc:3979`) decides
+// propagation by walking the processors and asking whether each feeds the
+// other, with no reference to `_pre_fader` or to placement anywhere in it, so
+// a pre fader send is a propagation edge exactly as a post fader one is. If
+// the setting could reach the reachability matrix, or any insert's own gain,
+// then an application preference about cue mixes would be quietly deciding
+// which strips are audible.
+// ---------------------------------------------------------------------------
+void testThePreFaderSettingChangesNothingElse()
+{
+    std::printf ("\nThe pre fader setting against everything it must not touch\n");
+
+    std::mt19937 rng (19770416u);
+    SoloGraph::Result on, off;
+
+    int cases = 0, moved = 0, differed = 0;
+
+    for (int trial = 0; trial < 6000; ++trial)
+    {
+        std::uniform_int_distribution<int> size (1, 16);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        auto m = makeMixer (rng, size (rng), unit (rng));
+
+        // A sixth of the trials have nothing soloed at all, because `compute`
+        // settles an insert in two different places and the one with no solo
+        // up is the path a test that always solos something never reaches.
+        const double pSolo = unit (rng) < 1.0 / 6.0 ? 0.0 : unit (rng) * 0.5;
+
+        for (int i = 0; i < m.n; ++i)
+        {
+            m.selfSoloed[(std::size_t) i] = unit (rng) < pSolo ? 1 : 0;
+            m.muted[(std::size_t) i]      = unit (rng) < 0.25 ? 1 : 0;
+            m.isolated[(std::size_t) i]   = unit (rng) < 0.15 ? 1 : 0;
+        }
+
+        SoloGraph::Settings settings;
+        settings.soloOverridesMute = unit (rng) < 0.5;
+
+        // Including Ardour's solo in front, where an insert's gain is neither
+        // unity nor zero. That is where a pre fader figure that is some third
+        // number could hide, and it is also the only setting under which the
+        // two halves of this check could differ by anything but a mute.
+        const double which = unit (rng);
+        settings.soloMuteGain = which < 0.4 ? 0.0f
+                              : which < 0.8 ? (float) (0.05 + 0.9 * unit (rng))
+                                            : 1.0f;
+
+        settings.muteAffectsPreFaderSends = true;
+        SoloGraph::compute (m.setup (settings), on);
+
+        settings.muteAffectsPreFaderSends = false;
+        SoloGraph::compute (m.setup (settings), off);
+
+        ++cases;
+
+        if (on.anySoloed != off.anySoloed || on.reach != off.reach
+            || on.takenOver != off.takenOver || on.inserts.size() != off.inserts.size())
+        {
+            ++moved;
+            continue;
+        }
+
+        for (std::size_t i = 0; i < on.inserts.size(); ++i)
+        {
+            if (on.inserts[i].gain != off.inserts[i].gain
+                || on.inserts[i].soloedByOthers != off.inserts[i].soloedByOthers
+                || on.inserts[i].mutedByOthersSoloing != off.inserts[i].mutedByOthersSoloing)
+                ++moved;
+
+            if (on.inserts[i].preFaderSendGain != off.inserts[i].preFaderSendGain)
+                ++differed;
+        }
+    }
+
+    check (moved == 0, "the pre fader setting changed something other than the pre fader figure in "
+                         + std::to_string (moved) + " places");
+
+    // And the other half of the same claim: if the setting had turned out to
+    // change nothing at all, the check above would pass while testing
+    // nothing. It has to be seen moving the one figure it is allowed to move.
+    check (differed > 0, "the pre fader setting never changed the pre fader figure, so the "
+                         "comparison above proves nothing");
+
+    std::printf ("  %d mixers computed both ways: audibility, propagation and every gain "
+                 "identical\n", cases);
+    std::printf ("  and the pre fader figure itself moved in %d insert(s)\n", differed);
+}
+
+// ---------------------------------------------------------------------------
+// There are two possible pre fader figures and there is no third.
+//
+// Ardour reaches the same two through one bitmask: every mute term in
+// `MuteMaster::mute_gain_at` (`mute_master.cc:92`) is `&&`ed with
+// `(_mute_point & mp)`, so a point outside the set returns unity however loudly
+// something else is soloed. The pre fader point is in the mute set or it is
+// not, which is why a figure that is neither the main gain nor unity would be
+// a bug rather than a tuning.
+// ---------------------------------------------------------------------------
+void testThePreFaderFigureHasTwoAnswers()
+{
+    std::printf ("\nThe pre fader figure, over every generated mixer\n");
+
+    std::mt19937 rng (20250704u);
+    SoloGraph::Result result;
+
+    int cases = 0, wrongOn = 0, wrongOff = 0;
+    int sawUnity = 0, sawFullMute = 0, sawPartialCut = 0, sawUnityWhileCut = 0;
+
+    for (int trial = 0; trial < 6000; ++trial)
+    {
+        std::uniform_int_distribution<int> size (1, 16);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        auto m = makeMixer (rng, size (rng), unit (rng));
+
+        const double pSolo = unit (rng) < 1.0 / 6.0 ? 0.0 : unit (rng) * 0.5;
+
+        for (int i = 0; i < m.n; ++i)
+        {
+            m.selfSoloed[(std::size_t) i] = unit (rng) < pSolo ? 1 : 0;
+            m.muted[(std::size_t) i]      = unit (rng) < 0.25 ? 1 : 0;
+            m.isolated[(std::size_t) i]   = unit (rng) < 0.15 ? 1 : 0;
+        }
+
+        SoloGraph::Settings settings;
+        settings.soloOverridesMute = unit (rng) < 0.5;
+        settings.soloMuteGain = unit (rng) < 0.5 ? 0.0f : (float) (0.05 + 0.9 * unit (rng));
+
+        settings.muteAffectsPreFaderSends = true;
+        SoloGraph::compute (m.setup (settings), result);
+        ++cases;
+
+        for (const auto& state : result.inserts)
+        {
+            if (state.preFaderSendGain != state.gain)
+                ++wrongOn;
+
+            if (state.gain == 1.0f)
+                ++sawUnity;
+            else if (state.gain == 0.0f)
+                ++sawFullMute;
+            else
+                ++sawPartialCut;
+        }
+
+        settings.muteAffectsPreFaderSends = false;
+        SoloGraph::compute (m.setup (settings), result);
+
+        for (const auto& state : result.inserts)
+        {
+            if (state.preFaderSendGain != 1.0f)
+                ++wrongOff;
+
+            if (state.gain != 1.0f)
+                ++sawUnityWhileCut;
+        }
+    }
+
+    check (wrongOn == 0, "with the setting on the pre fader figure must be the insert's own gain, "
+                         "and was not in " + std::to_string (wrongOn) + " places");
+    check (wrongOff == 0, "with the setting off the pre fader figure must be exactly unity, and "
+                          "was not in " + std::to_string (wrongOff) + " places");
+
+    // Each of the three main gains has to have been seen, or the check above
+    // is a claim about a mixer with nothing happening in it. The partial cut
+    // is the one that matters: it is the only value a third answer could hide
+    // behind, since unity and full mute are what a wrong answer would pick.
+    check (sawUnity > 0 && sawFullMute > 0 && sawPartialCut > 0,
+           "the sweep did not reach all three main gains: unity " + std::to_string (sawUnity)
+             + ", full mute " + std::to_string (sawFullMute)
+             + ", partial cut " + std::to_string (sawPartialCut));
+
+    check (sawUnityWhileCut > 0,
+           "with the setting off, no insert was ever cut, so unity there proves nothing");
+
+    std::printf ("  %d mixers: %d unity, %d full mute, %d partial cut, every pre fader figure "
+                 "one of the two\n", cases, sawUnity, sawFullMute, sawPartialCut);
+    std::printf ("  and with the setting off it stayed at unity through %d cut insert(s)\n",
+                 sawUnityWhileCut);
+}
+
+// ---------------------------------------------------------------------------
+// The figure and the menu come from one place.
+//
+// `preFaderSendGainFor` is written over `SendTap::carriesStripCut` rather than
+// over a comparison of its own, so that what the mixer's menu claims about a
+// tap and what the gain does are the same statement. Nothing stops a later
+// edit from separating them, and nothing about a mix would say it had
+// happened, so the agreement is asserted directly.
+// ---------------------------------------------------------------------------
+void testThePreFaderFigureAgreesWithTheTap()
+{
+    std::printf ("\nThe pre fader figure against SendTap's own table\n");
+
+    // Pinned as a literal. This default is deliberately the opposite of
+    // Ardour's `mute-affects-pre-fader`, which ships false, and the reasoning
+    // is at the flag: this studio has one output path, so there is no
+    // headphone mix for false to be protecting and it would leave a solo
+    // letting a guitar through at full level.
+    check (SoloGraph::Settings{}.muteAffectsPreFaderSends,
+           "a mute must reach a pre fader send by default, which is the opposite of Ardour");
+
+    std::mt19937 rng (31415926u);
+    std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+    std::vector<float> gains { 0.0f, -0.0f, 1.0f, 0.5f, 0.25f, 0.0001f, 0.9999f };
+
+    for (int i = 0; i < 2000; ++i)
+        gains.push_back ((float) unit (rng));
+
+    int disagreed = 0, thirdAnswer = 0;
+
+    for (bool setting : { false, true })
+    {
+        SoloGraph::Settings settings;
+        settings.muteAffectsPreFaderSends = setting;
+
+        const bool carries = SendTap::carriesStripCut (SendTap::Tap::preFader, setting);
+
+        for (float g : gains)
+        {
+            const float got = SoloGraph::preFaderSendGainFor (g, settings);
+
+            if (got != (carries ? g : 1.0f))
+                ++disagreed;
+
+            // No third answer, asserted separately from the agreement above
+            // so that a figure which is neither fails on its own terms.
+            if (got != g && got != 1.0f)
+                ++thirdAnswer;
+        }
+    }
+
+    check (disagreed == 0, "the pre fader figure disagreed with SendTap::carriesStripCut in "
+                             + std::to_string (disagreed) + " places");
+    check (thirdAnswer == 0, "the pre fader figure was neither the main gain nor unity in "
+                               + std::to_string (thirdAnswer) + " places");
+
+    // The post fader tap is not a question this setting can answer, in either
+    // direction: that send is copied out of the buffer the cut was applied to.
+    for (bool setting : { false, true })
+        check (SendTap::carriesStripCut (SendTap::Tap::postFader, setting),
+               "a post fader send carries the strip cut whatever the setting says");
+
+    std::printf ("  %d gains at both settings, agreeing with the tap table and with no third "
+                 "answer\n", (int) gains.size() * 2);
+}
+
+// ---------------------------------------------------------------------------
+// What a silenced insert sends from its pre fader tap, measured.
+//
+// The case is the one the setting's own comment names: solo the vocal, and a
+// guitar with a pre fader send to the reverb bus the solo is keeping audible.
+// Both halves of the setting are measured through the mixer's forward pass
+// rather than read off the figure, because the figure being right and the
+// signal arriving at the master are two different claims and only the second
+// one is what somebody hears.
+// ---------------------------------------------------------------------------
+void testWhatAPreFaderSendOfASilencedInsertCarries()
+{
+    std::printf ("\nA silenced insert's pre fader send, measured at the master\n");
+
+    const int vocal = 3, guitar = 4, reverb = 9;
+
+    std::mt19937 rng (5u);
+    Mixer m = makeMixer (rng, 12, 0.0);
+    m.route (vocal, reverb, 0.5f);
+    m.route (guitar, reverb, 0.5f);
+    m.selfSoloed[(std::size_t) vocal] = 1;
+
+    SoloGraph::Result r;
+
+    for (bool setting : { true, false })
+    {
+        SoloGraph::Settings settings;
+        settings.muteAffectsPreFaderSends = setting;
+
+        SoloGraph::compute (m.setup (settings), r);
+
+        check (r.inserts[(std::size_t) reverb].soloedByOthers,
+               "the reverb the soloed vocal feeds has to stay audible");
+        check (r.inserts[(std::size_t) guitar].gain == 0.0f,
+               "the guitar is not soloed and does not feed anything soloed, so it is silenced");
+
+        // The guitar's own buffer, its pre fader copy, and what that copy
+        // arrives at the master as. The pre fader tap is taken before the
+        // insert's gain, so the only thing standing between a silenced strip
+        // and the reverb bus is the figure under test.
+        const double preFaderCopy = (double) r.inserts[(std::size_t) guitar].preFaderSendGain;
+        const double sent = SendTap::levelTarget (SendTap::Tap::preFader, 0.5, preFaderCopy);
+        const double atMaster = sent * (double) r.inserts[(std::size_t) reverb].gain
+                                     * (double) r.inserts[0].gain;
+
+        if (setting)
+            check (atMaster == 0.0,
+                   "at the default a silenced strip must not be heard through its pre fader send, "
+                   "and arrived at " + std::to_string (atMaster));
+        else
+            check (atMaster == 0.5,
+                   "with the setting off the pre fader send is Ardour's cue path and keeps its "
+                   "full level, and arrived at " + std::to_string (atMaster));
+
+        std::printf ("  setting %s: the guitar arrives at the master at %.4f through the reverb\n",
+                     setting ? "on " : "off", atMaster);
+    }
+
+    // The post fader send of the same guitar is silent either way, because it
+    // is copied out of a buffer already at zero. That is what one gain per
+    // insert bought and the new figure must not have taken it away.
+    for (bool setting : { true, false })
+    {
+        SoloGraph::Settings settings;
+        settings.muteAffectsPreFaderSends = setting;
+
+        SoloGraph::compute (m.setup (settings), r);
+
+        const double postFaderCopy = (double) r.inserts[(std::size_t) guitar].gain;
+        const double sent = SendTap::levelTarget (SendTap::Tap::postFader, 0.5,
+                                                  (double) r.inserts[(std::size_t) guitar].preFaderSendGain);
+
+        check (postFaderCopy * sent == 0.0,
+               "a silenced insert's post fader send must be silent whatever the pre fader setting "
+               "says");
+    }
+}
+
 } // namespace
 
 int main()
@@ -1546,6 +1884,10 @@ int main()
     testMuteOnItsOwn();
     testMutePrecedence();
     testTheSoloMuteGain();
+    testThePreFaderSettingChangesNothingElse();
+    testThePreFaderFigureHasTwoAnswers();
+    testThePreFaderFigureAgreesWithTheTap();
+    testWhatAPreFaderSendOfASilencedInsertCarries();
     testGestures();
     testReuseAndEdges();
 

@@ -334,8 +334,14 @@ namespace SoloGraph
             set returns `GAIN_COEFF_UNITY` however loudly something else is
             soloed.
 
-            Unity for insert 0 like everything else, and for the same reason:
-            the master has no send of its own. */
+            Insert 0 gets a figure like every other insert rather than a
+            carve out, so a muted master comes out at zero here as well as in
+            `gain`. Nothing reads it there, because the master has no send for
+            it to be applied to, and that is why it is left as the general
+            answer instead of being special cased: a carve out would be a
+            second rule to keep in step for a number nobody asks for. Said
+            plainly rather than left as "unity like everything else", which is
+            what this comment used to claim and is not what the code does. */
         float preFaderSendGain = 1.0f;
 
         /** Audible because of somebody else's solo rather than its own: rules
