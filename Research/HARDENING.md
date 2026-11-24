@@ -21,13 +21,35 @@ sample on the audio thread, and the whole argument for naming sources and
 destinations rather than numbering them is that the failure mode here is a
 patch that loads, plays, and is wrong. Nothing in it can fail loudly.
 
+### Mutation testing: 50 breakages, 37 caught
+
+Each one compiled with the sanitizers exactly as `Tests/run.sh` has them, and
+the harness verified that the unmutated header passes first. Several died on a
+sanitizer rather than on a comparison, which is the usual reminder that a plain
+`-O2` harness would have called them survivors.
+
+| Where | Tried | Caught |
+|---|---|---|
+| `shaped`, the clamps and the four shapes | 10 | 10 |
+| `evaluate` | 14 | 11 |
+| `apply` | 6 | 5 |
+| the id lookups | 7 | 6 |
+| `Patch`: `add`, `clear`, `isWired`, `anyRouteTo` | 8 | 4 |
+| the source and destination tables | 5 | 2 |
+
+`shaped` is covered as well as a function that size can be. Every one of its
+ten breakages died, including the two the file's own comments warn about:
+folding a bipolar source up by taking its absolute value, and applying a
+transform to a source that is already in that polarity.
+
+The thirteen survivors are not spread evenly. Four of them are every single
+breakage of `anyRouteTo`, and that is where the finding is.
+
 ### What is left to do
 
-- Mutation test `ModMatrixTest.cpp` against deliberate breakages of
-  `ModMatrix.h`, with the sanitizers on as `Tests/run.sh` has them.
-- Decide for each survivor whether it is a gap or a genuine no-op.
-- Strengthen the test where the survivors say to.
-- Fix anything that turns out to be actually wrong.
+- Judge the remaining survivors, gap by gap.
+- Strengthen the test where they say to.
+- Fix what is actually wrong.
 
 ---
 
