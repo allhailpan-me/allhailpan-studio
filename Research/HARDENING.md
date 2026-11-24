@@ -229,6 +229,50 @@ that was not in the repository. They are `Tests/ModMatrixGateProbe.cpp` now.
 The seven the auditor wrote are included. The two survivors are the two
 no-ops above.
 
+### Re-run from a cold start, which found two more of the same shape
+
+The audit above was run against the strengthened file a second time, from a
+separately written set of 48 breakages, by somebody who had the mutation
+results and the diff but not the session that produced them. Five survived
+rather than two, and the three extra are:
+
+**A via on the edge of a short array.** `evaluate` bounds a via twice, once
+against the source table and once against the length of the array the caller
+handed over, and the existing case put a via one past the end of the **whole**
+table. There the table bound refuses the row whatever the array bound says,
+so an off by one in the array bound reads as covered and is a heap overflow on
+the audio thread. A short array is the only place the array bound is the one
+doing the refusing, and the short array case had a row on its source bound and
+one on its destination bound and none on its via. Closed, and the check also
+pins what an unresolvable via does, which is to be ignored rather than to
+scale its row to nothing: the row stands at full depth.
+
+This is the auditor's own finding from this entry for the fourth time, in the
+one column it had not been applied to. A bound checked twice needs a case
+where each check is the only one that can refuse the row, not one case for the
+pair.
+
+**The null destination array check had no case, where the source one did.**
+The two are mirrors, and the argument written above for the source check, that
+a count of nothing already refuses every row so only a disagreeing count and
+pointer reach it, is word for word the argument for the destination check.
+One got a case and the other did not. Closed with the mirror of it.
+
+**`rows = patch.count < maxRoutes ? patch.count : maxRoutes` with `<=` for
+`<`.** A third no-op, and a cleaner one than either above: both forms are
+`min` of the same two numbers, so no input distinguishes them.
+
+Nothing in the fix itself failed the second pass, and the two no-ops it
+recorded were confirmed independently: `Patch::clear` still has no caller
+anywhere in `Source`, and `isWired()` still makes `anyRouteTo`'s negative
+guard unreachable.
+
+### Mutation testing, truly final: 63 breakages, 60 caught
+
+The three survivors are the two no-ops the first pass recorded plus the `min`
+one above. Every bound in the file now has a case where that bound is the only
+thing refusing the row.
+
 ---
 
 ## 2026-11-20: the transform every spectral measurement is taken through
