@@ -575,7 +575,25 @@ void nothingInAPatchCanBreakIt()
     std::printf ("arbitrary patches\n");
 
     std::mt19937 rng (20261008);
-    std::uniform_int_distribution<int> anyIndex (-2000, 2000);
+
+    // Two ranges rather than one, and the narrow one is the one that matters.
+    // A bound is admitted one index too far by an off by one, so what has to
+    // be hit is a single exact value, and with both ends of a row drawn from
+    // plus or minus two thousand the chance of a row reaching a given bound
+    // at all is two draws of one in four thousand at once: 0.69 rows in a
+    // whole run, which `theBoundsAreTriedAtTheirEdge` has the measurement
+    // for. Drawn narrow four times in five it is about eleven hundred rows.
+    // Both figures count the mean of 20.1 rows a trial that the count
+    // distribution really produces, not the thirty two it looks like. The
+    // wide range is kept for what it is really good at, which is counts and
+    // indices far enough out to catch arithmetic that overflows rather than
+    // arithmetic that is off by one.
+    std::uniform_int_distribution<int> nearIndex (-40, 40);
+    std::uniform_int_distribution<int> farIndex (-2000, 2000);
+    std::uniform_int_distribution<int> howFar (0, 4);
+
+    const auto anIndex = [&] { return howFar (rng) == 0 ? farIndex (rng) : nearIndex (rng); };
+
     std::uniform_int_distribution<int> anyCount (-50, MM::maxRoutes * 4);
     std::uniform_int_distribution<int> anyShape (0, 3);
     std::uniform_real_distribution<float> anyDepth (-1000.0f, 1000.0f);
@@ -587,9 +605,9 @@ void nothingInAPatchCanBreakIt()
 
         for (int i = 0; i < MM::maxRoutes; ++i)
         {
-            patch.routes[i].source = anyIndex (rng);
-            patch.routes[i].destination = anyIndex (rng);
-            patch.routes[i].via = anyIndex (rng);
+            patch.routes[i].source = anIndex();
+            patch.routes[i].destination = anIndex();
+            patch.routes[i].via = anIndex();
             patch.routes[i].depth = anyDepth (rng);
             patch.routes[i].shape = (MM::Shape) anyShape (rng);
             patch.routes[i].enabled = (trial % 7) != 0;
@@ -612,6 +630,31 @@ void nothingInAPatchCanBreakIt()
                 fail ("a destination sum stopped being finite");
                 return;
             }
+
+        // Asked the same questions, over the same patches. It is read on the
+        // audio thread beside `evaluate` and the count it is handed is the
+        // same count, so it has to survive the same nonsense.
+        //
+        // The answer is checked rather than discarded, because these patches
+        // carry rows pointed at destinations that do not exist, and a routing
+        // to a destination that does not exist is not a routing. Thrown away,
+        // every guard on the way in reads as covered and is not.
+        // Every destination is asked, including the ones inside the table
+        // whose answer these patches make unpredictable. Asking only about
+        // the ones outside it would stop at the guard on the way in and never
+        // walk the rows at all, which is where the counts these patches carry
+        // would be followed off the end of the table.
+        for (int d = -2; d <= MM::numDestinations() + 1; ++d)
+        {
+            const bool claimed = patch.anyRouteTo (d);
+
+            if (claimed && (d < 0 || d >= MM::numDestinations()))
+            {
+                fail ("destination " + std::to_string (d)
+                      + ", which does not exist, was claimed as having a routing");
+                return;
+            }
+        }
     }
 
     // Short arrays, which is what a caller would hand over if the tables grew
@@ -646,6 +689,17 @@ void nothingInAPatchCanBreakIt()
 
         MM::evaluate (patch, nullptr, 0, nullptr, 0);   // must simply return
         MM::evaluate (patch, sums.data(), (int) sums.size(), nullptr, 0);
+
+        // And a caller that says it has sources and hands over nothing, which
+        // is what the null check is there for and the only thing that can
+        // reach it: with a count of nothing every row is already refused by
+        // the bound on its own source, so the check reads as dead code until
+        // the count and the pointer disagree.
+        MM::evaluate (patch, nullptr, MM::numSources(), sums.data(), (int) sums.size());
+
+        for (float s : sums)
+            if (s != 0.0f)
+                fail ("a caller that promised sources and gave none moved a destination");
     }
 }
 
@@ -712,6 +766,561 @@ void aWholePatchMeansWhatItReads()
                 "the cutoff did not notice the wheel");
 }
 
+//==============================================================================
+/** `anyRouteTo` and `evaluate` have to agree about which rows are live.
+
+    This is the one function here whose caller cannot tolerate a wrong answer
+    in either direction. `Synth/Voice.h` asks whether anything drives the
+    gate, and opens the gate from the amplitude envelope when nothing does, so
+    that an instrument nobody has patched still makes a sound. Answer false
+    when something is wired and two things fight over the gate. Answer true
+    when nothing live is wired and the envelope is taken away with nothing put
+    in its place: the gate is in series with everything the voice produces, so
+    the note does not come back quieter, it does not come back at all.
+
+    So the property is not "does it find a row". It is that the two functions
+    draw the line between a live row and a dead one in the same place, for
+    every patch either of them could be handed. Asking the sum cannot answer
+    it, which is the whole reason the function exists: a sum of zero is what a
+    live row sitting at zero depth produces and also what no row at all
+    produces.
+*/
+void aSwitchedOffRowIsNotARouting()
+{
+    std::printf ("what counts as a routing\n");
+
+    const int env1 = MM::sourceFromId ("env1");
+    const int gate = MM::destinationFromId ("gateopen");
+    const int cutoff = MM::destinationFromId ("cutoff");
+
+    auto values = noSources();
+    values[(std::size_t) env1] = 1.0f;
+
+    // A wired, switched on row is a routing.
+    {
+        MM::Patch patch;
+        patch.add (env1, gate, 1.0f);
+
+        if (! patch.anyRouteTo (gate))
+            fail ("a wired row pointed at the gate did not count as a routing");
+
+        if (patch.anyRouteTo (cutoff))
+            fail ("a row pointed at the gate counted as a routing to the cutoff");
+    }
+
+    // The same row switched off is not. This is the row's own on/off control,
+    // which is a saved parameter a host can automate, so it is a thing that
+    // moves while somebody is playing.
+    {
+        MM::Patch patch;
+        MM::Route off;
+        off.source = env1;
+        off.destination = gate;
+        off.depth = 1.0f;
+        off.enabled = false;
+        patch.add (off);
+
+        if (patch.anyRouteTo (gate))
+            fail ("a switched off row still counted as a routing, so the voice "
+                  "would take the amplitude envelope off the gate and put a "
+                  "sum of nothing in its place");
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, values.data(), (int) values.size(),
+                      sums.data(), (int) sums.size());
+
+        expectNear (sums[(std::size_t) gate], 0.0, 0.0,
+                    "a switched off row contributing to the sum");
+    }
+
+    // A row with one end picked and the other still empty is what the editor
+    // holds while somebody is halfway through wiring it up, and it drives
+    // nothing.
+    {
+        MM::Patch patch;
+        MM::Route half;
+        half.source = -1;
+        half.destination = gate;
+        half.depth = 1.0f;
+        patch.add (half);
+
+        if (patch.anyRouteTo (gate))
+            fail ("a row with no source counted as a routing");
+    }
+
+    // A row sitting above the count is a row the engine never looks at,
+    // because the count is one past the last wired row and nothing below it
+    // is read. It must not count as a routing either.
+    {
+        MM::Patch patch;
+        patch.add (env1, cutoff, 0.5f);
+
+        // Written at the first row past the count, not somewhere comfortably
+        // beyond it. A row twenty rows up is out of reach of a walk that goes
+        // one row too far, so it would pin nothing: the same lesson as the
+        // index draw below, in the block that exists for this bound.
+        patch.routes[patch.count].source = env1;
+        patch.routes[patch.count].destination = gate;
+        patch.routes[patch.count].depth = 1.0f;
+
+        if (patch.anyRouteTo (gate))
+            fail ("a row above the count counted as a routing");
+
+        if (! patch.anyRouteTo (cutoff))
+            fail ("a row below the count stopped counting as a routing");
+    }
+
+    // And a count claiming more rows than the array holds must be read as the
+    // array's size, the way `evaluate` reads it. This runs on the audio
+    // thread, where reading past the end of the table is a crash rather than
+    // a wrong note, and the sanitizers are what catch it.
+    {
+        MM::Patch lying;
+        lying.add (env1, gate, 1.0f);
+        lying.count = MM::maxRoutes * 10;
+
+        if (! lying.anyRouteTo (gate))
+            fail ("a patch claiming too many rows lost a routing it really had");
+
+        lying.count = -500;
+
+        if (lying.anyRouteTo (gate))
+            fail ("a patch claiming a negative number of rows found one anyway");
+    }
+
+    // A row pointing at a source that is not there drives nothing either,
+    // and has to be read the same way at both ends. `evaluate` skips it
+    // because it cannot read a source value for it; this has to agree, or a
+    // project saved by a later version comes back with its gate held shut by
+    // a row whose source this version has never heard of.
+    //
+    // Tried on the bound as well as past it. Fifty past the end is the easy
+    // case and the first index past the end is the only one an off by one
+    // admits, so a check that only tries the easy one leaves the guard it is
+    // aimed at free to be wrong by one.
+    for (int source : { MM::numSources(), MM::numSources() + 1, MM::numSources() + 50 })
+    {
+        MM::Patch patch;
+        patch.add (source, gate, 1.0f);
+
+        if (patch.anyRouteTo (gate))
+            fail ("a row whose source is " + std::to_string (source)
+                  + ", which does not exist, counted as a routing");
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, values.data(), (int) values.size(),
+                      sums.data(), (int) sums.size());
+
+        expectNear (sums[(std::size_t) gate], 0.0, 0.0,
+                    "a row whose source does not exist contributing to the sum");
+    }
+
+    // Nothing is a routing to a destination that does not exist.
+    for (int d : { -1, -2000, MM::numDestinations(), MM::numDestinations() + 1,
+                   MM::numDestinations() + 2000 })
+    {
+        MM::Patch patch;
+        patch.add (env1, gate, 1.0f);
+
+        if (patch.anyRouteTo (d))
+            fail ("destination " + std::to_string (d) + " counted as having a routing");
+    }
+
+    //==========================================================================
+    // The agreement itself, over generated patches.
+    //
+    // Every source is held at 0.8, which is the value that makes all four
+    // shapes non-zero for both polarities: as is and inverted give 0.8,
+    // a bipolar source folded up gives 0.9, a unipolar source stretched out
+    // gives 0.6. So a live row always moves its destination off zero, and a
+    // destination that did not move had no live row pointed at it. Pick the
+    // wrong constant here, 0.5 for instance, and a unipolar source stretched
+    // out lands exactly on zero and the check quietly stops meaning anything.
+    std::mt19937 rng (20261124);
+    std::uniform_int_distribution<int> aSource (-1, MM::numSources() - 1);
+    std::uniform_int_distribution<int> aDestination (-1, MM::numDestinations() - 1);
+    std::uniform_int_distribution<int> aShape (0, 3);
+    std::uniform_int_distribution<int> aCoin (0, 1);
+    std::uniform_int_distribution<int> aRowCount (0, MM::maxRoutes);
+    std::uniform_real_distribution<float> aDepth (0.1f, 1.0f);
+
+    int liveRows = 0;
+    int deadRows = 0;
+
+    for (int trial = 0; trial < 4000; ++trial)
+    {
+        MM::Patch patch;
+
+        // At most one row per destination, so a destination that moved can
+        // only have moved through the row pointed at it. Two rows that
+        // happened to cancel would make a live destination read as a dead
+        // one and the agreement check would be measuring nothing.
+        std::vector<bool> taken ((std::size_t) MM::numDestinations(), false);
+
+        const int rows = aRowCount (rng);
+
+        for (int i = 0; i < rows; ++i)
+        {
+            MM::Route r;
+            r.source = aSource (rng);
+            r.destination = aDestination (rng);
+
+            if (r.destination >= 0)
+            {
+                if (taken[(std::size_t) r.destination])
+                    continue;
+
+                taken[(std::size_t) r.destination] = true;
+            }
+
+            r.depth = aDepth (rng) * (aCoin (rng) == 0 ? 1.0f : -1.0f);
+            r.shape = (MM::Shape) aShape (rng);
+            r.via = aCoin (rng) == 0 ? -1 : aSource (rng);
+            r.enabled = aCoin (rng) == 0;
+
+            patch.add (r);
+
+            if (r.enabled && r.isWired())
+                ++liveRows;
+            else
+                ++deadRows;
+        }
+
+        auto held = noSources();
+
+        for (auto& v : held)
+            v = 0.8f;
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, held.data(), (int) held.size(),
+                      sums.data(), (int) sums.size());
+
+        for (int d = 0; d < MM::numDestinations(); ++d)
+        {
+            const bool claimed = patch.anyRouteTo (d);
+            const bool moved = sums[(std::size_t) d] != 0.0f;
+
+            if (claimed != moved)
+            {
+                fail (std::string ("destination ") + MM::destinationId (d)
+                      + (claimed ? " was claimed as driven and did not move"
+                                 : " moved without being claimed as driven"));
+                return;
+            }
+        }
+    }
+
+    std::printf ("    agreed over 4000 patches, %d live rows and %d dead ones\n",
+                 liveRows, deadRows);
+}
+
+//==============================================================================
+/** Every bound is tried at the first index past the end, deliberately.
+
+    This is here because the randomised loop below does not do it, and looks
+    as though it does. It draws indices from minus two thousand to two
+    thousand, and for a row to reach the source bound at all it needs its
+    source to land on exactly one value and its destination to land anywhere
+    inside the table at the same time: two independent draws of about one in
+    four thousand, which works out at 0.69 rows in a whole run of twenty
+    thousand trials. Measured rather than reasoned about: an off by one in
+    that bound survived the suite, and narrowing the draw to plus or minus
+    forty killed it immediately.
+
+    So a wider fuzz is not a stronger one when what it has to hit is a single
+    exact value. The range below is narrowed for that reason, and the exact
+    edges are tried here as well, because a generated case that usually
+    arrives is not the same thing as a case that always does. */
+void theBoundsAreTriedAtTheirEdge()
+{
+    std::printf ("the first index past the end of each table\n");
+
+    const int env1 = MM::sourceFromId ("env1");
+    const int amp = MM::destinationFromId ("amp");
+
+    // `sourceId` and `destinationId` at the last real index and the first
+    // index past it.
+    if (std::strlen (MM::sourceId (MM::numSources() - 1)) == 0)
+        fail ("the last source has no id");
+
+    if (std::strlen (MM::sourceId (MM::numSources())) != 0)
+        fail ("the first index past the end of the source table produced an id");
+
+    if (std::strlen (MM::destinationId (MM::numDestinations() - 1)) == 0)
+        fail ("the last destination has no id");
+
+    if (std::strlen (MM::destinationId (MM::numDestinations())) != 0)
+        fail ("the first index past the end of the destination table produced an id");
+
+    // `apply` at the first destination past the end. The range it would read
+    // there is whatever happens to be in memory, so this is a sanitizer
+    // check as much as a comparison.
+    expectNear (MM::apply (MM::numDestinations(), 5.0f, 1.0f, -100.0f, 100.0f), 5.0, 1e-6,
+                "apply at the first destination past the end");
+    expectNear (MM::apply (MM::numDestinations() - 1, 0.0f, 1.0f, -100.0f, 100.0f),
+                MM::destinations()[(std::size_t) (MM::numDestinations() - 1)].range, 1e-5,
+                "apply at the last real destination");
+
+    // `evaluate` with a row pointed at the first source past the end, and at
+    // the first destination past the end, with the other end valid so the
+    // row actually reaches the bound being tested.
+    {
+        MM::Patch patch;
+        patch.add (MM::numSources(), amp, 1.0f);
+        patch.add (env1, MM::numDestinations(), 1.0f);
+        patch.add (env1, amp, 0.5f);
+
+        auto values = noSources();
+
+        for (auto& v : values)
+            v = 1.0f;
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, values.data(), (int) values.size(),
+                      sums.data(), (int) sums.size());
+
+        expectNear (sums[(std::size_t) amp], 0.5, 1e-6,
+                    "the good row beside two rows that sit on a bound");
+    }
+
+    // The same for the via column, which has a bound of its own.
+    {
+        MM::Patch patch;
+        patch.add (env1, amp, 1.0f, MM::Shape::asIs, MM::numSources());
+
+        auto values = noSources();
+
+        for (auto& v : values)
+            v = 1.0f;
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, values.data(), (int) values.size(),
+                      sums.data(), (int) sums.size());
+
+        if (! std::isfinite (sums[(std::size_t) amp]))
+            fail ("a via on the first source past the end produced something "
+                  "that is not finite");
+    }
+
+    // And a caller whose arrays are shorter than the tables: a row pointed at
+    // the first index past the end of the array it was given, rather than
+    // past the end of the table.
+    //
+    // One end on its bound at a time, with the other end well inside. A row
+    // with both ends past the end proves nothing, because the tests run in
+    // order and the row is refused on the first of them: written that way,
+    // the destination bound hides the source bound completely, and an off by
+    // one in the source bound is a heap overflow that nothing notices.
+    {
+        MM::Patch onTheSource;
+        onTheSource.add (4, 0, 1.0f);
+
+        MM::Patch onTheDestination;
+        onTheDestination.add (0, 4, 1.0f);
+
+        std::vector<float> fourSources (4, 1.0f);
+
+        for (const MM::Patch* p : { &onTheSource, &onTheDestination })
+        {
+            std::vector<float> fourDestinations (4, 0.0f);
+
+            MM::evaluate (*p, fourSources.data(), (int) fourSources.size(),
+                          fourDestinations.data(), (int) fourDestinations.size());
+
+            for (float s : fourDestinations)
+                if (s != 0.0f)
+                    fail ("a row on the edge of a short array moved something");
+        }
+    }
+
+    // The other way round: a caller with more room than the tables have
+    // entries, which is what a caller built against a later version would
+    // hand over. Here the array bound is no protection and the table bound is
+    // the only thing refusing the row, so this is the one case that tests it.
+    {
+        MM::Patch patch;
+        patch.add (MM::numSources(), MM::destinationFromId ("amp"), 1.0f);
+        patch.add (MM::sourceFromId ("env1"), MM::destinationFromId ("amp"), 0.5f);
+
+        std::vector<float> roomySources ((std::size_t) MM::numSources() + 8, 1.0f);
+
+        auto sums = noDestinations();
+        MM::evaluate (patch, roomySources.data(), (int) roomySources.size(),
+                      sums.data(), (int) sums.size());
+
+        expectNear (sums[(std::size_t) MM::destinationFromId ("amp")], 0.5, 1e-6,
+                    "a source past the end of the table, in an array with room for it");
+    }
+}
+
+//==============================================================================
+/** The two columns of the tables that are claims rather than arithmetic.
+
+    Neither of these can be derived from anything, so they are pinned by name,
+    the way `PanOneParamsTest` pins the presets. That is a weaker kind of
+    check and it is written down here as one: it does not prove the numbers
+    are the right numbers, it only makes changing one a deliberate act that
+    shows up in a diff rather than a silent edit that rescales every patch
+    anybody has saved.
+
+    The two it protects are worth the words:
+
+    A source's polarity is a fact about the module behind it, and it decides
+    what the shapes do. Declare an envelope bipolar and every routing from it
+    asking to be bipolar stops stretching, so the patch's movement halves,
+    and the envelope itself still looks and sounds like an envelope.
+
+    A destination's range is what a depth of one is worth. Halve the cutoff's
+    and every saved patch's filter sweep halves with it. Nothing in the file
+    can notice, because everything else here reads the range out of the same
+    table: the existing check on `apply` compares against the number it is
+    testing, which is why halving it survived the whole suite. */
+void theTablesSayWhatTheyMean()
+{
+    std::printf ("the declared polarities and ranges\n");
+
+    const auto uni = MM::Polarity::unipolar;
+    const auto bi  = MM::Polarity::bipolar;
+
+    // Unipolar is anything that rests at nothing and goes up: an envelope, a
+    // slope, a pedal, a position somebody set. Bipolar is anything with a
+    // middle: a wave about a centre, a distance from middle C, a bend, a
+    // draw either side of zero.
+    const struct { const char* id; MM::Polarity polarity; } expectedPolarity[]
+    {
+        { "env1", uni }, { "env2", uni }, { "env3", uni }, { "env4", uni },
+        { "lfo1", bi },  { "lfo2", bi },  { "lfo3", bi },  { "lfo4", bi },
+        { "slope1", uni }, { "slope2", uni },
+        { "velocity", uni },
+        { "keytrack", bi },
+        { "modwheel", uni },
+        { "pressure", uni },
+        { "bend", bi },
+        { "random", bi },
+        { "unison", bi },
+        { "gate", uni },
+        { "macro1", uni }, { "macro2", uni }, { "macro3", uni }, { "macro4", uni },
+    };
+
+    const int expectedSources = (int) (sizeof (expectedPolarity) / sizeof (expectedPolarity[0]));
+
+    if (expectedSources != MM::numSources())
+        fail ("the source table has " + std::to_string (MM::numSources())
+              + " entries and this check names " + std::to_string (expectedSources)
+              + ", so a source has been added or removed without its polarity "
+                "being stated here");
+
+    for (const auto& e : expectedPolarity)
+    {
+        const int i = MM::sourceFromId (e.id);
+
+        if (i < 0)
+        {
+            fail (std::string ("the source ") + e.id + " has gone");
+            continue;
+        }
+
+        if (MM::sources()[(std::size_t) i].polarity != e.polarity)
+            fail (std::string ("the source ") + e.id + " is declared "
+                  + (e.polarity == uni ? "bipolar where it should be unipolar"
+                                       : "unipolar where it should be bipolar"));
+    }
+
+    const struct { const char* id; float range; } expectedRange[]
+    {
+        { "osc1pitch", 48.0f }, { "osc2pitch", 48.0f },
+        { "osc1pos", 1.0f },    { "osc2pos", 1.0f },
+        { "osc1level", 1.0f },  { "osc2level", 1.0f }, { "sublevel", 1.0f },
+        { "osc1phase", 1.0f },  { "osc2phase", 1.0f },
+        { "fm", 1.0f },
+        { "noiselevel", 1.0f }, { "noisecolour", 1.0f },
+        { "cutoff", 8.0f },
+        { "resonance", 8.0f },
+        { "drive", 8.0f },      { "drivebias", 1.0f },
+        { "fold", 8.0f },       { "foldsymmetry", 1.0f }, { "foldmix", 1.0f },
+        { "gateopen", 1.0f },   { "gaterange", 4.0f },
+        { "amp", 1.0f },        { "pan", 1.0f },
+        { "unisondetune", 1.0f }, { "unisonspread", 1.0f },
+        { "lfo1rate", 6.0f },   { "lfo2rate", 6.0f },
+        { "lfo3rate", 6.0f },   { "lfo4rate", 6.0f },
+        { "slope1rate", 6.0f }, { "slope2rate", 6.0f },
+        { "glide", 1.0f },
+    };
+
+    const int expectedDestinations = (int) (sizeof (expectedRange) / sizeof (expectedRange[0]));
+
+    if (expectedDestinations != MM::numDestinations())
+        fail ("the destination table has " + std::to_string (MM::numDestinations())
+              + " entries and this check names " + std::to_string (expectedDestinations)
+              + ", so a destination has been added or removed without its range "
+                "being stated here");
+
+    for (const auto& e : expectedRange)
+    {
+        const int i = MM::destinationFromId (e.id);
+
+        if (i < 0)
+        {
+            fail (std::string ("the destination ") + e.id + " has gone");
+            continue;
+        }
+
+        expectNear (MM::destinations()[(std::size_t) i].range, e.range, 1e-6,
+                    std::string ("the declared range of ") + e.id);
+    }
+
+    //==========================================================================
+    // Where an id carries a number, the name a person reads has to carry the
+    // same one.
+    //
+    // This is what catches the mistake the whole file is built to prevent,
+    // and it is the one shape of it a round trip through the id cannot see:
+    // swap the ids of `osc1pitch` and `osc2pitch` and every id still resolves
+    // to an index that resolves back to the same id, no id is duplicated or
+    // empty, and every patch anybody saved is now modulating the other
+    // oscillator. What does change is that the row reading "Osc 1 pitch"
+    // carries the id `osc2pitch`, so the menu and the project file have
+    // stopped agreeing, and that is checkable.
+    const auto firstDigit = [] (const char* s)
+    {
+        for (const char* p = s; *p != '\0'; ++p)
+            if (*p >= '0' && *p <= '9')
+                return *p;
+
+        return '\0';
+    };
+
+    int numbered = 0;
+
+    for (int i = 0; i < MM::numSources(); ++i)
+    {
+        const auto& s = MM::sources()[(std::size_t) i];
+        const char inId = firstDigit (s.id);
+
+        if (inId != '\0')
+            ++numbered;
+
+        if (inId != firstDigit (s.name))
+            fail (std::string ("the source id ") + s.id + " and the name "
+                  + s.name + " do not carry the same number");
+    }
+
+    for (int i = 0; i < MM::numDestinations(); ++i)
+    {
+        const auto& d = MM::destinations()[(std::size_t) i];
+        const char inId = firstDigit (d.id);
+
+        if (inId != '\0')
+            ++numbered;
+
+        if (inId != firstDigit (d.name))
+            fail (std::string ("the destination id ") + d.id + " and the name "
+                  + d.name + " do not carry the same number");
+    }
+
+    std::printf ("    %d sources and destinations carry a number in their id\n", numbered);
+}
+
 } // namespace
 
 int main()
@@ -719,6 +1328,7 @@ int main()
     std::printf ("Synth::ModMatrix\n\n");
 
     theTablesAreAContract();
+    theTablesSayWhatTheyMean();
     anUnknownIdIsNotAnIndex();
     theShapesAreWhatTheySay();
     foldingDoesNotDoubleTheRate();
@@ -727,7 +1337,9 @@ int main()
     theSumsAreWrittenNotAccumulated();
     aViaScalesAndNeverInverts();
     rowsThatCannotBeResolvedAreDropped();
+    aSwitchedOffRowIsNotARouting();
     theTableFillsAndThenRefuses();
+    theBoundsAreTriedAtTheirEdge();
     applyingUsesTheDestinationsRange();
     aWholePatchMeansWhatItReads();
     nothingInAPatchCanBreakIt();

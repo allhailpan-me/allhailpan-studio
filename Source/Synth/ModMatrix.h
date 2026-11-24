@@ -403,15 +403,49 @@ struct Patch
         what no route at all produces, and the difference between them is the
         difference between a gate held shut on purpose and a gate nobody has
         connected.
+
+        It therefore has to draw the line between a live row and a dead one in
+        exactly the same place `evaluate` draws it, and the word "drives" is
+        what says where that is: a row whose own on/off control is off drives
+        nothing, and neither does a row pointing at something that is not
+        there. Answering yes for one of those is worse than answering no,
+        because it takes the default away and puts a sum of nothing in its
+        place. On the gate that is not a quieter note, it is silence: the gate
+        is in series with everything the voice produces.
     */
     bool anyRouteTo (int destination) const noexcept
     {
-        if (destination < 0)
+        if (destination < 0 || destination >= (int) destinations().size())
             return false;
 
+        const int numSourcesAvailable = (int) sources().size();
+
         for (int i = 0; i < count && i < maxRoutes; ++i)
-            if (routes[i].destination == destination && routes[i].isWired())
+        {
+            const Route& route = routes[i];
+
+            // `evaluate`'s tests, in `evaluate`'s order, as far as they can be
+            // applied here. Worth being exact about how far that is, because
+            // the agreement is the point and it does not come from this
+            // function alone: `evaluate` bounds a row's source against both
+            // the table and the length of the array its caller handed over,
+            // and bounds the destination against that array's length too,
+            // while this has no arrays and can only reach the tables. So the
+            // two agree for as long as the caller's arrays cover the tables,
+            // which is a property of the caller: `Synth/Voice.h` keeps room
+            // for sixty four of each and `VoiceTest` asserts that both tables
+            // fit in it. Grow a table past that room and this would call a
+            // row live that `evaluate` never reaches, which on the gate is
+            // the silence this function was fixed for.
+            if (! route.enabled || ! route.isWired())
+                continue;
+
+            if (route.source >= numSourcesAvailable)
+                continue;
+
+            if (route.destination == destination)
                 return true;
+        }
 
         return false;
     }
