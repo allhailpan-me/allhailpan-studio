@@ -1800,6 +1800,51 @@ void theGateDefaultYields()
 
     if (! (loud > 0.01))
         fail ("a routing holding the gate open did not: " + show (loud));
+
+    // And a row that is switched off has to put the default back.
+    //
+    // A row's on/off is a saved parameter a host can automate, so this is a
+    // thing that moves while somebody is playing, and the gate is the one
+    // destination where getting it wrong is not a wrong amount but no sound
+    // at all: the default is taken away and a sum of nothing is put in its
+    // place, with the gate in series with everything the voice produces. It
+    // shipped that way. Switching off a row pointed at the gate silenced the
+    // patch outright, and the only thing on screen to explain it was a row
+    // the person had just turned off.
+    //
+    // Checked by rendering the same patch with and without the switched off
+    // row and requiring the two to be identical rather than merely similar.
+    // A row that drives nothing has nothing to contribute, so anything other
+    // than an exact match means it contributed something.
+    auto switchedOff = plainPatch();
+    Synth::ModMatrix::Route off;
+    off.source = env4;
+    off.destination = gateOpen;
+    off.depth = 1.0f;
+    off.enabled = false;
+    switchedOff.matrix.add (off);
+    switchedOff.envelopes[3] = { 0.001, 0.001, 0.0, 0.001 };
+
+    const auto withTheRowOff = play (switchedOff, 45, (int) (rate * 0.2));
+    const auto withNoRowAtAll = play (unpatched, 45, (int) (rate * 0.2));
+
+    double worst = 0.0;
+
+    for (std::size_t i = 0; i < withTheRowOff.size() && i < withNoRowAtAll.size(); ++i)
+        worst = std::max (worst, std::abs (withTheRowOff[i] - withNoRowAtAll[i]));
+
+    const double offRms = rmsOf (withTheRowOff);
+
+    std::printf ("    a switched off gate row: rms %s, worst sample difference %s\n",
+                 show (offRms).c_str(), show (worst).c_str());
+
+    if (! (offRms > 0.01))
+        fail ("switching off a row pointed at the gate silenced the voice: rms "
+              + show (offRms));
+
+    if (worst != 0.0)
+        fail ("a switched off row changed the sound: worst sample difference "
+              + show (worst));
 }
 
 /** Modulating one oscillator's phase with the other does not move the note. */
