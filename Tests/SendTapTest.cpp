@@ -399,7 +399,46 @@ void testTheNamesAndTheBehaviourComeFromOnePlace()
     check (! SendTap::carriesPan (SendTap::Tap::preFader),
            "no studio reads a post pan buffer for a pre fader send");
 
-    std::printf ("  \"%s\" and \"%s\", each agreeing with what it carries\n", post, pre);
+    // The short form is what a mixer row has space for and is therefore the
+    // string somebody actually reads while mixing, so it is held to the same
+    // standard as the long one rather than being left as two literals at the
+    // control. Required to be the opening of the long name, which is what stops
+    // the pair drifting into describing different taps: "pre" over a tap whose
+    // full name begins "post fader" is the lie this check exists to refuse.
+    for (auto tap : bothTaps)
+    {
+        const std::string full  = SendTap::displayName (tap);
+        const std::string brief = SendTap::shortName (tap);
+
+        check (! brief.empty(), "a tap's short name may not be empty");
+        check (full.rfind (brief, 0) == 0,
+               std::string ("the short name \"") + brief + "\" is not the opening of \""
+                 + full + "\"");
+    }
+
+    check (std::strcmp (SendTap::shortName (SendTap::Tap::postFader),
+                        SendTap::shortName (SendTap::Tap::preFader)) != 0,
+           "the two taps must not share a short name either");
+
+    // Which buffer the mixing loop copies out of. Pinned here because it is the
+    // one decision in the whole feature that could have been left as a ternary
+    // in code no test can compile: inverted, both buffers are the right strip
+    // at a plausible level and the only symptom is a send following a fader it
+    // was told not to follow.
+    check (SendTap::sourceIsPreFader (SendTap::Tap::preFader),
+           "a pre fader send has to be copied out of the pre fader buffer");
+    check (! SendTap::sourceIsPreFader (SendTap::Tap::postFader),
+           "a post fader send has to be copied out of the insert's own output");
+
+    for (auto tap : bothTaps)
+        check (SendTap::sourceIsPreFader (tap) != SendTap::carriesFader (tap),
+               "the buffer a tap reads and whether it carries the fader are the same question "
+               "asked from two ends, and they have disagreed");
+
+    std::printf ("  \"%s\" and \"%s\", each agreeing with what it carries,\n", post, pre);
+    std::printf ("    with \"%s\" and \"%s\" on the row and the buffer each one reads\n",
+                 SendTap::shortName (SendTap::Tap::postFader),
+                 SendTap::shortName (SendTap::Tap::preFader));
 }
 
 void testWhichTapCarriesTheStripCut()

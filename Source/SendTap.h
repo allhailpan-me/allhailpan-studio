@@ -1,7 +1,5 @@
 #pragma once
 
-#include <cmath>
-
 /**
     WHERE A SEND IS TAPPED OFF A STRIP
 
@@ -133,11 +131,26 @@ namespace SendTap
     constexpr int numTaps = 2;
 
     //==========================================================================
-    /** What to put on the control, from Reaper's names. */
+    /** The name on the control, from Reaper's names, and the short form the
+        mixer row has space for.
+
+        Both are here rather than written out at the control for the same
+        reason the predicates below are: a label that says one thing over a tap
+        that does another is worse than either mistake on its own, so the words
+        a user reads and the behaviour they describe come out of one file and
+        are checked against each other. `shortName` is required to be the
+        opening of `displayName`, which is what stops the two drifting into
+        describing different taps.
+    */
     inline const char* displayName (Tap tap) noexcept
     {
         return tap == Tap::preFader ? "pre fader (post FX)"
                                     : "post fader (post pan)";
+    }
+
+    inline const char* shortName (Tap tap) noexcept
+    {
+        return tap == Tap::preFader ? "pre" : "post";
     }
 
     //==========================================================================
@@ -191,6 +204,24 @@ namespace SendTap
     */
     inline bool carriesFader (Tap tap) noexcept  { return tap == Tap::postFader; }
     inline bool carriesPan   (Tap tap) noexcept  { return tap == Tap::postFader; }
+
+    /** Which of the two buffers a send at this tap is copied out of: the one
+        taken before the multiply, or the insert's own output after it.
+
+        A one line function because of what inverting it would do rather than
+        because it earns its own name. It is the quietest possible breakage of
+        this whole feature: both buffers hold the right strip, in time, at a
+        plausible level, so a swapped answer is a reverb that follows a fader it
+        was told not to follow and nothing else, with no error, no click and
+        nothing on a meter. Left as a ternary in the mixing loop it would have
+        had no oracle at all, since none of that loop can be compiled without
+        JUCE. Here it is one of the things the test pins.
+
+        It is the same question as `carriesFader`, read from the other end, and
+        it is written as its own function rather than as `! carriesFader` so
+        that the day a tap arrives whose buffer is neither of these two, this is
+        where that is dealt with. */
+    inline bool sourceIsPreFader (Tap tap) noexcept  { return tap == Tap::preFader; }
 
     /** Whether the strip's own cut, its mute and whatever somebody else's solo
         does to it, reaches a send taken at this tap.

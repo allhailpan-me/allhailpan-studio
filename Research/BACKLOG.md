@@ -217,9 +217,18 @@ true.
 
 ### What is being built
 
-- **`Source/SendTap.h`**, no JUCE: the two taps, their stable string ids for
-  the project file, what each one carries, the composition of a send's ramp
-  target, and the latency statement above.
+- **`Source/SendTap.h`**, no JUCE: the two taps, the stored number for each,
+  both of their names, which buffer each one is copied out of, what each one
+  carries, the composition of a send's ramp target, and the latency statement
+  above.
+
+  A stored integer rather than a string id, which is the opposite of what this
+  entry said while it was being planned and is worth correcting here rather
+  than quietly. The reason is in the header: the mixer settings saved in the
+  same element already use a small integer, and the protection string ids buy
+  in `Synth/ModMatrix.h` comes from the mapping being explicit rather than from
+  it being a string, so an explicit switch gives the same guarantee. A pre FX
+  tap takes 2 and the two existing numbers do not move, which the test pins.
 - **`SoloGraph.h`**: `Settings::muteAffectsPreFaderSends` and a second gain per
   insert, `State::preFaderSendGain`, which is exactly the figure the header's
   own comment said a pre fader send would need. The reachability matrix does
@@ -234,8 +243,12 @@ true.
   one block. The tap change fades from zero like a destination change.
 - **`ProjectIO.cpp`**: the tap saved by id and the mute point saved, reset and
   restored.
-- **`MixerComponent.h`**: the choice on the send's own menu, named "Post fader
-  (post pan)" and "Pre fader (post FX)" after Reaper.
+- **`MixerComponent.h`**: a two state button on the send's own row, because a
+  mixer row has space for "pre" or "post" and not for a menu. Reaper's full
+  names are in the tooltip, and both strings come out of `SendTap.h` so that
+  the words somebody reads and the behaviour they describe cannot drift apart.
+  The project setting goes on the strip's context menu beside the pan law,
+  which is the other setting there that belongs to the whole project.
 
 ### What is deliberately not built
 

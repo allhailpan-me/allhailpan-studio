@@ -177,7 +177,16 @@
     Ardour does the same thing, and for the same structural reason: its gain
     is applied per output point, so a signal through a send meets
     `mute_gain_at` twice as well. So this is modelled rather than chosen, and
-    the test measures it rather than leaving it to be discovered. Fixing it
+    the test measures it rather than leaving it to be discovered.
+
+    A pre fader send meets it twice as well while `muteAffectsPreFaderSends` is
+    on, which is the default, so the square above is what the whole mixer does
+    and the test asserts that both taps agree about it. With the setting off a
+    pre fader send is the one path in the mixer that meets the cut exactly once,
+    because nothing is applied at the source and only the bus's own cut is left.
+    That is arguably the better answer rather than an oversight, and it is said
+    here because it is the one place in this file where the two taps differ in
+    their arithmetic rather than only in what they are copied from. Fixing it
     would mean a second figure per insert, one for its own output and one for
     what passes through it, which is a real feature and not a tidy up.
 
@@ -334,14 +343,13 @@ namespace SoloGraph
             set returns `GAIN_COEFF_UNITY` however loudly something else is
             soloed.
 
-            Insert 0 gets a figure like every other insert rather than a
-            carve out, so a muted master comes out at zero here as well as in
-            `gain`. Nothing reads it there, because the master has no send for
-            it to be applied to, and that is why it is left as the general
-            answer instead of being special cased: a carve out would be a
-            second rule to keep in step for a number nobody asks for. Said
-            plainly rather than left as "unity like everything else", which is
-            what this comment used to claim and is not what the code does. */
+            Insert 0 gets a figure like every other insert rather than a carve
+            out, so a muted master comes out at zero here as well as in `gain`.
+            The engine does read it there, in `latchGainRamps`, which walks
+            every insert including the master; it is harmless because the
+            master has no send for the figure to reach. Left as the general
+            answer rather than special cased, because a carve out would be a
+            second rule to keep in step for a number nothing acts on. */
         float preFaderSendGain = 1.0f;
 
         /** Audible because of somebody else's solo rather than its own: rules

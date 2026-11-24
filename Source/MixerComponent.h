@@ -85,11 +85,6 @@ public:
             // the parenthesis is the half worth reading once.
             auto* tap = sendTap.add (new juce::TextButton());
             tap->setWantsKeyboardFocus (false);
-            tap->setTooltip ("Where this send is taken from the strip. Post fader follows "
-                             "the fader, the pan and the mute, which is what a reverb that "
-                             "belongs to the part wants. Pre fader is taken after the "
-                             "effects and before all three, so its level stays where you "
-                             "put it however the fader afterwards moves.");
             tap->onClick = [this, k] { toggleSendTap (k); };
             addAndMakeVisible (tap);
         }
@@ -278,9 +273,32 @@ public:
 
             const auto tap = engine.getSendTap (selected, k);
 
-            // The short word on the button and the full name on the tooltip, so
-            // the row stays readable and the meaning is one hover away.
-            sendTap[k]->setButtonText (tap == SendTap::Tap::preFader ? "pre" : "post");
+            // The short word on the button and the full name in the tooltip,
+            // both out of SendTap.h, so that the words somebody reads and the
+            // behaviour they describe come from one place.
+            sendTap[k]->setButtonText (SendTap::shortName (tap));
+
+            // Written here rather than once at construction because the last
+            // sentence of it depends on a setting that can change while the
+            // mixer is open. The first version of this tooltip said a pre fader
+            // send is taken before the fader, the pan "and the mute", which is
+            // true of Ardour's default and false of the one this studio ships:
+            // mute and solo reach the pre fader tap unless somebody turns that
+            // off on the strip menu. A control whose own tooltip describes a
+            // configuration it is not in is worse than one with no tooltip.
+            sendTap[k]->setTooltip (
+                juce::String ("This send is taken ") + SendTap::displayName (tap)
+                + ". Post fader follows the fader and the pan, which is what a reverb that "
+                  "belongs to the part wants. Pre fader is taken after this insert's effects "
+                  "and before the fader and the pan, so its level stays where you put it "
+                  "however the fader afterwards moves."
+                + (engine.getMuteAffectsPreFaderSends()
+                     ? " A mute, or soloing something else, silences either kind: that is the "
+                       "project setting on a strip's own menu, and it is on."
+                     : " A mute, or soloing something else, silences a post fader send and "
+                       "leaves a pre fader one feeding its bus at full level: that is the "
+                       "project setting on a strip's own menu, and it is off."));
+
             sendTap[k]->setEnabled (valid);
         }
 
@@ -311,7 +329,22 @@ public:
         const int to = id > 1 ? id - 1 : 0;
 
         engine.setSend (selected, k, to, (float) sendAmount[k]->getValue());
-        sendAmount[k]->setEnabled (to > selected);
+
+        // Both controls, not just the amount. Wiring a destination is what
+        // brings a send into existence, and it is also the moment somebody
+        // would reach for the tap: updating only the amount left the tap button
+        // greyed out on a send that was already audible, with no way out but
+        // selecting another strip and coming back. The reverse was live too, a
+        // tap button still clickable on a send just pointed at nothing.
+        //
+        // The two enablements rather than refreshSends, which is reached from
+        // here through a ComboBox's own onChange and would rebuild that
+        // ComboBox's items from inside its callback. Nothing else about the row
+        // can have changed: this function is what changed it.
+        const bool valid = to > selected;
+
+        sendAmount[k]->setEnabled (valid);
+        sendTap[k]->setEnabled (valid);
 
         if (onEdited)
             onEdited();

@@ -856,6 +856,24 @@ private:
         // rather than stepping between two different signals.
         std::array<SendTap::Tap, kNumSends> sendTapLatched {};
         std::array<SendTap::Tap, kNumSends> sendActiveTap {};
+
+        // The crossfade between the two taps, as a figure counting down from 1
+        // to 0 while it runs, so that zero initialised means "not fading" and
+        // a slot that has never been touched needs nothing done to it.
+        //
+        // It exists because a tap change is the one discontinuity in this
+        // mixer where both signals are available at once: processInsert leaves
+        // the pre fader copy beside the post fader buffer in the same block, so
+        // the two can be mixed rather than one being cut off and the other
+        // faded in from nothing. They are the same audio at two different
+        // gains, so a straight line between them is a gain move and nothing
+        // else, which is why no equal power curve belongs here.
+        //
+        // sendFadeFrom is the tap being left, and it is what keeps the pre
+        // fader copy being taken for the few milliseconds after a send has
+        // moved off it.
+        std::array<double, kNumSends>       sendTapFade {};
+        std::array<SendTap::Tap, kNumSends> sendFadeFrom {};
     };
     struct ChannelSlot
     {
