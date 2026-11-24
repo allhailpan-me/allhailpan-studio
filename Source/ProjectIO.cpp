@@ -102,7 +102,19 @@ namespace
     // is not a bar, and a MIDI export that tells the next studio the piece is
     // in 4/4. That is a project which looks subtly wrong and plays right,
     // which is harder to diagnose than one that refuses to open.
-    constexpr int formatVersion = 9;
+    // 10 adds the point each send is tapped at, and the project's mute point
+    // for the pre fader tap. A send with no tap attribute is post fader, which
+    // is what every version up to 9 did to every send, because there was no
+    // choice, so old projects open unchanged and mix identically.
+    //
+    // Bumped unconditionally, like every bump from 2 onward. An older loader
+    // would ignore the attribute without complaint, so every pre fader send
+    // would come back as a post fader one: a reverb that had been set to sit
+    // still would follow the fader again and die on a mute, and a mix balanced
+    // around that would be wrong everywhere the fader was not at the position
+    // it happened to be mixed at. It would open, play, and sound plausible,
+    // which is the shape of failure this file keeps refusing.
+    constexpr int formatVersion = 10;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -367,6 +379,14 @@ void ProjectIO::resetEngine (AudioEngine& engine)
     // the same session sound different depending on what was loaded before it.
     engine.setPanLaw (PanLaw::defaultLaw);
 
+    // The mute point goes with it, and for the same reason: it is a project
+    // setting, so a new project must start on the default rather than
+    // inheriting whichever answer the last session was mixed under. Left
+    // behind, soloing a vocal would or would not let a pre fader send through
+    // depending on what had been open before, which is the sort of difference
+    // nobody would think to blame on the previous project.
+    engine.setMuteAffectsPreFaderSends (true);
+
     // And the signature, for the same reason: the engine holds its own copy
     // for the click and the play head, so one left behind would click a new
     // project in the last one's meter. Both callers happen to set it from the
@@ -411,6 +431,14 @@ void ProjectIO::resetEngine (AudioEngine& engine)
         {
             ctl.sendTo[(size_t) k].store (0);
             ctl.sendLevel[(size_t) k].store (0.0f);
+
+            // The tap as well. CLAUDE.md names the missing reset as the one of
+            // the four that survives testing and then leaks between projects,
+            // and this is exactly the shape of it: a pre fader send set up in
+            // one session, left behind on a strip with no destination, and
+            // inherited by the next project the moment somebody points that
+            // send somewhere.
+            ctl.sendTap[(size_t) k].store (SendTap::defaultTap);
         }
         for (auto& b : ctl.bypass)
             b.store (false);
@@ -535,6 +563,11 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     // times below.
     mixerXml->setAttribute ("panLaw", PanLaw::lawToStored (engine.getPanLaw()));
 
+    // Ardour's mute point for the pre fader tap, and here for the same reason
+    // the law is: it is one answer for the whole project rather than one per
+    // strip.
+    mixerXml->setAttribute ("muteAffectsPreFaderSends", engine.getMuteAffectsPreFaderSends());
+
     for (int i = 0; i < kNumInserts; ++i)
     {
         auto& ctl = engine.insert (i);
@@ -579,6 +612,14 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
                 send->setAttribute ("index", k);
                 send->setAttribute ("to", ctl.sendTo[(size_t) k].load());
                 send->setAttribute ("level", (double) ctl.sendLevel[(size_t) k].load());
+
+                // Written always rather than only when it is not the default,
+                // because a send element is already only written for a send
+                // that has a destination, and an attribute that appears only
+                // sometimes is one more thing a reader has to know about. The
+                // absent case is still handled on load, which is what every
+                // project saved before this existed looks like.
+                send->setAttribute ("tap", SendTap::tapToStored (ctl.sendTap[(size_t) k].load()));
             }
 
         for (int k = 0; k < kNumFxSlots; ++k)
@@ -899,6 +940,14 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
         engine.setPanLaw (PanLaw::lawFromStored (
             mixerXml->getIntAttribute ("panLaw", PanLaw::lawToStored (PanLaw::defaultLaw))));
 
+        // Defaulting to the shipped answer rather than to Ardour's, so a
+        // project written before this existed opens mixing the way this
+        // version mixes. It cannot change how one of those sounds either way:
+        // every send in it is post fader, which this setting has nothing to say
+        // about.
+        engine.setMuteAffectsPreFaderSends (
+            mixerXml->getBoolAttribute ("muteAffectsPreFaderSends", true));
+
         for (auto* e : mixerXml->getChildWithTagNameIterator ("INSERT"))
         {
             const int i = e->getIntAttribute ("index", -1);
@@ -979,6 +1028,17 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
                 // compensation is recomputed.
                 engine.setSend (i, k, send->getIntAttribute ("to", 0),
                                 (float) send->getDoubleAttribute ("level", 0.0));
+
+                // The tap afterwards rather than as a fourth argument to
+                // setSend, because the two are not the same kind of change:
+                // setSend recomputes the compensation and the solo closure, and
+                // a tap changes neither. An absent attribute, which is every
+                // project written before this existed, reads as post fader,
+                // which is what those projects were doing. SendTap::tapFromStored
+                // is also what refuses a tap from a newer file that this
+                // version cannot model.
+                engine.setSendTap (i, k, SendTap::tapFromStored (
+                    send->getIntAttribute ("tap", SendTap::tapToStored (SendTap::defaultTap))));
             }
 
             for (auto* fx : e->getChildWithTagNameIterator ("FX"))

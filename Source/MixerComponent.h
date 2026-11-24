@@ -3,7 +3,7 @@
 #include "AudioEngine.h"
 #include "AhpLookAndFeel.h"
 
-// FL-style mixer: the master on the left, the 16 inserts in a compact grid that
+// The mixer: the master on the left, the 16 inserts in a compact grid that
 // wraps instead of stretching across the screen, and the effect rack for the
 // selected insert on the right.
 class MixerComponent : public juce::Component
@@ -73,6 +73,20 @@ public:
             amount->setColour (juce::Slider::backgroundColourId, Ahp::panel3);
             amount->onValueChange = [this, k] { pushSend (k); };
             addAndMakeVisible (amount);
+
+            // Where this send is tapped off the strip. Two taps, so a button
+            // that says which one it is on rather than a menu to go and look
+            // in: a reverb set to sit still while a fader moves is the kind of
+            // thing somebody needs to be able to see at a glance while mixing,
+            // not find out by opening something.
+            //
+            // Reaper's full names are on the tooltip rather than on the button,
+            // because "post fader (post pan)" does not fit in a mixer row and
+            // the parenthesis is the half worth reading once.
+            auto* tap = sendTap.add (new juce::TextButton());
+            tap->setWantsKeyboardFocus (false);
+            tap->onClick = [this, k] { toggleSendTap (k); };
+            addAndMakeVisible (tap);
         }
 
         routing.setColour (juce::Label::textColourId, Ahp::muted);
@@ -256,11 +270,59 @@ public:
 
             sendAmount[k]->setValue (ctl.sendLevel[(size_t) k].load(), juce::dontSendNotification);
             sendAmount[k]->setEnabled (valid);
+
+            const auto tap = engine.getSendTap (selected, k);
+
+            // The short word on the button and the full name in the tooltip,
+            // both out of SendTap.h, so that the words somebody reads and the
+            // behaviour they describe come from one place.
+            sendTap[k]->setButtonText (SendTap::shortName (tap));
+
+            // Written here rather than once at construction because the last
+            // sentence of it depends on a setting that can change while the
+            // mixer is open. The first version of this tooltip said a pre fader
+            // send is taken before the fader, the pan "and the mute", which is
+            // true of Ardour's default and false of the one this studio ships:
+            // mute and solo reach the pre fader tap unless somebody turns that
+            // off on the strip menu. A control whose own tooltip describes a
+            // configuration it is not in is worse than one with no tooltip.
+            sendTap[k]->setTooltip (
+                juce::String ("This send is taken ") + SendTap::displayName (tap)
+                + ". Post fader follows the fader and the pan, which is what a reverb that "
+                  "belongs to the part wants. Pre fader is taken after this insert's effects "
+                  "and before the fader and the pan, so its level stays where you put it "
+                  "however the fader afterwards moves."
+                + (engine.getMuteAffectsPreFaderSends()
+                     ? " A mute silences either kind, and so does soloing something else, "
+                       "except that a partial solo cut set in Preferences reaches a post fader "
+                       "send twice and a pre fader one once: that is the project setting on a "
+                       "strip's own menu, and it is on."
+                     : " A mute, or soloing something else, silences a post fader send and "
+                       "leaves a pre fader one feeding its bus at full level: that is the "
+                       "project setting on a strip's own menu, and it is off."));
+
+            sendTap[k]->setEnabled (valid);
         }
 
         sendsTitle.setText (selected == 0 ? "sends   (the master has nowhere to send to)"
                                           : "sends",
                             juce::dontSendNotification);
+    }
+
+    void toggleSendTap (int k)
+    {
+        if (! juce::isPositiveAndBelow (k, kNumSends))
+            return;
+
+        const auto now = engine.getSendTap (selected, k);
+
+        engine.setSendTap (selected, k,
+                           now == SendTap::Tap::preFader ? SendTap::Tap::postFader
+                                                         : SendTap::Tap::preFader);
+        refreshSends();
+
+        if (onEdited)
+            onEdited();
     }
 
     void pushSend (int k)
@@ -269,7 +331,30 @@ public:
         const int to = id > 1 ? id - 1 : 0;
 
         engine.setSend (selected, k, to, (float) sendAmount[k]->getValue());
-        sendAmount[k]->setEnabled (to > selected);
+
+        // Both controls, not just the amount. Wiring a destination is what
+        // brings a send into existence, and it is also the moment somebody
+        // would reach for the tap: updating only the amount left the tap button
+        // greyed out on a send that was already audible, with no way out but
+        // selecting another strip and coming back. The reverse was live too, a
+        // tap button still clickable on a send just pointed at nothing.
+        //
+        // The two enablements rather than refreshSends, because nothing else
+        // about the row can have changed: this function is what changed it.
+        // Not for any reentrancy reason, which an earlier version of this
+        // comment claimed and which is not true of JUCE 9: ComboBox::sendChange
+        // goes through triggerAsyncUpdate, so onChange runs off the message
+        // queue rather than inside setSelectedId, and refreshSends passes
+        // dontSendNotification to both calls anyway.
+        //
+        // The same test refreshSends makes, rather than a shorter one that
+        // happens to agree because the list only ever offers legal
+        // destinations: two opinions about what a valid send is would be one
+        // more thing to keep in step.
+        const bool valid = to > selected && to < kNumInserts;
+
+        sendAmount[k]->setEnabled (valid);
+        sendTap[k]->setEnabled (valid);
 
         if (onEdited)
             onEdited();
@@ -309,6 +394,8 @@ public:
             auto row = rack.removeFromTop (26);
             sendDest[k]->setBounds (row.removeFromLeft (118).reduced (0, 2));
             row.removeFromLeft (6);
+            sendTap[k]->setBounds (row.removeFromRight (44).reduced (0, 3));
+            row.removeFromRight (6);
             sendAmount[k]->setBounds (row);
             rack.removeFromTop (4);
         }
@@ -885,6 +972,18 @@ private:
 
             m.addSubMenu ("Pan law, for the whole project", laws);
 
+            // Beside the pan law because it is the same kind of setting: one
+            // answer for the project rather than one per strip, and said so on
+            // the item.
+            //
+            // Ardour's name for it, and Ardour's exact meaning: the one flag
+            // governs a mute and somebody else's solo together, because in
+            // Ardour both ask the same mute point. Its default is the opposite
+            // of Ardour's, and the reason is at
+            // SoloGraph::Settings::muteAffectsPreFaderSends.
+            m.addItem (40, "Mute and solo reach pre fader sends, for the whole project",
+                       true, owner.engine.getMuteAffectsPreFaderSends());
+
             // Image-Line's manual calls this Auto-map: "This will
             // automatically map each input on your audio device to a unique
             // Mixer Track Input, starting on the Mixer track where the
@@ -928,6 +1027,18 @@ private:
                 if ((result == 20 || result == 21) && safe->index > 0)
                 {
                     ctl.panMode.store (result == 21 ? PanLaw::Mode::pan : PanLaw::Mode::balance);
+                }
+                else if (result == 40)
+                {
+                    // Every strip's own quiet reason can change, since this
+                    // decides what a solo anywhere does to every pre fader
+                    // send, so the whole mixer is refreshed rather than this
+                    // strip.
+                    safe->owner.engine.setMuteAffectsPreFaderSends (
+                        ! safe->owner.engine.getMuteAffectsPreFaderSends());
+                    safe->owner.refresh();
+                    safe->owner.edited();
+                    return;
                 }
                 else if (result >= 30 && result < 30 + PanLaw::numLaws)
                 {
@@ -1004,6 +1115,7 @@ private:
     juce::OwnedArray<juce::TextButton> slots, powers;
     juce::OwnedArray<juce::ComboBox>   sendDest;
     juce::OwnedArray<juce::Slider>     sendAmount;
+    juce::OwnedArray<juce::TextButton> sendTap;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MixerComponent)
 };

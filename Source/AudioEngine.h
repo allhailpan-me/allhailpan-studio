@@ -16,6 +16,7 @@
 #include "FaderLaw.h"
 #include "GainRamp.h"
 #include "SoloGraph.h"
+#include "SendTap.h"
 #include "TransportSilence.h"
 #include "HoldPedal.h"
 #include "Tuner.h"
@@ -269,7 +270,23 @@ public:
         // feedback loops and lets one pass over the inserts resolve everything.
         std::array<std::atomic<int>,   kNumSends> sendTo {};
         std::array<std::atomic<float>, kNumSends> sendLevel {};
+
+        // Where each send's copy is taken from: after the fader, the pan and
+        // the cut, or after the effect slots and before all three. What the two
+        // taps are, which studio's names they carry and why a tap point must
+        // never reach the compensation graph are all in SendTap.h.
+        //
+        // Value initialised, which lands on SendTap::Tap{} and therefore on
+        // zero. That has to be the default tap and not merely the first
+        // enumerator, because it is also what an .ahp written before this
+        // existed means by saying nothing, so the static_assert below is what
+        // keeps those three facts from drifting apart.
+        std::array<std::atomic<SendTap::Tap>, kNumSends> sendTap {};
     };
+
+    static_assert (SendTap::Tap{} == SendTap::defaultTap,
+                   "a value initialised sendTap must be the default tap: it is what an "
+                   "older project, a fresh insert and a cleared mixer all come out as");
     InsertControls& insert (int index) noexcept { return controls[(size_t) juce::jlimit (0, kNumInserts - 1, index)]; }
 
     /** How a panner turns a position into two gains.
@@ -366,6 +383,33 @@ public:
     /** Routes a portion of one insert into another. A send may only feed a
         higher numbered insert; anything else is treated as off. */
     void setSend (int insert, int sendIndex, int destination, float level);
+
+    /** Where a send's copy is taken from. See SendTap.h.
+
+        Unlike setSend this does **not** recompute the compensation graph, and
+        that is the finding rather than an omission. A post FX pre fader tap and
+        a post fader tap sit at the same point in the latency chain, because the
+        only thing between them is one gain multiply, so no figure moves.
+        Ardour reaches the same answer by accumulating from the send's real
+        position (Route::update_signal_latency), and SendTap.h has the
+        derivation and says which tap would break it. */
+    void setSendTap (int insert, int sendIndex, SendTap::Tap tap) noexcept;
+
+    SendTap::Tap getSendTap (int insert, int sendIndex) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (insert, kNumInserts)
+            || ! juce::isPositiveAndBelow (sendIndex, kNumSends))
+            return SendTap::defaultTap;
+
+        return controls[(size_t) insert].sendTap[(size_t) sendIndex].load();
+    }
+
+    /** Whether a mute, or somebody else's solo, reaches an insert's pre fader
+        sends. One setting for the project, and the reasoning for that and for
+        its default is at SoloGraph::Settings::muteAffectsPreFaderSends. */
+    void setMuteAffectsPreFaderSends (bool shouldAffect);
+
+    bool getMuteAffectsPreFaderSends() const noexcept { return muteAffectsPreFaderSends.load(); }
     juce::AudioPluginInstance* getFx (int insert, int slot) const noexcept;
 
     template <typename Fn> void forEachPlugin (Fn&& fn) const
@@ -781,6 +825,66 @@ private:
         // and stop at the other, which is the click the ramp exists to remove
         // appearing at a distance.
         std::array<int, kNumSends>            sendFlush {};
+
+        // The post FX, pre fader copy of this insert, taken in processInsert
+        // between the effect slots and the one multiply that applies the fader,
+        // the pan and the cut. One buffer rather than one per send, because
+        // every pre fader send on an insert is taken from the same point.
+        //
+        // Only filled when at least one of this insert's sends is asking for
+        // it, so an insert with no pre fader send pays nothing, and preFaderReady
+        // says whether it was: a send that finds it absent is treated exactly
+        // as one that finds no sendScratch, which is the case routeSends
+        // already reasons about.
+        juce::AudioBuffer<float> preFaderScratch;
+        bool                     preFaderReady = false;
+
+        // Audio thread only. Latched once per block in processInsert and read
+        // in routeSends, rather than both functions reading the atomic.
+        //
+        // That is not a cache. The two functions run at different points in the
+        // same block, so reading the atomic twice lets a click on the control
+        // land between them: processInsert would decide no pre fader copy was
+        // needed and routeSends would then go looking for one, and what it
+        // would find is whatever that buffer last held, which is this insert's
+        // audio from an earlier block. A few milliseconds of the right strip at
+        // the wrong time is not a sound anybody could diagnose. Latching is the
+        // same discipline the pan law already gets for the same reason.
+        //
+        // sendActiveTap is which tap this send is currently being taken at, and
+        // it has two jobs. It is what routeSends compares the latched tap
+        // against to notice a change at all, and it is what processInsert reads
+        // to keep the pre fader copy being taken for the one block in which
+        // routeSends has not yet noticed. The second of those is load bearing
+        // for the crossfade below: without it the block that starts a fade off
+        // the pre fader tap would have nothing to fade away from.
+        std::array<SendTap::Tap, kNumSends> sendTapLatched {};
+        std::array<SendTap::Tap, kNumSends> sendActiveTap {};
+
+        // The crossfade between the two taps, as a figure counting down from 1
+        // to 0 while it runs, so that zero initialised means "not fading" and
+        // a slot that has never been touched needs nothing done to it.
+        //
+        // It exists because a tap change is the one discontinuity in this mixer
+        // where both signals are available at once: processInsert leaves the pre
+        // fader copy beside the post fader buffer in the same block, so the two
+        // can be mixed rather than one being cut off and the other faded in
+        // from nothing.
+        //
+        // sendFadeFrom is the tap being left, and it is also what keeps the pre
+        // fader copy being taken for the few milliseconds after a send has
+        // moved off it.
+        //
+        // sendFadeGain is the gain the send was running at when it left, held
+        // for the length of the fade rather than tracked. That is what makes
+        // each side of the fade a resolved steady state and the answer a convex
+        // combination of the two, which is the whole reason the arithmetic is
+        // in SendTap::fadeSample where a test can see it: the arrangement that
+        // ramps the gain while the fade runs is not equivalent and puts a burst
+        // on the bus exactly where the right answer is silence.
+        std::array<double, kNumSends>       sendTapFade {};
+        std::array<double, kNumSends>       sendFadeGain {};
+        std::array<SendTap::Tap, kNumSends> sendFadeFrom {};
     };
     struct ChannelSlot
     {
@@ -950,6 +1054,17 @@ private:
         zero and zero here is silence. Set in the constructor. */
     std::array<std::atomic<float>, kNumInserts> soloGain;
 
+    /** Per insert: what a **pre fader** send's copy of it is multiplied by.
+
+        A second figure because a pre fader send is taken before the multiply
+        soloGain is applied in, so nothing has reached it yet. Either the same
+        number as soloGain or exactly unity, and which it is depends on one
+        setting: see SoloGraph::Settings::muteAffectsPreFaderSends.
+
+        Not default initialised, for the same reason as soloGain: zero is
+        silence. Set in the constructor. */
+    std::array<std::atomic<float>, kNumInserts> preFaderSendGain;
+
     /** Audio thread only: the four gains on each insert on their way to where
         they are going.
 
@@ -973,6 +1088,12 @@ private:
     std::atomic<bool>  anySoloed { false };
     std::atomic<float> soloMuteGain { 0.0f };
     std::atomic<bool>  soloOverridesMute { false };
+
+    // Ardour's mute point for the pre fader tap, with the opposite default and
+    // the reason written down at SoloGraph::Settings::muteAffectsPreFaderSends.
+    // Read only by updateSolo, which folds it into preFaderSendGain, so the
+    // audio thread never sees this flag itself.
+    std::atomic<bool>  muteAffectsPreFaderSends { true };
     std::atomic<bool>  exclusiveSolo { false };
 
     // Modulators follow the song while it plays, so a project sounds the
