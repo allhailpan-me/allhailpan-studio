@@ -255,6 +255,26 @@ true.
   The project setting goes on the strip's context menu beside the pan law,
   which is the other setting there that belongs to the whole project.
 
+### Outcome
+
+Merged as #90, squashed, with `tests`, `ubuntu-latest` and `windows-latest`
+green and macOS still building, which is the threshold the brief sets. Two
+audit rounds, four real faults, all fixed; the counts and the findings are in
+the pull request.
+
+**No release cut.** v0.8.0 was cut six days ago on 11-18 and `main` is a
+handful of commits past it, mostly hardening branches that strengthen tests
+over code already shipped. One feature six days after a release is not the
+pile the standing question above was about, and the lesson recorded there was
+about a reason that never stops being true rather than about releasing on
+every occasion.
+
+**One thing to flag for whoever reads this next.** `RELEASE_NOTES.md` is a
+file open pull request #77 also changes, so the write-up committed to `main`
+tonight may give #77 a conflict in it. It is an append under a heading in a
+file of prose, so it resolves by keeping both, and the alternative was
+skipping the step the brief asks for. Worth knowing rather than discovering.
+
 ### What is deliberately not built
 
 - **No pre FX tap.** See the table above. Its unlock is `LatencyGraph.h` free
