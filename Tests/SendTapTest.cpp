@@ -598,6 +598,158 @@ void testANumberItCannotReadIsSilence()
 
 } // namespace
 
+//==============================================================================
+// The crossfade between the two taps, and the fault it was written twice to fix.
+//
+// The first version of this in the engine mixed the two source buffers and then
+// applied one gain to the blend. That looks equivalent to mixing two resolved
+// signals and is not, because the two taps differ in their gain as well as in
+// their buffer: `levelTarget` folds the cut into the pre fader branch and not
+// the post fader one. So a tap change was two moves at once and the output was
+// their product, which is not monotone.
+//
+// The case it was worst in is the one the engine reaches by default. On a muted
+// strip the pre fader gain is zero and the post fader buffer is zero, so both
+// steady states are exactly silence, and an audit measured a 5 ms burst at
+// -12 dB of the strip's own level going onto the bus. Those are the numbers the
+// first three checks below exist to refuse, and the fourth is the general
+// statement they are instances of.
+void testTheFadeCannotOvershootEitherEndOfItself()
+{
+    std::printf ("\nThe crossfade between the two taps\n");
+
+    // The endpoints, exactly. Not to within a tolerance: the blocks either side
+    // of a fade take the steady path, so a join that was out by a rounding
+    // error would be a click of its own at each end.
+    check (SendTap::fadeSample (0.7, 0.5, -0.2, 0.25, 0.0) == 0.7 * 0.5,
+           "t of nothing has to give back the tap being left, exactly");
+    check (SendTap::fadeSample (0.7, 0.5, -0.2, 0.25, 1.0) == -0.2 * 0.25,
+           "t of one has to give back the tap being arrived at, exactly");
+
+    // The measured fault. A muted strip at the shipped default: the post fader
+    // buffer is silence at a send level of one, and the pre fader buffer is the
+    // strip's full signal at a gain of nothing. Both ends are silence, so every
+    // point between them has to be silence too.
+    {
+        int heard = 0;
+        double worst = 0.0;
+
+        for (int i = 0; i <= 1000; ++i)
+        {
+            const double t = (double) i / 1000.0;
+
+            // Both directions, because the burst was measured in both.
+            const double out = SendTap::fadeSample (0.0, 1.0, 0.9, 0.0, t);
+            const double back = SendTap::fadeSample (0.9, 0.0, 0.0, 1.0, t);
+
+            worst = std::max (worst, std::max (std::fabs (out), std::fabs (back)));
+
+            if (out != 0.0 || back != 0.0)
+                ++heard;
+        }
+
+        check (heard == 0, "a tap change on a muted strip must be silent at every point of the "
+                           "fade, and was audible at " + std::to_string (heard) + " of 1001, "
+                           "worst " + str (worst));
+    }
+
+    // A partial solo cut, where the two resolved signals are equal and the fade
+    // therefore has nothing to do. This is the case the product version
+    // overshot by more than 8 dB, because the buffer and the gain were both
+    // moving and in opposite directions.
+    {
+        const double cut = 0.1;          // about -20 dB
+        const double level = 0.8;
+        const double x = 0.6;            // the strip's own signal
+
+        int moved = 0;
+
+        for (int i = 0; i <= 1000; ++i)
+        {
+            const double t = (double) i / 1000.0;
+
+            // Post fader: the buffer already carries the cut, the gain is the
+            // level. Pre fader: the buffer is the raw signal, the gain is the
+            // level times the cut. Two ways of writing the same answer.
+            const double out = SendTap::fadeSample (x * cut, level, x, level * cut, t);
+
+            if (std::fabs (out - x * cut * level) > 1.0e-12)
+                ++moved;
+        }
+
+        check (moved == 0, std::to_string (moved) + " of 1001 points of a fade between two taps "
+                           "that resolve to the same signal were not that signal");
+    }
+
+    // The general statement, which is what the other three are instances of: a
+    // convex combination of two numbers lies between them, so the fade can
+    // never be louder than the louder of the two steady states it travels
+    // between. Randomised, including signs that differ, because a fade between
+    // a positive and a negative sample is where a blend that was not convex
+    // would hide.
+    {
+        std::mt19937 rng (20261124u);
+        std::uniform_real_distribution<double> sym (-1.0, 1.0);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        int over = 0, notMonotone = 0, jumped = 0;
+
+        for (int trial = 0; trial < 20000; ++trial)
+        {
+            const double fromSample = sym (rng);
+            const double toSample   = sym (rng);
+            const double fromGain   = unit (rng);
+            const double toGain     = unit (rng);
+
+            const double a = fromSample * fromGain;
+            const double b = toSample * toGain;
+            const double bound = std::max (std::fabs (a), std::fabs (b));
+
+            double previous = a;
+
+            for (int i = 0; i <= 64; ++i)
+            {
+                const double t = (double) i / 64.0;
+                const double out = SendTap::fadeSample (fromSample, fromGain,
+                                                        toSample, toGain, t);
+
+                // A tolerance only for the floating point of the multiply, not
+                // for any travel outside the pair.
+                if (std::fabs (out) > bound + 1.0e-12)
+                    ++over;
+
+                // Monotone between the two ends, which is the property the
+                // product version failed: its output rose above both ends and
+                // came back.
+                if (b >= a ? out < previous - 1.0e-12 : out > previous + 1.0e-12)
+                    ++notMonotone;
+
+                // And gradual, which is the property a fade exists for and the
+                // one the two checks above cannot see: a hard switch at the
+                // halfway point satisfies both of them and is exactly the
+                // click this is here to remove. No step of a fade in 64 may
+                // carry more than a small share of the whole distance.
+                if (i > 0 && std::fabs (out - previous) > std::fabs (b - a) * (4.0 / 64.0) + 1.0e-12)
+                    ++jumped;
+
+                previous = out;
+            }
+        }
+
+        check (over == 0, std::to_string (over) + " points of a fade were louder than the louder "
+                          "of the two steady states it was travelling between");
+        check (notMonotone == 0, std::to_string (notMonotone) + " points of a fade moved away "
+                                 "from the tap it was travelling towards");
+        check (jumped == 0, std::to_string (jumped) + " steps of a fade carried more of the "
+                            "distance than a gradual one can: a fade that steps is the click "
+                            "it exists to remove");
+
+        std::printf ("  20000 fades, none louder than either end of itself, none turning back\n");
+        std::printf ("    and none of them stepping rather than travelling\n");
+        std::printf ("    and a tap change on a muted strip is silent at every point of it\n");
+    }
+}
+
 int main()
 {
     std::printf ("SendTap\n=======\n\n");
@@ -609,6 +761,7 @@ int main()
     testThePostFaderBranchIgnoresTheCut();
     testThePreFaderBranchCarriesTheCutOnce();
     testANumberItCannotReadIsSilence();
+    testTheFadeCannotOvershootEitherEndOfItself();
 
     std::printf ("\n");
 

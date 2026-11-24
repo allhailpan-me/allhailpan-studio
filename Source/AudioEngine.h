@@ -851,9 +851,13 @@ private:
         // the wrong time is not a sound anybody could diagnose. Latching is the
         // same discipline the pan law already gets for the same reason.
         //
-        // sendActiveTap is the other half: which tap the audio currently in
-        // flight was taken at, so that changing the tap fades in from nothing
-        // rather than stepping between two different signals.
+        // sendActiveTap is which tap this send is currently being taken at, and
+        // it has two jobs. It is what routeSends compares the latched tap
+        // against to notice a change at all, and it is what processInsert reads
+        // to keep the pre fader copy being taken for the one block in which
+        // routeSends has not yet noticed. The second of those is load bearing
+        // for the crossfade below: without it the block that starts a fade off
+        // the pre fader tap would have nothing to fade away from.
         std::array<SendTap::Tap, kNumSends> sendTapLatched {};
         std::array<SendTap::Tap, kNumSends> sendActiveTap {};
 
@@ -861,18 +865,25 @@ private:
         // to 0 while it runs, so that zero initialised means "not fading" and
         // a slot that has never been touched needs nothing done to it.
         //
-        // It exists because a tap change is the one discontinuity in this
-        // mixer where both signals are available at once: processInsert leaves
-        // the pre fader copy beside the post fader buffer in the same block, so
-        // the two can be mixed rather than one being cut off and the other
-        // faded in from nothing. They are the same audio at two different
-        // gains, so a straight line between them is a gain move and nothing
-        // else, which is why no equal power curve belongs here.
+        // It exists because a tap change is the one discontinuity in this mixer
+        // where both signals are available at once: processInsert leaves the pre
+        // fader copy beside the post fader buffer in the same block, so the two
+        // can be mixed rather than one being cut off and the other faded in
+        // from nothing.
         //
-        // sendFadeFrom is the tap being left, and it is what keeps the pre
+        // sendFadeFrom is the tap being left, and it is also what keeps the pre
         // fader copy being taken for the few milliseconds after a send has
         // moved off it.
+        //
+        // sendFadeGain is the gain the send was running at when it left, held
+        // for the length of the fade rather than tracked. That is what makes
+        // each side of the fade a resolved steady state and the answer a convex
+        // combination of the two, which is the whole reason the arithmetic is
+        // in SendTap::fadeSample where a test can see it: the arrangement that
+        // ramps the gain while the fade runs is not equivalent and puts a burst
+        // on the bus exactly where the right answer is silence.
         std::array<double, kNumSends>       sendTapFade {};
+        std::array<double, kNumSends>       sendFadeGain {};
         std::array<SendTap::Tap, kNumSends> sendFadeFrom {};
     };
     struct ChannelSlot

@@ -293,8 +293,10 @@ public:
                   "and before the fader and the pan, so its level stays where you put it "
                   "however the fader afterwards moves."
                 + (engine.getMuteAffectsPreFaderSends()
-                     ? " A mute, or soloing something else, silences either kind: that is the "
-                       "project setting on a strip's own menu, and it is on."
+                     ? " A mute silences either kind, and so does soloing something else, "
+                       "except that a partial solo cut set in Preferences reaches a post fader "
+                       "send twice and a pre fader one once: that is the project setting on a "
+                       "strip's own menu, and it is on."
                      : " A mute, or soloing something else, silences a post fader send and "
                        "leaves a pre fader one feeding its bus at full level: that is the "
                        "project setting on a strip's own menu, and it is off."));
@@ -337,11 +339,19 @@ public:
         // selecting another strip and coming back. The reverse was live too, a
         // tap button still clickable on a send just pointed at nothing.
         //
-        // The two enablements rather than refreshSends, which is reached from
-        // here through a ComboBox's own onChange and would rebuild that
-        // ComboBox's items from inside its callback. Nothing else about the row
-        // can have changed: this function is what changed it.
-        const bool valid = to > selected;
+        // The two enablements rather than refreshSends, because nothing else
+        // about the row can have changed: this function is what changed it.
+        // Not for any reentrancy reason, which an earlier version of this
+        // comment claimed and which is not true of JUCE 9: ComboBox::sendChange
+        // goes through triggerAsyncUpdate, so onChange runs off the message
+        // queue rather than inside setSelectedId, and refreshSends passes
+        // dontSendNotification to both calls anyway.
+        //
+        // The same test refreshSends makes, rather than a shorter one that
+        // happens to agree because the list only ever offers legal
+        // destinations: two opinions about what a valid send is would be one
+        // more thing to keep in step.
+        const bool valid = to > selected && to < kNumInserts;
 
         sendAmount[k]->setEnabled (valid);
         sendTap[k]->setEnabled (valid);

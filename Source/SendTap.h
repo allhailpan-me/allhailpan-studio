@@ -267,6 +267,59 @@ namespace SendTap
         fine. Unity is not an acceptable fallback for an unreadable cut either:
         that would be a mute that did nothing.
     */
+    /** One sample of a send while it is travelling from one tap to the other.
+
+        Each side arrives here **resolved**: the strip's copy at that tap times
+        the gain the send is actually running at there. The answer is the
+        straight line between those two, so it is a convex combination of two
+        steady states and therefore cannot exceed either of them.
+
+        That phrasing is the whole of this function and it is here because the
+        obvious arrangement is wrong in a way nothing announces. The first
+        version mixed the two **buffers** and then applied one gain to the
+        blend, which looks equivalent and is not: the two taps differ in their
+        gain as well as in their buffer, because `levelTarget` folds the cut
+        into one and not the other. So a tap change was two moves at once and
+        the output was their product. On a muted strip at the shipped default
+        the pre fader gain is zero and the post fader buffer is zero, so both
+        steady states are silence, and the product of a gain falling from one
+        and a fade rising from nothing put a 5 ms burst at -12 dB of the muted
+        strip's own level onto the bus. Measured, in the configuration a mute
+        gives by default, where the right answer is exactly nothing. It then
+        travelled through the send's alignment line and arrived up to 85 ms
+        later, which is the same "nothing connects it to the control that caused
+        it" the crossfade exists to avoid.
+
+        A straight line rather than an equal power curve, deliberately: the two
+        sides are the same audio at two gains rather than two signals, so they
+        sum coherently and a curve would put a bump in the middle of a level
+        that should simply travel.
+
+        `t` runs from 0 to 1 and is not clamped here. The caller drives it and
+        the test sweeps outside the range to pin what that would do, which is
+        to extrapolate rather than to saturate.
+    */
+    inline double fadeSample (double fromSample, double fromGain,
+                              double toSample,   double toGain,
+                              double t) noexcept
+    {
+        const double from = fromSample * fromGain;
+        const double to   = toSample   * toGain;
+
+        // Written as the weighted sum rather than as "from, plus the distance
+        // travelled", and the difference is not style. The travelled form is
+        // exact at t of nothing and is **not** exact at t of one: `from + (to -
+        // from)` loses the low bits of `from`, so at 0.7 by 0.5 against -0.2 by
+        // 0.25 it misses the far endpoint by one part in 1.0e16. This form
+        // multiplies each end by exactly 1 and exactly 0 at the two extremes,
+        // so both are returned bit for bit. That matters because the blocks
+        // either side of a fade take the steady path, so an endpoint out by a
+        // rounding error would be a join that is a click of its own, twice,
+        // at a level nothing would ever trace back to here.
+        return from * (1.0 - t) + to * t;
+    }
+
+    //==========================================================================
     inline double levelTarget (Tap tap, double sendLevel, double preFaderCutGain) noexcept
     {
         if (! (sendLevel >= 0.0 && sendLevel <= 1.0))

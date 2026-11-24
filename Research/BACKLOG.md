@@ -240,7 +240,12 @@ true.
   fader copy taken after the effect slots and before the multiply, and
   `routeSends` reading the latched tap rather than the atomic, so the two
   functions cannot disagree about which buffer a send is coming out of inside
-  one block. The tap change fades from zero like a destination change.
+  one block. A tap change crossfades between the two taps over the five
+  milliseconds every other level in the mixer moves in, with each side resolved
+  to a steady state so the answer cannot overshoot either of them, and without
+  touching the alignment line, whose destination has not changed. The first
+  version of that branch did neither of those things, and the two audit rounds
+  are what found it.
 - **`ProjectIO.cpp`**: the tap saved by id and the mute point saved, reset and
   restored.
 - **`MixerComponent.h`**: a two state button on the send's own row, because a

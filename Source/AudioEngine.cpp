@@ -684,6 +684,7 @@ void AudioEngine::latchGainRamps (PanLaw::Law law)
             // this: a render that inherited one would spend its first few
             // milliseconds mixing in a tap the send is no longer on.
             slot.sendTapFade[(size_t) sendIndex]  = 0.0;
+            slot.sendFadeGain[(size_t) sendIndex] = 0.0;
             slot.sendFadeFrom[(size_t) sendIndex] = tap;
 
             // Through SendTap::levelTarget rather than off the level, so that a
@@ -3190,7 +3191,9 @@ void AudioEngine::routeSends (int index, int numSamples)
         auto& align = slot.sendAlign[(size_t) s];
         auto& flush = slot.sendFlush[(size_t) s];
 
-        if (to != activeTo)
+        const bool destinationChanged = to != activeTo;
+
+        if (destinationChanged)
         {
             activeTo  = to;
 
@@ -3210,7 +3213,44 @@ void AudioEngine::routeSends (int index, int numSamples)
             align.reset();
             flush = 0;
         }
-        else if (tap != activeTap)
+        if (! valid)
+        {
+            // Nothing to feed and nowhere to feed it, so there is no fade to
+            // be had: turning a destination off is the same truncation as
+            // repointing it. Latched rather than left where it was so that
+            // choosing a destination again starts from silence.
+            //
+            // The line is NOT emptied here, and that is deliberate rather than
+            // an omission. The branch above already emptied it on the one
+            // block where the destination changed, and nothing can write to it
+            // afterwards because process is never reached while a send is off,
+            // so there is nothing to empty. Doing it here instead costs a
+            // memset of the whole line on every block of every switched off
+            // send, which is two per insert by default: with a lookahead
+            // plugin reporting 4096 samples and a 64 sample buffer that is
+            // over a megabyte a block, walked through the cache, in a 1.3 ms
+            // budget, paid by somebody who does not use sends at all.
+            ramp.latch (0.0);
+            flush = 0;
+
+            // And no crossfade, because there is nothing flowing for one to be
+            // between. A fade left armed here would be waiting on audio that
+            // only arrives once a destination is chosen again, and by then it
+            // would be a fade away from a tap the send left some time ago.
+            slot.sendTapFade[(size_t) s] = 0.0;
+            continue;
+        }
+
+        // What the cut does to a send is the tap's question, and SendTap.h is
+        // where it is answered: a post fader send's cut is already in the
+        // buffer it is copied from, and folding it in again here would arrive
+        // at its square. A pre fader send is copied from a buffer nothing has
+        // been applied to, so whatever cut it is supposed to carry has to be
+        // folded in, and whether that is a cut at all is the one setting.
+        const double target = SendTap::levelTarget (tap, (double) level,
+                                                    (double) preFaderSendGain[(size_t) index].load());
+
+        if (! destinationChanged && tap != activeTap)
         {
             // A TAP CHANGE WITH THE SAME DESTINATION IS NOT A DESTINATION
             // CHANGE, and treating it as one was wrong in both halves.
@@ -3233,54 +3273,38 @@ void AudioEngine::routeSends (int index, int numSamples)
             // What makes this case different from every other discontinuity in
             // the mixer is that **both signals exist in the same block**:
             // processInsert leaves the pre fader copy beside the post fader
-            // buffer. So the two are mixed rather than one being cut off, the
-            // ramp is left where it is and the line is left alone, and the
-            // result is continuous at every fader position. They are the same
-            // audio at two gains, so a straight line between them is a gain
-            // move and nothing else: no equal power curve, which would put a
-            // bump in the middle of a signal that is not two signals.
+            // buffer. So the two are mixed instead, the line is left alone, and
+            // the send travels between two steady states.
+            //
+            // Which is why the gain is **held** rather than ramped across the
+            // fade, and why the ramp is put straight onto the new tap's target
+            // instead of slewing toward it. Each side of the fade is then a
+            // resolved steady state and the answer is a convex combination of
+            // the two, which cannot exceed either. Ramping the gain while the
+            // fade ran was two moves at once, and the product of the two is not
+            // monotone: SendTap::fadeSample carries the measurement of what
+            // that did on a muted strip, where both steady states are silence
+            // and it produced a burst.
+            //
+            // The ramp being latched costs an in progress level move its
+            // remaining travel, since a send whose amount was being dragged
+            // arrives at the amount in one sample instead of over the rest of
+            // the slew. That is bounded by the convex combination above, so it
+            // cannot overshoot, and dragging an amount and changing a tap in
+            // the same five milliseconds is not a gesture anybody makes.
             //
             // A second change while a fade is still running fades from the tap
-            // it was heading for rather than from the blend. That is a
-            // discontinuity of whatever the fade had left to travel, which is
-            // small and only reachable by clicking the control twice inside
-            // five milliseconds.
+            // it was heading for rather than from the blend, which is a
+            // discontinuity of whatever that fade had left to travel. It is
+            // only reachable by clicking the control twice inside five
+            // milliseconds, and setSendTap has no caller but the button.
             slot.sendFadeFrom[(size_t) s] = activeTap;
+            slot.sendFadeGain[(size_t) s] = ramp.value;
             slot.sendTapFade[(size_t) s]  = 1.0;
 
+            ramp.latch (target);
             activeTap = tap;
         }
-
-        if (! valid)
-        {
-            // Nothing to feed and nowhere to feed it, so there is no fade to
-            // be had: turning a destination off is the same truncation as
-            // repointing it. Latched rather than left where it was so that
-            // choosing a destination again starts from silence.
-            //
-            // The line is NOT emptied here, and that is deliberate rather than
-            // an omission. The branch above already emptied it on the one
-            // block where the destination changed, and nothing can write to it
-            // afterwards because process is never reached while a send is off,
-            // so there is nothing to empty. Doing it here instead costs a
-            // memset of the whole line on every block of every switched off
-            // send, which is two per insert by default: with a lookahead
-            // plugin reporting 4096 samples and a 64 sample buffer that is
-            // over a megabyte a block, walked through the cache, in a 1.3 ms
-            // budget, paid by somebody who does not use sends at all.
-            ramp.latch (0.0);
-            flush = 0;
-            continue;
-        }
-
-        // What the cut does to a send is the tap's question, and SendTap.h is
-        // where it is answered: a post fader send's cut is already in the
-        // buffer it is copied from, and folding it in again here would arrive
-        // at its square. A pre fader send is copied from a buffer nothing has
-        // been applied to, so whatever cut it is supposed to carry has to be
-        // folded in, and whether that is a cut at all is the one setting.
-        const double target = SendTap::levelTarget (tap, (double) level,
-                                                    (double) preFaderSendGain[(size_t) index].load());
 
         // Zero level and a ramp already at zero is the only case that can be
         // skipped. Skipping on the level alone, which is what this did before
@@ -3294,16 +3318,26 @@ void AudioEngine::routeSends (int index, int numSamples)
         const bool quiet = target <= 0.0 && ramp.settled (0.0);
 
         if (quiet && flush <= 0)
+        {
+            // Nothing is flowing, so there is nothing for a crossfade to be
+            // between: a tap changed on a send whose level is already at
+            // nothing is simply the new tap, and the fade is dropped rather
+            // than left armed to run whenever the level next comes up. Raising
+            // the level then arms a fade of its own from a held gain of zero,
+            // which is a fade in.
+            slot.sendTapFade[(size_t) s] = 0.0;
             continue;
+        }
 
         // A pre fader send with no copy to read is in exactly the position of a
         // send with no scratch to copy through, so it is the same branch: the
         // alternative is reading a buffer processInsert did not fill this
         // block, which is older audio off the right strip.
         //
-        // A fade away from the pre fader tap needs that copy too, for as long
-        // as it is still mixing it in, which is why processInsert keeps taking
-        // it until the fade is finished.
+        // A fade away from the pre fader tap needs that copy too, for as long as
+        // it is still mixing it in, which is why processInsert keeps taking it
+        // while one is running. A fade only runs while audio is flowing: the
+        // two paths above that feed nothing drop it rather than leave it armed.
         auto& fade = slot.sendTapFade[(size_t) s];
 
         const bool needsPreFaderCopy = tap == SendTap::Tap::preFader
@@ -3335,17 +3369,15 @@ void AudioEngine::routeSends (int index, int numSamples)
 
         juce::AudioBuffer<float> copy (slot.sendScratch.getArrayOfWritePointers(), 2, numSamples);
 
-        if (fade <= 0.0)
+        if (fade > 0.0)
         {
-            copy.copyFrom (0, 0, source, 0, 0, numSamples);
-            copy.copyFrom (1, 0, source, 1, 0, numSamples);
-        }
-        else
-        {
-            // Crossfading off the tap this send has just left. See the branch
-            // above for why this is a straight line and why the line is not
-            // emptied. The step is the one every other level in the mixer
-            // travels at, so a tap change takes as long as a fader move.
+            // CROSSFADING OFF THE TAP THIS SEND HAS JUST LEFT, and the gains
+            // are in here rather than being applied to the blend afterwards.
+            // That is the whole correction: each side is resolved, so the
+            // answer is a convex combination of two steady states.
+            // SendTap::fadeSample is where that is written down and tested, and
+            // it carries the measurement of what applying one gain to a blend
+            // of two buffers did instead.
             const auto& from = SendTap::sourceIsPreFader (slot.sendFadeFrom[(size_t) s])
                                  ? slot.preFaderScratch : slot.buffer;
 
@@ -3357,30 +3389,42 @@ void AudioEngine::routeSends (int index, int numSamples)
             auto* outL = copy.getWritePointer (0);
             auto* outR = copy.getWritePointer (1);
 
+            const double held = slot.sendFadeGain[(size_t) s];
+
             for (int i = 0; i < numSamples; ++i)
             {
-                // Both channels off one figure, for the reason processInsert
-                // gives about a level change: a crossfade that ran at
-                // different rates on the two halves would move the image for
-                // as long as it lasted.
-                const float t = (float) (1.0 - fade);
+                // One figure for both channels, for the reason processInsert
+                // gives about a level change: a crossfade running at different
+                // rates on the two halves would move the image for as long as
+                // it lasted.
+                const double t = 1.0 - fade;
 
-                outL[i] = fromL[i] + (toL[i] - fromL[i]) * t;
-                outR[i] = fromR[i] + (toR[i] - fromR[i]) * t;
+                // The ramp is read rather than assumed to be at the target,
+                // because the amount can be moved during the fade and the send
+                // must then travel to where it is now going rather than to
+                // where it was going when the tap changed.
+                const double g = ramp.next (target, levelStep);
+
+                outL[i] = (float) SendTap::fadeSample (fromL[i], held, toL[i], g, t);
+                outR[i] = (float) SendTap::fadeSample (fromR[i], held, toR[i], g, t);
 
                 fade = std::max (0.0, fade - levelStep);
             }
         }
-
-        if (ramp.settled (target))
+        else if (ramp.settled (target))
         {
             // Which includes every block of a flush, where the level has
             // reached zero and this is feeding silence in to push the last of
             // the fade out of the alignment line.
+            copy.copyFrom (0, 0, source, 0, 0, numSamples);
+            copy.copyFrom (1, 0, source, 1, 0, numSamples);
             copy.applyGain ((float) ramp.value);
         }
         else
         {
+            copy.copyFrom (0, 0, source, 0, 0, numSamples);
+            copy.copyFrom (1, 0, source, 1, 0, numSamples);
+
             // Per sample and both channels together, for the reasons
             // processInsert gives: a move that arrives part way through a block
             // must not be spread across the rest of it, and a send is not a
