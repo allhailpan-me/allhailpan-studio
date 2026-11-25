@@ -257,6 +257,16 @@ namespace MonitorRule
         through the count, which is also Ardour's answer inside its record
         pre-roll window (`route.cc:6722`): the player needs to hear themselves
         coming in.
+
+        One consequence of asking the recorder, worth knowing before it is
+        reported as a fault. A record pass that captures no audio input, which
+        is the MIDI record modes and the one that bounces an instrument's own
+        output, begins no input recorder at all. So under either transport
+        aware rule a wired, armed strip is silent for the whole of such a
+        pass, because nothing is recording that strip and the rules say the
+        arrangement alone in that case. It is the rules being consistent
+        rather than an exception, and `Choice::always` is the answer for
+        somebody who wants to play along to a MIDI take.
     */
     struct Transport
     {

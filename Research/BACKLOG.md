@@ -102,6 +102,10 @@ the player hears their own input across the entire pass, including the part
 they are listening back to. Every studio looked at has a transport-aware
 monitoring rule and two of them name it after a tape machine.
 
+The first of those two faults is what this night fixes. **The punch one is
+not fixed**, and the audit section below is where that is worked through,
+because this entry claimed it was until an audit said otherwise.
+
 | Candidate | Verdict |
 |---|---|
 | **A transport-aware monitoring rule: what "armed" means while the transport rolls** | **Chosen.** It is standard in all five studios looked at, two of them name the same three-case rule independently, and the one input it needs the engine does not already have is nothing: `playing` and each insert's own recorder are both already read in that function. No held file, no compensation figure, and it lands in a header with no JUCE in it. |
@@ -313,9 +317,159 @@ in, and that belongs in the release note rather than in a silent default.
   exhaustively, plus the distinguishability of the three rules at the cells
   that separate them.
 
+### What the mutation pass and the audit found
+
+**Mutation testing, in two passes, both compiled with the sanitizers exactly
+as `Tests/run.sh` has them**, which CLAUDE.md is emphatic about after a
+harness weaker than the real test run misled an audit here.
+
+Thirty hand written mutations of the header. Twenty five caught on the first
+pass, five survived, and two of the five were real gaps:
+
+- **`ruleAt (index + 1)`**, rotating the menu. It survived because the check
+  on menu order counted each rule once as a **set**, and a rotation of three
+  rules is still a set of three. What it would have done is put the default
+  rule last, which is the one position the project's own convention says it
+  must not be in: the first entry of a choice list is the one that is safe to
+  fall back to. Menu order is now pinned position by position, and that the
+  first position is the default is pinned separately.
+- **`Capture::idle = 7`**, reordering the capture states, survived as a
+  genuine no-op because nothing stores a capture state or compares one for
+  order. Rather than leave a survivor to be rediscovered, the numbers came
+  out of the enum: there is now nothing there to reorder, and the header says
+  why that enum carries no numbers while `Rule` does.
+
+The other three survivors are the three post-switch fallbacks, and all three
+are unreachable for any value the type can hold: every `Rule` in the program
+comes from `ruleFromStored`, `ruleAt` or `defaultRule`, so reaching them needs
+a cast of an out of range integer, which is undefined behaviour. They cannot
+be removed either, because a function whose end is reachable is a warning and
+CI builds with `-Wall -Wextra`. Recorded as no-ops rather than counted as
+caught.
+
+**Then every cell of the table, one at a time.** The decision has 108 states:
+three choices, three rules, three capture states, rolling or stopped, an
+input or none. A wrapper compiled into the header negates the answer for
+exactly one state, chosen at compile time, and the test was built and run 108
+times, once per state. **All 108 were caught.** That is the check worth having
+for a table, because a table is the one shape where a mutation that nothing
+notices is not a missing case in the code but a missing case in the test, and
+no set of hand written mutations can prove their absence.
+
+**The `auditor` agent then reviewed the branch**, and it sent back three
+faults, three overclaims and two risks. All six of the first two groups are
+fixed. It also ran its own 144 cell sweep over the version it was given,
+independently, which is how two of those were found.
+
+**The punch case was claimed as fixed and is not fixed.** The worst of the
+three, and it was in the header's opening sentence, in the commit message, in
+the pull request and in the entry above. A recorder here is begun before the
+transport rolls and ended after it stops, because this studio deliberately
+captures the whole pass and trims it afterwards, which is what makes a
+punch's lead in and its pre-crossfade possible at all. So `capturing` means "a
+record pass is running", for the whole of its length, where Cubase and Reaper
+mean the stretch the transport is actually in record for, which begins at the
+punch in. Under every rule in this header a player punching in still hears
+themselves across the whole pass, including the lead in bar whose entire
+purpose is listening to what is already there.
+
+The header now says so in a section of its own, names the one input that
+would reach it, whether the transport is inside the punch range this pass,
+and names where that input is (latched in the window at the top of a take).
+The recommendation no longer points somebody who punches in at a rule that
+does nothing for them. **What the change does fix is the strip left armed
+during playback**, which is the case somebody meets every time they listen
+back, and that is what it now claims and no more.
+
+**Two flags that could be exchanged with nothing noticing.** The insert's
+state was `armed` and `capturing`, two adjacent bools filled from two adjacent
+arrays of atomics inside one aggregate initialiser. Exchange them and it still
+compiles, the gate is symmetric so nothing changes there, `whileArmed` ignores
+both, and the other two rules then answer on the arm: **both new rules become
+the old behaviour, the menu still offers three, nothing errors, and every cell
+of the table still passes, because the swap is in the engine and not in the
+header.** The one state that differs is a take running on a strip whose arm
+was cleared under it, which nobody would ever notice.
+
+They are now one value, `MonitorRule::Capture`, built by a ladder in the
+engine where each branch names its own state, so there is nothing of the same
+type sitting next to anything else. It also says something true that the pair
+could not: these are three states and not four, because a recorder is only
+ever begun for a strip that was armed, and an arm cleared under a running
+take leaves recording without armed.
+
+Worth keeping the general lesson rather than only the fix. The header had
+already given `Transport` a type of its own precisely so it could not be
+swapped at a call site, and had said so. It protected the one value that was
+hardest to confuse and left unprotected the two the whole table turns on. A
+guard written against the hazard somebody thought of is not a guard against
+the hazard, and the test could not see either way: **the boundary of what a
+JUCE free header can be tested for is exactly the line where the engine fills
+its arguments in**, and on this branch that line is four lines long.
+
+**The format version was not bumped, on one real precedent and one false
+one.** The claim was that this follows the feel and the de-click fade, which
+were added without a bump. The feel was. The de-click fade was not: the
+version history at the top of the same file records it as part of version 5.
+Worse, the argument itself, that an attribute changing nothing audible in the
+file can skip a bump, had already been made and already rejected at version 8,
+where the comment says plainly that "a studio where the record button means
+two different things depending on which build opened the file is worse than
+one that says the file is too new". Version 6 is the case in point: it bumped
+because an older build would ignore a solo isolate and then write the file
+back without it. Exactly that happens here. The version is bumped, like every
+bump since 2.
+
+**Three overclaims, all corrected.** `Choice::always` was described as
+Steinberg's "Manual" mode and is not: Manual follows a button on each channel
+and this studio has one answer for every strip, which the entry above lists as
+the deferred per insert override. A comment listed "the punch the player is
+rolling into" as one of the moments the rule switches monitoring at, which it
+cannot. And the test's own opening comment said the space it exhausts has 288
+states where the enumeration has 108, which in the one file whose entire
+argument is exhaustion is the number most worth getting right.
+
+**Two risks, recorded rather than fixed, both with the reason.**
+
+- **The toolbar still describes the old behaviour, at the worst moment.** The
+  monitoring combo's tooltip says "armed = only the mixer strips that are
+  armed to record", and selecting a mode prints "Monitoring 2 inputs at 11.6
+  ms round trip" immediately. Under the two new rules that sentence can be
+  printed while nothing is monitored at all, to the person with a silent
+  guitar in their hands, who is the exact person it was written for. Not fixed
+  because the toolbar is `MainComponent.cpp`, which open pull request #77
+  holds. **It is the first thing to do in this corner when that lands**, and
+  it is one tooltip and one status line.
+- **Under tapeMachine the compensation exemption is paid throughout playback
+  and buys nothing**, because no player is hearing anything during playback,
+  and playback is the activity the rule exists to improve. The exemption's own
+  comment weighs its cost against "unplayable latency" felt by a player, and
+  in that cell there is no such player. Nothing regresses: the same state was
+  reachable before this branch, with mode armed and a strip wired but not
+  armed. It is an opportunity rather than a fault, and taking it means
+  conditioning the exemption on something that changes without a graph update,
+  which is the thing that line refuses to do. `LatencyGraph.h` is held by #72
+  anyway.
+
+**What the audit confirmed rather than found**, listed because a claim nobody
+checked is worth less than one somebody attacked: the compensation exemption
+genuinely does not need to move and no new state is reachable; `renderOffline`
+cannot pass a live input under any choice or rule, structurally, because
+`mixMonitorInput` has one call site in the device callback and the callback
+returns early while `offlineActive` is set; aliasing `AudioEngine::Monitor` to
+`MonitorRule::Choice` preserves every value, every comparison and the
+settings file; the project state is saved, restored and reset, the reset is
+reached by both paths that start a project, and a garbled attribute lands on
+the default; the transport latch gives one block one answer and there is no
+second place in the engine that decides monitoring; the count-in, an arm
+cleared mid take, an arm set mid take and an input cleared mid take all behave
+as the header says; and nothing on the branch allocates, locks or logs on the
+audio thread, `inputAudible` being branch only and the one new read being an
+atomic load.
+
 ### Outcome
 
-Pending.
+Pending: pull request #92, waiting on CI.
 
 ## 2026-11-24: where a send is tapped off a strip, and the mute point that decides what solo does to it
 
