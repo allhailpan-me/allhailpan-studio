@@ -2915,6 +2915,16 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
                                    int numInputChannels, int numSamples)
 {
     const auto mode = monitorMode.load();
+    const auto rule = monitorRule.load();
+
+    // Latched once, before the loop, the way the pan law and the time
+    // signature are: every insert in one block is monitored under one
+    // transport state. Read per insert instead, a transport edge arriving
+    // mid loop would open one strip's input and close another's inside the
+    // same block, and the two would then be ramping in opposite directions
+    // from a state neither of them was in.
+    const MonitorRule::Transport transport { playing.load() };
+
     bool anyLive = false;
 
     // The same figure every other gain in the mixer travels at, from
@@ -2937,18 +2947,35 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
                             ? InputSource::resolve (assignment.choice, numInputChannels)
                             : InputSource::Resolved{};
 
-        // "armed" passes only the inserts about to be recorded, which is what
-        // keeps a studio quiet between takes when eight sockets are wired.
-        // "on" passes everything that has an input.
+        // The decision itself is in MonitorRule.h, with the sources for
+        // every rule in it. Asked rather than decided here: it is a table
+        // with a cell that two shipped behaviours differ by, and a table in
+        // the device callback is a table nothing can test.
+        //
         // This insert's own recorder, not the instrument one. Testing the
         // instrument recorder here meant that bouncing a plugin's output
         // opened the monitor on every wired insert, mixing live microphones
         // into the room during a take that had nothing to do with them.
-        const bool listening = pick.valid
-                            && (mode == Monitor::always
-                                || (mode == Monitor::armed
-                                    && (insertArmed[(size_t) i].load()
-                                        || inputRecorders[(size_t) i].isActive())));
+        // It is also what answers "is this strip being recorded" for the
+        // rules that ask, including through the count-in, since the
+        // recorders are begun before the transport rolls.
+
+        // The ladder rather than two flags handed over side by side: each
+        // branch names its own state, so there are no two same typed values
+        // here to exchange. MonitorRule::Capture carries what that was
+        // protecting against, which an audit found by exchanging them.
+        //
+        // The recorder first, because it outranks the arm: a take running on
+        // a strip whose arm was cleared under it is still being recorded.
+        const auto capture = inputRecorders[(size_t) i].isActive()
+                                 ? MonitorRule::Capture::recording
+                                 : insertArmed[(size_t) i].load()
+                                       ? MonitorRule::Capture::armed
+                                       : MonitorRule::Capture::idle;
+
+        const MonitorRule::Insert state { .hasInput = pick.valid, .capture = capture };
+
+        const bool listening = MonitorRule::inputAudible (mode, rule, transport, state);
 
         // Changing input is as much of a discontinuity as switching monitoring
         // on and off, and the same answer applies: fade out, swap at silence,

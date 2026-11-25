@@ -114,7 +114,22 @@ namespace
     // around that would be wrong everywhere the fader was not at the position
     // it happened to be mixed at. It would open, play, and sound plausible,
     // which is the shape of failure this file keeps refusing.
-    constexpr int formatVersion = 10;
+    // 11 adds the monitoring rule: what an armed strip hears while the
+    // transport is moving. No rule attribute means the rule the studio had
+    // before there was a choice, which is also this one's default, so old
+    // projects open monitoring exactly as they always did.
+    //
+    // Bumped like the rest, and the first draft of this did not bump at all,
+    // on the argument that the setting changes nothing anybody can hear in a
+    // file: not the mix, not a clip, not a take, not a bounce. An audit is
+    // what sent it back, and it is right. The argument was already made and
+    // already rejected at version 8, in the same words it would have been
+    // made in here, and version 6 is the case: an older build opening a tape
+    // machine project would ignore the rule, monitor the way it always did,
+    // and then write the file back without it, so the setting is silently
+    // gone and the next take is recorded with the player hearing something
+    // they had asked not to hear.
+    constexpr int formatVersion = 11;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -387,6 +402,13 @@ void ProjectIO::resetEngine (AudioEngine& engine)
     // nobody would think to blame on the previous project.
     engine.setMuteAffectsPreFaderSends (true);
 
+    // And the monitoring rule, for the reason the two above it are reset: a
+    // rule left behind would mean the same strip, armed, with the same input,
+    // either hears itself during playback or does not, depending on which
+    // project was open before this one. Monitoring is the one setting somebody
+    // diagnoses by unplugging cables, so it is the worst one to leak.
+    engine.setMonitorRule (MonitorRule::defaultRule);
+
     // And the signature, for the same reason: the engine holds its own copy
     // for the click and the play head, so one left behind would click a new
     // project in the last one's meter. Both callers happen to set it from the
@@ -567,6 +589,15 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     // the law is: it is one answer for the whole project rather than one per
     // strip.
     mixerXml->setAttribute ("muteAffectsPreFaderSends", engine.getMuteAffectsPreFaderSends());
+
+    // What "armed" means while the transport moves, which Ardour also keeps
+    // per session rather than per application. Stored as its number, the way
+    // the law and the send tap are, and the numbers are fixed: MonitorRule.h
+    // says so at ruleToStored.
+    //
+    // Behind a version bump, like every other attribute added since 2, and
+    // the reasoning is at formatVersion rather than repeated here.
+    mixerXml->setAttribute ("monitorRule", MonitorRule::ruleToStored (engine.getMonitorRule()));
 
     for (int i = 0; i < kNumInserts; ++i)
     {
@@ -947,6 +978,15 @@ juce::Result ProjectIO::load (const juce::File& file, Project& project, AudioEng
         // about.
         engine.setMuteAffectsPreFaderSends (
             mixerXml->getBoolAttribute ("muteAffectsPreFaderSends", true));
+
+        // A project written before this existed has no rule in it and opens
+        // monitoring exactly as it always did, because the default is the
+        // behaviour that was there before the rule was. ruleFromStored drops
+        // anything it does not recognise onto that same answer, so a garbled
+        // attribute cannot take a player's input away either.
+        engine.setMonitorRule (MonitorRule::ruleFromStored (
+            mixerXml->getIntAttribute ("monitorRule",
+                                       MonitorRule::ruleToStored (MonitorRule::defaultRule))));
 
         for (auto* e : mixerXml->getChildWithTagNameIterator ("INSERT"))
         {

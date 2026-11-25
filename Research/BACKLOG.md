@@ -79,6 +79,398 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-25: what monitoring does when the transport is rolling, which nothing here was asking
+
+### What was looked at
+
+Ten open pull requests again, every one of them a `harden/` branch, so there
+was no draft of this lane's own to finish. Between them they hold `Project.h`,
+`MainComponent.cpp`, `PianoRollComponent.cpp`, `PlaylistComponent.cpp`,
+`Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`,
+`NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h`, `Fx/BellMatch.h` and `RELEASE_NOTES.md`, and `Source/Synth` and
+`Source/Fx` are being built by hand. `Project.h` rules out new project state
+held there, `MainComponent.cpp` rules out both a new toolbar control and a new
+entry in `PreferencesActions`, and `LatencyGraph.h` rules out moving any
+compensation figure.
+
+The candidate was found by reading `mixMonitorInput` and noticing what is not
+in it. The studio has one monitoring setting, `Monitor { off, armed, always }`,
+and **nothing in the monitoring decision consults the transport at all**. So a
+strip left armed is heard live over the whole of playback, and during a punch
+the player hears their own input across the entire pass, including the part
+they are listening back to. Every studio looked at has a transport-aware
+monitoring rule and two of them name it after a tape machine.
+
+The first of those two faults is what this night fixes. **The punch one is
+not fixed**, and the audit section below is where that is worked through,
+because this entry claimed it was until an audit said otherwise.
+
+| Candidate | Verdict |
+|---|---|
+| **A transport-aware monitoring rule: what "armed" means while the transport rolls** | **Chosen.** It is standard in all five studios looked at, two of them name the same three-case rule independently, and the one input it needs the engine does not already have is nothing: `playing` and each insert's own recorder are both already read in that function. No held file, no compensation figure, and it lands in a header with no JUCE in it. |
+| A per insert monitor override, defeating both the arm and the rule | **Deferred, and it is the next night's work in this corner.** Unanimous across the four studios that have one (Ardour's per route `MonitorChoice`, Pro Tools' TrackInput button, Reaper's Monitor Input item, Logic's Input Monitoring button) and this studio has nothing like it. It is a second feature: new per insert state, a button on the strip, and save, load and reset. Its unlock is nothing being held, so it is available now. |
+| Muting the track's own playback while its input is monitored | **Deferred with its reason written down below, and it is the half this night does not build.** It is not a monitoring setting at all: in Ardour it is `RecordMode`, and it needs the arrangement to be able to gate one track's clips. See "The disk side" below, which is the most important thing the research found. |
+| Ardour's talkback, input when stopped on tracks that are not armed | Rejected for now, on Ardour's own shipped default rather than on taste: `auto_input_does_talkback` ships **false** (`rc_configuration_vars.inc.h:146`), and `Monitor::always` already covers somebody who wants to hear everything. |
+| A pre FX send tap | Still deferred by `LatencyGraph.h`, exactly as the 11-24 entry left it. |
+| Polarity invert and a per strip trim | Still deferred: the half that fixes comb filtering is a per strip delay, which is `LatencyGraph.h`. |
+
+### What the research settled, and the four things it corrected
+
+The `dsp-researcher` agent read the Ardour tree as bytes (sparse clone, commit
+`f2f67d8b5ca3a747267689c3e0e1957a90ed4ecb`) and the Steinberg, Avid, Apple and
+Reaper manuals through a fetch tool, and it said which class each source was
+in. Four of its findings changed what is being built, and one of them changed
+the shape of the whole thing.
+
+**There is no `Track::monitoring_state()`.** The decision lives entirely in
+`Route::monitoring_state()`, `libs/ardour/route.cc:6614` to `:6749`, with a
+per type virtual `get_input_monitoring_state (bool recording, bool talkback)`
+that answers what monitoring input means on that kind of track. Anything
+written from memory of the other arrangement would not have found the
+function.
+
+**There is no `get_tape_machine_mode()` either, and the polarity is
+backwards.** `grep -rn "tape_machine" libs/ardour gtk2_ardour` in that tree
+returns exactly one hit, a comment at `route.cc:6741`. The option was inverted
+and renamed to `auto_input_does_talkback`, which Harrison's own Mixbus 32C v6
+manual states as a rename: "in versions prior to v6, the option was called
+'Tape Machine Mode' and it had the reverse effect". So tape machine behaviour
+is `auto_input_does_talkback == false`, which is the shipped default. A night
+that had implemented a `tapeMachineMode` flag from memory would have had the
+sense of it inverted, and nothing about an inverted monitoring flag announces
+itself: it is heard as "monitoring is wrong somehow".
+
+**Cubase's four modes are a flat enumeration over three near-independent
+questions, and the one that separates its last two modes is a single cell.**
+Steinberg's own wording, from the shared Cubase and Nuendo preferences topic
+`preferences_vst_r.html`, Preferences > VST > Auto Monitoring:
+
+- Manual: "Turns input monitoring on or off when you click Monitor."
+- While Record-Enabled: "Connects the audio source to the channel input when
+  you click Record Enable."
+- While Record Running: "Switches to input monitoring during recording only."
+- Tapemachine Style: "Activates input monitoring in stop mode and during
+  recording, but not during playback."
+
+Set the last two side by side and the only difference is what happens when the
+transport is stopped and the strip is armed. Both close the input during
+playback and both open it while recording. That is the cell a truth table is
+most likely to collapse, and a test that checks each mode against its own
+expected row will pass a table in which two modes have become accidentally
+identical, so the test asserts that the three rules **differ**, at the cell
+that separates each pair.
+
+**Reaper names the same rule after the same machine, independently.** The
+Reaper User Guide 7.26 has "Monitor Input (Tape Auto Style)", which "monitors
+input only when the transport has stopped or when you are recording", and
+"During playback you will hear only the timeline audio, not the input." Two
+manufacturers arriving at the same three cases and the same name is about as
+close to an established definition as this corner of the field gets, which is
+why this is implemented as the published rule rather than as a preference
+somebody here invented.
+
+What could not be sourced is named rather than filled in: **Steinberg does not
+print which of the four modes is the default** on the VST preferences page or
+anywhere the researcher could reach, and **Avid's definitions of Auto Input
+and Input Only monitoring are not on any host that could be fetched** (the
+Pro Tools Reference Guide proper). Avid's Pro Tools First 12.3 help did give
+the control's name and shape: "When the TrackInput button in a track is
+disabled, the track monitors in Auto Input mode", enabled and green is Input
+Only, and it can be toggled "during playback, recording, while stopped, and
+even when a track is not record-enabled". So Pro Tools' structure is a global
+two way mode plus a per track override, which is structurally Ardour's
+`auto_input` plus the per route `MonitorChoice`, and that is cited for the
+shape only. The gap is recorded here so a later night does not think it was
+answered.
+
+### The disk side, which is the most useful thing the research found
+
+Asked whether input monitoring also mutes that track's playback, the answer
+came back from Ardour's source as yes, structurally rather than by a rule:
+`disk_reader.cc:330` takes the disk gain to zero unless the `MonitoringDisk`
+bit is set, `:435` reads the disk into a scratch buffer rather than the output
+when `MonitoringInput` is set, and `:500` mixes it back in only for the state
+that wants both. `MonitorState` has four members, `MonitoringSilence`,
+`MonitoringInput`, `MonitoringDisk` and `MonitoringCue`, and
+`MonitoringCue == MonitoringInput | MonitoringDisk`.
+
+So **monitoring is not a boolean about the input. It is one three valued
+decision about the input and the playback together**, and hearing both at once
+is a named state that Ardour reaches only through `RecSoundOnSound` record
+mode or inside the record pre-roll window. The researcher's own conclusion:
+an input rule that leaves playback alone produces a fifth state none of the
+studios has, which is the player hearing themselves on top of their old take.
+
+That is worth being exact about, because it is the reason this night builds
+one half and says so rather than claiming the whole thing:
+
+- **That fifth state is what this studio does today**, for the whole time a
+  strip is armed, and it is not created by this change. What this change does
+  is shrink it from "the entire time a strip is armed" to "only while a take
+  is actually being recorded", and under the rule somebody chooses.
+- **Muting the playback of the track being recorded into is not a monitoring
+  setting.** In Ardour it is `RecordMode { RecLayered, RecNonLayered,
+  RecSoundOnSound }`, a session setting, and the monitoring decision reads it
+  rather than deciding it (`audio_track.cc:190` to `:203`). Building it here
+  means a gate on one playlist track's clips inside the arrangement, which is
+  a real feature of its own with its own night, and it is layered against
+  sound on sound recording rather than a monitoring mode.
+- So `MonitorRule.h` is honestly scoped to the input side, the header says
+  that is what it is, and it names the state it cannot reach and what reaching
+  it would take. A header that declared a `disk` or `both` state nothing could
+  produce would be the "declared destination nothing reaches" failure this
+  project keeps meeting.
+
+Also from the same reading, and already satisfied here: a monitoring change is
+a gain discontinuity and has to be ramped. Ardour spends `route.cc:491` to
+`:494` and `disk_reader.cc:331` to `:368` on declicking one, with a preference
+of its own distinct from the transport fades. This engine's monitor path
+already ramps, at `GainRamp::levelSeconds`, five milliseconds, which is the
+one figure the whole mixer moves at, and it is above the four millisecond
+floor Pro Tools publishes for its own monitor only crossfade, recorded in the
+11-07 entry. **A rule that switches during playback is exactly what that ramp
+was built for, and it needed no change.** Worth stating because the first
+thing a transport-aware rule does is switch monitoring at a moment nothing
+used to switch it.
+
+### What this stores where, and why it is project state
+
+Ardour keeps `auto_input` in the **session**, not the application:
+`session_configuration_vars.inc.h:38`, default **true**. So the rule goes in
+the project here, saved, loaded and reset the way the pan law and the mute
+point are, and for the same reason written at `ProjectIO::resetEngine`: a
+setting left behind would make the same session behave differently depending
+on what had been open before it.
+
+That also answers where the control goes, which the file locks had made the
+awkward question. `PreferencesWindow.h` says in its own header comment that
+monitoring deliberately stays on the toolbar because it is "a decision made
+while working, several times a session", and that is right about the
+monitoring choice. The rule is not that: it is set once and then left, which
+is where Cubase and Ardour both keep it. It goes on the mixer strip's context
+menu, beside the pan law and the mute point, which is where this project
+already keeps the settings that belong to the whole project, and the item says
+so on itself.
+
+### The divergence from Ardour, stated at the flag
+
+Ardour's armed and rolling and not recording row is decided by `session_rec`,
+the session's own record state (`route.cc:6710` to `:6727`), while its
+`track_rec` is that route's own arm. Here the rule reads **this insert's own
+recorder** instead of a global record state, and the reason is that the two
+engines differ in the underlying fact rather than in the intent: arming a
+track mid pass in Ardour starts capturing it, and arming a strip mid pass here
+does not, because the recorders are begun once in `startAudioRecording`. So
+"is this strip being recorded" is answered here by the recorder, and
+`mixMonitorInput`'s existing comment had already chosen that discipline for
+the same reason: "This insert's own recorder, not the instrument one."
+
+The happy consequence is the count-in. The recorders begin before the
+transport rolls, so an armed strip is monitored through the count, which is
+also Ardour's answer for its record pre-roll window: input, at
+`route.cc:6722` to `:6726`. One less input to the rule and no special case.
+
+### The default, which is deliberately not Ardour's
+
+Ardour ships `auto_input = true`, so its default closes the input during
+playback. This ships **"while armed"**, which is what the studio does today,
+so **nothing anybody hears changes until they choose otherwise**. Two reasons,
+and the first is the stronger:
+
+- A run that nobody is watching should not silently change what comes out of a
+  musician's headphones. Of all the settings to move under somebody, the one
+  that decides whether they can hear their own guitar is the worst.
+- Playing along to the arrangement before pressing record is a real use, and
+  it is the use the tape machine rule takes away. It is why Cubase offers
+  "While Record-Enabled" at all, and Reaper's own default is plain input
+  monitoring rather than its Tape Auto Style: "By default, Input Monitoring
+  should be on."
+
+So the disagreement with Ardour is deliberate, and is written down at the
+flag. The tape machine rule is the one to recommend to somebody who punches
+in, and that belongs in the release note rather than in a silent default.
+
+### What is being built
+
+- **`Source/MonitorRule.h`**, no JUCE: the monitoring choice (which moves out
+  of `AudioEngine` into the header and is aliased back, so the toolbar's cast
+  keeps working and there is one enum rather than two), the three rules with
+  the source for each, the stored number for each, the names, and one
+  function that decides for one insert from the choice, the rule, the
+  transport and that insert's own state. The disk side and the latency
+  statement are in there as statements with their derivations.
+- **`AudioEngine`**: the rule as an atomic with a setter, the transport
+  latched once per block before the insert loop so one block is monitored
+  under one answer, and `mixMonitorInput` asking the header instead of
+  deciding for itself. **No change to the compensation exemption**, and that
+  is a finding rather than an oversight: it is already deliberately not
+  conditioned on the per insert arm, "which changes without a graph update",
+  so an insert can be exempt while not monitoring today and still can. The
+  trade is the one already documented there.
+- **`ProjectIO.cpp`**: the rule saved by its stored number, restored, and
+  reset to the default for a new project.
+- **`MixerComponent.h`**: a submenu beside the pan law, each item carrying
+  what it does, with the names coming out of the header so the words somebody
+  reads and the behaviour they get cannot drift apart.
+- **`Tests/MonitorRuleTest.cpp`**: the properties, over the whole state space
+  exhaustively, plus the distinguishability of the three rules at the cells
+  that separate them.
+
+### What the mutation pass and the audit found
+
+**Mutation testing, in two passes, both compiled with the sanitizers exactly
+as `Tests/run.sh` has them**, which CLAUDE.md is emphatic about after a
+harness weaker than the real test run misled an audit here.
+
+Thirty hand written mutations of the header. Twenty five caught on the first
+pass, five survived, and two of the five were real gaps:
+
+- **`ruleAt (index + 1)`**, rotating the menu. It survived because the check
+  on menu order counted each rule once as a **set**, and a rotation of three
+  rules is still a set of three. What it would have done is put the default
+  rule last, which is the one position the project's own convention says it
+  must not be in: the first entry of a choice list is the one that is safe to
+  fall back to. Menu order is now pinned position by position, and that the
+  first position is the default is pinned separately.
+- **`Capture::idle = 7`**, reordering the capture states, survived as a
+  genuine no-op because nothing stores a capture state or compares one for
+  order. Rather than leave a survivor to be rediscovered, the numbers came
+  out of the enum: there is now nothing there to reorder, and the header says
+  why that enum carries no numbers while `Rule` does.
+
+The other three survivors are the three post-switch fallbacks, and all three
+are unreachable for any value the type can hold: every `Rule` in the program
+comes from `ruleFromStored`, `ruleAt` or `defaultRule`, so reaching them needs
+a cast of an out of range integer, which is undefined behaviour. They cannot
+be removed either, because a function whose end is reachable is a warning and
+CI builds with `-Wall -Wextra`. Recorded as no-ops rather than counted as
+caught.
+
+**Then every cell of the table, one at a time.** The decision has 108 states:
+three choices, three rules, three capture states, rolling or stopped, an
+input or none. A wrapper compiled into the header negates the answer for
+exactly one state, chosen at compile time, and the test was built and run 108
+times, once per state. **All 108 were caught.** That is the check worth having
+for a table, because a table is the one shape where a mutation that nothing
+notices is not a missing case in the code but a missing case in the test, and
+no set of hand written mutations can prove their absence.
+
+**The `auditor` agent then reviewed the branch**, and it sent back three
+faults, three overclaims and two risks. All six of the first two groups are
+fixed. It also ran its own 144 cell sweep over the version it was given,
+independently, which is how two of those were found.
+
+**The punch case was claimed as fixed and is not fixed.** The worst of the
+three, and it was in the header's opening sentence, in the commit message, in
+the pull request and in the entry above. A recorder here is begun before the
+transport rolls and ended after it stops, because this studio deliberately
+captures the whole pass and trims it afterwards, which is what makes a
+punch's lead in and its pre-crossfade possible at all. So `capturing` means "a
+record pass is running", for the whole of its length, where Cubase and Reaper
+mean the stretch the transport is actually in record for, which begins at the
+punch in. Under every rule in this header a player punching in still hears
+themselves across the whole pass, including the lead in bar whose entire
+purpose is listening to what is already there.
+
+The header now says so in a section of its own, names the one input that
+would reach it, whether the transport is inside the punch range this pass,
+and names where that input is (latched in the window at the top of a take).
+The recommendation no longer points somebody who punches in at a rule that
+does nothing for them. **What the change does fix is the strip left armed
+during playback**, which is the case somebody meets every time they listen
+back, and that is what it now claims and no more.
+
+**Two flags that could be exchanged with nothing noticing.** The insert's
+state was `armed` and `capturing`, two adjacent bools filled from two adjacent
+arrays of atomics inside one aggregate initialiser. Exchange them and it still
+compiles, the gate is symmetric so nothing changes there, `whileArmed` ignores
+both, and the other two rules then answer on the arm: **both new rules become
+the old behaviour, the menu still offers three, nothing errors, and every cell
+of the table still passes, because the swap is in the engine and not in the
+header.** The one state that differs is a take running on a strip whose arm
+was cleared under it, which nobody would ever notice.
+
+They are now one value, `MonitorRule::Capture`, built by a ladder in the
+engine where each branch names its own state, so there is nothing of the same
+type sitting next to anything else. It also says something true that the pair
+could not: these are three states and not four, because a recorder is only
+ever begun for a strip that was armed, and an arm cleared under a running
+take leaves recording without armed.
+
+Worth keeping the general lesson rather than only the fix. The header had
+already given `Transport` a type of its own precisely so it could not be
+swapped at a call site, and had said so. It protected the one value that was
+hardest to confuse and left unprotected the two the whole table turns on. A
+guard written against the hazard somebody thought of is not a guard against
+the hazard, and the test could not see either way: **the boundary of what a
+JUCE free header can be tested for is exactly the line where the engine fills
+its arguments in**, and on this branch that line is four lines long.
+
+**The format version was not bumped, on one real precedent and one false
+one.** The claim was that this follows the feel and the de-click fade, which
+were added without a bump. The feel was. The de-click fade was not: the
+version history at the top of the same file records it as part of version 5.
+Worse, the argument itself, that an attribute changing nothing audible in the
+file can skip a bump, had already been made and already rejected at version 8,
+where the comment says plainly that "a studio where the record button means
+two different things depending on which build opened the file is worse than
+one that says the file is too new". Version 6 is the case in point: it bumped
+because an older build would ignore a solo isolate and then write the file
+back without it. Exactly that happens here. The version is bumped, like every
+bump since 2.
+
+**Three overclaims, all corrected.** `Choice::always` was described as
+Steinberg's "Manual" mode and is not: Manual follows a button on each channel
+and this studio has one answer for every strip, which the entry above lists as
+the deferred per insert override. A comment listed "the punch the player is
+rolling into" as one of the moments the rule switches monitoring at, which it
+cannot. And the test's own opening comment said the space it exhausts has 288
+states where the enumeration has 108, which in the one file whose entire
+argument is exhaustion is the number most worth getting right.
+
+**Two risks, recorded rather than fixed, both with the reason.**
+
+- **The toolbar still describes the old behaviour, at the worst moment.** The
+  monitoring combo's tooltip says "armed = only the mixer strips that are
+  armed to record", and selecting a mode prints "Monitoring 2 inputs at 11.6
+  ms round trip" immediately. Under the two new rules that sentence can be
+  printed while nothing is monitored at all, to the person with a silent
+  guitar in their hands, who is the exact person it was written for. Not fixed
+  because the toolbar is `MainComponent.cpp`, which open pull request #77
+  holds. **It is the first thing to do in this corner when that lands**, and
+  it is one tooltip and one status line.
+- **Under tapeMachine the compensation exemption is paid throughout playback
+  and buys nothing**, because no player is hearing anything during playback,
+  and playback is the activity the rule exists to improve. The exemption's own
+  comment weighs its cost against "unplayable latency" felt by a player, and
+  in that cell there is no such player. Nothing regresses: the same state was
+  reachable before this branch, with mode armed and a strip wired but not
+  armed. It is an opportunity rather than a fault, and taking it means
+  conditioning the exemption on something that changes without a graph update,
+  which is the thing that line refuses to do. `LatencyGraph.h` is held by #72
+  anyway.
+
+**What the audit confirmed rather than found**, listed because a claim nobody
+checked is worth less than one somebody attacked: the compensation exemption
+genuinely does not need to move and no new state is reachable; `renderOffline`
+cannot pass a live input under any choice or rule, structurally, because
+`mixMonitorInput` has one call site in the device callback and the callback
+returns early while `offlineActive` is set; aliasing `AudioEngine::Monitor` to
+`MonitorRule::Choice` preserves every value, every comparison and the
+settings file; the project state is saved, restored and reset, the reset is
+reached by both paths that start a project, and a garbled attribute lands on
+the default; the transport latch gives one block one answer and there is no
+second place in the engine that decides monitoring; the count-in, an arm
+cleared mid take, an arm set mid take and an input cleared mid take all behave
+as the header says; and nothing on the branch allocates, locks or logs on the
+audio thread, `inputAudible` being branch only and the one new read being an
+atomic load.
+
+### Outcome
+
+Pending: pull request #92, waiting on CI.
+
 ## 2026-11-24: where a send is tapped off a strip, and the mute point that decides what solo does to it
 
 ### What was looked at
