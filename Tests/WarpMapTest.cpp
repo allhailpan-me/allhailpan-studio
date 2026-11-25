@@ -582,6 +582,333 @@ static void testTempoIndependence()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The segment table is in absolute arrangement beats, and the clip is almost
+// never at the start of the arrangement.
+//
+// This is the half of the mapping the audio thread actually reads.
+// MainComponent builds the table with the clip's own `start` as its origin and
+// AudioEngine looks it up at the arrangement's beat, so every marker's entry
+// has to carry that origin. Dropping it reads the right file at the wrong
+// place, by exactly as many beats as the clip is along the arrangement, and
+// nothing about it looks broken: the clip plays, in time, from the wrong
+// moment of the take.
+//
+// Nothing was checking it. Every marker set in this file was built at
+// startBeat 0, where the origin and the relative beat are the same number, and
+// the one case at startBeat 8 had no markers at all, so the loop that adds the
+// origin never ran.
+
+static void testClipAwayFromBarOne()
+{
+    std::printf ("a warped clip reads the same wherever it sits in the arrangement\n");
+
+    const double offset = 0.25;
+    const double slope  = warpFallbackSlope (120.0, 1.0);
+    std::vector<WarpMarker> m { { 2.10, 4.0 }, { 4.30, 8.0 }, { 6.00, 12.0 } };
+    normaliseWarpMarkers (m, offset);
+
+    for (double startBeat : { 0.0, 1.5, 16.0, 64.0, 991.25 })
+    {
+        std::vector<WarpSegment> segments;
+        buildWarpSegments (m, offset, slope, startBeat, segments);
+
+        // Each marker's segment begins where the clip begins plus the marker's
+        // own position in the clip.
+        check (segments.size() == m.size() + 1, "wrong number of segments");
+        checkClose (segments[0].beat, startBeat, 1.0e-12,
+                    "the first segment is not at the clip's start");
+        for (size_t i = 0; i < m.size(); ++i)
+            checkClose (segments[i + 1].beat, startBeat + m[i].beat, 1.0e-12,
+                        "marker " + std::to_string (i) + " is at the wrong arrangement beat");
+
+        // And reading the table at an arrangement beat is reading the clip at
+        // the beat it is into the clip. Swept, including before the clip's
+        // start, which is where the renderer places the head of the file.
+        int cursor = 0;
+        for (int i = -200; i <= 2000; ++i)
+        {
+            const double beatsIn = i * (20.0 / 2000.0);
+            checkClose (warpSourceAtSegment (segments.data(), (int) segments.size(),
+                                             cursor, startBeat + beatsIn),
+                        warpSourceAtBeat (m, offset, slope, beatsIn), 1.0e-9,
+                        "the table reads elsewhere at beat " + std::to_string (beatsIn)
+                            + " of a clip starting at " + std::to_string (startBeat));
+        }
+
+        // The full property sweep, at this origin.
+        checkInvariants (m, offset, slope, startBeat, 20.0,
+                         "clip at beat " + std::to_string (startBeat));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rebasing is the one operation that can hand the rest of the file a list that
+// breaks the invariant, because it moves the frame the markers are measured in
+// rather than the markers.
+//
+// Project::split and the playlist's left trim both call it, and both then rely
+// on what it promises. The trim asks whether the list came back empty, and uses
+// the clip's stretch ratio to carry the old reading rate if it did: a list that
+// kept its swallowed markers is never empty, so that branch would not fire and
+// the trim would change the clip's speed.
+//
+// The split check further down this file compares read positions and passes
+// either way, because an unnormalised list still describes the same piecewise
+// line over the beats the split check looks at. So the property to assert is
+// the invariant itself, on the list that comes back.
+
+static void testRebaseKeepsTheInvariant()
+{
+    std::printf ("a rebased marker list still satisfies the invariant\n");
+
+    const double offset = 0.5;
+    const double slope  = warpFallbackSlope (120.0, 1.0);
+    std::vector<WarpMarker> m { { 2.10, 4.0 }, { 4.30, 8.0 }, { 6.00, 12.0 } };
+    normaliseWarpMarkers (m, offset);
+
+    // Edges moved to before the first marker, onto a marker exactly, between
+    // markers, and past the last one.
+    for (double shift : { 0.0, 1.0, 4.0, 6.0, 8.0, 11.5, 12.0, 14.0, 40.0 })
+    {
+        auto moved = m;
+        const double newOffset = warpSourceAtBeat (m, offset, slope, shift);
+        rebaseWarpMarkers (moved, shift, newOffset);
+
+        // Nothing may survive at or before the new left edge, in either
+        // coordinate: the edge is itself an implicit marker.
+        for (size_t i = 0; i < moved.size(); ++i)
+        {
+            check (moved[i].beat > 0.0,
+                   "a rebased marker sits at or before the new left edge in beats, shift "
+                       + std::to_string (shift));
+            check (moved[i].source > newOffset,
+                   "a rebased marker sits at or before the new left edge in the source, shift "
+                       + std::to_string (shift));
+        }
+
+        // Every marker the edge has not passed is still there, and nothing else.
+        size_t expected = 0;
+        for (const auto& k : m)
+            if (k.beat - shift >= kMinWarpBeatSpan && k.source >= newOffset + kMinWarpSourceSpan)
+                ++expected;
+        check (moved.size() == expected,
+               "a rebase kept the wrong number of markers at shift " + std::to_string (shift));
+
+        checkInvariants (moved, newOffset, warpSlopeAtBeat (m, offset, slope, shift),
+                         3.0, 16.0, "rebased by " + std::to_string (shift));
+    }
+
+    // An edge dragged past the last marker leaves nothing, which is what tells
+    // the trim to fall back to the clip's stretch ratio.
+    {
+        auto moved = m;
+        rebaseWarpMarkers (moved, 20.0, warpSourceAtBeat (m, offset, slope, 20.0));
+        check (moved.empty(), "a rebase past the last marker kept markers");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The audio thread's lookup, handed nothing.
+//
+// `segments.data()` on an empty vector is allowed to be a null pointer, and a
+// clip whose table has not been built yet has a count of zero. The guard reads
+// as belt and braces and is not: with it removed, the cursor clamp resolves
+// `count - 1` to -1 and the function reads segments[-1] on the audio thread.
+// Nothing in this file was calling it with an empty table, so address
+// sanitizer never had the chance to say so.
+
+static void testEmptyTableIsRefused()
+{
+    std::printf ("the audio thread's lookup refuses a table it cannot read\n");
+
+    std::vector<WarpSegment> none;
+    int cursor = 7;
+
+    check (warpSourceAtSegment (nullptr, 0, cursor, 4.0) == 0.0,
+           "a null table did not read as nothing");
+    check (warpSourceAtSegment (nullptr, 3, cursor, 4.0) == 0.0,
+           "a null table with a count did not read as nothing");
+    check (warpSourceAtSegment (none.data(), 0, cursor, 4.0) == 0.0,
+           "an empty table did not read as nothing");
+    check (warpSourceAtSegment (none.data(), -1, cursor, 4.0) == 0.0,
+           "a negative count did not read as nothing");
+
+    // One segment is the smallest real table, and a clip with no markers has
+    // exactly that, so it has to answer at any beat and from any cursor.
+    std::vector<WarpSegment> one { { 8.0, 1.25, 0.5 } };
+
+    // A count of zero against a pointer that is not null, which is what
+    // `snapshot.warp.data() + warpFirst` is for a clip whose table has not been
+    // built. The null test above cannot stand in for this one: with the count
+    // half of the guard removed, the cursor clamp resolves to count - 1, which
+    // is -1, and the read is one element before the table.
+    for (int c : { -3, 0, 5 })
+    {
+        int probe = c;
+        check (warpSourceAtSegment (one.data(), 0, probe, 4.0) == 0.0,
+               "a table with no segments in it did not read as nothing");
+        check (warpSourceAtSegment (one.data(), -2, probe, 4.0) == 0.0,
+               "a table with a negative count did not read as nothing");
+    }
+
+    for (int c : { -5, 0, 1, 99 })
+    {
+        int probe = c;
+        checkClose (warpSourceAtSegment (one.data(), 1, probe, 12.0), 1.25 + 4.0 * 0.5, 1.0e-12,
+                    "a single segment table does not read forward");
+        checkClose (warpSourceAtSegment (one.data(), 1, probe, 4.0), 1.25 - 4.0 * 0.5, 1.0e-12,
+                    "a single segment table does not read back before the clip");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The cap on how many markers a list may carry.
+//
+// It is there so a corrupt or hostile project file cannot hand the audio
+// thread a segment table of any size it likes, and nothing was checking it:
+// the largest marker set anywhere in this file was twenty four.
+
+static void testMarkerCap()
+{
+    std::printf ("a marker list is capped however many a project file carries\n");
+
+    std::vector<WarpMarker> m;
+    for (size_t i = 1; i <= kMaxWarpMarkers * 2 + 17; ++i)
+        m.push_back ({ (double) i * 0.01, (double) i });   // all perfectly usable
+
+    normaliseWarpMarkers (m, 0.0);
+    check (m.size() == kMaxWarpMarkers,
+           "the cap did not hold: " + std::to_string (m.size()) + " markers kept");
+
+    // The ones kept are the earliest, so the head of the clip is the part that
+    // stays accurate, and the table the audio thread gets is bounded with it.
+    checkClose (m.front().beat, 1.0, 1.0e-12, "the cap kept the wrong end of the list");
+    checkClose (m.back().beat, (double) kMaxWarpMarkers, 1.0e-12,
+                "the cap kept the wrong end of the list");
+
+    std::vector<WarpSegment> segments;
+    buildWarpSegments (m, 0.0, 0.5, 0.0, segments);
+    check (segments.size() == kMaxWarpMarkers + 1,
+           "a capped list did not build a bounded segment table");
+
+    double prev = -1.0e300;
+    int cursor = 0;
+    for (int i = 0; i <= 4000; ++i)
+    {
+        const double beat = i * ((double) kMaxWarpMarkers * 1.1 / 4000.0);
+        const double here = warpSourceAtSegment (segments.data(), (int) segments.size(), cursor, beat);
+        if (! (here > prev))
+        {
+            fail ("a capped list is not monotonic at beat " + std::to_string (beat));
+            break;
+        }
+        prev = here;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Each of the two minimum spans guards its own coordinate.
+//
+// They are different sizes, for different reasons: a beat span of nothing asks
+// for a segment of zero length, and a source span of nothing asks the stretcher
+// to hold one sample for a stretch of time. Every degenerate case in this file
+// stacks markers exactly, which a span of either size catches, and the random
+// sets draw from continuous distributions where landing between the two spans
+// never happens. So nothing said which constant belonged to which coordinate.
+
+static void testSpansGuardTheirOwnCoordinate()
+{
+    std::printf ("each minimum span guards the coordinate it is named for\n");
+
+    // A marker separated from its predecessor in beats only by `d`, with plenty
+    // of room in the source, and the other way round.
+    struct Case { double d; bool beatKept, sourceKept; };
+
+    for (auto c : { Case { 0.0,                     false, false },
+                    Case { kMinWarpSourceSpan,      false, true  },   // clears the source span, not the beat one
+                    Case { kMinWarpBeatSpan * 0.99, false, true  },
+                    Case { kMinWarpBeatSpan,        true,  true  } })  // exactly on it is usable
+    {
+        std::vector<WarpMarker> byBeat   { { 1.0, 4.0 }, { 2.0, 4.0 + c.d } };
+        std::vector<WarpMarker> bySource { { 1.0, 4.0 }, { 1.0 + c.d, 8.0 } };
+        normaliseWarpMarkers (byBeat, 0.0);
+        normaliseWarpMarkers (bySource, 0.0);
+
+        check (byBeat.size() == (c.beatKept ? 2u : 1u),
+               "a marker " + std::to_string (c.d) + " beats from its neighbour was judged wrongly");
+        check (bySource.size() == (c.sourceKept ? 2u : 1u),
+               "a marker " + std::to_string (c.d) + "s from its neighbour was judged wrongly");
+    }
+
+    // And the left edge is held to the same two spans, each in its own
+    // coordinate: the edge is an implicit marker at (offset, beat 0).
+    const double offset = 2.0;
+    {
+        std::vector<WarpMarker> m { { offset + kMinWarpSourceSpan, kMinWarpBeatSpan } };
+        normaliseWarpMarkers (m, offset);
+        check (m.size() == 1, "a marker exactly clear of the left edge was dropped");
+    }
+    {
+        std::vector<WarpMarker> m { { offset + kMinWarpSourceSpan, kMinWarpBeatSpan * 0.99 } };
+        normaliseWarpMarkers (m, offset);
+        check (m.empty(), "a marker too close to the left edge in beats was kept");
+    }
+    {
+        std::vector<WarpMarker> m { { offset + kMinWarpSourceSpan * 0.99, kMinWarpBeatSpan } };
+        normaliseWarpMarkers (m, offset);
+        check (m.empty(), "a marker too close to the left edge in the source was kept");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Which of several markers on one beat survives.
+//
+// The list is sorted stably so the survivor is the first one in the list, which
+// is what makes dragging a marker onto its neighbour leave the neighbour alone
+// rather than silently moving it. With two or three markers an unstable sort
+// happens to agree, because every implementation insertion sorts a list that
+// short, so the cases already here could not tell the difference. With enough
+// of them it does not agree, and it does not have to agree between one standard
+// library and another, which would be the same project warping differently on
+// Windows and on Linux. This project has been bitten by that before, which is
+// why PanOneBreed.h carries its own random number generator rather than using
+// <random>'s distributions.
+
+static void testStackedMarkersKeepTheFirst()
+{
+    std::printf ("the first of many markers on one beat is the one that survives\n");
+
+    for (int direction : { +1, -1 })
+    {
+        std::vector<WarpMarker> m;
+        for (int i = 0; i < 64; ++i)
+            m.push_back ({ 8.0 + direction * i * 0.05, 4.0 });
+
+        const double firstInTheList = m.front().source;
+        normaliseWarpMarkers (m, 0.0);
+
+        check (m.size() == 1, "markers stacked on one beat were not thinned to one");
+        if (m.size() == 1)
+            checkClose (m[0].source, firstInTheList, 1.0e-12,
+                        "the wrong one of many stacked markers survived");
+    }
+
+    // The same again where the ties are in the middle of a usable list, which
+    // is what a handful of double clicks on one transient actually looks like.
+    {
+        std::vector<WarpMarker> m { { 1.0, 2.0 } };
+        for (int i = 0; i < 48; ++i)
+            m.push_back ({ 3.0 + i * 0.01, 6.0 });
+        m.push_back ({ 9.0, 10.0 });
+
+        normaliseWarpMarkers (m, 0.0);
+        check (m.size() == 3, "a stack in the middle of a list was not thinned to one");
+        if (m.size() == 3)
+            checkClose (m[1].source, 3.0, 1.0e-12, "the wrong marker survived a stack");
+    }
+}
+
 int main()
 {
     std::printf ("warp map\n");
@@ -589,7 +916,13 @@ int main()
     testExactAndPiecewise();
     testDegenerateMarkers();
     testEmptyAfterNormaliseIsUnwarped();
+    testSpansGuardTheirOwnCoordinate();
+    testStackedMarkersKeepTheFirst();
+    testMarkerCap();
     testTempoIndependence();
+    testClipAwayFromBarOne();
+    testEmptyTableIsRefused();
+    testRebaseKeepsTheInvariant();
     testSplit();
     testSourceScale();
     testRandom();
