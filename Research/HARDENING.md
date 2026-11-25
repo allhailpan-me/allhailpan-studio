@@ -7,6 +7,33 @@ Newest first.
 
 ---
 
+## 2026-11-25: the warp mapping, which decides where a warped clip reads from
+
+### What is being looked at
+
+`Source/WarpMap.h`, 296 lines, and `Tests/WarpMapTest.cpp`, 603 of them.
+Never audited here before.
+
+It is picked for what a fault in it would sound like. Every path that moves a
+marker or a clip's left edge goes back through `normaliseWarpMarkers`, and the
+invariant it is there to restore, sorted and strictly increasing in both beat
+and source, is what makes the mapping monotonic and invertible. A list that
+breaks it makes a clip read backwards, which is a stutter, and it makes the
+clip's own length in beats meaningless. `warpSourceAtSegment` is the audio
+thread's half of it.
+
+Chosen over the one remaining JUCE free header with no test at all,
+`Fx/Unit.h`, because that header is not reachable: nothing in the tree
+includes it and `Fx/Plugin.h`, the wrapper it is written for, does not exist
+yet. Observations about it are recorded at the end of this entry so the night
+that builds on it does not start from nothing.
+
+### Status
+
+In progress. Mutation harness next.
+
+---
+
 ## 2026-11-24: the modulation matrix, which decides what every patch is wired to
 
 ### What is being looked at
