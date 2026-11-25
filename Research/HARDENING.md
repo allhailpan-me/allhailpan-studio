@@ -49,9 +49,203 @@ spread evenly, and the two clusters are the finding: everything to do with
 where a clip sits in the arrangement, and everything to do with a marker list
 that has just been rebased onto a new left edge.
 
-### Status
+### Nothing in the header was wrong
 
-In progress. Survivors being judged, then tests.
+No fault was found in `WarpMap.h`. Every formula in it survived being attacked
+from every direction tried, and the two places that read as suspicious on a
+first pass turned out to be right:
+
+- `warpSourceAtBeat` extrapolates the tail from the marker *before* the last
+  one rather than from the last one itself, which looks like an off by one and
+  is algebraically the same thing, because the segment's line passes through
+  both. Written the other way (mutation S9) the test still passes, as it
+  should.
+- `warpSlopeAtBeat` reports the rate of the segment *after* a beat that lands
+  exactly on a marker, not the one before it. That is the right way round for
+  both of its callers, which ask at the point of a cut and then read forward
+  from it.
+
+The finding is in the test, and it was a large one.
+
+### The gap: the audio thread's table was only ever checked at bar one
+
+`buildWarpSegments` takes the clip's position in the arrangement as `startBeat`
+and every segment it writes has to carry it, because `AudioEngine` looks the
+table up at the arrangement's beat, not at a beat into the clip. Dropping that
+one term (mutation G2) passed the entire test.
+
+Every marker set in `WarpMapTest.cpp` was built at `startBeat` 0, where the
+clip's origin and a beat into the clip are the same number. The one case that
+did pass a non-zero origin, `testNoMarkers` at beat 8, has no markers at all,
+so the loop that adds the origin never ran. `testSourceScale` does use beat 3,
+and compares a scaled table against an unscaled one, so the same mistake was
+present on both sides of its comparison and cancelled.
+
+What it would have sounded like is why it is worth writing down. A warped clip
+placed anywhere other than the very start of the arrangement would read the
+right file at the wrong place, by exactly as many beats as the clip is along.
+It still plays, still in time, still at the right speed: it just starts from
+the wrong moment of the take. A clip at bar 1 is correct, which is where
+anybody checking would put one.
+
+The shape of it is the familiar one from `Synth/ModMatrix.h` last night. The
+numbers all had attention and the frame they were measured in had none.
+
+### Mutation testing: 70 breakages, 60 caught, 10 genuine no-ops
+
+The harness is `Research/warp-mutations.py`, kept so the figures can be
+reproduced and so the next night does not have to guess what was tried:
+
+```
+python3 Research/warp-mutations.py            every mutation
+python3 Research/warp-mutations.py G2 R3      only those
+```
+
+It compiles each broken copy with the sanitizers exactly as `Tests/run.sh` has
+them, and checks the unmutated header passes first.
+
+| Where | Tried | Caught before | Caught after |
+|---|---|---|---|
+| `normaliseWarpMarkers` and its two spans | 20 | 14 | 20 |
+| `warpFallbackSlope`, `warpStretchForSlope` | 6 | 5 | 5 |
+| `warpSourceAtBeat` | 9 | 7 | 7 |
+| `warpBeatAtSource` | 6 | 5 | 5 |
+| `warpSlopeAtBeat` | 5 | 4 | 4 |
+| `rebaseWarpMarkers` | 4 | 2 | 3 |
+| `buildWarpSegments` | 10 | 8 | 9 |
+| `warpSourceAtSegment` | 10 | 5 | 7 |
+
+Six new sections close eleven of the twenty survivors.
+
+### The other gaps that were closed
+
+**A rebased marker list was never checked against the invariant.** `rebase`
+is the one operation that can break it, because it moves the frame the markers
+are measured in rather than the markers. Removing its call to
+`normaliseWarpMarkers` altogether passed the whole test. The split check could
+not see it: it compares read positions, and an unnormalised list still
+describes the same piecewise line over the beats it looks at, because the
+markers the new edge has swallowed sit at negative beats and the segment
+through them is the original segment. The playlist's left trim is the caller
+that would have felt it, because it asks whether the list came back empty and
+hands the clip's stretch ratio the old reading rate if it did. A list that kept
+its swallowed markers is never empty, so a trim past the last marker would have
+changed the clip's speed. `testRebaseKeepsTheInvariant` asserts the invariant
+on what comes back instead of the read positions.
+
+**The cap on the marker count was a comment and nothing else.** It is there so
+a corrupt or hostile project file cannot hand the audio thread a segment table
+of any size it likes. Removing it, raising it, and putting it off by one all
+passed: the largest marker set anywhere in the file was twenty four.
+
+**Nothing said which of the two minimum spans guards which coordinate.** They
+are different sizes for different reasons, and using each for the other's
+coordinate passed. Every degenerate case in the file stacks markers exactly,
+which a span of either size catches, and the random sets draw from continuous
+distributions, so landing between 1e-5 and 1e-4 never happened in ten thousand
+trials. The new case walks both spans in both coordinates, including exactly on
+each one, which is usable, and including against the clip's left edge.
+
+**The stable sort was being relied on and nothing could see it.** The survivor
+of several markers on one beat is the first in the list, which is what makes
+dragging a marker onto its neighbour leave the neighbour alone rather than
+silently moving it. With two or three markers an unstable sort agrees, because
+every implementation insertion sorts a list that short, so the cases already
+present could not tell the difference. The new case stacks sixty four, where it
+does not agree, and need not agree between one standard library and another:
+that would be the same project warping differently on Windows and on Linux,
+which is the fault `PanOneBreed.h` carries its own random number generator to
+avoid.
+
+**The audio thread's lookup was never handed an empty table.** Removing either
+half of its guard passed. The null half matters because `data()` on an empty
+vector may be null; the count half matters more, because with it gone the
+cursor clamp resolves `count - 1` to -1 and the function reads one element
+before the table, on the audio thread. Address sanitizer catches that the
+moment anything calls it that way, and nothing did. Note that the two halves
+need separate cases: calling it with an empty vector's `data()` exercises only
+the null half, which is why the first attempt at this check did not bite.
+
+### The ten survivors, and why each one is a no-op rather than a gap
+
+Four are the same observation twice over: a boundary test at a beat that lands
+exactly on a marker.
+
+| | |
+|---|---|
+| S2 | `warpSourceAtBeat`'s `beat < b1` becomes `<=` |
+| B2 | `warpBeatAtSource`'s `source < s1` becomes `<=` |
+| A1 | `warpSourceAtSegment`'s cursor advance becomes strict |
+| A9 | its walk back becomes non strict |
+
+All four are no-ops in the answer. A segment's line passes through the marker
+at its end by construction, so at a beat exactly on a marker both sides of the
+boundary give the same number, and the cursor being one segment behind or ahead
+at that instant changes nothing but which line is evaluated at a point the two
+share. L1, the same change in `warpSlopeAtBeat`, is not a no-op in the value
+but is one for both of its callers: cutting exactly on the last marker takes
+the `i + 1 == markers.size()` arm either way, and cutting exactly on any
+earlier marker leaves that marker's successors in the rebased list, so the rate
+only sets the stretch ratio of a piece whose own markers govern its reading,
+and `buildWarpSegments` scales the table to match whatever that ratio turns
+out to be.
+
+**R2, normalising a rebased list against the old left edge instead of the new
+one, is a no-op because the mapping is monotonic.** A marker is after the new
+edge in beats exactly when it is after it in the source, so the two tests drop
+the same markers. They could differ only for a marker a hair past the edge in
+beats and less than 1e-5 of a second past it in the source, which needs a rate
+no performance has. Worth knowing rather than worth a contrived case.
+
+**The remaining four are guards whose job is done somewhere else, and that is
+the thing to write down.**
+
+| | |
+|---|---|
+| F3 | `warpFallbackSlope`'s `max (1e-6, bpm)` |
+| S6 | `warpSourceAtBeat`'s `max (1e-12, slope)` |
+| G7 | `buildWarpSegments`' `max (1e-9, sourceScale)` |
+| G8 | its `max (1e-12, fallbackSlope)` |
+
+Removing any of them passes, and not because the test is weak. They cannot
+fire. `AudioEngine::setBpm` clamps the tempo to 20 to 400 and `ProjectIO::load`
+reads the project's tempo back through it, so no tempo near zero reaches here.
+`ProjectIO::load` clamps every clip's stretch ratio to 0.1 to 10, and that
+ratio is the only thing ever passed as `sourceScale`. `fallbackSlope` is always
+the return of `warpFallbackSlope`, which clamps both of its own inputs before
+dividing, so it is always positive. And `slope` inside the walk is positive for
+any normalised list, which every caller passes, since normalisation is what
+makes the list strictly increasing in both coordinates.
+
+So the warp map's own guards are a second line and not the first. Anybody
+tempted to take the clamps out of `ProjectIO::load` or `setBpm` should know
+that these are what would be left, and that nothing in `Tests/` would notice
+them starting to matter. Testing them here would be testing the formulas rather
+than the property, so they are recorded instead.
+
+### A note on Fx/Unit.h, which is the remaining untested header
+
+`Source/Fx/Unit.h` is the only JUCE free header in `Source` with no test, and
+it was passed over because nothing reaches it: no file in the tree includes it,
+and `Fx/Plugin.h`, the wrapper it exists to feed, has not been written. It
+landed on 23 October and has not been touched since. Three things noticed while
+reading it, for whoever builds on it:
+
+- The class comment says an id nobody recognises "lands there", meaning the
+  first entry of the choice list, which is the rule `PanOneParams.h` follows.
+  Nothing in the file does that. `choiceFromId` returns -1, as its own doc
+  comment says, and the only thing that turns -1 into 0 is `toIndex`. So the
+  promise holds only for callers that route every stored id through `toIndex`,
+  and the first effect that reads `choiceFromId` directly into a patch field
+  will store -1 in it. In `Synth/ModMatrix.h` a -1 is deliberate and means the
+  routing is dropped; here it means a choice that does not exist.
+- `Table::pick` takes the list's size minus one as the control's maximum.
+  `size()` is unsigned, so an empty list gives `SIZE_MAX` cast to float rather
+  than an error.
+- `toIndex (value, 0)` returns -1 for the same reason.
+
+None of it can be heard today. It is written down so the night that wires the
+first effect through this header starts from here.
 
 ---
 

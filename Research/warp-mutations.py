@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Mutation harness for Source/WarpMap.h against Tests/WarpMapTest.cpp.
 
+    python3 Research/warp-mutations.py            every mutation
+    python3 Research/warp-mutations.py G2 R3       only those
+
+
 Compiles each broken copy with exactly the flags Tests/run.sh uses, including
 the sanitizers, because a plain -O2 build calls an out of bounds read a
 survivor.
 """
 import os, subprocess, sys, tempfile, shutil, concurrent.futures
 
-REPO = "/home/claude/allhailpan-studio"
-WORK = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORK = tempfile.mkdtemp(prefix="warpmut_")
 HDR  = os.path.join(REPO, "Source/WarpMap.h")
 TEST = os.path.join(REPO, "Tests/WarpMapTest.cpp")
 
