@@ -28,9 +28,30 @@ includes it and `Fx/Plugin.h`, the wrapper it is written for, does not exist
 yet. Observations about it are recorded at the end of this entry so the night
 that builds on it does not start from nothing.
 
+### Mutation testing: 70 breakages, 50 caught
+
+Each one compiled with the sanitizers exactly as `Tests/run.sh` has them, and
+the harness checked that the unmutated header passes first.
+
+| Where | Tried | Caught |
+|---|---|---|
+| `normaliseWarpMarkers` and its two spans | 20 | 14 |
+| `warpFallbackSlope`, `warpStretchForSlope` | 6 | 5 |
+| `warpSourceAtBeat` | 9 | 7 |
+| `warpBeatAtSource` | 6 | 5 |
+| `warpSlopeAtBeat` | 5 | 4 |
+| `rebaseWarpMarkers` | 4 | 2 |
+| `buildWarpSegments` | 10 | 8 |
+| `warpSourceAtSegment` | 10 | 5 |
+
+The twenty survivors and what each one is are in the next section. They are not
+spread evenly, and the two clusters are the finding: everything to do with
+where a clip sits in the arrangement, and everything to do with a marker list
+that has just been rebased onto a new left edge.
+
 ### Status
 
-In progress. Mutation harness next.
+In progress. Survivors being judged, then tests.
 
 ---
 
