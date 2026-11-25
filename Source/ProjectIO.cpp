@@ -114,7 +114,22 @@ namespace
     // around that would be wrong everywhere the fader was not at the position
     // it happened to be mixed at. It would open, play, and sound plausible,
     // which is the shape of failure this file keeps refusing.
-    constexpr int formatVersion = 10;
+    // 11 adds the monitoring rule: what an armed strip hears while the
+    // transport is moving. No rule attribute means the rule the studio had
+    // before there was a choice, which is also this one's default, so old
+    // projects open monitoring exactly as they always did.
+    //
+    // Bumped like the rest, and the first draft of this did not bump at all,
+    // on the argument that the setting changes nothing anybody can hear in a
+    // file: not the mix, not a clip, not a take, not a bounce. An audit is
+    // what sent it back, and it is right. The argument was already made and
+    // already rejected at version 8, in the same words it would have been
+    // made in here, and version 6 is the case: an older build opening a tape
+    // machine project would ignore the rule, monitor the way it always did,
+    // and then write the file back without it, so the setting is silently
+    // gone and the next take is recorded with the player hearing something
+    // they had asked not to hear.
+    constexpr int formatVersion = 11;
 
     juce::String num (double v) { return juce::String (v, 9); }
 
@@ -580,14 +595,8 @@ juce::Result ProjectIO::save (const juce::File& file, Project& project, AudioEng
     // the law and the send tap are, and the numbers are fixed: MonitorRule.h
     // says so at ruleToStored.
     //
-    // Written as its own attribute with no bump of the format version, the
-    // way the feel and the de-click fade are, and the line is the one those
-    // two draw: a bump makes an older build refuse the file outright, which
-    // is only worth it when the older build would otherwise play the project
-    // wrong. This one cannot. It changes what a player hears live while a
-    // strip is armed and nothing else: not the mix, not a clip, not a take,
-    // not a bounce. An older build ignores it and monitors the way it always
-    // did, which is this setting's own default anyway.
+    // Behind a version bump, like every other attribute added since 2, and
+    // the reasoning is at formatVersion rather than repeated here.
     mixerXml->setAttribute ("monitorRule", MonitorRule::ruleToStored (engine.getMonitorRule()));
 
     for (int i = 0; i < kNumInserts; ++i)

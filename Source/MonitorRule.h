@@ -9,8 +9,8 @@
     are the same answer whatever the transport is doing, which is the part
     that was missing. A strip left armed is heard live over the whole of
     playback, so listening back to a take means hearing yourself over it, and
-    somebody punching into a vocal hears their own voice across the entire
-    pass rather than only across the punch.
+    practising a part along with the arrangement and then listening to what is
+    already there are the same thing to this studio.
 
     Every studio looked at has a rule for this, and two of them arrived at the
     same three cases under the same name. Reaper's User Guide 7.26 has
@@ -35,12 +35,15 @@
     - "Tapemachine Style": as quoted above.
 
     Steinberg's fourth mode, "Manual", "Turns input monitoring on or off when
-    you click Monitor", is `Choice::always` here and is deliberately outside
-    the rule: it is somebody saying they want to hear the input, and a rule
-    that overrode that would be answering a question nobody asked. Ardour
-    draws the same line in the same place, by returning from
-    `Route::monitoring_state()` before the transport is ever read when the
-    route's own choice is not `MonitorAuto` (`route.cc:6622`).
+    you click Monitor", has no equivalent here and `Choice::always` is not it:
+    Manual follows a button on each channel, and this studio has one answer
+    for every strip rather than one per strip. What `always` borrows from it is
+    only the part that settles where the rule stops. Both are somebody stating
+    an answer rather than asking for one, and a rule that overrode a stated
+    answer would be answering a question nobody asked. Ardour draws the same
+    line in the same place, by returning from `Route::monitoring_state()`
+    before the transport is ever read when the route's own choice is not
+    `MonitorAuto` (`route.cc:6622`).
 
     Kept free of JUCE so the whole table can be tested, which is worth doing
     for the reason `LatencyGraph.h` is: nothing in here can announce that it
@@ -84,6 +87,37 @@
     `disk` or `both` state that nothing could produce, because a declared
     state nothing reaches is the failure this project keeps meeting.
 
+    ## What a punch still does, and why no rule in here can reach it
+
+    This was claimed as fixed in the first version of this header and it is
+    not fixed, which an audit caught before it merged. Worth the space,
+    because the reason is a real difference between this engine and the ones
+    the rules come from, and because the next person to reach for this will
+    reach for it with a punch in mind.
+
+    `Capture::recording` is this insert's recorder being active, and the
+    recorder is deliberately begun before the transport rolls and ended after
+    it stops: this studio captures the whole pass and trims it afterwards,
+    which is what makes a punch's pre-crossfade and its lead in possible at
+    all. So "recording" here means "a record pass is running", for its whole
+    length, including the bar rolled in before the punch and everything after
+    the punch out.
+
+    In Cubase and Reaper the same word means something narrower, because there
+    the transport switches into record at the punch in. "During recording"
+    therefore closes the input outside the punch in those studios and does not
+    here, and under every rule in this file a player punching in hears
+    themselves across the whole pass exactly as they did before. **The rule
+    fixes the strip left armed during playback. It does not fix the punch.**
+
+    What it would take is one more input: whether the transport is inside the
+    punch range this pass. The engine does not know. The range is latched in
+    the window at the top of a take (`MainComponent::startRecording`, with
+    `Punch::isUsable`) and read again only when the take is cut up, which is
+    the discipline that stops a punch moving under a performance. Pushing the
+    latched range into the engine is the unlock, and it is one field and one
+    comparison once something puts it there.
+
     ## Latency: nothing moves, and that is a finding
 
     An insert carrying a live input is exempt from delay compensation, and
@@ -112,10 +146,10 @@
     the five milliseconds every other level in the mixer travels at.
 
     That matters here because a transport aware rule switches monitoring at
-    moments nothing used to switch it: the first beat of playback, the punch
-    the player is rolling into, the stop at the end. Those switches are
-    clickless because the ramp in `mixMonitorInput` was already there, not
-    because this header does anything about it.
+    moments nothing used to switch it: the first beat of playback, the stop at
+    the end, and the start of a record pass. Those switches are clickless
+    because the ramp in `mixMonitorInput` was already there, not because this
+    header does anything about it.
 */
 namespace MonitorRule
 {
@@ -192,8 +226,9 @@ namespace MonitorRule
         is plain input monitoring rather than its Tape Auto Style: "By
         default, Input Monitoring should be on."
 
-        The tape machine rule is the one to recommend to somebody who punches
-        in. Recommending is a release note's job, not a default's.
+        The rule worth recommending is the tape machine one, to anybody who
+        leaves a strip armed and then listens back, which is most people most
+        of the time. Recommending is a release note's job, not a default's.
     */
     inline constexpr Rule defaultRule = Rule::whileArmed;
 
@@ -201,7 +236,7 @@ namespace MonitorRule
     /** What the transport is doing, latched once per block.
 
         Its own type rather than a loose bool so that it cannot be swapped
-        with one of the insert's three at a call site. That is not a
+        with the insert's own state at a call site. That is not a
         hypothetical: the flags handed to `setSoloSettings` were documented in
         the wrong order for a while, and an audit is what found it.
 
@@ -230,6 +265,48 @@ namespace MonitorRule
         bool rolling = false;
     };
 
+    //==========================================================================
+    /** What one insert is doing about recording.
+
+        One value rather than the two flags this started as, armed and
+        capturing, and the reason is a mutation an audit found rather than
+        tidiness. Two adjacent `bool` members, filled from two adjacent arrays
+        of atomics in one aggregate initialiser, can be exchanged at the call
+        site without changing a type, and exchanging them turns both new rules
+        back into the old behaviour: the gate is symmetric, `whileArmed`
+        ignores both, and the other two then answer on the arm. The menu would
+        still offer three rules, nothing would error, and the whole table
+        could still be tested cell by cell and pass, because the swap is in
+        the engine and not in here.
+
+        One value cannot be swapped with itself. Deliberately carrying no
+        numbers of its own, unlike `Rule` below: nothing stores a capture
+        state or compares one for order, because it is worked out again from
+        the arm and the recorder on every block, so a number here would be a
+        number nothing depends on and a reader would have to find that out
+        for themselves.
+
+        It also says something the pair could not: these are three states
+        rather than four,
+        because being armed and being recorded are not independent. A recorder
+        is begun only for a strip that was armed, and an arm cleared under a
+        running take leaves `recording` without `armed`, which is a state the
+        engine deliberately keeps monitoring.
+    */
+    enum class Capture
+    {
+        /** Not armed, and nothing capturing it. */
+        idle,
+
+        /** Armed to record, with no take running. */
+        armed,
+
+        /** This insert's recorder is running, which is this engine's answer
+            to "is this strip being recorded". Note what it does not mean:
+            see the punch section above. */
+        recording
+    };
+
     /** One insert's own state, as the monitoring decision needs it. */
     struct Insert
     {
@@ -240,12 +317,8 @@ namespace MonitorRule
             plugged into it, under every rule. */
         bool hasInput = false;
 
-        /** The strip is armed to record. */
-        bool armed = false;
-
-        /** This insert's own recorder is running, which is this engine's
-            answer to "is this strip being recorded". */
-        bool capturing = false;
+        /** What it is doing about recording. */
+        Capture capture = Capture::idle;
     };
 
     //==========================================================================
@@ -271,21 +344,24 @@ namespace MonitorRule
             case Choice::armed:  break;
         }
 
-        // The recorder as well as the arm, so that a take already running
-        // keeps being monitored if the arm is cleared under it. The existing
-        // engine comment is the argument: clearing an arm mid take should not
-        // deafen the player who is still playing.
-        if (! (insert.armed || insert.capturing))
+        // Idle covers both halves of "not asked to record": never armed, and
+        // armed with nothing capturing. A take already running on a strip
+        // whose arm was cleared under it is `recording` rather than idle, so
+        // clearing an arm mid take does not deafen the player who is still
+        // playing.
+        if (insert.capture == Capture::idle)
             return false;
+
+        const bool beingRecorded = insert.capture == Capture::recording;
 
         switch (rule)
         {
             case Rule::whileArmed:     return true;
-            case Rule::whileRecording: return insert.capturing;
+            case Rule::whileRecording: return beingRecorded;
 
             // Stopped or recording, and silent during playback. The two terms
             // are the two halves of Steinberg's sentence and of Reaper's.
-            case Rule::tapeMachine:    return insert.capturing || ! transport.rolling;
+            case Rule::tapeMachine:    return beingRecorded || ! transport.rolling;
         }
 
         // A value this header does not define, which only a bad cast can

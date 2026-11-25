@@ -2,11 +2,12 @@
 // MonitorRule.h: whether a player hears their own input, and what the
 // transport has to do with it.
 //
-// The input space here is finite and small: three choices, three rules, and
-// four booleans, which is 288 states. So this enumerates all of them rather
-// than sampling, which is the one case where exhaustion beats the randomised
-// testing this project usually prefers. Nothing can be missed by a generator
-// that never happened to produce it.
+// The input space here is finite and small: three choices, three rules, two
+// transport states, two input states and three capture states, which is 108
+// states. So this enumerates all of them rather than sampling, which is the
+// one case where exhaustion beats the randomised testing this project usually
+// prefers. Nothing can be missed by a generator that never happened to
+// produce it.
 //
 // What is deliberately not here is a transcription of the table into an
 // expected array. A table checked against a second copy of itself proves the
@@ -52,13 +53,15 @@ void check (bool condition, const std::string& what)
         fail (what);
 }
 
+using MonitorRule::Capture;
 using MonitorRule::Choice;
 using MonitorRule::Insert;
 using MonitorRule::Rule;
 using MonitorRule::Transport;
 
-const Choice allChoices[] { Choice::off, Choice::armed, Choice::always };
-const Rule   allRules[]   { Rule::whileArmed, Rule::whileRecording, Rule::tapeMachine };
+const Choice  allChoices[]  { Choice::off, Choice::armed, Choice::always };
+const Rule    allRules[]    { Rule::whileArmed, Rule::whileRecording, Rule::tapeMachine };
+const Capture allCaptures[] { Capture::idle, Capture::armed, Capture::recording };
 
 const char* choiceText (Choice c)
 {
@@ -84,29 +87,42 @@ const char* ruleText (Rule r)
     return "?";
 }
 
+const char* captureText (Capture c)
+{
+    switch (c)
+    {
+        case Capture::idle:      return "idle";
+        case Capture::armed:     return "armed";
+        case Capture::recording: return "recording";
+    }
+
+    return "?";
+}
+
 /** One cell of the table, so a failure can say which one it was. */
 struct State
 {
-    Choice choice;
-    Rule   rule;
-    bool   rolling, hasInput, armed, capturing;
+    Choice  choice;
+    Rule    rule;
+    Capture capture;
+    bool    rolling, hasInput;
 
     bool audible() const
     {
         return MonitorRule::inputAudible (choice, rule,
                                           Transport { .rolling = rolling },
-                                          Insert { .hasInput  = hasInput,
-                                                   .armed     = armed,
-                                                   .capturing = capturing });
+                                          Insert { .hasInput = hasInput, .capture = capture });
     }
+
+    bool armedOrRecording() const { return capture != Capture::idle; }
+    bool beingRecorded()    const { return capture == Capture::recording; }
 
     std::string text() const
     {
         return std::string (choiceText (choice)) + "/" + ruleText (rule)
-             + (rolling   ? " rolling"   : " stopped")
-             + (hasInput  ? " input"     : " noInput")
-             + (armed     ? " armed"     : " unarmed")
-             + (capturing ? " capturing" : " idle");
+             + (rolling  ? " rolling" : " stopped")
+             + (hasInput ? " input"   : " noInput")
+             + " " + captureText (capture);
     }
 };
 
@@ -116,12 +132,10 @@ std::vector<State> everyState()
 
     for (auto choice : allChoices)
         for (auto rule : allRules)
-            for (int rolling = 0; rolling < 2; ++rolling)
-                for (int hasInput = 0; hasInput < 2; ++hasInput)
-                    for (int armed = 0; armed < 2; ++armed)
-                        for (int capturing = 0; capturing < 2; ++capturing)
-                            states.push_back ({ choice, rule, rolling != 0, hasInput != 0,
-                                                armed != 0, capturing != 0 });
+            for (auto capture : allCaptures)
+                for (int rolling = 0; rolling < 2; ++rolling)
+                    for (int hasInput = 0; hasInput < 2; ++hasInput)
+                        states.push_back ({ choice, rule, capture, rolling != 0, hasInput != 0 });
 
     return states;
 }
@@ -130,7 +144,7 @@ std::vector<State> everyState()
     gate every rule sits behind. */
 bool participates (const State& s)
 {
-    return s.hasInput && (s.armed || s.capturing);
+    return s.hasInput && s.armedOrRecording();
 }
 
 //==============================================================================
@@ -140,10 +154,10 @@ void theWholeTable()
 
     const auto states = everyState();
 
-    // 3 choices * 3 rules * 2^4 booleans. Pinned so that adding a rule
-    // without extending this enumeration fails here rather than quietly
-    // testing two thirds of the table.
-    check (states.size() == 144, "the enumeration is not the whole space: "
+    // 3 choices * 3 rules * 3 capture states * 2 * 2. Pinned so that adding a
+    // rule or a capture state without extending this enumeration fails here
+    // rather than quietly testing part of the table.
+    check (states.size() == 108, "the enumeration is not the whole space: "
                                  + std::to_string (states.size()) + " states");
 
     check ((int) MonitorRule::numRules == (int) (sizeof (allRules) / sizeof (allRules[0])),
@@ -172,13 +186,13 @@ void theWholeTable()
         // Steinberg's "While Record-Enabled": "Connects the audio source to
         // the channel input when you click Record Enable." Nothing that was
         // not armed, or already being recorded, is passed.
-        if (s.choice == Choice::armed && ! (s.armed || s.capturing))
+        if (s.choice == Choice::armed && ! s.armedOrRecording())
             check (! audible, "an unarmed, idle insert was audible: " + s.text());
 
         // All three published rules open the input while a take is running:
         // "during recording only", "and during recording", and the one that
         // never closes it at all.
-        if (s.choice == Choice::armed && s.hasInput && s.capturing)
+        if (s.choice == Choice::armed && s.hasInput && s.beingRecorded())
             check (audible, "a strip being recorded could not hear itself: " + s.text());
 
         if (s.choice != Choice::armed || ! participates (s))
@@ -194,7 +208,7 @@ void theWholeTable()
 
             // "Switches to input monitoring during recording only."
             case Rule::whileRecording:
-                check (audible == s.capturing,
+                check (audible == s.beingRecorded(),
                        "whileRecording did not follow the recorder: " + s.text());
                 break;
 
@@ -204,7 +218,7 @@ void theWholeTable()
             // recording", and "During playback you will hear only the
             // timeline audio, not the input."
             case Rule::tapeMachine:
-                check (audible == (s.capturing || ! s.rolling),
+                check (audible == (s.beingRecorded() || ! s.rolling),
                        "tapeMachine is not stopped-or-recording: " + s.text());
                 break;
         }
@@ -223,12 +237,12 @@ void theRulesDiffer()
 {
     std::printf ("The three rules are distinguishable, at the cells that separate them\n");
 
-    const auto audibleUnder = [] (Rule rule, bool rolling, bool capturing)
+    const auto audibleUnder = [] (Rule rule, bool rolling, bool recording)
     {
         return MonitorRule::inputAudible (Choice::armed, rule, Transport { .rolling = rolling },
-                                          Insert { .hasInput  = true,
-                                                   .armed     = true,
-                                                   .capturing = capturing });
+                                          Insert { .hasInput = true,
+                                                   .capture  = recording ? Capture::recording
+                                                                         : Capture::armed });
     };
 
     // Stopped, armed, nothing being recorded. This is the ONLY cell in which
@@ -279,8 +293,8 @@ void whatThisIsFor()
 {
     std::printf ("The behaviour the rule exists to make possible\n");
 
-    const Insert armedWithInput { .hasInput = true, .armed = true, .capturing = false };
-    const Insert recording      { .hasInput = true, .armed = true, .capturing = true };
+    const Insert armedWithInput { .hasInput = true, .capture = Capture::armed };
+    const Insert recording      { .hasInput = true, .capture = Capture::recording };
 
     int rulesThatCloseDuringPlayback = 0;
 
@@ -321,9 +335,8 @@ void whatThisIsFor()
         for (int rolling = 0; rolling < 2; ++rolling)
             check (MonitorRule::inputAudible (Choice::always, rule,
                                               Transport { .rolling = rolling != 0 },
-                                              Insert { .hasInput  = true,
-                                                       .armed     = false,
-                                                       .capturing = false }),
+                                              Insert { .hasInput = true,
+                                                       .capture  = Capture::idle }),
                    "Choice::always was overridden by a rule or by the transport");
 }
 
@@ -364,9 +377,21 @@ void whatIsStored()
         check (stored >= 0 && stored < MonitorRule::numRules,
                "ruleAt gave something outside the list at index " + std::to_string (i));
 
+        // Menu order is stored order, exactly, which is what keeps the first
+        // item the one that is safe to fall back to and what makes a fourth
+        // rule append rather than insert. Checked position by position
+        // rather than as a set: a rotation of the three is a set of three
+        // and passes every other check here, and it would quietly put the
+        // default in last place.
+        check (stored == i, "menu position " + std::to_string (i) + " holds the rule stored as "
+                                + std::to_string (stored));
+
         if (stored >= 0 && stored < MonitorRule::numRules)
             ++seen[(size_t) stored];
     }
+
+    check (MonitorRule::ruleAt (0) == MonitorRule::defaultRule,
+           "the first rule in the menu is not the one an unreadable setting falls back to");
 
     for (int i = 0; i < MonitorRule::numRules; ++i)
         check (seen[(size_t) i] == 1,
@@ -394,6 +419,35 @@ void whatIsStored()
     check (MonitorRule::ruleFromStored (MonitorRule::ruleToStored (MonitorRule::defaultRule))
                == MonitorRule::defaultRule,
            "the default rule does not round trip");
+}
+
+//==============================================================================
+/** The default member initialisers, which are the only part of the structs a
+    call site can leave out.
+
+    Both exist as insurance against a partial initialiser arriving later, and
+    insurance nothing checks is decoration: a mutation of either one survived
+    a mutation pass until these two checks were written. */
+void theDefaults()
+{
+    std::printf ("What an unfilled state means\n");
+
+    // Nothing plugged in and nothing asked of it, under every choice and
+    // every rule, including the choice that overrides the transport.
+    for (auto choice : allChoices)
+        for (auto rule : allRules)
+            for (int rolling = 0; rolling < 2; ++rolling)
+                check (! MonitorRule::inputAudible (choice, rule,
+                                                    Transport { .rolling = rolling != 0 },
+                                                    Insert {}),
+                       std::string ("a default constructed insert was audible under ")
+                           + choiceText (choice) + "/" + ruleText (rule));
+
+    // And an unfilled transport is a stopped one, which is the half of the
+    // tape machine rule that opens the input.
+    check (MonitorRule::inputAudible (Choice::armed, Rule::tapeMachine, Transport {},
+                                      Insert { .hasInput = true, .capture = Capture::armed }),
+           "a default constructed transport is not a stopped one");
 }
 
 //==============================================================================
@@ -453,6 +507,7 @@ int main()
     theRulesDiffer();
     whatThisIsFor();
     whatIsStored();
+    theDefaults();
     theNames();
     itIsAFunction();
 

@@ -2959,9 +2959,21 @@ void AudioEngine::mixMonitorInput (const float* const* inputChannelData,
         // It is also what answers "is this strip being recorded" for the
         // rules that ask, including through the count-in, since the
         // recorders are begun before the transport rolls.
-        const MonitorRule::Insert state { .hasInput  = pick.valid,
-                                          .armed     = insertArmed[(size_t) i].load(),
-                                          .capturing = inputRecorders[(size_t) i].isActive() };
+
+        // The ladder rather than two flags handed over side by side: each
+        // branch names its own state, so there are no two same typed values
+        // here to exchange. MonitorRule::Capture carries what that was
+        // protecting against, which an audit found by exchanging them.
+        //
+        // The recorder first, because it outranks the arm: a take running on
+        // a strip whose arm was cleared under it is still being recorded.
+        const auto capture = inputRecorders[(size_t) i].isActive()
+                                 ? MonitorRule::Capture::recording
+                                 : insertArmed[(size_t) i].load()
+                                       ? MonitorRule::Capture::armed
+                                       : MonitorRule::Capture::idle;
+
+        const MonitorRule::Insert state { .hasInput = pick.valid, .capture = capture };
 
         const bool listening = MonitorRule::inputAudible (mode, rule, transport, state);
 
