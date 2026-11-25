@@ -17,6 +17,7 @@
 #include "GainRamp.h"
 #include "SoloGraph.h"
 #include "SendTap.h"
+#include "MonitorRule.h"
 #include "TransportSilence.h"
 #include "HoldPedal.h"
 #include "Tuner.h"
@@ -519,12 +520,31 @@ public:
     // performer's ears, and every sample of delay there is felt directly.
     // Lining the take up with the arrangement is the recorder's job, and it
     // already does it.
-    enum class Monitor { off = 0, armed, always };
+    // The choice itself lives in MonitorRule.h, with the rest of the
+    // decision, and is aliased back to its old name here. One enum rather
+    // than two: a second copy of these three values would be a parallel
+    // representation of the same idea, and the transport bar casts a combo
+    // box id to it, so the values cannot move anyway.
+    using Monitor = MonitorRule::Choice;
 
     /** Both of these change which insert skips delay compensation, so both
         have to recompute the latency graph rather than only store a value. */
     void setMonitorMode (Monitor m);
     Monitor getMonitorMode() const noexcept    { return monitorMode.load(); }
+
+    /** What `armed` means while the transport is moving.
+
+        A project setting, which is where Ardour keeps its own
+        (`session_configuration_vars.inc.h:38`), and the reasons for each rule
+        and for the default are all in MonitorRule.h.
+
+        Deliberately **not** a reason to recompute the latency graph, and that
+        is a finding rather than an omission. The compensation exemption is
+        already not conditioned on the arm or the recorder, which is what
+        makes every rule in there free of it. MonitorRule.h carries the
+        derivation. */
+    void setMonitorRule (MonitorRule::Rule r) noexcept { monitorRule.store (r); }
+    MonitorRule::Rule getMonitorRule() const noexcept  { return monitorRule.load(); }
 
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
     float getMonitorGain() const noexcept      { return monitorGain.load(); }
@@ -1102,6 +1122,7 @@ private:
     double modFreeClock = 0.0;
 
     std::atomic<Monitor> monitorMode { Monitor::off };
+    std::atomic<MonitorRule::Rule> monitorRule { MonitorRule::defaultRule };
     std::atomic<float>   monitorGain { 1.0f };
     std::atomic<bool>    monitoring { false };
     // Per insert, index 0 unused: the master is where everything is summed,

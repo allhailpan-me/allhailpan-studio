@@ -984,6 +984,31 @@ private:
             m.addItem (40, "Mute and solo reach pre fader sends, for the whole project",
                        true, owner.engine.getMuteAffectsPreFaderSends());
 
+            // And beside those two for the same reason: one answer for the
+            // project, said so on the item rather than discovered after
+            // setting it on eight strips in turn.
+            //
+            // Here rather than in the preferences window, which says in its
+            // own header that monitoring stays on the toolbar because it is
+            // "a decision made while working, several times a session". That
+            // is right about the monitoring control and not about this: the
+            // rule is set once and then left, which is where Cubase
+            // (Preferences > VST > Auto Monitoring) and Ardour (session
+            // properties, plus a transport menu toggle) both keep it.
+            //
+            // The names come out of MonitorRule.h so that the words somebody
+            // reads here and the behaviour they get cannot drift apart.
+            juce::PopupMenu monitoring;
+            const auto currentRule = owner.engine.getMonitorRule();
+
+            for (int i = 0; i < MonitorRule::numRules; ++i)
+            {
+                const auto r = MonitorRule::ruleAt (i);
+                monitoring.addItem (50 + i, MonitorRule::name (r), true, r == currentRule);
+            }
+
+            m.addSubMenu ("Input monitoring, for the whole project", monitoring);
+
             // Image-Line's manual calls this Auto-map: "This will
             // automatically map each input on your audio device to a unique
             // Mixer Track Input, starting on the Mixer track where the
@@ -1037,6 +1062,16 @@ private:
                     safe->owner.engine.setMuteAffectsPreFaderSends (
                         ! safe->owner.engine.getMuteAffectsPreFaderSends());
                     safe->owner.refresh();
+                    safe->owner.edited();
+                    return;
+                }
+                else if (result >= 50 && result < 50 + MonitorRule::numRules)
+                {
+                    // No refresh: no strip draws the rule, and what it
+                    // changes is heard on the monitor path rather than seen.
+                    // edited() because it is saved in the project, so a rule
+                    // chosen and not saved would come back as the old one.
+                    safe->owner.engine.setMonitorRule (MonitorRule::ruleAt (result - 50));
                     safe->owner.edited();
                     return;
                 }
