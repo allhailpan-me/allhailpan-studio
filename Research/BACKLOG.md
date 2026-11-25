@@ -469,7 +469,48 @@ atomic load.
 
 ### Outcome
 
-Pending: pull request #92, waiting on CI.
+Merged as #92, squashed, on `tests`, `ubuntu-latest` and `windows-latest`
+green, which is the threshold the brief sets. macOS was still building and is
+routinely slow; nothing in this change is platform specific, since the header
+is plain arithmetic over enums and the engine change is four lines inside a
+function that already compiled everywhere.
+
+One audit round, six findings fixed and two recorded, and two mutation passes.
+The counts and the findings are in the pull request and above.
+
+**No release cut.** v0.8.0 was cut on 11-18 and `main` is a handful of commits
+past it, mostly hardening branches that strengthen tests over code already
+shipped. This is one feature a week after a release, which is not the pile the
+standing question at the top of this file was about.
+
+**Two things to flag for whoever reads this next.**
+
+`RELEASE_NOTES.md` is a file open pull request #77 also changes, so tonight's
+write-up may give #77 a conflict in it, exactly as the 11-24 entry warned it
+would. It is an append under a heading in a file of prose and resolves by
+keeping both.
+
+The two earliest commits on the branch carry `Co-Authored-By` and
+`Claude-Session` trailers, which `CLAUDE.md` forbids. Rewriting them was not
+permitted in this environment. The branch is squash merged, so the message
+that landed on `main` carries neither, but it is worth knowing that every
+other squashed commit on `main` does carry them: the repository's history and
+its own rulebook disagree about this, and somebody should decide which wins
+rather than each night deciding again.
+
+### What is deliberately not built
+
+- **No fix for the punch**, and the reason is the whole of the audit section
+  above. Its unlock is one field: the punch range latched in
+  `MainComponent::startRecording` pushed into the engine, plus a comparison
+  per block. `MainComponent.cpp` is held by #77.
+- **No disk side**, which is Ardour's `RecordMode` and wants the arrangement
+  to gate one track's clips.
+- **No per insert monitor override**, which is the next night's work in this
+  corner: unanimous across the four studios that have one, nothing holding the
+  files it needs, and it is per insert state, a button on the strip, and save,
+  load and reset.
+- **No talkback**, on Ardour's own shipped default rather than on taste.
 
 ## 2026-11-24: where a send is tapped off a strip, and the mute point that decides what solo does to it
 
