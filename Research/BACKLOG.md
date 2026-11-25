@@ -470,10 +470,11 @@ atomic load.
 ### Outcome
 
 Merged as #92, squashed, on `tests`, `ubuntu-latest` and `windows-latest`
-green, which is the threshold the brief sets. macOS was still building and is
-routinely slow; nothing in this change is platform specific, since the header
-is plain arithmetic over enums and the engine change is four lines inside a
-function that already compiled everywhere.
+green, which is the threshold the brief sets. **macOS came green afterwards on
+the same tree**, so all four jobs passed on exactly what was merged and the
+written-down threshold was never actually leaned on. That also means the
+precondition for cutting a release was met, so not cutting one is the decision
+recorded below rather than a block.
 
 One audit round, six findings fixed and two recorded, and two mutation passes.
 The counts and the findings are in the pull request and above.
