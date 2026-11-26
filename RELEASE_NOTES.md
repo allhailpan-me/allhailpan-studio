@@ -2,6 +2,57 @@ If you play with a sustain pedal, the note that used to hang when you switched c
 
 ## Since v0.8.0
 
+**You can hear the mix in mono now, and find out what it costs you.** There
+was no way to do that at all, and it is the check that finds two mics
+fighting each other. Put a mic in front of a cabinet and another a foot
+behind it, or double a vocal, and the two can partly cancel: it sounds big on
+your speakers and goes thin and hollow the moment anything sums it to mono,
+which is a phone speaker, a laptop, a club PA, a shop, a car on one channel.
+You cannot hear that until you fold it.
+
+Under the master in the mixer there is a **control room** panel with six
+buttons:
+
+- **mono** folds the speakers to mono. Anything in the middle stays at
+  exactly the same level, so what you hear change is only what actually
+  changed. If the guitar drops away or the vocal goes thin, those two mics
+  are fighting.
+- **dim** drops the speakers so you can talk over them or rest your ears.
+  Right click any of these buttons for how far it dims, from 3 dB to 30.
+- **cut L** and **cut R** silence one speaker, for checking one side on its
+  own.
+- **Ø L** and **Ø R** flip the polarity of one speaker. On its own that is
+  for a listening test. With **mono** on as well it is the useful one: it
+  gives you the difference, so everything in the middle cancels and what is
+  left is exactly what a mono fold destroys. That is much easier to hear than
+  the thing going slightly quieter in the fold. If a fold goes thin and the
+  difference goes loud, you have a polarity problem, and flipping one of the
+  two mic channels usually fixes it.
+
+**None of this touches your mix.** It is on the way out to the speakers and
+nowhere else, which is the whole point of a control room section: your bounce
+is unaffected, the loudness and true peak figures in the mix report are
+measured before it, and a take records what came in regardless. Leave mono on
+and export, and the file is still stereo. The one thing that does go through
+it is the click, deliberately, because a dim that leaves the metronome at
+full level is not a dim.
+
+Two things worth knowing. The buttons are **not saved**: open the studio and
+the speakers are always carrying the mix, because coming back to a session
+that is quietly folded to mono and mixing in it for an hour is not something
+you can undo. While any of them is engaged, the panel's border and title go
+red and it tells you which check you are in, so you cannot leave one on
+without the panel saying so, though the mixer window has to be open to see
+that. And the amount the dim dims is not kept between launches yet; that is
+coming.
+
+The fold is 6 dB a side, which is what Ardour does and what Avid's C|24
+console documents as its default. The other number in circulation, 3 dB a
+side, turns out to come from a surround to mono downmix table in ITU-R
+BS.775 rather than from stereo, and using it would push a centred full scale
+mix into clipping on the way to your speakers, so the button would distort
+the thing it is there to let you judge.
+
 **You can stop hearing yourself over the song.** Monitoring here had one
 switch and it never looked at the transport: if a strip was armed, you heard
 its input live, all the time. So leaving a track armed meant that playing the
