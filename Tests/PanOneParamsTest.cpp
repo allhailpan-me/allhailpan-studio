@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <iterator>
 #include <set>
@@ -819,6 +820,423 @@ void aVersionOneProjectTranslates()
     }
 }
 
+/** The id contract, checked against a string that is not the table's own.
+
+    This is the premise of the whole file: a project stores the id of a choice
+    so that reordering a list cannot silently repoint every patch anybody ever
+    saved. The reversibility check above cannot establish it, and the reason is
+    worth keeping. It does
+
+        const char* id = PanOneParams::idOfChoice (list, i);
+        choiceFromId (list, id)
+
+    and `idOfChoice` hands back `list[i].id`, which is the table's own pointer.
+    So `choiceFromId` comparing `list[i].id == id`, a pointer comparison, comes
+    back to the same index and passes. It also correctly refuses an invented
+    literal, which is a different pointer again.
+
+    The real caller is not reversible that way. `PanOne::setStateInformation`
+    calls `choiceFromId (list, saved.toRawUTF8())`, where `saved` is a
+    juce::String read out of the project file, so the pointer is into that
+    string's buffer and never into the table. Under a pointer comparison every
+    choice in every saved project would come back unrecognised and land on the
+    first entry of its list: every wavetable the first wavetable, every filter
+    a low pass, every routing dropped, and every knob and every envelope time
+    exactly right.
+
+    So every lookup here goes through a copy of the characters, the way a
+    project's does.
+*/
+void theIdsAreMatchedByTheirCharacters()
+{
+    std::printf ("ids matched by their characters\n");
+
+    int looked = 0;
+
+    for (const auto& spec : PanOneParams::all())
+    {
+        if (spec.choices == nullptr)
+            continue;
+
+        const auto& list = spec.choices();
+
+        for (int i = 0; i < (int) list.size(); ++i)
+        {
+            // A copy, so the pointer handed over is nothing the table has
+            // ever seen. Through a std::string rather than a char array so
+            // that nothing can fold it back to the original literal.
+            const std::string copy { list[(std::size_t) i].id };
+
+            if (PanOneParams::choiceFromId (list, copy.c_str()) != i)
+            {
+                fail (std::string (spec.id) + " entry " + std::to_string (i)
+                      + " (" + copy + ") is not found from a copy of its own id:"
+                        " the lookup is comparing pointers, not characters");
+                return;
+            }
+
+            ++looked;
+
+            // And it is the whole id that has to match, not a start of it.
+            // A prefix match would make a list containing both "lowpass" and
+            // "lowpassq" resolve the longer one to the shorter.
+            const std::string shorter = copy.substr (0, copy.size() - 1);
+            const std::string longer  = copy + "x";
+
+            const int fromShorter = PanOneParams::choiceFromId (list, shorter.c_str());
+            const int fromLonger  = PanOneParams::choiceFromId (list, longer.c_str());
+
+            // A shorter string may legitimately be another entry's id. What
+            // it must not be is this one.
+            if (fromShorter == i)
+                fail (std::string (spec.id) + ": " + shorter + " resolved to "
+                      + copy + ", so the match is on a prefix");
+
+            if (fromLonger == i)
+                fail (std::string (spec.id) + ": " + longer + " resolved to "
+                      + copy + ", so the match ignores the tail");
+        }
+    }
+
+    std::printf ("    %d ids found from a copy of their characters, none from a"
+                 " prefix\n", looked);
+
+    // The two guards on the conversion, each of which protects a case nothing
+    // else here reaches. A null id is what a missing attribute would give, and
+    // an empty string is what juce::String::toRawUTF8 gives for an empty one.
+    const auto& list = PanOneParams::filterTypes();
+
+    check (PanOneParams::choiceFromId (list, nullptr) == -1,
+           "a null id is not refused");
+    check (PanOneParams::choiceFromId (list, "") == -1,
+           "an empty id is not refused");
+
+    // idOfChoice's own out of range cases. An index exactly equal to the size
+    // is the one the existing check does not try: it tries 9999, which is far
+    // enough out that a comparison written as > rather than >= still catches
+    // it, and reading list[size] is inside the vector's own allocation often
+    // enough that it is not reliably a crash either.
+    check (std::string (PanOneParams::idOfChoice (list, (int) list.size()))
+             == list.front().id,
+           "an index equal to the list size does not fall back to the first entry");
+    check (std::string (PanOneParams::idOfChoice (list, -1)) == list.front().id,
+           "an index of minus one does not fall back to the first entry");
+    check (std::string (PanOneParams::idOfChoice (list, (int) list.size() - 1))
+             == list.back().id,
+           "the last index does not give the last entry");
+
+    // And an empty list, which no list in the table is, so this is the only
+    // place the guard is exercised at all.
+    const std::vector<PanOneParams::Choice> nothing;
+
+    check (std::string (PanOneParams::idOfChoice (nothing, 0)).empty(),
+           "an empty list does not give an empty id");
+    check (PanOneParams::choiceFromId (nothing, "anything") == -1,
+           "an empty list claims to recognise an id");
+
+    std::printf ("    a null id, an empty id, both ends of the range and an"
+                 " empty list all behave\n");
+}
+
+/** What a choice control does with a value that is not already an exact index.
+
+    `toIndex` exists to round a float onto a choice index, and the round trip
+    check above cannot see whether it does: it builds its choice values by
+    calling `toIndex` first, so every value it feeds back in is an exact
+    integer, and rounding and truncating agree on all of those. A host hands
+    over something else. A choice parameter is held as a normalised float and
+    converted back through a NormalisableRange, so what arrives at the setter
+    is a value like 2.9999998, and truncating there leaves the control one
+    entry low.
+
+    Both clamps are unexercised for the same reason, so they are included:
+    a value past either end of the list has to land on that end, which also
+    pins every call site's hand written count against its own list. The via
+    column is the one that needs that: it clamps against modSources(), and
+    clamping against modDestinations() instead is invisible from inside the
+    range because the destination list is the longer of the two.
+*/
+void aChoiceRoundsToTheNearestEntry()
+{
+    std::printf ("choices round rather than truncate\n");
+
+    const auto& specs = PanOneParams::all();
+
+    int checked = 0;
+
+    for (std::size_t c = 0; c < specs.size(); ++c)
+    {
+        const auto& spec = specs[c];
+
+        if (spec.choices == nullptr)
+            continue;
+
+        const int size = (int) spec.choices().size();
+
+        for (int i = 0; i < size; ++i)
+        {
+            // Just inside each half of the entry's own cell, plus the two
+            // values a float conversion actually lands on either side of it.
+            const float around[]
+            {
+                (float) i - 0.49f,
+                std::nextafter ((float) i, -1.0f),
+                (float) i,
+                std::nextafter ((float) i, (float) size),
+                (float) i + 0.49f
+            };
+
+            for (float value : around)
+            {
+                // The first and last entries have no cell on one side of
+                // them, and the clamp is what is being checked there instead.
+                const float wanted = value < 0.0f ? 0.0f
+                                                  : (value > (float) (size - 1)
+                                                       ? (float) (size - 1)
+                                                       : (float) i);
+
+                Patch patch;
+                spec.set (patch, value);
+
+                if (! near (spec.get (patch), wanted))
+                {
+                    fail (std::string (spec.id) + " set to " + show (value)
+                          + " came back as " + show (spec.get (patch))
+                          + " where entry " + std::to_string ((int) wanted)
+                          + " was wanted: the value is being truncated rather"
+                            " than rounded");
+                    return;
+                }
+            }
+
+            ++checked;
+        }
+
+        // Past both ends. These have to land on the ends, and nothing in the
+        // table may store an index outside its own list.
+        for (float value : { -1.0f, -0.6f, -1000.0f,
+                             (float) size, (float) size + 0.6f, 1000.0f })
+        {
+            const float wanted = value < 0.0f ? 0.0f : (float) (size - 1);
+
+            Patch patch;
+            spec.set (patch, value);
+
+            if (! near (spec.get (patch), wanted))
+            {
+                fail (std::string (spec.id) + " set to " + show (value)
+                      + " came back as " + show (spec.get (patch))
+                      + " where its list has " + std::to_string (size)
+                      + " entries: the clamp is not against its own list");
+                return;
+            }
+        }
+    }
+
+    std::printf ("    %d entries round from either side, and both clamps hold\n",
+                 checked);
+}
+
+/** A synced LFO's beats per cycle back into a menu entry, including the
+    values no entry is anywhere near.
+
+    `divisionFromBeats` starts its search from index zero rather than from
+    nothing, so that a value no entry is within a billion of still lands on a
+    real entry. Nothing else here produces such a value, and under a search
+    started from minus one the caller reads table[-1]. A NaN is the case to
+    worry about in earnest: every comparison against it is false, so a search
+    that relies on finding something finds nothing.
+*/
+void everyBeatsValueLandsOnARealDivision()
+{
+    std::printf ("divisions from beats\n");
+
+    const auto& table = PanOneParams::divisionTable();
+
+    // Every entry has to come back as itself, which is what makes saving a
+    // division and loading it a round trip.
+    for (int i = 0; i < (int) table.size(); ++i)
+        check (PanOneParams::divisionFromBeats (table[(std::size_t) i].beats) == i,
+               std::string ("the division ") + table[(std::size_t) i].name
+                 + " does not come back from its own length in beats");
+
+    // And a value that is not an entry lands on the nearest one rather than on
+    // the first. Two per cent either side, which is well inside the smallest
+    // gap in the table: the closest pair is a sixteenth triplet at a third of
+    // a beat and a dotted sixteenth at 0.375, twelve per cent apart. Asserted
+    // as a property rather than against hand picked numbers, because an exact
+    // midpoint is a tie and a tie goes to whichever comes first in the table,
+    // which is a menu order and not worth pinning.
+    for (int i = 0; i < (int) table.size(); ++i)
+        for (double nudge : { 0.98, 1.02 })
+        {
+            const double beats = table[(std::size_t) i].beats * nudge;
+            const int found = PanOneParams::divisionFromBeats (beats);
+
+            check (found == i,
+                   std::string ("a cycle of ") + show (beats) + " beats resolved to "
+                     + table[(std::size_t) found].name + " where "
+                     + table[(std::size_t) i].name + " is nearer");
+        }
+
+    for (double beats : { std::nan (""), 1.0e300, -1.0e300,
+                          std::numeric_limits<double>::infinity(),
+                          -std::numeric_limits<double>::infinity() })
+    {
+        const int found = PanOneParams::divisionFromBeats (beats);
+
+        check (found >= 0 && found < (int) table.size(),
+               "a beats value nothing is near gave the index "
+                 + std::to_string (found) + ", which is not in the table");
+    }
+
+    std::printf ("    all %zu round trip, and a NaN or an infinity still lands"
+                 " in the table\n", table.size());
+}
+
+/** Writing a patch twice through the same object.
+
+    `toPatch` resets the matrix row count before working it out, and every
+    caller today hands it a patch straight off the stack, where the count is
+    already nothing. So the reset guards the second write and nothing does a
+    second write. It is pinned because the fault it prevents is one this
+    project has already had: a row switched off that still counted as a
+    routing silenced the voice, and that was found in the matrix itself on 24
+    November.
+
+    The short vector in the second half is the other guard in the same
+    function: a vector of fewer values than the table has controls leaves the
+    rest of the patch alone rather than reading past the end of it.
+*/
+void aPatchCanBeWrittenTwice()
+{
+    std::printf ("writing a patch twice\n");
+
+    const auto& specs = PanOneParams::all();
+
+    auto values = PanOneParams::fromPatch (Patch {});
+
+    const std::size_t first = PanOneParams::firstRouteControl();
+
+    const auto column = [&] (int row, int which) { return first + (std::size_t) (row * 6 + which); };
+
+    // Four rows wired, then one, into the same patch.
+    const auto wire = [&] (int rows)
+    {
+        for (int r = 0; r < 8; ++r)
+        {
+            const bool on = r < rows;
+
+            values[column (r, 0)] = on ? 1.0f : 0.0f;   // source
+            values[column (r, 1)] = on ? 1.0f : 0.0f;   // destination
+            values[column (r, 2)] = on ? 0.5f : 0.0f;   // depth
+            values[column (r, 5)] = on ? 1.0f : 0.0f;   // enabled
+        }
+    };
+
+    Patch patch;
+
+    wire (4);
+    PanOneParams::toPatch (values, patch);
+    check (patch.matrix.count == 4, "four wired rows gave a count of "
+                                      + std::to_string (patch.matrix.count));
+
+    wire (1);
+    PanOneParams::toPatch (values, patch);
+    check (patch.matrix.count == 1,
+           "after four rows were switched off the count is still "
+             + std::to_string (patch.matrix.count)
+             + ": the row count is not being worked out from nothing");
+
+    wire (0);
+    PanOneParams::toPatch (values, patch);
+    check (patch.matrix.count == 0,
+           "with nothing wired the count is " + std::to_string (patch.matrix.count));
+
+    // And fewer values than there are controls. Everything the vector reaches
+    // is written and everything past it keeps what the patch already had.
+    {
+        auto full = PanOneParams::fromPatch (Patch {});
+
+        for (std::size_t i = 0; i < full.size(); ++i)
+        {
+            const auto& spec = specs[i];
+
+            full[i] = spec.kind == PanOneParams::Kind::choice
+                        ? (near (full[i], 0.0f) ? 1.0f : 0.0f)
+                        : (near (full[i], spec.minimum) ? spec.maximum : spec.minimum);
+        }
+
+        const std::size_t howMany = 20;
+        const std::vector<float> few (full.begin(), full.begin() + (long) howMany);
+
+        Patch written;
+        PanOneParams::toPatch (few, written);
+
+        const auto after = PanOneParams::fromPatch (written);
+        const auto resting = PanOneParams::fromPatch (Patch {});
+
+        for (std::size_t i = 0; i < howMany; ++i)
+            check (near (after[i], full[i]),
+                   std::string (specs[i].id) + " was inside the values handed over"
+                     + " and did not take them");
+
+        for (std::size_t i = howMany; i < specs.size(); ++i)
+            if (specs[i].kind == PanOneParams::Kind::continuous
+                  && ! near (after[i], resting[i]))
+            {
+                fail (std::string (specs[i].id) + " was past the end of the values"
+                      + " handed over and moved anyway, from " + show (resting[i])
+                      + " to " + show (after[i]));
+                break;
+            }
+
+        std::printf ("    %zu values of %zu written, the rest left alone\n",
+                     howMany, specs.size());
+    }
+}
+
+/** Which group each control is laid out under.
+
+    The group check above adds the counts up and compares the total, so moving
+    one control from the end of a group to the start of the next one, which is
+    what a wrong count is, leaves the total and the knob count exactly right
+    and puts a control under the wrong heading on the panel. The first id of
+    each group is pinned so that cannot happen quietly. This is the one check
+    here about what somebody sees rather than what they hear, and it is cheap.
+*/
+void eachGroupStartsWhereItShould()
+{
+    std::printf ("group boundaries\n");
+
+    const char* const starts[]
+    {
+        "osc1table", "folddrive", "filtertype", "ampattack", "env3attack",
+        "slope1rise", "glide", "lfo1shape", "lfo3shape", "macro1", "mod1src"
+    };
+
+    const auto& all = PanOneParams::all();
+    const auto& g = PanOneParams::groups();
+
+    check (g.size() == std::size (starts),
+           "there are " + std::to_string (g.size()) + " groups and "
+             + std::to_string (std::size (starts)) + " pinned first controls");
+
+    for (std::size_t i = 0; i < g.size() && i < std::size (starts); ++i)
+    {
+        check (g[i].first < all.size(), std::string (g[i].heading)
+                                          + " starts past the end of the table");
+
+        if (g[i].first < all.size())
+            check (std::string (all[g[i].first].id) == starts[i],
+                   std::string (g[i].heading) + " starts at "
+                     + all[g[i].first].id + " where it should start at "
+                     + starts[i]);
+    }
+
+    std::printf ("    all %zu groups start on the control they should\n", g.size());
+}
+
 /** A project stores the index of the preset it was on, and one saved before
     the controls existed stores nothing else. So the bank only ever grows at
     the end, and the first twenty two keep their places for good: a preset
@@ -916,11 +1334,16 @@ int main()
 
     identifiers();
     choiceLists();
+    theIdsAreMatchedByTheirCharacters();
+    aChoiceRoundsToTheNearestEntry();
+    everyBeatsValueLandsOnARealDivision();
     ranges();
     theGroupsCoverEverything();
     eachControlIsItsOwn();
     theRoundTripIsLossless();
     theRowCountIsWorkedOut();
+    aPatchCanBeWrittenTwice();
+    eachGroupStartsWhereItShould();
     everyPresetFitsItsControls();
     everyPresetSurvivesTheControls();
     everyPresetMakesASound();
