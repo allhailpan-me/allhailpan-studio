@@ -674,6 +674,16 @@ void aVersionOneProjectTranslates()
         patch.cutoff = 20000.0;
         patch.envelopes[0] = { 0.002, 0.050, 1.0, 0.100 };
 
+        // Both turned up first, which is the whole point of the two checks
+        // below. A fresh patch rests with the fold mixed out and the drive at
+        // nothing, so asking a patch that has never had either whether it has
+        // either is a check that cannot fail: deleting both lines from
+        // applyLegacy passed it. The patch now arrives at the translation with
+        // a folder in circuit and the drive up, the way a project loaded over
+        // a patch somebody was already playing would.
+        patch.foldMix = 0.8;
+        patch.driveAmount = 20.0;
+
         PanOneParams::applyLegacy (old, patch);
 
         // Nothing version one had could fold or drive, so a project from it
@@ -731,14 +741,124 @@ void aVersionOneProjectTranslates()
                      + show (third / first));
 
         if (shape == 2)     // a square at half width has no even harmonics
+        {
             check (second / first < 0.05,
                    "a square from version one arrived with even harmonics: second at "
                      + show (second / first));
+
+            // And it has to be a square and not a triangle, which is the other
+            // waveform with no even harmonics at all. A square's third
+            // harmonic is a third of its first and a triangle's is a ninth, so
+            // the third is what tells them apart: it measures 0.34 against
+            // 0.11. Without this a square from version one arriving on the
+            // start of the analogue table, which is a triangle, passed.
+            check (third / first > 0.2,
+                   "a square from version one has a triangle's spectrum rather"
+                   " than a square's: third at " + show (third / first));
+        }
+
+        if (shape == 3)     // a triangle falls away far faster than a square
+            check (third / first < 0.2,
+                   "a triangle from version one has a square's spectrum: third at "
+                     + show (third / first));
 
         if (shape == 1)     // a saw has both, the second at about a half
             check (second / first > 0.2,
                    "a saw from version one has no even harmonics: second at "
                      + show (second / first));
+    }
+
+    // The two oscillators are translated from their own shapes.
+    //
+    // The loop above gives both the same shape and silences oscillator two, so
+    // it cannot see oscillator two being handed oscillator one's shape. Each
+    // pair is compared against the single shape case rather than against the
+    // arithmetic again: where one shape on its own lands is what the spectrum
+    // checks above have already established, so if a mixed pair puts each
+    // oscillator where its own shape goes on its own, both are right.
+    {
+        const auto alone = [] (int shape)
+        {
+            PanOneParams::Legacy both;
+            both.present = true;
+            both.osc1Shape = shape;
+            both.osc2Shape = shape;
+            both.pulseWidth = 0.5f;
+
+            Patch patch;
+            PanOneParams::applyLegacy (both, patch);
+
+            return patch;
+        };
+
+        for (int a = 0; a < 4; ++a)
+            for (int b = 0; b < 4; ++b)
+            {
+                if (a == b)
+                    continue;
+
+                PanOneParams::Legacy mixed;
+                mixed.present = true;
+                mixed.osc1Shape = a;
+                mixed.osc2Shape = b;
+                mixed.pulseWidth = 0.5f;
+
+                Patch patch;
+                PanOneParams::applyLegacy (mixed, patch);
+
+                const auto first1 = alone (a);
+                const auto second2 = alone (b);
+
+                check (patch.osc1Table == first1.osc1Table
+                         && near ((float) patch.osc1Position, (float) first1.osc1Position),
+                       std::string ("with a ") + called[a] + " and a " + called[b]
+                         + ", oscillator one is not where a " + called[a]
+                         + " goes on its own");
+
+                check (patch.osc2Table == second2.osc2Table
+                         && near ((float) patch.osc2Position, (float) second2.osc2Position),
+                       std::string ("with a ") + called[a] + " and a " + called[b]
+                         + ", oscillator two is not where a " + called[b]
+                         + " goes on its own: it has been handed oscillator one's shape");
+            }
+
+        std::printf ("    all 12 mixed pairs of shapes land where each shape goes"
+                     " on its own\n");
+    }
+
+    // A shape number version one never wrote, which is what a file from a
+    // version that had more of them, or a corrupted one, would carry. The
+    // documented fallback is the saw, because arriving at a plain waveform is
+    // the least wrong answer and arriving nowhere leaves whatever the patch
+    // happened to hold.
+    {
+        const auto sawLike = [] (int shape)
+        {
+            PanOneParams::Legacy old;
+            old.present = true;
+            old.osc1Shape = shape;
+            old.osc2Shape = shape;
+            old.pulseWidth = 0.5f;
+
+            Patch patch;
+            PanOneParams::applyLegacy (old, patch);
+
+            return patch;
+        };
+
+        const auto saw = sawLike (1);
+
+        for (int shape : { -1, 4, 97 })
+        {
+            const auto odd = sawLike (shape);
+
+            check (odd.osc1Table == saw.osc1Table
+                     && near ((float) odd.osc1Position, (float) saw.osc1Position),
+                   "a shape of " + std::to_string (shape)
+                     + " does not fall back to the saw");
+        }
+
+        std::printf ("    a shape version one never had falls back to the saw\n");
     }
 
     // The width control, which only meant anything on a square, has to come
@@ -803,6 +923,36 @@ void aVersionOneProjectTranslates()
 
         check (found, "a filter envelope depth from version one did not become a"
                       " routing from envelope two to the cutoff");
+
+        // And a depth deeper than the destination's whole range is held to
+        // full depth rather than being written past it. Version one's control
+        // went to twelve octaves and the cutoff destination is worth eight, so
+        // this is a value real projects carry, not an invented one.
+        {
+            PanOneParams::Legacy deep;
+            deep.present = true;
+            deep.envOctaves = 12.0f;
+
+            Patch patch12;
+            PanOneParams::applyLegacy (deep, patch12);
+
+            bool wired = false;
+
+            for (int r = 0; r < patch12.matrix.count; ++r)
+                if (patch12.matrix.routes[r].source == env2
+                      && patch12.matrix.routes[r].destination == cutoff)
+                {
+                    wired = true;
+
+                    check (near (patch12.matrix.routes[r].depth, 1.0f),
+                           "twelve octaves of filter envelope became a depth of "
+                             + show (patch12.matrix.routes[r].depth)
+                             + " rather than being held to full depth");
+                }
+
+            check (wired, "twelve octaves of filter envelope did not become a"
+                          " routing at all");
+        }
 
         // And nothing is wired when there was no depth to carry.
         PanOneParams::Legacy none;
