@@ -993,8 +993,9 @@ two evaluations once.
 
 **Every choice in the instrument is saved by its id, and that includes the
 modulation matrix's own rows.** `PanOneParams.h` is the whole control surface
-of PAN One as a table: 240 controls, of which 192 are the matrix at six
-controls a row, and 22 presets.
+of PAN One as a table: 281 controls, of which 192 are the matrix at six
+controls a row and 89 are knobs, and 67 presets. The first 22 of those are the
+bank the paragraph on preset places below is about.
 
 The matrix is in the table rather than beside it, and that is a decision
 rather than a convenience. A routing's source and destination are useless as
@@ -1010,6 +1011,17 @@ safe to fall back to, because an id nobody recognises lands there: "none" for
 a source or a destination, which drops the routing the way the matrix says an
 unresolvable routing should be dropped, and the plainest setting for
 everything else.
+
+That fallback is not in `choiceFromId`, which returns -1 and says so, and the
+route to it carries a rule that went unstated for a month.
+`PanOne::setStateInformation` reads an unrecognised id as a number, because
+version one wrote numbers in these attributes, and `getIntValue` gives zero for
+text that is not one. Zero is the first entry. So the fallback holds for ids a
+number parser reads as zero, which means ids that do not begin with a digit or
+a sign, and an id beginning with a digit would land on that digit instead. The
+synced LFO divisions, "1bar" through "8bars", are the only such ids here, and
+the division list is also the only one that declares it has no safe fallback at
+all. `PanOneParamsTest` now enforces the rule on every other list.
 
 **A project from version one is translated, not just partly loaded.** Four of
 its controls have no equivalent: two oscillator shapes, a pulse width, and a

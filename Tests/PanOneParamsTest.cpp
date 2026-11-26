@@ -36,6 +36,7 @@
 #include "PanOneParams.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -1387,6 +1388,94 @@ void eachGroupStartsWhereItShould()
     std::printf ("    all %zu groups start on the control they should\n", g.size());
 }
 
+/** The rule that makes the documented fallback true, which nothing stated.
+
+    The header says an id nobody recognises falls back to the first entry of
+    its list. `choiceFromId` does not do that: it returns -1, as its own doc
+    comment says. What turns that into the first entry is the real caller,
+    `PanOne::setStateInformation`:
+
+        const int found = choiceFromId (list, saved.toRawUTF8());
+        setParameterValue (i, (float) (found >= 0
+                                         ? found
+                                         : juce::jlimit (0, (int) list.size() - 1,
+                                                         saved.getIntValue())));
+
+    which reads an unrecognised id as a number, because version one wrote
+    numbers in these attributes and a project from it has to keep working.
+    `juce::String::getIntValue` on text that is not a number gives zero, which
+    is the first entry, which is the documented fallback.
+
+    So the fallback holds only for ids that a number parser reads as zero. An
+    id beginning with a digit lands on that digit instead: were "8bars" ever
+    to stop being recognised, it would arrive at entry 8 of its list rather
+    than at entry 0. That is not a fault today, and it is a rule nothing
+    enforced.
+
+    The division list is the one that breaks it, with "1bar" through "8bars",
+    and it is the one list whose own comment declares it exempt: there is no
+    division that is safe to fall back to, so arriving at eight bars is no
+    more or less wrong than arriving at a sixteenth. Every other list is
+    checked, because the lists where the rule earns its keep are exactly the
+    ones that genuinely change: the wavetables and the matrix.
+*/
+void anUnknownIdCanOnlyLandOnTheFirstEntry()
+{
+    std::printf ("the fallback is reachable\n");
+
+    const auto& divisions = PanOneParams::lfoDivisions();
+
+    const auto isADivisionList = [&] (const std::vector<PanOneParams::Choice>& list)
+    {
+        return list.size() == divisions.size()
+                 && ! list.empty()
+                 && std::string (list.front().id) == divisions.front().id;
+    };
+
+    std::set<std::string> checked;
+    int exempt = 0;
+
+    for (const auto& spec : PanOneParams::all())
+    {
+        if (spec.choices == nullptr)
+            continue;
+
+        const auto& list = spec.choices();
+
+        if (isADivisionList (list))
+        {
+            ++exempt;
+            continue;
+        }
+
+        for (const auto& choice : list)
+        {
+            const std::string id = choice.id;
+
+            if (id.empty())
+                continue;
+
+            // What a number parser makes of the first character is the whole
+            // of it: a digit is read as a value, and a leading sign is how a
+            // negative one starts.
+            const bool reads = std::isdigit ((unsigned char) id[0]) != 0
+                                 || id[0] == '-' || id[0] == '+';
+
+            if (reads)
+                fail (std::string (spec.id) + "'s id " + id
+                      + " begins with a character a number parser reads, so an"
+                        " unrecognised id would land on that number rather than"
+                        " on the first entry of its list");
+
+            checked.insert (id);
+        }
+    }
+
+    std::printf ("    %zu ids across every list but the divisions read as the"
+                 " first entry, %d division controls exempt\n",
+                 checked.size(), exempt);
+}
+
 /** A project stores the index of the preset it was on, and one saved before
     the controls existed stores nothing else. So the bank only ever grows at
     the end, and the first twenty two keep their places for good: a preset
@@ -1487,6 +1576,7 @@ int main()
     theIdsAreMatchedByTheirCharacters();
     aChoiceRoundsToTheNearestEntry();
     everyBeatsValueLandsOnARealDivision();
+    anUnknownIdCanOnlyLandOnTheFirstEntry();
     ranges();
     theGroupsCoverEverything();
     eachControlIsItsOwn();
