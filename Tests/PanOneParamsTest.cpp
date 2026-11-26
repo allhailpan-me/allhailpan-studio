@@ -1476,6 +1476,193 @@ void anUnknownIdCanOnlyLandOnTheFirstEntry()
                  checked.size(), exempt);
 }
 
+/** Every choice list that is cast to something has to be in that thing's own
+    order, and the tie is checked by name at both ends.
+
+    This is the gap a fresh batch of mutations found, and it is one fault in
+    three places. A choice is stored in the patch as an index, and for five of
+    these lists that index is cast straight to an enum declared in another
+    header; for one it is an index into another table in this one; for one it
+    is a bool. Nothing anywhere said the orders had to agree, and nothing could
+    see it when they did not, because every check of a choice goes out and
+    comes back through the same convention and so cannot tell a consistent
+    mistake from a correct answer.
+
+    Reversing `driveCurves` passed the whole suite. Choosing "Soft" would then
+    give the hard clip, and a patch saved on the soft curve would reload on the
+    hard one: an instrument that gets brighter and more distorted every time
+    somebody opens their project, with the knob still reading Soft. Reversing
+    `offOrOn` passed too, which inverts every switch in the instrument.
+    Reversing `lfoDivisions` against the table it indexes passed, and that
+    saves a synced LFO's rate as the mirror of what it is set to, so a 1/32
+    comes back as eight bars.
+
+    So each pair is pinned by the names at both ends rather than by its order,
+    which is what lets either side be reordered deliberately: moving an entry
+    means moving its line here too, and that is a line somebody has to read.
+*/
+void everyChoiceListAgreesWithWhatItIsCastTo()
+{
+    std::printf ("the lists agree with what they are cast to\n");
+
+    const auto at = [] (const std::vector<PanOneParams::Choice>& list, const char* id)
+    {
+        return PanOneParams::choiceFromId (list, std::string (id).c_str());
+    };
+
+    const auto pin = [&] (const char* what, const std::vector<PanOneParams::Choice>& list,
+                          const char* id, int wanted)
+    {
+        check (at (list, id) == wanted,
+               std::string (what) + ": " + id + " sits at entry "
+                 + std::to_string (at (list, id)) + " of its list where the value it"
+                   " is cast to is " + std::to_string (wanted));
+    };
+
+    // The filter's responses against Fx::Svf::Type. The eleventh value of that
+    // enum, the matched bell, is deliberately not offered, which is why the
+    // list is ten long and the clamp beside it is ten.
+    {
+        using T = Fx::Svf::Type;
+        const auto& list = PanOneParams::filterTypes();
+
+        pin ("filter", list, "lowpass",   (int) T::lowpass);
+        pin ("filter", list, "highpass",  (int) T::highpass);
+        pin ("filter", list, "bandpass",  (int) T::bandpass);
+        pin ("filter", list, "bandpassq", (int) T::bandpassQ);
+        pin ("filter", list, "notch",     (int) T::notch);
+        pin ("filter", list, "peak",      (int) T::peak);
+        pin ("filter", list, "allpass",   (int) T::allpass);
+        pin ("filter", list, "bell",      (int) T::bell);
+        pin ("filter", list, "lowshelf",  (int) T::lowShelf);
+        pin ("filter", list, "highshelf", (int) T::highShelf);
+    }
+
+    {
+        using C = Fx::Saturator::Curve;
+        const auto& list = PanOneParams::driveCurves();
+
+        pin ("drive", list, "soft",  (int) C::soft);
+        pin ("drive", list, "cubic", (int) C::cubic);
+        pin ("drive", list, "hard",  (int) C::hard);
+    }
+
+    {
+        using M = Synth::LowPassGate::Mode;
+        const auto& list = PanOneParams::gateModes();
+
+        pin ("gate", list, "both",      (int) M::both);
+        pin ("gate", list, "lowpass",   (int) M::lowpass);
+        pin ("gate", list, "amplitude", (int) M::amplitude);
+    }
+
+    {
+        using S = Synth::Lfo::Shape;
+        const auto& list = PanOneParams::lfoShapes();
+
+        pin ("LFO", list, "sine",     (int) S::sine);
+        pin ("LFO", list, "triangle", (int) S::triangle);
+        pin ("LFO", list, "sawup",    (int) S::sawUp);
+        pin ("LFO", list, "sawdown",  (int) S::sawDown);
+        pin ("LFO", list, "square",   (int) S::square);
+        pin ("LFO", list, "pulse",    (int) S::pulse);
+        pin ("LFO", list, "sandh",    (int) S::sampleAndHold);
+        pin ("LFO", list, "random",   (int) S::smoothRandom);
+    }
+
+    {
+        using S = Synth::ModMatrix::Shape;
+        const auto& list = PanOneParams::modShapes();
+
+        pin ("routing", list, "asis",     (int) S::asIs);
+        pin ("routing", list, "unipolar", (int) S::unipolar);
+        pin ("routing", list, "bipolar",  (int) S::bipolar);
+        pin ("routing", list, "inverted", (int) S::inverted);
+    }
+
+    // A switch is a bool, so entry zero has to be the false one: the setters
+    // read `v > 0.5f`.
+    {
+        const auto& list = PanOneParams::offOrOn();
+
+        pin ("switch", list, "off", 0);
+        pin ("switch", list, "on",  1);
+
+        // And through a real control, so the convention is tied to a field and
+        // not only to the list.
+        for (const auto& spec : PanOneParams::all())
+        {
+            if (spec.choices != &PanOneParams::offOrOn)
+                continue;
+
+            Patch off, on;
+            spec.set (off, (float) at (list, "off"));
+            spec.set (on,  (float) at (list, "on"));
+
+            check (near (spec.get (off), 0.0f) && near (spec.get (on), 1.0f),
+                   std::string (spec.id) + " does not read as off when it is set"
+                     " to off and on when it is set to on");
+        }
+    }
+
+    // The synced LFO's menu against the table of lengths it indexes. The
+    // control stores the beats from divisionTable()[index] and the project
+    // saves lfoDivisions()[index].id, so the two orders being different means
+    // a division is saved as a different division. Nothing in the patch can
+    // see it, because both directions go through divisionFromBeats.
+    {
+        const auto& menu = PanOneParams::lfoDivisions();
+        const auto& table = PanOneParams::divisionTable();
+
+        check (menu.size() == table.size(),
+               "the division menu has " + std::to_string (menu.size())
+                 + " entries and the table of lengths has "
+                 + std::to_string (table.size()));
+
+        for (std::size_t i = 0; i < menu.size() && i < table.size(); ++i)
+            check (std::string (menu[i].id) == table[i].id,
+                   "division entry " + std::to_string (i) + " is "
+                     + menu[i].id + " in the menu and " + table[i].id
+                     + " in the table of lengths");
+    }
+
+    // And the two lists built from the matrix, where the index is the matrix's
+    // own index plus one because "none" is in front.
+    {
+        const auto& sources = PanOneParams::modSources();
+
+        for (std::size_t i = 0; i < Synth::ModMatrix::sources().size(); ++i)
+            check (i + 1 < sources.size()
+                     && std::string (sources[i + 1].id) == Synth::ModMatrix::sources()[i].id,
+                   "source entry " + std::to_string (i + 1)
+                     + " is not the matrix's source " + std::to_string (i));
+
+        const auto& destinations = PanOneParams::modDestinations();
+
+        for (std::size_t i = 0; i < Synth::ModMatrix::destinations().size(); ++i)
+            check (i + 1 < destinations.size()
+                     && std::string (destinations[i + 1].id)
+                          == Synth::ModMatrix::destinations()[i].id,
+                   "destination entry " + std::to_string (i + 1)
+                     + " is not the matrix's destination " + std::to_string (i));
+
+        const auto& tables = PanOneParams::waveTables();
+
+        check (tables.size() == Synth::WaveBank::catalogue().size(),
+               "the wavetable menu and the catalogue are different lengths");
+
+        for (std::size_t i = 0; i < tables.size()
+                                  && i < Synth::WaveBank::catalogue().size(); ++i)
+            check (std::string (tables[i].id) == Synth::WaveBank::catalogue()[i].id,
+                   "wavetable entry " + std::to_string (i) + " is " + tables[i].id
+                     + " in the menu and " + Synth::WaveBank::catalogue()[i].id
+                     + " in the catalogue");
+    }
+
+    std::printf ("    five enums, the switch, the divisions, the sources, the"
+                 " destinations and the wavetables all line up\n");
+}
+
 /** A project stores the index of the preset it was on, and one saved before
     the controls existed stores nothing else. So the bank only ever grows at
     the end, and the first twenty two keep their places for good: a preset
@@ -1577,6 +1764,7 @@ int main()
     aChoiceRoundsToTheNearestEntry();
     everyBeatsValueLandsOnARealDivision();
     anUnknownIdCanOnlyLandOnTheFirstEntry();
+    everyChoiceListAgreesWithWhatItIsCastTo();
     ranges();
     theGroupsCoverEverything();
     eachControlIsItsOwn();
