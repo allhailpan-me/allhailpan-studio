@@ -34,12 +34,142 @@ version one project whose four orphaned controls are dropped rather than
 translated opens with the right envelope times and entirely the wrong sound.
 None of those errors, and none of them look broken.
 
+### The shape of it, apart from the data
+
+Most of the 2523 lines are the table itself and the preset bank. The logic that
+can be wrong is small and sits in six places:
+
+- `choiceFromId` and `idOfChoice`, the id to index conversion in both
+  directions, which every project save and every project load goes through.
+- `toIndex`, which clamps a float to a choice list, and `toEnum` on top of it.
+  Five call sites pass a hand written count rather than the list's own size:
+  `filterTypes` 10, `lfoShapes` 8, `modShapes` 4, `driveCurves` 3,
+  `gateModes` 3.
+- `divisionFromBeats`, which turns a synced LFO's beats per cycle back into a
+  menu entry by nearest match.
+- the matrix rows' plus one and minus one, because a row stores minus one for
+  an empty row and the control offers "none" as its first entry.
+- `toPatch`'s working out of `matrix.count`, which is how far down the matrix
+  the engine walks per sample per voice.
+- `applyLegacyShape` and `applyLegacy`, the translation of what version one
+  saved.
+
+The counts in CLAUDE.md are out of date, which is worth saying because it was
+read first: the table is 281 controls and not 240, of which 89 are knobs and
+192 the matrix, and the bank is 67 presets and not 22. Corrected in this
+change.
+
+### Mutation testing, first batch: 20 breakages, 11 caught, 9 survived
+
+Every broken copy compiled with `run.sh`'s own flags, sanitizers and
+`-D_GLIBCXX_ASSERTIONS` included.
+
+The nine survivors are all in one place, and it is the place the whole file
+rests on. **Nothing in the test ever hands the id to index conversion anything
+but the table's own pointers, and nothing ever hands `toIndex` a float that is
+not already an exact integer.** So the layer that exists to convert between
+what a project stores and what a control holds is, in both directions, checked
+only against itself.
+
+| # | breakage | result |
+|---|---|---|
+| m01 | an unrecognised id returns 0 rather than -1 | caught |
+| m02 | `choiceFromId` drops its null guard | **survived** |
+| m03 | `choiceFromId` walks one past the end of the list | caught |
+| m04 | `choiceFromId` compares the pointers rather than the text | **survived** |
+| m05 | an out of range index falls back to the last entry, not the first | caught |
+| m06 | `idOfChoice` accepts an index equal to the size | **survived** |
+| m07 | `idOfChoice` drops its empty guard | **survived** |
+| m08 | `toIndex` truncates instead of rounding | **survived** |
+| m09 | `toIndex` clamps the top to `count` rather than `count - 1` | **survived** |
+| m10 | `toIndex` does not clamp a negative value | **survived** |
+| m11 | `divisionFromBeats` compares signed distance, not distance | caught |
+| m12 | `divisionFromBeats` starts from an index not in the table | **survived** |
+| m13 | `divisionFromBeats` never narrows its search | caught |
+| m14 | `divisionFromBeats` takes the furthest division | caught |
+| m15 | the filter type clamp is one short of its ten responses | caught |
+| m16 | the LFO shape clamp is one short of its eight shapes | caught |
+| m17 | the routing shape clamp is one short of its four shapes | caught |
+| m18 | the drive curve clamp is one short of its three curves | caught |
+| m19 | the gate mode clamp is one short of its three modes | caught |
+| m20 | the filter type clamp is one past its ten responses | **survived** |
+
+### m04 is the one that matters, and it is the file's own premise
+
+`choiceFromId` compared with `list[i].id == id`, a pointer comparison, passes
+the whole suite. The reason is in the test rather than in the header. Its round
+trip is
+
+```
+const char* id = PanOneParams::idOfChoice (list, i);
+if (PanOneParams::choiceFromId (list, id) != i)
+```
+
+and `idOfChoice` hands back `list[i].id`, which is the table's own pointer. So
+the two calls are reversible under pointer equality and the check cannot tell
+the two comparisons apart. The invented id it also tries, `"no-such-id-anywhere"`,
+is a different pointer and so is correctly refused either way.
+
+The real caller is not reversible that way. `PanOne::setStateInformation` does
+
+```
+const int found = PanOneParams::choiceFromId (list, saved.toRawUTF8());
+```
+
+where `saved` is a `juce::String` read out of the project file, so the pointer
+is into that string's own buffer and never into the table. Under a pointer
+comparison every choice in every saved project and every preset referred to by
+id would come back unrecognised and fall back to the first entry of its list:
+every wavetable the first wavetable, every filter a low pass, every routing
+dropped. The project would load, every envelope time and every knob would be
+exactly right, and the sound would be gone. That is this project's recurring
+fault, in the one layer that exists to prevent it.
+
+Nothing is wrong in the shipped header. The gap is that the only check of the
+id contract is one that cannot fail in the direction the contract is about.
+
+### m08 is the second gap, and it is the same blind spot
+
+`toIndex` exists to round a float onto a choice index. The round trip test
+builds its choice values by calling `toIndex` first, so every value it then
+feeds back in is already an exact integer, and truncation and rounding agree on
+every exact integer. Nothing in the suite ever hands `toIndex` a value like
+2.9999998, which is what a normalised host parameter converted back through a
+`NormalisableRange` actually produces. Truncating there puts the control one
+entry low.
+
+m09, m10 and m20 are the two clamps of the same function, and they survive for
+the same reason: no test hands `toIndex` a value outside the list at all. In
+the shipped code a parameter cannot exceed its own range, so these three are
+closer to a no-op than m08 is, but all four are the same untested boundary and
+the fix is the same one test.
+
+### m02, m06, m07 and m12 are four guards nothing stands on
+
+Each is a documented guard with no case behind it.
+
+- m02: no caller passes a null id today, because `juce::String::toRawUTF8`
+  never returns null.
+- m06: an index exactly equal to the size is the one out of range value the
+  test does not try. It tries 9999 and it tries 0 to size minus one.
+- m07: no list in the table is empty, and the test asserts that, so the empty
+  guard protects a case the table cannot produce. The nearest thing to a real
+  caller is `Fx/Unit.h`, which HARDENING already records as reaching nothing.
+- m12: `divisionFromBeats` starts from index zero so that a beats value no
+  entry is within a billion of still lands somewhere real. Reaching that needs
+  a NaN or a vast `beatsPerCycle`, and nothing in the suite produces one.
+  Under the mutation such a value returns -1 and the caller reads
+  `table[-1]`.
+
+These are gaps rather than no-ops, because every one of them is a guard whose
+boundary nothing visits, and a guard nothing visits is how
+`Tuner::InputRing`'s blind window survived two audits here.
+
 ### What is left to do
 
-- read the header's logic apart from its data, and list what a mutation can aim at
-- mutate it, compiled with run.sh's own sanitizer flags
-- judge every survivor as a gap or a genuine no-op
-- close the gaps
+- mutate the matrix plus one, the row count, the legacy translation
+- close the gaps above
+- re-run the mutations against the stronger test
 
 ---
 
