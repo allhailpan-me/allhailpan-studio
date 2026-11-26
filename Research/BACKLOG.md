@@ -1,5 +1,44 @@
 # Research backlog
 
+## Standing question: answered again, on 2026-11-26, by cutting v0.9.0
+
+**v0.9.0 is out.** The last tag was **v0.8.0**, cut on 2026-11-18, and `main`
+had reached **twenty one commits** past it over **eight days**. Five of those
+are things the owner would notice within a minute of opening the studio: a
+recorded MIDI note landing where it was played rather than a few milliseconds
+late, the hold pedal modelled so the note that hung no longer hangs, a pre
+fader tap per send, monitoring that knows what the transport is doing, and the
+control room section. The rest is the hardening lane, which strengthens tests
+over code already merged and would not have justified a release on its own.
+
+Three things were checked rather than assumed. The notes under
+`## Since v0.8.0` describe all five changes and not only the newest two, which
+is what makes them the release body rather than a draft. All four CI jobs came
+green on the merged tree, both on the merge of #94 and on the head of `main`,
+and the Windows configure step printed its "ASIO support enabled from" line in
+the release run itself. And the summary paragraph at the top of
+`RELEASE_NOTES.md` did not mention the control room at all, which is the one
+thing this release is most about, so it was rewritten to lead with it before
+the build was dispatched.
+
+Two gaps shipped knowingly, both named in the notes rather than left for
+somebody to find: the dim amount is relearned on every launch, and the main
+window has no light saying the speakers are not carrying the mix, only the
+mixer panel does. Both are held by `MainComponent.cpp`, which an open pull
+request owns. They were not a reason to hold. The latches are not persisted,
+so the hazard cannot outlive a session, and holding four features on a file
+hold with no known end date is exactly the reason this section already warns
+about. The nine open `harden/` pull requests were not a reason either, on the
+2026-11-17 entry's own argument: they change what the next release is
+confident about rather than what this one contains.
+
+**The reason to release tonight was specific rather than general**, which is
+the test this section sets. It was not "the span has grown" and not "there has
+not been a release in a while": both of those would have been equally true
+last night and will be true again. It was that five separate things a musician
+touches daily were sitting behind a build, and nothing in the span was
+unfinished or red.
+
 ## Standing question: answered, on 2026-11-17, after four deferrals
 
 **The call was made rather than deferred a fifth time.** The last tag was
