@@ -103,8 +103,9 @@
     m908 covers -30 to 0 dB in half decibel steps. Nobody ships a fixed dim
     on the main speaker path. So: adjustable, stored in decibels, default -20
     dB as the majority of the console side, over -30 to 0 dB, which covers
-    the console side of that spread. UAD's lowest steps go below it and are
-    deliberately out of reach, for the reason given at `dimFloorDb`.
+    the console side of that spread and not all of it: UAD's lowest steps go
+    below -30 and are deliberately out of reach, for the reason given at
+    `dimFloorDb`.
 
     Stored in decibels rather than as a coefficient, which is where Ardour
     keeps it, because the number a person chooses is a number of decibels and
@@ -139,10 +140,22 @@ namespace ControlRoom
     /** What the buttons are in, which is what the message thread sets.
 
         `dim` and `dimDb` are separate because they are different kinds of
-        thing: whether the dim is engaged is a momentary check and is not
-        saved, and how far it dims is calibration and is. The engine reads
-        both together, so a dim amount changed while the dim is engaged takes
-        effect without having to be re-engaged. */
+        thing: whether the dim is engaged is a momentary check, and how far it
+        dims is calibration. The engine reads both together, so a dim amount
+        changed while the dim is engaged takes effect without having to be
+        re-engaged.
+
+        **None of this is saved**, including the amount, and that is only half
+        a decision. Not saving the latches is argued below and is deliberate.
+        Not saving the amount is a hold: the one place in this studio where a
+        stored preference is applied to the engine is in a file another change
+        is holding, so the amount lasts as long as the studio is open and is
+        relearned on every launch, which for a calibration figure is the wrong
+        answer. Research/BACKLOG.md has it as the first thing to finish here.
+        Said plainly because an earlier draft of this header claimed the
+        amount was saved when nothing in the tree saved it, which is the shape
+        of fault this project keeps meeting, in a sentence rather than in the
+        signal. */
     struct State
     {
         bool   mono        = false;
@@ -172,6 +185,63 @@ namespace ControlRoom
     /** The matrix that passes the mix through untouched, which is what the
         speaker feed is whenever nothing is engaged. */
     inline Matrix passThrough() noexcept { return {}; }
+
+    /** Which bit of the published word each latch is.
+
+        The six latches travel to the audio thread as one word, so a gesture
+        that moves two of them cannot half arrive and a block reads one atomic
+        rather than six.
+
+        The pack and the unpack are here rather than in the engine, and that
+        is the whole reason this exists as a named thing. They are two
+        hand-written mappings between six booleans and six bits, which is
+        twelve chances to transpose a pair, and a pair transposed in the
+        unpack alone would mean "cut L" silencing the right speaker: a studio
+        that works, with the speakers swapped under one button. That is the
+        same argument the `Matrix` comment below makes about naming its four
+        coefficients, and in the engine it would have been in the one file no
+        test can compile. Here the round trip is a property a test can state
+        in one line, and it does.
+    */
+    enum Latch : unsigned
+    {
+        latchMono        = 1u << 0,
+        latchDim         = 1u << 1,
+        latchCutLeft     = 1u << 2,
+        latchCutRight    = 1u << 3,
+        latchInvertLeft  = 1u << 4,
+        latchInvertRight = 1u << 5
+    };
+
+    inline unsigned pack (const State& s) noexcept
+    {
+        unsigned bits = 0;
+
+        if (s.mono)        bits |= latchMono;
+        if (s.dim)         bits |= latchDim;
+        if (s.cutLeft)     bits |= latchCutLeft;
+        if (s.cutRight)    bits |= latchCutRight;
+        if (s.invertLeft)  bits |= latchInvertLeft;
+        if (s.invertRight) bits |= latchInvertRight;
+
+        return bits;
+    }
+
+    /** The amount comes alongside rather than inside the word, because it is a
+        number of decibels and not a latch. */
+    inline State unpack (unsigned bits, double dimDb) noexcept
+    {
+        State s;
+        s.mono        = (bits & latchMono)        != 0;
+        s.dim         = (bits & latchDim)         != 0;
+        s.cutLeft     = (bits & latchCutLeft)     != 0;
+        s.cutRight    = (bits & latchCutRight)    != 0;
+        s.invertLeft  = (bits & latchInvertLeft)  != 0;
+        s.invertRight = (bits & latchInvertRight) != 0;
+        s.dimDb       = dimDb;
+
+        return s;
+    }
 
     /** A stored dim amount brought inside the range.
 
@@ -226,12 +296,21 @@ namespace ControlRoom
 
     /** Whether the speaker feed is the mix.
 
-        Defined on the signal rather than on the buttons, deliberately: a dim
-        engaged at 0 dB does nothing to the sound, and an indicator that
-        lights when nothing is happening to what you hear teaches people to
-        ignore it. The test asserts the equivalence both ways, so this cannot
-        drift from `matrixFor` the way a second opinion about the same state
-        usually does.
+        Defined as the matrix being the identity rather than as no button
+        being pressed, deliberately: a dim engaged at 0 dB does nothing at all
+        to the sound, and an indicator that lights when nothing is happening
+        to what you hear teaches people to ignore it. The test asserts the
+        equivalence both ways, so this cannot drift from `matrixFor` the way a
+        second opinion about the same state usually does.
+
+        Note what that is not, since the obvious reading is wrong by one case:
+        this is not "nothing audible is happening". Both legs inverted is
+        inaudible on its own and is still reported as not neutral, because the
+        feed is not the mix, it is the mix upside down, and the moment
+        anything else joins it, another source, a mono fold, a listener on one
+        speaker, that matters. The question this answers is whether the
+        speakers are carrying the mix, not whether the difference would be
+        noticed in isolation.
 
         This is the mitigation Ardour reaches for and does not use. It
         computes a `monitor_active()` flag over exactly this question
@@ -266,24 +345,65 @@ namespace ControlRoom
         return std::abs (m.rightFromLeft) + std::abs (m.rightFromRight);
     }
 
-    /** What a device with one output channel gets.
+    /** The state as a given number of speaker legs can actually express it.
 
-        Written down as its own figure rather than left as a branch in the
-        engine, because the alternatives are all wrong in a way that would not
-        announce itself. A one channel feed has one leg, so the leg's own cut,
-        polarity and dim apply and the fold has nothing to fold: taking the
-        missing leg as silence would make the fold a 6 dB drop for nothing,
-        and taking it as a copy of the leg that is there would make a cut of
-        the absent leg a 6 dB drop instead. The controls that are about the
-        relationship between two legs simply have no second leg to act on,
-        which is the honest reading, and a dim still dims.
+        A device with one output channel has one leg, so the fold has nothing
+        to fold and the second leg's cut and polarity have nothing to act on.
+        The alternatives are all wrong in a way that would not announce
+        itself: taking the missing leg as silence would make the fold a 6 dB
+        drop for nothing, and taking it as a copy of the leg that is there
+        would make a cut of the absent leg a 6 dB drop instead. So those three
+        controls are dropped rather than approximated, and the leg's own cut,
+        polarity and dim all still apply.
+
+        This is a reduction of the state rather than a separate gain because
+        everything that asks a question about the control room has to ask it
+        about the same state, and an audit found what happens otherwise: on a
+        one output device the engine applied one leg's gain while the strip
+        read `describe` and `isNeutral` on the full state, so pressing mono
+        lit the "this is not the mix" indicator and changed nothing, and mono
+        plus cut left said "mono, right leg only" while the one speaker was
+        silent. Both of those are statements of fact about the signal and both
+        were false. Reduce once, here, and the words, the indicator and the
+        arithmetic cannot disagree.
 
         Rare rather than hypothetical: the engine treats a missing right
-        channel as a real case everywhere else in the block, so this is the
-        case it already has. */
+        channel as a real case everywhere else in the block, and the device
+        selector will offer a single output channel.
+
+        Two legs or more is the ordinary stereo feed and is unchanged. Zero
+        legs means nothing is heard at all and is treated as the stereo case
+        rather than given a third reading: there is no feed to describe, so
+        describing the buttons is the least surprising thing to do with them.
+
+        What this does not fix, said rather than left to be discovered: on a
+        one output device the engine has already discarded the right half of
+        the mix upstream, so a mono check is unavailable on the one hardware
+        where it is hardest to get any other way. Folding properly there would
+        mean reaching back into the master buffer, which would put this
+        section somewhere other than on the way out, and that is the trade the
+        whole design is. */
+    inline State asHeard (const State& s, int legs) noexcept
+    {
+        if (legs != 1)
+            return s;
+
+        State one = s;
+        one.mono        = false;
+        one.cutRight    = false;
+        one.invertRight = false;
+
+        return one;
+    }
+
+    /** What a device with one output channel multiplies its one leg by.
+
+        The same arithmetic as everything else rather than a second law beside
+        it: the reduced state through the matrix, and the only coefficient one
+        leg has. */
     inline double oneChannelGain (const State& s) noexcept
     {
-        return legGain (s.cutLeft, s.invertLeft, dimGain (s));
+        return matrixFor (asHeard (s, 1)).leftFromLeft;
     }
 
     /** What the row of buttons says it is doing, for the one line on the
@@ -295,7 +415,7 @@ namespace ControlRoom
             return "control room: the speakers are hearing the mix";
 
         if (s.cutLeft && s.cutRight)
-            return "control room: both legs cut, the speakers are silent";
+            return "control room: both legs cut, silent";
 
         // A cut leg is described before the difference is claimed, because a
         // difference listen needs both legs. With one leg cut and the other
@@ -313,7 +433,7 @@ namespace ControlRoom
         if (s.mono && s.cutRight)     return "control room: mono, left leg only";
 
         if (s.mono && (s.invertLeft != s.invertRight))
-            return "control room: difference, only what a mono fold destroys";
+            return "control room: difference, what mono destroys";
         if (s.mono)                   return "control room: mono";
         if (s.cutLeft)                return "control room: left leg cut";
         if (s.cutRight)               return "control room: right leg cut";

@@ -1183,10 +1183,31 @@ private:
                 b.setWantsKeyboardFocus (false);
                 b.setMouseClickGrabsKeyboardFocus (false);
                 b.setClickingTogglesState (false);
-                b.setColour (juce::TextButton::buttonColourId, Ahp::panel3);
-                b.setColour (juce::TextButton::textColourOnId, Ahp::rec);
+
+                // Red fill when engaged, the way every other control in this
+                // studio that means "something is not neutral" is drawn:
+                // record, punch and the solo alert all set buttonOnColourId.
+                // The look and feel draws its own off state and ignores
+                // buttonColourId, so only the on colour is worth setting.
+                b.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
+                b.setColour (juce::TextButton::textColourOnId,   Ahp::black);
+
                 b.onClick = [this, field]
                 {
+                    // juce::Button does not filter on which mouse button, so
+                    // without this a right click on any of these would toggle
+                    // a latch and the panel's own menu would be unreachable
+                    // from five sixths of its area. The same thing a strip's
+                    // solo button does, for the same reason. The first
+                    // version of this filtered the dim button alone, which an
+                    // audit found: the hazard was known and the guard written
+                    // one control too narrowly.
+                    if (juce::ModifierKeys::getCurrentModifiers().isPopupMenu())
+                    {
+                        offerDimAmounts();
+                        return;
+                    }
+
                     auto state = owner.engine.getControlRoom();
                     state.*field = ! (state.*field);
                     owner.engine.setControlRoom (state);
@@ -1207,24 +1228,6 @@ private:
                   "Right click for how far it dims.",
                   &ControlRoom::State::dim);
 
-            // juce::Button does not filter on which mouse button, so without
-            // this a right click would both engage the dim and fail to open
-            // the menu the tooltip sends people to. The same thing the solo
-            // button in a strip does, for the same reason.
-            dim.onClick = [this]
-            {
-                if (juce::ModifierKeys::getCurrentModifiers().isPopupMenu())
-                {
-                    offerDimAmounts();
-                    return;
-                }
-
-                auto state = owner.engine.getControlRoom();
-                state.dim = ! state.dim;
-                owner.engine.setControlRoom (state);
-                refresh();
-            };
-
             wire (cutLeft,  "cut L", "Silence the left speaker.",  &ControlRoom::State::cutLeft);
             wire (cutRight, "cut R", "Silence the right speaker.", &ControlRoom::State::cutRight);
 
@@ -1234,16 +1237,20 @@ private:
 
             wire (invertLeft, phi + " L",
                   "Flip the polarity of the left speaker.\n"
-                  "With mono engaged this is the difference listen: everything centred "
-                  "cancels, so what is left is exactly what a mono fold destroys. That is "
-                  "the loud half of the same check, and a polarity problem between two "
-                  "mics shows up as the fold going thin and this going loud.",
+                  "With mono engaged and this on one leg only, that is the difference "
+                  "listen: everything centred cancels, so what is left is exactly what a "
+                  "mono fold destroys. That is the loud half of the same check, and a "
+                  "polarity problem between two mics shows up as the fold going thin and "
+                  "this going loud.\n"
+                  "On both legs, or with the other leg cut, it is not a difference listen, "
+                  "and the panel says which of the two you have.",
                   &ControlRoom::State::invertLeft);
 
             wire (invertRight, phi + " R",
                   "Flip the polarity of the right speaker.\n"
-                  "With mono engaged this is the difference listen: everything centred "
-                  "cancels, so what is left is exactly what a mono fold destroys.",
+                  "With mono engaged and this on one leg only, that is the difference "
+                  "listen: everything centred cancels, so what is left is exactly what a "
+                  "mono fold destroys.",
                   &ControlRoom::State::invertRight);
 
             refresh();
@@ -1251,31 +1258,58 @@ private:
 
         void refresh()
         {
-            const auto state = owner.engine.getControlRoom();
+            const int legs = owner.engine.getControlRoomLegs();
 
-            mono       .setToggleState (state.mono,        juce::dontSendNotification);
-            dim        .setToggleState (state.dim,         juce::dontSendNotification);
-            cutLeft    .setToggleState (state.cutLeft,     juce::dontSendNotification);
-            cutRight   .setToggleState (state.cutRight,    juce::dontSendNotification);
-            invertLeft .setToggleState (state.invertLeft,  juce::dontSendNotification);
-            invertRight.setToggleState (state.invertRight, juce::dontSendNotification);
+            // Everything shown here is read off the state as the speakers can
+            // actually express it, not off the buttons that were pressed.
+            // ControlRoom::asHeard is that reduction and carries why it is one
+            // function rather than a case here: on a one output device the
+            // engine applied one leg while this panel described two, so mono
+            // lit the "this is not the mix" indicator and changed nothing, and
+            // mono with the left leg cut said "mono, right leg only" over a
+            // silent speaker. An audit found both. One reduction, and the
+            // words, the light and the arithmetic cannot disagree.
+            const auto heard = ControlRoom::asHeard (owner.engine.getControlRoom(), legs);
+
+            mono       .setToggleState (heard.mono,        juce::dontSendNotification);
+            dim        .setToggleState (heard.dim,         juce::dontSendNotification);
+            cutLeft    .setToggleState (heard.cutLeft,     juce::dontSendNotification);
+            cutRight   .setToggleState (heard.cutRight,    juce::dontSendNotification);
+            invertLeft .setToggleState (heard.invertLeft,  juce::dontSendNotification);
+            invertRight.setToggleState (heard.invertRight, juce::dontSendNotification);
+
+            // Greyed rather than hidden, and the status line says why: a
+            // control that is simply missing reads as a studio that cannot do
+            // it, where this is a studio whose current output cannot.
+            const bool twoLegs = legs != 1;
+            mono       .setEnabled (twoLegs);
+            cutRight   .setEnabled (twoLegs);
+            invertRight.setEnabled (twoLegs);
+
+            // The amount lives on the button that uses it, which is where a
+            // console keeps it, and leaves the status line for what the
+            // section is doing. Whole decibels, because the menu offers only
+            // whole ones and a trailing ".0" on a forty pixel button is two
+            // characters of nothing.
+            dim.setButtonText ("dim " + juce::String (juce::roundToInt (
+                                   -ControlRoom::clampDimDb (heard.dimDb))));
 
             // The words come from ControlRoom.h rather than being assembled
             // here, so they cannot describe a state the matrix does not have.
-            // The first version of that function could, and the test that pins
-            // the words against the actual cancellation is what found it.
-            // Only the part after the colon, since the title above already
-            // says which section this is.
-            const juce::String said = ControlRoom::describe (state);
+            // The first version of that function could, and the test that
+            // pins the words against the actual cancellation is what found
+            // it. Only the part after the colon, since the title above
+            // already says which section this is.
+            const juce::String said = ControlRoom::describe (heard);
             juce::String text = said.fromFirstOccurrenceOf (": ", false, false);
 
             if (text.isEmpty())
                 text = said;
 
-            if (state.dim)
-                text += ", " + juce::String (ControlRoom::clampDimDb (state.dimDb), 1) + " dB";
+            if (! twoLegs)
+                text += ", one output: nothing to fold";
 
-            const bool neutral = ControlRoom::isNeutral (state);
+            const bool neutral = ControlRoom::isNeutral (heard);
 
             status.setText (text, juce::dontSendNotification);
             status.setColour (juce::Label::textColourId, neutral ? Ahp::muted : Ahp::rec);
@@ -1312,7 +1346,9 @@ private:
 
         void paint (juce::Graphics& g) override
         {
-            const bool neutral = ControlRoom::isNeutral (owner.engine.getControlRoom());
+            const bool neutral = ControlRoom::isNeutral (
+                ControlRoom::asHeard (owner.engine.getControlRoom(),
+                                      owner.engine.getControlRoomLegs()));
             auto r = getLocalBounds().toFloat();
 
             g.setColour (Ahp::panel2);

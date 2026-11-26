@@ -1012,12 +1012,11 @@ int main()
     // the matrix does not have. The two claims checked here are the two that
     // would be read as statements of fact about the signal.
     //
-    // One case is deliberately not asserted, and is in the report rather than
-    // here: with the fold on, one leg inverted and the other leg cut,
-    // `describe` says "difference, only what a mono fold destroys" while the
-    // matrix is half of one leg with a polarity flip, which does not cancel
-    // centred content at all. Pinning that would commit a failing test to the
-    // tree over a wording decision that belongs to whoever owns the strip.
+    // The case that made this section worth writing: with the fold on, one
+    // leg inverted and the other leg cut, the first version of `describe`
+    // said "difference" while the matrix was half of one leg with a polarity
+    // flip, which cancels nothing centred at all. It is pinned below rather
+    // than excluded, and reinstating the old branch order fails it.
     std::printf ("describe against the matrix, over %d x %d states\n",
                  64, (int) amounts.size());
     {
@@ -1161,6 +1160,155 @@ int main()
                        "the one channel gain is inside unity for " + describeState (s));
                 check (std::isfinite (got),
                        "the one channel gain is finite for " + describeState (s));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The word the latches travel to the audio thread as.
+    //
+    // Six booleans packed into six bits by hand and unpacked by hand is twelve
+    // chances to transpose a pair, and a pair transposed in the unpack alone
+    // means a studio that works with the speakers swapped under one button.
+    // That is why the pack and the unpack are in the header and not in the
+    // engine, where nothing could reach them.
+    //
+    // The round trip is the check that catches it. Note what it cannot catch
+    // and does not need to: a transposition made in both directions composes
+    // to the identity, so it is not a fault at all, since nothing but these
+    // two functions ever sees the bits.
+    std::printf ("the packed word, over %d x %d states\n", 64, (int) amounts.size());
+    {
+        std::vector<unsigned> words;
+
+        for (int bits = 0; bits < 64; ++bits)
+        {
+            const State s = stateFromBits (bits, defaultDimDb);
+            const State back = unpack (pack (s), s.dimDb);
+
+            check (back.mono        == s.mono
+                && back.dim         == s.dim
+                && back.cutLeft     == s.cutLeft
+                && back.cutRight    == s.cutRight
+                && back.invertLeft  == s.invertLeft
+                && back.invertRight == s.invertRight,
+                   "the packed word round trips for " + describeState (s));
+
+            checkExact (back.dimDb, s.dimDb,
+                        "the amount travels beside the word for " + describeState (s));
+
+            // And the matrix is the same either side of the trip, which is the
+            // thing that actually has to survive it.
+            const auto a = matrixFor (s);
+            const auto b = matrixFor (back);
+            check (a.leftFromLeft == b.leftFromLeft && a.leftFromRight == b.leftFromRight
+                && a.rightFromLeft == b.rightFromLeft && a.rightFromRight == b.rightFromRight,
+                   "the matrix survives the packed word for " + describeState (s));
+
+            words.push_back (pack (s));
+        }
+
+        // Every state has to get its own word. Two latches sharing a bit would
+        // round trip one of them and lose the other, and the round trip above
+        // would pass for whichever one won.
+        std::sort (words.begin(), words.end());
+        check (std::adjacent_find (words.begin(), words.end()) == words.end(),
+               "the 64 states pack to 64 distinct words");
+
+        for (double db : amounts)
+        {
+            // The amount travels beside the word and is not touched by it, so
+            // whatever came in comes out, a stored NaN included. Compared this
+            // way rather than exactly because a NaN is not equal to itself,
+            // and the claim here is that nothing happened to it: bringing it
+            // inside the range is clampDimDb's job and is checked there.
+            const State s = stateFromBits (0, db);
+            const double back = unpack (pack (s), s.dimDb).dimDb;
+
+            check ((back == db) || (std::isnan (back) && std::isnan (db)),
+                   "the word carries no part of the amount for " + allDigits (db));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The state as one speaker leg can express it.
+    //
+    // A device with one output channel has one leg, so the fold has nothing to
+    // fold and the second leg's cut and polarity have nothing to act on. The
+    // reduction is a function rather than a branch in the engine because the
+    // arithmetic, the words on the strip and the indicator all have to be
+    // asking about the same state: an audit found the version where they were
+    // not, with mono lighting the "this is not the mix" indicator and changing
+    // nothing, and "mono, right leg only" printed over a silent speaker.
+    std::printf ("the state as one leg can express it, over %d x %d states\n",
+                 64, (int) amounts.size());
+    {
+        for (double db : amounts)
+        {
+            for (int bits = 0; bits < 64; ++bits)
+            {
+                const State s = stateFromBits (bits, db);
+
+                // Two legs or more, and nothing is reduced at all. Zero legs
+                // is the stereo reading too, deliberately: there is no feed to
+                // describe, so describing the buttons is the least surprising
+                // thing to do with them.
+                for (int legs : { 0, 2, 3, 6 })
+                {
+                    const State full = asHeard (s, legs);
+                    check (full.mono == s.mono && full.dim == s.dim
+                        && full.cutLeft == s.cutLeft && full.cutRight == s.cutRight
+                        && full.invertLeft == s.invertLeft
+                        && full.invertRight == s.invertRight
+                        && ((full.dimDb == s.dimDb) || (std::isnan (full.dimDb) && std::isnan (s.dimDb))),
+                           "a feed of " + std::to_string (legs) + " legs reduces nothing for "
+                               + describeState (s));
+                }
+
+                const State one = asHeard (s, 1);
+
+                check (! one.mono && ! one.cutRight && ! one.invertRight,
+                       "one leg drops the fold and the absent leg for " + describeState (s));
+                check (one.cutLeft == s.cutLeft && one.invertLeft == s.invertLeft
+                    && one.dim == s.dim,
+                       "one leg keeps its own cut, polarity and dim for " + describeState (s));
+
+                // Reducing twice is reducing once, which is what makes it safe
+                // to apply wherever the question is asked.
+                const State twice = asHeard (one, 1);
+                check (pack (twice) == pack (one),
+                       "the reduction is idempotent for " + describeState (s));
+
+                // The one leg really is one coefficient: nothing can put
+                // anything on the off diagonal of a reduced state, so the
+                // engine applying leftFromLeft alone is applying the whole of
+                // it.
+                const auto m = matrixFor (one);
+                checkExact (m.leftFromRight, 0.0,
+                            "a reduced state has no crossfeed for " + describeState (s));
+                checkExact (oneChannelGain (s), m.leftFromLeft,
+                            "the one channel gain is the reduced matrix for "
+                                + describeState (s));
+
+                // And the words and the indicator, asked about the reduced
+                // state, agree with it. This is the fault the audit found,
+                // stated as the property that forbids it: on one leg, the
+                // indicator lights exactly when that leg is not carrying the
+                // mix.
+                const bool neutralOne = isNeutral (one);
+                checkExact (m.leftFromLeft, neutralOne ? 1.0 : m.leftFromLeft,
+                            "a neutral one leg state passes its leg through for "
+                                + describeState (s));
+                check (neutralOne == (m.leftFromLeft == 1.0),
+                       "the indicator on one leg follows the leg for " + describeState (s));
+
+                const std::string words = describe (one);
+                check ((words.find ("mono") != std::string::npos) == false,
+                       "nothing on one leg is described as a fold, said \"" + words
+                           + "\" for " + describeState (s));
+                check ((words.find ("difference") != std::string::npos) == false,
+                       "nothing on one leg is described as a difference, said \"" + words
+                           + "\" for " + describeState (s));
             }
         }
     }

@@ -580,6 +580,15 @@ public:
     void setControlRoom (ControlRoom::State s) noexcept;
     ControlRoom::State getControlRoom() const noexcept;
 
+    /** How many speaker legs the open device gave the control room.
+
+        The strip needs it, because three of the six controls have nothing to
+        act on with one leg and the words on the strip have to be true of what
+        is actually applied rather than of what was pressed. See
+        `ControlRoom::asHeard`, which is where that reduction lives so that
+        the arithmetic and the words cannot disagree about it. */
+    int getControlRoomLegs() const noexcept { return controlRoomLegs.load(); }
+
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
     float getMonitorGain() const noexcept      { return monitorGain.load(); }
 
@@ -1158,21 +1167,21 @@ private:
     // The control room's six latches as one word, so a gesture that moves
     // two of them cannot half arrive at the audio thread, and so a block
     // reads one atomic rather than six. The dim amount is separate because it
-    // is the one part of this that is saved: the latches are momentary checks
-    // and arriving in one of them is a silent wrong state, which is the
-    // departure from Ardour that ControlRoom.h argues.
-    enum ControlRoomLatch : std::uint32_t
-    {
-        latchMono        = 1u << 0,
-        latchDim         = 1u << 1,
-        latchCutLeft     = 1u << 2,
-        latchCutRight    = 1u << 3,
-        latchInvertLeft  = 1u << 4,
-        latchInvertRight = 1u << 5
-    };
+    // is a number of decibels and not a latch.
+    //
+    // The pack and the unpack are in ControlRoom.h rather than here, and that
+    // is deliberate: they are the one order convention in this feature, and a
+    // transposed pair would swap the speakers under one button. In this file
+    // no test could reach them. ControlRoom.h carries the argument and the
+    // test states the round trip as a property.
+    std::atomic<unsigned> controlRoomLatches { 0 };
+    std::atomic<double>   controlRoomDimDb { ControlRoom::defaultDimDb };
 
-    std::atomic<std::uint32_t> controlRoomLatches { 0 };
-    std::atomic<double>        controlRoomDimDb { ControlRoom::defaultDimDb };
+    // How many legs the speaker feed has, which is how many output channels
+    // the open device gave us. Two until a device says otherwise, which is
+    // also what it is with no device at all: there is then no feed, and
+    // describing the buttons is the least surprising thing to do with them.
+    std::atomic<int>      controlRoomLegs { 2 };
 
     // One moving gain per coefficient, audio thread only, seeded where a
     // fresh engine already is: passing the mix through. Slewed rather than

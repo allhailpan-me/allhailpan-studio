@@ -863,37 +863,17 @@ void AudioEngine::setSoloSettings (float gain, bool overridesMute, bool exclusiv
 
 void AudioEngine::setControlRoom (ControlRoom::State s) noexcept
 {
-    std::uint32_t bits = 0;
-
-    if (s.mono)        bits |= latchMono;
-    if (s.dim)         bits |= latchDim;
-    if (s.cutLeft)     bits |= latchCutLeft;
-    if (s.cutRight)    bits |= latchCutRight;
-    if (s.invertLeft)  bits |= latchInvertLeft;
-    if (s.invertRight) bits |= latchInvertRight;
-
     // Brought inside the range here as well as where it is used, so what a
     // caller reads back is what the speakers will do rather than what it
     // asked for. A settings file is the thing that puts a number out of range
     // in here, and the guard in ControlRoom.h says what a NaN one would cost.
     controlRoomDimDb.store (ControlRoom::clampDimDb (s.dimDb));
-    controlRoomLatches.store (bits);
+    controlRoomLatches.store (ControlRoom::pack (s));
 }
 
 ControlRoom::State AudioEngine::getControlRoom() const noexcept
 {
-    const auto bits = controlRoomLatches.load();
-
-    ControlRoom::State s;
-    s.mono        = (bits & latchMono)        != 0;
-    s.dim         = (bits & latchDim)         != 0;
-    s.cutLeft     = (bits & latchCutLeft)     != 0;
-    s.cutRight    = (bits & latchCutRight)    != 0;
-    s.invertLeft  = (bits & latchInvertLeft)  != 0;
-    s.invertRight = (bits & latchInvertRight) != 0;
-    s.dimDb       = controlRoomDimDb.load();
-
-    return s;
+    return ControlRoom::unpack (controlRoomLatches.load(), controlRoomDimDb.load());
 }
 
 /*
@@ -902,7 +882,19 @@ ControlRoom::State AudioEngine::getControlRoom() const noexcept
     and nowhere else.
 
     Applied after the master, after the preview and after the click, which is
-    the second deliberate choice here. Ardour's metronome bypasses its monitor
+    the second deliberate choice here. Not after absolutely everything,
+    and the two exceptions are worth naming rather than leaving the comment to
+    overstate itself. JUCE sums the output of every audio callback added after
+    this engine's into the buffer once this one has returned, and it sums its
+    own Test tone in after all of them, so the loopback probe's tone and the
+    Test button in Preferences > Audio both bypass this section. The first of
+    those is the right way round and is load bearing: a round trip measurement
+    taken through a dim or a cut would be a measurement of the control room,
+    and an audit confirmed the engine is always the first callback, so the
+    probe is safe by construction. The second is a reachable contradiction of
+    everything below, since pressing Test while the speakers are cut or
+    dimmed for somebody puts a tone out at half scale, and it is JUCE's button
+    rather than one of ours. Ardour's metronome bypasses its monitor
     section entirely (session_click.cc:254-256 sends the click straight to its
     own ports) and Harrison documents the consequence, that the monitor volume
     knob does not control the click. That is the wrong trade for this studio.
@@ -946,9 +938,13 @@ void AudioEngine::applyControlRoom (float* outL, float* outR, int numSamples) no
     for (int i = 0; i < numSamples; ++i)
     {
         // Both legs read before either is written, because each output is a
-        // function of both inputs: written in place one at a time, a fold
-        // would sum the left leg with itself. This is the one line in here
-        // that is a bug if it moves.
+        // function of both inputs. Written in place one at a time, the left
+        // output is fine and the right one then reads the left leg it has
+        // already overwritten: under a fold the right leg would come out as
+        // a quarter of the left plus three quarters of the right, which is a
+        // stereo image pulled to one side rather than a fold, and it would
+        // sound like a mix decision. This is the one line in here that is a
+        // bug if it moves.
         const double inL = (double) outL[i];
         const double inR = (double) outR[i];
 
@@ -1556,6 +1552,12 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // device opening with the fold already engaged would otherwise fade into
     // mono over however long the new rate makes of five milliseconds.
     {
+        // How many legs the feed has, read where the device is, so the strip
+        // and the arithmetic are asking the same question.
+        controlRoomLegs.store (device != nullptr
+                                   ? device->getActiveOutputChannels().countNumberOfSetBits()
+                                   : 2);
+
         const auto state = getControlRoom();
         const auto m     = ControlRoom::matrixFor (state);
 
@@ -2119,10 +2121,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     }
 
     // ---- the control room, last of all and on the way out only ----
-    // Everything the speakers will hear has now been summed, the click and
-    // the preview included, which is the point: this is the speaker feed and
-    // not the mix. applyControlRoom carries why the click is inside it and
-    // why renderOffline has no counterpart.
+    // Everything this engine puts in front of the speakers has now been
+    // summed, the click and the preview included, which is the point: this is
+    // the speaker feed and not the mix. applyControlRoom carries why the
+    // click is inside it, why renderOffline has no counterpart, and the two
+    // things JUCE itself adds after this engine has returned and which this
+    // therefore cannot reach.
     applyControlRoom (outL, outR, numSamples);
 
     beatPosition.store (position);

@@ -123,9 +123,8 @@ invert, on the speaker feed only.**
 
 Missing entirely, standard everywhere that has a control room at all, and
 the one thing on the list that touches no held file: it lands in a new header
-with no JUCE in it, four atomics and about twenty lines in the device
-callback, a row of buttons on the master strip in `MixerComponent.h`, and one
-stored amount in `Preferences.h`.
+with no JUCE in it, three atomics and about thirty lines in the device
+callback, and a panel under the master strip in `MixerComponent.h`.
 
 It is also the candidate that most changes what the owner can actually do
 today. He records guitar and vocals and mixes, and there is currently **no
@@ -212,9 +211,17 @@ reduction, UAD Console defaults to -17 dB over seven discrete steps, PreSonus
 trims -30 to -6 dB and fixes its talkback cue dim at -20 dB, the Grace m908
 goes -30 to 0 dB in half decibel steps. Nobody ships a fixed dim on the main
 speaker path. So: adjustable, stored in dB, **-20 dB default** as the
-majority of the console side, over **-30 to 0 dB** which covers every
-published range. The header says plainly that the number is a choice between
-sources rather than a specification, and names them.
+majority of the console side, over **-30 to 0 dB**, which covers the console
+side of that spread and not all of it: UAD's three lowest steps go below -30
+and are deliberately out of reach, because a 60 dB dim is a mute with extra
+steps. The header says plainly that the number is a choice between sources
+rather than a specification, and names them.
+
+An earlier draft of this paragraph said the range covered every published one,
+which an audit disproved against this entry's own citations. Left on the
+record rather than quietly corrected, because a claim that is present,
+plausible and wrong is what this project keeps meeting, and here it was in the
+argument for a number rather than in the number itself.
 
 **Where it sits, and what it must not reach.** In Ardour the control room is
 not a processor on the master at all: it is a separate route, and
@@ -249,24 +256,49 @@ goes through the monitor path, and that is the behaviour taken here. In
 practice the click is centred, so the fold leaves it alone; what changes is
 that dim dims it and a cut cuts it.
 
-**The latches are not saved; the dim amount is.** Ardour saves all of it in
-the session, `mono` included (`monitor_processor.cc:260`), and offers a
-`monitor_active()` flag for a UI to warn with that its own monitor section
-then does not blink. UAD Console persists the lot to the application. The
-split taken here is: save the dim amount, because that is calibration and
-relearning it is annoying, and save none of mono, dim engaged, cut or invert,
-because those are momentary checks and arriving in one of them is a silent
-wrong state. An hour of mixing in mono is not recoverable and a cleared check
-costs one click. Hardware cannot persist a latch at all, so there is no
-hardware precedent either way. Said plainly rather than implied: this departs
-from the only readable reference implementation, and the mitigation Ardour
-reaches for and does not use is the one shipped here instead, an indicator on
-the master strip that says the speaker feed is not the mix.
+**None of it is saved, and only half of that is a decision.** Ardour saves
+all of it in the session, `mono` included (`monitor_processor.cc:260`), and
+offers a `monitor_active()` flag for a UI to warn with that its own monitor
+section then does not blink. UAD Console persists the lot to the application.
 
-That split also happens to remove two of the four obligations CLAUDE.md's
-"new state needs four things" rule imposes, and would have removed a fifth
-question: whether a control room latch is undoable. It must not be, since
-undo would then move the speakers.
+The latches, mono and dim engaged and the cuts and the inversions, are
+deliberately not saved: they are momentary checks and arriving in one of them
+is a silent wrong state. An hour of mixing in mono is not recoverable and a
+cleared check costs one click. Hardware cannot persist a latch at all, so
+there is no hardware precedent either way, and the mitigation Ardour reaches
+for and does not use is shipped here instead.
+
+The dim amount is a different kind of thing and should be saved, because it
+is calibration rather than a check. **It is not**, and that is a hold rather
+than a view: the one place in this studio where a stored preference is
+applied to the engine is `applyPreferences`, whose actions are populated in
+`MainComponent.cpp`, which an open pull request is holding. So the amount is
+adjustable from the dim button, which is where a console keeps it, and is
+relearned on every launch. It is the first thing to finish in this corner.
+
+Recorded this way because the first draft of this entry, of `ControlRoom.h`
+and of the pull request all said the amount was saved, and nothing in the
+tree saved it: `Preferences.h` had been written and then reverted when the
+hold was noticed, and three descriptions of it were not. An audit found all
+three. That is the shape of fault this project keeps meeting, in the
+sentences rather than in the signal, and it is worth more written down than
+quietly corrected.
+
+**The indicator is half a mitigation, and the other half is owed.** The
+argument above for not persisting the latches leans on something saying the
+speaker feed is not the mix. What ships is on the control room panel itself:
+the border and the title go red, and the panel says which check is engaged.
+The panel is in the mixer, and the mixer is a separate window that is closed
+on launch. So press mono, close the mixer, and nothing on screen says you are
+mixing in mono, which is the same hazard the no-persistence decision was taken
+to avoid, reached by a different route.
+
+This studio already has the right answer to exactly this problem and it is
+`soloAlertButton` on the main toolbar, which lights when anything in the
+mixer is soloed and clears it when clicked. The control room needs the same
+thing, and it is in `MainComponent.cpp`, held by the same pull request as the
+preference. Two things owed to one file, and an audit is what turned "the
+mitigation is shipped" into "half of it is".
 
 **It is called the control room, not the monitor section.** Ardour and SSL
 say monitor; Steinberg says Control Room. Both are established, and `Monitor`
@@ -290,11 +322,130 @@ Monitor in one engine is a collision waiting to confuse somebody reading
   (`monitor_processor.cc:325-361` switches instantly while everything beside
   it ramps at line 319), which is the one piece of its behaviour not copied.
 - `Source/MixerComponent.h`: the row on the master strip, and the indicator.
-- `Source/Preferences.h`, `Source/PreferencesWindow.h`: the dim amount.
+The dim amount is a menu on the dim button, which is where a console keeps
+it, and the list is Ardour's own monitor section presets
+(`monitor_section.cc:251-255`) with this header's floor added. It is not in
+`Preferences.h`, for the reason given above.
 
 `renderOffline` is not touched, which is the whole point, and the reason is
 written at the one place the matrix is applied rather than at the place it is
 absent from.
+
+### What the audits found, which was all in the sentences
+
+Three sessions other than the one that wrote the code: the `dsp-researcher`
+for the specification, the `test-author` for the test and its mutations, and
+the `auditor` over the finished diff. The division was worth it and the
+result is worth stating in one line: **nothing in the arithmetic, in the
+audio thread rules, in the containment claim or in any number anywhere was
+wrong, and seven things that were written down were.** On this project that
+is the dangerous category rather than the harmless one, and two of the seven
+were real faults rather than wording.
+
+The test came back at 57 of 59 mutations caught, with the two survivors
+argued to be unreachable rewrites of `isNeutral`. It also found the first
+real fault, which is in the body of this entry: `describe` claimed a
+difference listen whenever the fold was on and the two polarities differed,
+and with one leg cut and the other inverted that is half of the surviving leg
+rather than a cancellation. A centred signal came out at half level while the
+strip said it was gone, four button presses away, invisible to every other
+check in the file.
+
+The auditor then found the same fault a second time, in the place nobody had
+looked:
+
+**On a one output device the strip described a matrix that was never
+applied.** The engine applied one leg's gain, correctly, while `describe` and
+`isNeutral` were asked about the full six button state. So pressing mono lit
+the "this is not the mix" indicator and changed nothing audible, which is
+exactly what `isNeutral`'s own comment says it was defined on the signal to
+prevent, and mono with the left leg cut printed "mono, right leg only" over a
+speaker that was silent. The fix is the general one rather than a case in the
+strip: `ControlRoom::asHeard (state, legs)` reduces the state to what that
+many speaker legs can express, everything that asks a question asks it about
+the reduced state, and `oneChannelGain` is now that same reduction through
+the same matrix rather than a second law beside it. The three controls that
+have nothing to act on are greyed and the panel says why.
+
+Worth keeping the shape of it rather than only the fix. The first fault was
+found by a test that pinned words against the signal. The second was the same
+fault in the one path that test could not reach, because nothing crossed the
+one leg case with the words. A check that exists is not the same as a check
+that covers.
+
+**The pack and the unpack were in the file no test can compile.** The six
+latches travel to the audio thread as one word, and the engine held both the
+mapping and its inverse: two hand-written lists of six, which is twelve
+chances to transpose a pair. A pair transposed in the unpack alone is a
+studio that works with the speakers swapped under one button. `ControlRoom.h`
+already makes that argument about naming its four coefficients rather than
+indexing them, and the code then put the one order convention in this feature
+somewhere unreachable. Moved into the header, where the round trip is a
+property in one line, and the test now also checks that the 64 states pack to
+64 distinct words, which is what catches two latches sharing a bit.
+
+**Right clicking five of the six buttons toggled a latch.** `juce::Button`
+does not filter on which mouse button, which is written down in this file
+beside a strip's solo button and was written down again beside the dim
+button, one control too narrowly. The panel's own menu was unreachable from
+five sixths of its area. The guard is in the shared wiring now.
+
+The other four were sentences, and each is corrected in place with the
+correction left visible: the comment on the in-place matrix named the wrong
+leg and the wrong effect (written one at a time it is the **right** output
+that reads the left leg it has already overwritten, giving a quarter of the
+left plus three quarters of the right under a fold, which sounds like a mix
+decision); `isNeutral`'s stated principle, "nothing is happening to what you
+hear", is not its definition, since both legs inverted is inaudible on its
+own and is correctly reported as not neutral; the dim range claim above; and
+the invert tooltips claimed the difference listen unconditionally, which is
+the `describe` fault once more in a sentence the user reads before pressing
+anything.
+
+Two things the auditor proved that are worth having on the record because
+they were assumed:
+
+**The loopback probe cannot be corrupted by this, by construction.** JUCE
+sums the output of every audio callback added after the first into the buffer
+once the first has returned, and `AudioEngine::start` adds the engine before
+any UI exists, so `LatencyCalibration` is always downstream. The probe tone
+goes out at full scale through a dim, a cut or a fold, and the measurement is
+of the round trip and nothing else. That is the right way round and it is
+luck turned into a fact by reading `juce_AudioDeviceManager.cpp` rather than
+assuming.
+
+**The same mechanism makes one claim in the code false**, and it is named in
+the comment now rather than left overstated: JUCE's own Test tone in
+Preferences > Audio is summed in after every callback, so pressing it while
+the speakers are cut or dimmed for somebody puts a 440 Hz tone out at half
+scale. It is JUCE's button rather than one of ours, and the honest thing is
+to say so where the comment used to say "everything the speakers will hear".
+
+And one gap the auditor closed with a proof rather than a test: the overflow
+bound during a gesture is asserted over slews that start from a reachable
+state, never from an interrupted one. The property holds anyway, and the
+argument is short enough to keep. For one row, `|a| + |b|` with both ramps
+slewing at one rate toward fixed targets can only change slope from more
+positive to less positive at an arrival, or from negative to positive at a
+zero crossing, never from positive to negative. So it has no interior maximum
+and is bounded by its endpoints, every reachable endpoint is at most one, and
+the engine starts latched at pass through. By induction it holds at every
+sample however many times a gesture is interrupted.
+
+Mutation testing across the three sessions: **90 tried, 88 caught.** The two
+survivors are the same rewrite of `isNeutral`, comparing only the diagonal
+with and without a tolerance, and both were established as genuine no-ops
+twice over: a matrix with a nonzero off diagonal is a folded one, no
+coefficient of a folded matrix can exceed 0.5, so a unit diagonal already
+implies the identity, and the dim is common to both legs so a diagonal near
+but not at unity cannot leave the other at exactly one. Enumerated over 1.9
+million states by the test author and derived independently by the auditor.
+Both become real bugs the moment this section grows a crossfeed or a per leg
+dim, which is why it is written down here rather than treated as covered.
+
+The thirteen mutations over the code the audit itself produced, the pack and
+the unpack, `asHeard` and the reordered `describe`, were all caught.
+
 
 ## 2026-11-25: what monitoring does when the transport is rolling, which nothing here was asking
 
