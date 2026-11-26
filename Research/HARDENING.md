@@ -7,6 +7,410 @@ Newest first.
 
 ---
 
+## 2026-11-26: the control surface of the instrument, which every patch is saved through
+
+### What is being looked at
+
+`Source/PanOneParams.h`, 2523 lines, the largest header in the tree that has a
+test and the one with the least test per line of it: 941 lines of
+`PanOneParamsTest.cpp` against 2523 of source. It has never been a target
+here. It was last touched on 28 October and no open pull request goes near it.
+
+It is the whole control surface of PAN One as data: 240 controls, of which 192
+are the modulation matrix at six controls a row, 22 presets at the time
+CLAUDE.md was written, the choice lists every one of those draws from, the
+groups the editor lays out from, and the translation of what version one of
+the instrument saved.
+
+Why it is worth a night. Everything a patch is goes through this table four
+times: building the parameters, reading them back into a patch once a block,
+writing a preset out to them, and saving and loading them in a project. The
+faults it can carry are all of the shape this project keeps meeting. A control
+missing from the table is a knob that works and a preset that sounds almost
+right. A choice saved by index rather than id is every patch anybody ever
+saved pointing one entry along. A choice list whose first entry is not the
+safe one is an unrecognised id landing somewhere wrong rather than nowhere. A
+version one project whose four orphaned controls are dropped rather than
+translated opens with the right envelope times and entirely the wrong sound.
+None of those errors, and none of them look broken.
+
+### The shape of it, apart from the data
+
+Most of the 2523 lines are the table itself and the preset bank. The logic that
+can be wrong is small and sits in six places:
+
+- `choiceFromId` and `idOfChoice`, the id to index conversion in both
+  directions, which every project save and every project load goes through.
+- `toIndex`, which clamps a float to a choice list, and `toEnum` on top of it.
+  Five call sites pass a hand written count rather than the list's own size:
+  `filterTypes` 10, `lfoShapes` 8, `modShapes` 4, `driveCurves` 3,
+  `gateModes` 3.
+- `divisionFromBeats`, which turns a synced LFO's beats per cycle back into a
+  menu entry by nearest match.
+- the matrix rows' plus one and minus one, because a row stores minus one for
+  an empty row and the control offers "none" as its first entry.
+- `toPatch`'s working out of `matrix.count`, which is how far down the matrix
+  the engine walks per sample per voice.
+- `applyLegacyShape` and `applyLegacy`, the translation of what version one
+  saved.
+
+The counts in CLAUDE.md are out of date, which is worth saying because it was
+read first: the table is 281 controls and not 240, of which 89 are knobs and
+192 the matrix, and the bank is 67 presets and not 22. Corrected in this
+change.
+
+### Mutation testing, first batch: 20 breakages, 11 caught, 9 survived
+
+Every broken copy compiled with `run.sh`'s own flags, sanitizers and
+`-D_GLIBCXX_ASSERTIONS` included.
+
+The nine survivors are all in one place, and it is the place the whole file
+rests on. **Nothing in the test ever hands the id to index conversion anything
+but the table's own pointers, and nothing ever hands `toIndex` a float that is
+not already an exact integer.** So the layer that exists to convert between
+what a project stores and what a control holds is, in both directions, checked
+only against itself.
+
+| # | breakage | result |
+|---|---|---|
+| m01 | an unrecognised id returns 0 rather than -1 | caught |
+| m02 | `choiceFromId` drops its null guard | **survived** |
+| m03 | `choiceFromId` walks one past the end of the list | caught |
+| m04 | `choiceFromId` compares the pointers rather than the text | **survived** |
+| m05 | an out of range index falls back to the last entry, not the first | caught |
+| m06 | `idOfChoice` accepts an index equal to the size | **survived** |
+| m07 | `idOfChoice` drops its empty guard | **survived** |
+| m08 | `toIndex` truncates instead of rounding | **survived** |
+| m09 | `toIndex` clamps the top to `count` rather than `count - 1` | **survived** |
+| m10 | `toIndex` does not clamp a negative value | **survived** |
+| m11 | `divisionFromBeats` compares signed distance, not distance | caught |
+| m12 | `divisionFromBeats` starts from an index not in the table | **survived** |
+| m13 | `divisionFromBeats` never narrows its search | caught |
+| m14 | `divisionFromBeats` takes the furthest division | caught |
+| m15 | the filter type clamp is one short of its ten responses | caught |
+| m16 | the LFO shape clamp is one short of its eight shapes | caught |
+| m17 | the routing shape clamp is one short of its four shapes | caught |
+| m18 | the drive curve clamp is one short of its three curves | caught |
+| m19 | the gate mode clamp is one short of its three modes | caught |
+| m20 | the filter type clamp is one past its ten responses | **survived** |
+
+### m04 is the one that matters, and it is the file's own premise
+
+`choiceFromId` compared with `list[i].id == id`, a pointer comparison, passes
+the whole suite. The reason is in the test rather than in the header. Its round
+trip is
+
+```
+const char* id = PanOneParams::idOfChoice (list, i);
+if (PanOneParams::choiceFromId (list, id) != i)
+```
+
+and `idOfChoice` hands back `list[i].id`, which is the table's own pointer. So
+the two calls are reversible under pointer equality and the check cannot tell
+the two comparisons apart. The invented id it also tries, `"no-such-id-anywhere"`,
+is a different pointer and so is correctly refused either way.
+
+The real caller is not reversible that way. `PanOne::setStateInformation` does
+
+```
+const int found = PanOneParams::choiceFromId (list, saved.toRawUTF8());
+```
+
+where `saved` is a `juce::String` read out of the project file, so the pointer
+is into that string's own buffer and never into the table. Under a pointer
+comparison every choice in every saved project and every preset referred to by
+id would come back unrecognised and fall back to the first entry of its list:
+every wavetable the first wavetable, every filter a low pass, every routing
+dropped. The project would load, every envelope time and every knob would be
+exactly right, and the sound would be gone. That is this project's recurring
+fault, in the one layer that exists to prevent it.
+
+Nothing is wrong in the shipped header. The gap is that the only check of the
+id contract is one that cannot fail in the direction the contract is about.
+
+### m08 is the second gap, and it is the same blind spot
+
+`toIndex` exists to round a float onto a choice index. The round trip test
+builds its choice values by calling `toIndex` first, so every value it then
+feeds back in is already an exact integer, and truncation and rounding agree on
+every exact integer. Nothing in the suite ever hands `toIndex` a value like
+2.9999998, which is what a normalised host parameter converted back through a
+`NormalisableRange` actually produces. Truncating there puts the control one
+entry low.
+
+m09, m10 and m20 are the two clamps of the same function, and they survive for
+the same reason: no test hands `toIndex` a value outside the list at all. In
+the shipped code a parameter cannot exceed its own range, so these three are
+closer to a no-op than m08 is, but all four are the same untested boundary and
+the fix is the same one test.
+
+### m02, m06, m07 and m12 are four guards nothing stands on
+
+Each is a documented guard with no case behind it.
+
+- m02: no caller passes a null id today, because `juce::String::toRawUTF8`
+  never returns null.
+- m06: an index exactly equal to the size is the one out of range value the
+  test does not try. It tries 9999 and it tries 0 to size minus one.
+- m07: no list in the table is empty, and the test asserts that, so the empty
+  guard protects a case the table cannot produce. The nearest thing to a real
+  caller is `Fx/Unit.h`, which HARDENING already records as reaching nothing.
+- m12: `divisionFromBeats` starts from index zero so that a beats value no
+  entry is within a billion of still lands somewhere real. Reaching that needs
+  a NaN or a vast `beatsPerCycle`, and nothing in the suite produces one.
+  Under the mutation such a value returns -1 and the caller reads
+  `table[-1]`.
+
+These are gaps rather than no-ops, because every one of them is a guard whose
+boundary nothing visits, and a guard nothing visits is how
+`Tuner::InputRing`'s blind window survived two audits here.
+
+### Mutation testing, second batch: 18 breakages, 14 caught, 4 survived
+
+Aimed at the matrix row's plus one and minus one, at `toPatch`'s working out of
+the row count, at the ranges the table builds, and at `keep`.
+
+The row count and the plus one are both well covered: dropping the minus one,
+dropping the plus one, taking two off, reading the destination where the source
+was wanted, reading the source where the via was wanted, stopping the count at
+the last wired row rather than one past it, counting the unwired rows, stopping
+at the first gap, and holding the generated ids in a vector so every pointer
+dangles once it grows, all caught.
+
+| # | breakage | result |
+|---|---|---|
+| m21 | the source setter drops the minus one | caught |
+| m22 | the source getter drops the plus one | caught |
+| m23 | the destination setter takes two off | caught |
+| m24 | the via setter clamps against the destination list | **survived** |
+| m25 | the source getter reads the row's destination | caught |
+| m26 | the via getter reads the row's source | caught |
+| m27 | the row count stops at the last wired row | caught |
+| m28 | the row count is not reset before being worked out | **survived** |
+| m29 | the row count counts the unwired rows | caught |
+| m30 | the row count stops at the first unwired row | caught |
+| m31 | `toPatch` walks past the end of the values handed over | **survived** |
+| m32 | `toPatch` stops one control short | caught |
+| m33 | `fromPatch` leaves its reserve in front of what it reads | caught |
+| m34 | a choice's maximum is the list size, not one less | caught |
+| m35 | a choice starts at one, so its first entry is unreachable | caught |
+| m36 | the matrix starts six controls earlier in the table | caught |
+| m37 | one control moves to the next group, the total unchanged | **survived** |
+| m38 | the generated ids are held in a vector | caught |
+
+m24 is the via column clamping against `modDestinations()` rather than
+`modSources()`. It survives because the destination list is the longer of the
+two, so every value inside the via control's own range passes through unchanged
+and only a value past the end of it differs. Nothing hands a choice a value
+past the end of its list, which is the same hole m09 and m20 fell through.
+
+m28 is `toPatch` not resetting `matrix.count` before working it out. Every
+caller today hands it a `Patch` straight off the stack, where the count is
+already nothing, so the reset guards a second write and nothing does a second
+write. A genuine no-op today, and pinned anyway, because the fault it prevents
+is the one found in the matrix itself on 24 November: a row switched off that
+still counted as a routing silenced the voice.
+
+m31 is `toPatch` reading one past the end of a short vector. Every caller
+passes exactly as many values as the table has controls, so the first condition
+of the loop stops it first. The guard exists for a short vector and nothing
+hands it one.
+
+m37 moves one control from the end of one group to the start of the next. The
+group check adds the counts up and compares the total, so the total and the
+knob count both stay right and one control is laid out under the wrong heading.
+The only cosmetic fault of the night.
+
+### Mutation testing, third batch: 18 breakages, 12 caught, 6 survived
+
+Aimed at the translation of what version one of the instrument saved, which is
+the part of this file a user cannot check for themselves: a project from before
+the engine changed either comes back sounding like it did or it does not.
+
+| # | breakage | result |
+|---|---|---|
+| m39 | version one's sine lands at the far end of the harmonics table | caught |
+| m40 | version one's sine lands on the analogue table | caught |
+| m41 | the pulse width is undone the wrong way round | caught |
+| m42 | the width is undone against the end of the sweep, not its ratio | caught |
+| m43 | the width's lower clamp is dropped: a logarithm of zero | caught |
+| m44 | version one's triangle lands where its saw does | caught |
+| m45 | version one's saw lands where its triangle does | caught |
+| m46 | version one's square lands on the analogue table | **survived** |
+| m47 | an unknown shape falls through to nothing, not to the saw | **survived** |
+| m48 | the translation runs on a project not from version one | caught |
+| m49 | a version one project arrives with the folder in circuit | **survived** |
+| m50 | a version one project arrives with the drive in circuit | **survived** |
+| m51 | the envelope depth is scaled against four octaves, not eight | caught |
+| m52 | no depth to carry still arrives with the routing wired | caught |
+| m53 | oscillator two takes oscillator one's shape | **survived** |
+| m54 | the envelope routing is wired from the cutoff to envelope two | caught |
+| m55 | a depth deeper than eight octaves is not held to full depth | **survived** |
+| m56 | oscillator one is translated into oscillator two's fields | caught |
+
+**m49 and m50 are a check that could not fail.** The test has
+
+```
+check (patch.foldMix == 0.0, "... arrived with the folder mixed in");
+check (patch.driveAmount == 0.0, "... arrived with the drive turned up");
+```
+
+and the patch it asks is a fresh one, which already rests with the fold mixed
+out and the drive at nothing. So it was asking a patch that had never had
+either whether it had either, and deleting both lines from `applyLegacy` passed
+it. This is the same shape as the fader law's test that could not fail in the
+direction it was written for, found on 28 October.
+
+**m46 is a square coming back as a triangle.** The only claim the test made
+about a square was that it has no even harmonics, and a triangle satisfies that
+too, so a square from version one arriving at the start of the analogue table,
+which is a triangle, passed. The third harmonic is what tells them apart, a
+third against a ninth, and it measures 0.34 against 0.11.
+
+m53 is oscillator two taking oscillator one's shape. The shape loop gives both
+oscillators the same shape and silences oscillator two, so it cannot see this
+at all.
+
+m47 and m55 are the two ends of the translation nothing visited: a shape number
+version one never wrote, which the switch's `default` says should become a saw,
+and a depth deeper than the destination's whole range, which version one's
+twelve octave control could carry against a cutoff destination worth eight.
+
+### Mutation testing, fourth batch: 14 fresh breakages, 11 caught, 3 survived
+
+Deliberately designed after the test had been strengthened and aimed at places
+the new checks were not written against, so that the score is not just a
+measure of fitting the test to the mutations already chosen.
+
+Three survived, and they are **one real gap in three places, and it is the
+worst kind this file can carry**.
+
+A choice is stored in the patch as an index. For five of these lists that index
+is cast straight to an enum declared in another header, for one it is an index
+into another table in this file, and for one it is a bool. Nothing anywhere
+said the two orders had to agree, and no check could see it when they did not,
+because every check of a choice goes out and comes back through the same
+convention and so cannot tell a consistent mistake from a correct answer.
+
+- **Reversing `driveCurves` passed the whole suite.** Choosing "Soft" would
+  give the hard clip, and a patch saved on the soft curve would reload on the
+  hard one: an instrument that gets brighter and more distorted every time
+  somebody opens their project, with the knob still reading Soft.
+- **Reversing `offOrOn` passed.** That inverts every switch in the instrument,
+  and reloads every saved "on" as off.
+- **Reversing `lfoDivisions` against the table of lengths it indexes passed.**
+  The control stores the beats from `divisionTable()[index]` and the project
+  saves `lfoDivisions()[index].id`, so the two orders differing saves a
+  division as a different division: a 1/32 comes back as eight bars. Nothing in
+  the patch can see it, because both directions go through
+  `divisionFromBeats`.
+
+Four more reorders were then written to the same shape, swapping two entries in
+the filter responses, the LFO shapes, the routing shapes and the gate modes
+without touching their enums. All four are now caught; all four would have
+passed before.
+
+| # | breakage | result |
+|---|---|---|
+| m57 | the generated ids all point at the first name ever kept | caught |
+| m58 | the division menu is built in the opposite order to its table | **survived** |
+| m59 | the source list is built without "none" in front | caught |
+| m60 | the destination list is built without "none" in front | caught |
+| m61 | an eleventh filter response is added to the list | caught |
+| m62 | the drive curves are reversed against their enum | **survived** |
+| m63 | off and on are the other way round | **survived** |
+| m64 | a slope's cycling switch is inverted | caught |
+| m65 | an LFO's retrigger switch can never be turned on | caught |
+| m66 | `toEnum` goes round the clamp altogether | caught |
+| m67 | the matrix starts one control later than it does | caught |
+| m68 | a continuous control's range is given the wrong way round | caught |
+| m69 | the wavetable list leaves out the first table | caught |
+| m70 | the gate mode clamp goes round its own list's size | caught |
+| m71 | the filter responses are reordered against their enum | caught after |
+| m72 | two LFO shapes are swapped against their enum | caught after |
+| m73 | two routing shapes are swapped against their enum | caught after |
+| m74 | two gate modes are swapped against their enum | caught after |
+
+### One claim that was not true, and the rule under it that nothing stated
+
+The header and CLAUDE.md both say an id nobody recognises falls back to the
+**first** entry of its list. `choiceFromId` does not do that: it returns -1, as
+its own doc comment says. This is the same confusion HARDENING already records
+in `Fx/Unit.h`, which claims the same thing and also does not do it.
+
+Here the claim does hold, through the caller rather than the function, and the
+route to it carries a rule that went unstated. `PanOne::setStateInformation`
+reads an unrecognised id as a **number**, because version one wrote numbers in
+these attributes and a project from it has to keep loading, and
+`juce::String::getIntValue` gives zero for text that is not a number. Zero is
+the first entry.
+
+So the documented fallback holds for ids a number parser reads as zero, which
+means ids that do not begin with a digit or a sign. An id beginning with a
+digit would land on that digit instead: were "8bars" ever to stop being
+recognised, it would arrive at entry 8 of its list rather than at entry 0.
+
+Nothing is wrong today, and the reason is luck rather than design. The synced
+LFO divisions, "1bar" through "8bars", are the only ids here that begin with a
+digit, and the division list is also the only list whose own comment declares
+it has no safe fallback at all, so nothing is lost there. Every other list is
+now checked: 91 ids, none beginning with a character a number parser reads. The
+header comment says what the code does instead of what it wishes it did.
+
+### Mutation testing, final: 74 breakages, 74 caught
+
+70 were run against the test as it was: **48 caught, 22 survived**, a score of
+69 per cent on the largest header in the tree that has a test. All 22 are now
+caught, along with four more written after the fix. Every broken copy compiled
+with `run.sh`'s own flags, sanitizers and `-D_GLIBCXX_ASSERTIONS` included.
+
+Two of the 22 were genuine no-ops rather than gaps and are recorded as such
+above, m28 and m31, and both were pinned anyway because each is a guard whose
+boundary nothing visited and both have a named fault behind them.
+
+### Nothing in the header was wrong
+
+No fault was found in `PanOneParams.h` itself. Every id is distinct, every
+choice list is in its enum's order, every clamp matches its own list, the
+matrix's plus one and minus one are right in both directions, the row count is
+one past the last wired row, the pulse width is undone against the same 0.06
+sweep `Synth/WaveBank.h` builds it with, and the filter envelope depth is
+scaled against the eight octaves the cutoff destination declares.
+
+What was wrong was the test, in one specific way worth naming: **every check of
+a choice went out and came back through the same convention**, so it could not
+tell a consistent mistake from a correct answer. The id round trip fed
+`idOfChoice` straight into `choiceFromId` and so could not tell a pointer
+comparison from a string comparison. The value round trip built its choice
+values with `toIndex` and so only ever handed it exact integers. The list orders
+were checked against nothing outside themselves. And two of its assertions were
+made against a patch that already satisfied them.
+
+### What is now proven that was not
+
+- an id is found from a copy of its characters, 2872 of them, and not from a
+  prefix or a pointer; a null id, an empty id, both ends of `idOfChoice`'s
+  range and an empty list all behave
+- every choice control rounds to the nearest entry from either side of it, and
+  both clamps hold against its own list, which pins all five hand written
+  counts
+- every choice list agrees with the enum, the table or the bool its index is
+  cast to, pinned by name at both ends so either side can still be reordered
+  deliberately
+- every division round trips, lands on the nearest entry two per cent either
+  side, and a NaN or an infinity still lands inside the table
+- a patch written twice through the same object loses the rows that were
+  switched off, and fewer values than there are controls leaves the rest alone
+- every list but the divisions can only fall back to its first entry
+- a project from version one arrives with the folder and the drive out of
+  circuit even when the patch it loads over had both; its square is a square
+  and not a triangle; both oscillators are translated from their own shapes
+  across all twelve mixed pairs; a shape it never wrote falls back to the saw;
+  and twelve octaves of filter envelope is held to full depth
+- each of the eleven editor groups starts on the control it should
+
+---
+
 ## 2026-11-25: the warp mapping, which decides where a warped clip reads from
 
 ### What is being looked at

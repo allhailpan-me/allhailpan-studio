@@ -61,6 +61,22 @@
     and the plainest setting for everything else. Losing a routing is a patch
     that is less than it was; pointing it somewhere else is a patch that is
     wrong, and the second is much worse because nothing about it looks broken.
+
+    That fallback is not in `choiceFromId`, which returns -1 and says so. It
+    is in the caller, and it is worth writing down here because the route to
+    it carries a rule nothing else states. `PanOne::setStateInformation` reads
+    an unrecognised id as a *number*, since version one wrote numbers in these
+    attributes and a project from it has to keep loading, and
+    `juce::String::getIntValue` gives zero for text that is not a number. Zero
+    is the first entry, so the fallback holds **for ids a number parser reads
+    as zero**, which means ids that do not begin with a digit or a sign. An id
+    beginning with a digit would land on that digit: if "8bars" ever stopped
+    being recognised it would arrive at entry 8 rather than entry 0.
+
+    The division list is the only one here with such ids, and it is also the
+    only one whose comment declares that it has no safe fallback at all, so
+    nothing is lost. `PanOneParamsTest` checks every other list, because the
+    lists where the rule earns its keep are the ones that genuinely change.
 */
 namespace PanOneParams
 {
