@@ -18,6 +18,9 @@ public:
         master.reset (new Strip (*this, 0));
         addAndMakeVisible (master.get());
 
+        controlRoom.reset (new ControlRoomPanel (*this));
+        addAndMakeVisible (controlRoom.get());
+
         for (int i = 1; i < kNumInserts; ++i)
             grid.addAndMakeVisible (strips.add (new Strip (*this, i)));
 
@@ -243,6 +246,7 @@ public:
                          juce::dontSendNotification);
 
         master->refresh();
+        controlRoom->refresh();
         for (auto* s : strips)
             s->refresh();
         repaint();
@@ -403,8 +407,17 @@ public:
         rack.removeFromTop (8);
         routing.setBounds (rack);
 
-        masterArea = r.removeFromLeft (stripW + 16);
-        master->setBounds (masterArea.withTrimmedRight (16));
+        // The master column is wider than an insert's by the control room under
+        // it, which needs two buttons side by side. The master is the one
+        // strip that can afford it: there is one of it, and it is the only one
+        // with something underneath.
+        masterArea = r.removeFromLeft (masterW + 16);
+        {
+            auto column = masterArea.withTrimmedRight (16);
+            controlRoom->setBounds (column.removeFromBottom (controlRoomH));
+            column.removeFromBottom (6);
+            master->setBounds (column);
+        }
         r.removeFromLeft (6);
 
         viewport.setBounds (r);
@@ -1121,6 +1134,290 @@ private:
         juce::Rectangle<int> meterArea;
     };
 
+    //==========================================================================
+    /** The control room: what the speakers do with the mix, which is not the
+        mix.
+
+        Under the master and not a strip of its own, because it is not a strip:
+        nothing here reaches a file, a meter or a take. ControlRoom.h carries
+        the arithmetic and where every number came from, and the engine applies
+        it in exactly one place on the way out.
+
+        Six buttons rather than a mode switch, which is where the sources
+        between them land. SSL and the Grace m908 ship one pair of per leg
+        buttons that is a cut set or a solo set depending on a mode switch, and
+        cut is the default state of that switch on every console that has it;
+        Ardour offers cut and solo as separate columns and is the outlier. Cut
+        is also the one that composes with the fold without surprise and the
+        one where both halves can be engaged at once.
+    */
+    class ControlRoomPanel : public juce::Component
+    {
+    public:
+        explicit ControlRoomPanel (MixerComponent& o) : owner (o)
+        {
+            title.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            title.setJustificationType (juce::Justification::centred);
+            title.setText ("control room", juce::dontSendNotification);
+            addAndMakeVisible (title);
+
+            status.setFont (juce::FontOptions (9.5f));
+            status.setJustificationType (juce::Justification::centredTop);
+
+            // So a right click anywhere on the panel reaches the menu rather
+            // than being eaten by whichever label it landed on.
+            title .setInterceptsMouseClicks (false, false);
+            status.setInterceptsMouseClicks (false, false);
+            addAndMakeVisible (status);
+
+            // Each button reads the engine, changes the one thing it owns and
+            // writes the whole state back, so the engine is the only place the
+            // state lives. A copy held here as well would be two opinions
+            // about what the speakers are doing, and the one on screen would
+            // be the one that was wrong.
+            auto wire = [this] (juce::TextButton& b, const juce::String& text,
+                                const juce::String& tip, bool ControlRoom::State::* field)
+            {
+                b.setButtonText (text);
+                b.setTooltip (tip);
+                b.setWantsKeyboardFocus (false);
+                b.setMouseClickGrabsKeyboardFocus (false);
+                b.setClickingTogglesState (false);
+
+                // Red fill when engaged, the way every other control in this
+                // studio that means "something is not neutral" is drawn:
+                // record, punch and the solo alert all set buttonOnColourId.
+                // The look and feel draws its own off state and ignores
+                // buttonColourId, so only the on colour is worth setting.
+                b.setColour (juce::TextButton::buttonOnColourId, Ahp::rec);
+                b.setColour (juce::TextButton::textColourOnId,   Ahp::black);
+
+                b.onClick = [this, field]
+                {
+                    // juce::Button does not filter on which mouse button, so
+                    // without this a right click on any of these would toggle
+                    // a latch and the panel's own menu would be unreachable
+                    // from five sixths of its area. The same thing a strip's
+                    // solo button does, for the same reason. The first
+                    // version of this filtered the dim button alone, which an
+                    // audit found: the hazard was known and the guard written
+                    // one control too narrowly.
+                    if (juce::ModifierKeys::getCurrentModifiers().isPopupMenu())
+                    {
+                        offerDimAmounts();
+                        return;
+                    }
+
+                    auto state = owner.engine.getControlRoom();
+                    state.*field = ! (state.*field);
+                    owner.engine.setControlRoom (state);
+                    refresh();
+                };
+                addAndMakeVisible (b);
+            };
+
+            wire (mono, "mono",
+                  "Fold the speakers to mono, to hear what survives a mono fold.\n"
+                  "Centred sound keeps its level, so what changes is only what actually "
+                  "changed. This is the check that finds two mics fighting each other.\n"
+                  "The mix, the bounce and the loudness reading are untouched.",
+                  &ControlRoom::State::mono);
+
+            wire (dim, "dim",
+                  "Drop the speakers by a set amount, to talk over or to rest your ears.\n"
+                  "Right click for how far it dims.",
+                  &ControlRoom::State::dim);
+
+            wire (cutLeft,  "cut L", "Silence the left speaker.",  &ControlRoom::State::cutLeft);
+            wire (cutRight, "cut R", "Silence the right speaker.", &ControlRoom::State::cutRight);
+
+            // The symbol every console uses for polarity, built from its code
+            // point rather than written as a literal so the file stays ASCII.
+            const juce::String phi = juce::String::charToString ((juce::juce_wchar) 0x00d8);
+
+            wire (invertLeft, phi + " L",
+                  "Flip the polarity of the left speaker.\n"
+                  "With mono engaged and this on one leg only, that is the difference "
+                  "listen: everything centred cancels, so what is left is exactly what a "
+                  "mono fold destroys. That is the loud half of the same check, and a "
+                  "polarity problem between two mics shows up as the fold going thin and "
+                  "this going loud.\n"
+                  "On both legs, or with the other leg cut, it is not a difference listen, "
+                  "and the panel says which of the two you have.",
+                  &ControlRoom::State::invertLeft);
+
+            wire (invertRight, phi + " R",
+                  "Flip the polarity of the right speaker.\n"
+                  "With mono engaged and this on one leg only, that is the difference "
+                  "listen: everything centred cancels, so what is left is exactly what a "
+                  "mono fold destroys.",
+                  &ControlRoom::State::invertRight);
+
+            refresh();
+        }
+
+        void refresh()
+        {
+            const int legs = owner.engine.getControlRoomLegs();
+
+            // Everything shown here is read off the state as the speakers can
+            // actually express it, not off the buttons that were pressed.
+            // ControlRoom::asHeard is that reduction and carries why it is one
+            // function rather than a case here: on a one output device the
+            // engine applied one leg while this panel described two, so mono
+            // lit the "this is not the mix" indicator and changed nothing, and
+            // mono with the left leg cut said "mono, right leg only" over a
+            // silent speaker. An audit found both. One reduction, and the
+            // words, the light and the arithmetic cannot disagree.
+            const auto heard = ControlRoom::asHeard (owner.engine.getControlRoom(), legs);
+
+            mono       .setToggleState (heard.mono,        juce::dontSendNotification);
+            dim        .setToggleState (heard.dim,         juce::dontSendNotification);
+            cutLeft    .setToggleState (heard.cutLeft,     juce::dontSendNotification);
+            cutRight   .setToggleState (heard.cutRight,    juce::dontSendNotification);
+            invertLeft .setToggleState (heard.invertLeft,  juce::dontSendNotification);
+            invertRight.setToggleState (heard.invertRight, juce::dontSendNotification);
+
+            // Greyed rather than hidden, and the status line says why: a
+            // control that is simply missing reads as a studio that cannot do
+            // it, where this is a studio whose current output cannot.
+            const bool twoLegs = legs != 1;
+            mono       .setEnabled (twoLegs);
+            cutRight   .setEnabled (twoLegs);
+            invertRight.setEnabled (twoLegs);
+
+            // The amount lives on the button that uses it, which is where a
+            // console keeps it, and leaves the status line for what the
+            // section is doing. Whole decibels, because the menu offers only
+            // whole ones and a trailing ".0" on a forty pixel button is two
+            // characters of nothing.
+            dim.setButtonText ("dim " + juce::String (juce::roundToInt (
+                                   -ControlRoom::clampDimDb (heard.dimDb))));
+
+            // The words come from ControlRoom.h rather than being assembled
+            // here, so they cannot describe a state the matrix does not have.
+            // The first version of that function could, and the test that
+            // pins the words against the actual cancellation is what found
+            // it. Only the part after the colon, since the title above
+            // already says which section this is.
+            const juce::String said = ControlRoom::describe (heard);
+            juce::String text = said.fromFirstOccurrenceOf (": ", false, false);
+
+            if (text.isEmpty())
+                text = said;
+
+            if (! twoLegs)
+                text += ", one output: nothing to fold";
+
+            const bool neutral = ControlRoom::isNeutral (heard);
+
+            status.setText (text, juce::dontSendNotification);
+            status.setColour (juce::Label::textColourId, neutral ? Ahp::muted : Ahp::rec);
+            title .setColour (juce::Label::textColourId, neutral ? Ahp::bone  : Ahp::rec);
+            repaint();
+        }
+
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu())
+                offerDimAmounts();
+        }
+
+        void resized() override
+        {
+            auto r = getLocalBounds().reduced (3, 2);
+            title.setBounds (r.removeFromTop (14));
+            // Two lines at this font, because the longest thing the section
+            // can say about itself is the difference listen and a single line
+            // of it compresses to something nobody can read.
+            status.setBounds (r.removeFromBottom (24));
+
+            auto row = [&] (juce::TextButton& a, juce::TextButton& b)
+            {
+                auto line = r.removeFromTop (20);
+                a.setBounds (line.removeFromLeft (line.getWidth() / 2).reduced (1));
+                b.setBounds (line.reduced (1));
+            };
+
+            row (mono, dim);
+            row (cutLeft, cutRight);
+            row (invertLeft, invertRight);
+        }
+
+        void paint (juce::Graphics& g) override
+        {
+            const bool neutral = ControlRoom::isNeutral (
+                ControlRoom::asHeard (owner.engine.getControlRoom(),
+                                      owner.engine.getControlRoomLegs()));
+            auto r = getLocalBounds().toFloat();
+
+            g.setColour (Ahp::panel2);
+            g.fillRoundedRectangle (r, 4.0f);
+
+            // The indicator that says the speaker feed is not the mix, and it
+            // is load bearing here rather than decoration. This is the
+            // mitigation Ardour computes and then does not use: it has a
+            // monitor_active() flag over exactly this question
+            // (monitor_processor.cc:483-504) and its own monitor section
+            // blinks only solo and audition (monitor_section.cc:1144-1151), so
+            // nothing there ever tells the user the path is not neutral. Here
+            // the latches are deliberately not saved, and this is the other
+            // half of that answer: what says the speakers are not telling you
+            // the truth right now.
+            g.setColour (neutral ? Ahp::line : Ahp::rec);
+            g.drawRoundedRectangle (r.reduced (0.5f), 4.0f, neutral ? 1.0f : 1.6f);
+        }
+
+    private:
+        /** How far the dim dims, as a menu rather than a number.
+
+            On the panel rather than in Preferences because that is where a
+            console keeps it, and the list is Ardour's own monitor section
+            presets (monitor_section.cc:251-255) with this header's floor
+            added. There is a list rather than one number because every source
+            makes this adjustable and no two agree on the amount: Ardour ships
+            -12 dB, UAD Console -17, the Digidesign C|24 documents a 20 dB
+            reduction and PreSonus fixes its talkback cue dim at -20.
+
+            It lasts as long as the studio is open and is not written to the
+            settings file, which is a hold rather than a decision: the one
+            place a stored preference is applied to the engine is in a file
+            another change is holding. Research/BACKLOG.md has it as the first
+            thing to finish in this corner. */
+        void offerDimAmounts()
+        {
+            static constexpr double amounts[] = { 0.0, -3.0, -6.0, -12.0, -20.0,
+                                                  ControlRoom::dimFloorDb };
+            static constexpr int numAmounts = (int) (sizeof (amounts) / sizeof (amounts[0]));
+
+            const double now = ControlRoom::clampDimDb (owner.engine.getControlRoom().dimDb);
+
+            juce::PopupMenu menu;
+            menu.addSectionHeader ("dim by");
+
+            for (int i = 0; i < numAmounts; ++i)
+                menu.addItem (i + 1, juce::String (amounts[i], 1) + " dB", true, amounts[i] == now);
+
+            menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&dim),
+                                [this] (int chosen)
+            {
+                if (chosen < 1 || chosen > numAmounts)
+                    return;
+
+                auto next = owner.engine.getControlRoom();
+                next.dimDb = amounts[chosen - 1];
+                owner.engine.setControlRoom (next);
+                refresh();
+            });
+        }
+
+        MixerComponent& owner;
+        juce::Label title, status;
+        juce::TextButton mono, dim, cutLeft, cutRight, invertLeft, invertRight;
+
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ControlRoomPanel)
+    };
+
     void edited() { if (onEdited) onEdited(); }
 
     // Set by the main window so the strip menu can clear a rack
@@ -1136,11 +1433,16 @@ private:
     // that adding solo did not come out of the fader's travel.
     static constexpr int stripW = 66, stripH = 250, gap = 6;
 
+    // The master column, which is wider than an insert's because the control
+    // room sits under it and its buttons go in pairs.
+    static constexpr int masterW = 112, controlRoomH = 104;
+
     AudioEngine& engine;
     Project&     project;
     int selected = 0;
 
     std::unique_ptr<Strip>  master;
+    std::unique_ptr<ControlRoomPanel> controlRoom;
     juce::Viewport          viewport;
     juce::Component         grid;
     juce::OwnedArray<Strip> strips;

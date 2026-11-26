@@ -79,6 +79,374 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-26: a control room section, and the one place in the engine that is not the mix
+
+### What was looked at
+
+Nine open pull requests, every one a `harden/` branch, so there was no draft
+of this lane's own to finish. Between them they hold `Project.h`,
+`MainComponent.cpp`, `PianoRollComponent.cpp`, `PlaylistComponent.cpp`,
+`Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`, `Punch.h`,
+`NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h`, `Fx/BellMatch.h` and `RELEASE_NOTES.md`. `Source/Synth` and
+`Source/Fx` are being built by hand and `Synth/ModMatrix.h` merged yesterday,
+so both are out.
+
+Those holds decide more than they look like they do, and the first half of
+this night was spent finding out what is left rather than what is best. Every
+candidate that needs saved project state is ruled out by `Project.h`, and
+every candidate that needs a transport change, a toolbar control or a
+keyboard shortcut is ruled out by `MainComponent.cpp`. Two strong candidates
+died on that:
+
+- **The per insert monitor override**, which the 11-25 entry left as the next
+  night's work in this corner. It needs per insert state that is saved,
+  loaded and reset, and that state belongs in `Project.h`. Still the right
+  next thing; still unavailable. It is held by a file, not by a reason, so it
+  comes back the first night `Project.h` is free.
+- **Loudness normalisation on export**, which is the sharpest workflow gap
+  found all night. The studio already measures integrated loudness and true
+  peak and already tells the person they are 3.2 dB over their target in
+  `MixReportPanel`, and then makes them apply that gain by hand. Reaper,
+  Logic and Studio One all normalise on render. It dies on one line:
+  `ExportJob` is constructed at `MainComponent.cpp:3204`, so the choice
+  cannot be plumbed to it. **Recorded as the first thing to build when
+  `MainComponent.cpp` frees up**, because the research is half done already:
+  the two-pass render, the gain being the lower of the loudness offset and
+  whatever the true peak ceiling allows, and the targets already named in
+  `MixReportPanel`.
+
+### What was chosen
+
+**A control room section: mono fold, dim, per leg cut, per leg polarity
+invert, on the speaker feed only.**
+
+Missing entirely, standard everywhere that has a control room at all, and
+the one thing on the list that touches no held file: it lands in a new header
+with no JUCE in it, three atomics and about thirty lines in the device
+callback, and a panel under the master strip in `MixerComponent.h`.
+
+It is also the candidate that most changes what the owner can actually do
+today. He records guitar and vocals and mixes, and there is currently **no
+way at all to hear the mix in mono**. Mono compatibility is the one check
+that finds a polarity problem between two mics on a cabinet or a doubled
+vocal, and the difference listen that comes free with a per leg invert is the
+louder, easier to hear half of the same measurement: a mono fold tells you
+what survives, and the difference tells you what is being destroyed.
+
+| Candidate | Verdict |
+|---|---|
+| **A control room section: mono, dim, per leg cut, per leg polarity** | **Chosen.** Missing, standard, daily, and the arithmetic is a 2x2 matrix that goes in a JUCE free header. Touches no held file. |
+| Loudness normalisation on export | **Deferred on a file hold, not on merit. Build it the night `MainComponent.cpp` is free.** See above. |
+| A per insert monitor override | Deferred on `Project.h`, unchanged from 11-25. |
+| Speaker set switching, A/B/Alt | **Deferred, and it is the next thing in this corner.** The most universal control room feature after the level control (SSL AWS LS SELECT, UAD Console ALT 1/2, Grace m908, PreSonus Monitor Station V2 A/B/C). It needs a second output pair chosen and held open, which is device work in `AudioSettingsPanel.h` rather than mixer work, and it is a feature of its own rather than a button. |
+| Per speaker trim and a calibrated reference level | Deferred with speaker switching, which is what it is for. SSL AWS p. 4-23 trims any speaker by +-10 dB; Steinberg has a recallable Reference Level. Without more than one speaker set there is nothing to trim against. |
+| Talkback with automatic dim | Rejected for now. It is a second input path and a second output path, and the owner records himself, so there is no control room and live room to talk between. |
+| A monitor level knob of its own | Rejected deliberately, and this is the one place this section departs from every reference. Ardour, SSL, UA and Grace all have one. Here the device's own output level is the speaker level, and a second gain in front of it that is not saved and not shown on any meter is a second place for the mix to be quiet from. Revisit with speaker switching, where a per set trim is what the knob is actually for. |
+| A plugin insert local to the control room path, for room correction | Deferred. It is the feature that makes the "never in the export" guarantee load bearing, and it is a plugin chain, which is a night of its own. |
+| A control room meter | Rejected. The master meter already reads what the mix is, and a second meter reading the speaker feed would read dim and mono as if they were the mix, which is the exact confusion this section has to avoid. Sources disagree on where it even taps: Sequoia's is post monitor volume, UA's is pre. |
+| Ardour's "SiP Cut" on the control room panel | **Rejected on the research's own finding, and worth keeping listed.** Ardour puts a solo in front control on the monitor panel (`monitor_section.cc:224-238`) that writes the session wide `solo-mute-gain`, which changes what every bus does to non soloed material and is therefore in the export path. A control with session wide signal consequences on a panel whose whole contract is "nothing here reaches the file" is a trap. If solo in front is ever wanted it goes with the solo model. |
+| Letting the click bypass the control room | Rejected, and this is the second deliberate departure. See below. |
+| Persisting the latches | Rejected, and this is the third. See below. |
+
+### What the research settled
+
+The `dsp-researcher` agent read Ardour's `libs/ardour/monitor_processor.cc`
+as bytes (sparse clone, HEAD `dd32a199e5`), Ardour being the one readable
+reference implementation, and cross checked every number against hardware
+manuals: the Digidesign C|24 Guide chapter 7, the SSL AWS 900+ SE Owner's
+Manual and Duality Delta User Guide, the Grace Design m908, the PreSonus
+Monitor Station V2 Owner's Manual, UAD Console, Magix Sequoia and Steinberg's
+Control Room. Ardour is GPL-2.0-or-later and was read for behaviour only.
+
+**The mono fold is 0.5 per leg, not 1/sqrt(2).** Ardour's
+`MonitorProcessor::run` scales by `1.f / chn`, which is exactly 0.5 for a
+stereo path, with no compensation of any kind; the C|24 Guide documents a 6 dB
+default reduction on its Mono switch. Three reasons it is also the right
+answer rather than only the common one, and all three are in the header: it
+leaves centred content at exactly the same level, so what you hear change in
+the fold is only what actually changed; it cannot overflow, since
+`|0.5*(L+R)| <= 1` whenever both legs are inside one, which is the overload
+ATSC A/52 section 7.8.2 writes its own 1/2 scaling to prevent; and with a
+polarity invert on one leg it gives exactly `0.5*(L-R)`, so the two buttons
+together produce the textbook mid and side signals rather than something off
+by a factor.
+
+The 1/sqrt(2) that is also in circulation was tracked to its actual source
+and is not a stereo to mono law at all: **ITU-R BS.775-3 Annex 4 Table 2** is
+a 3/2 to mono downmix, where L and R take 0.7071 and the centre channel takes
+1.0, and its normalisation is chosen for power across mostly decorrelated
+channels rather than for level continuity on a correlated centre image.
+BS.775 contains no two channel stereo to mono equation. Worth having written
+down, because 0.7071 is exactly the number somebody would reach for from
+memory and it would put a correlated full scale mix 3 dB into clipping on the
+speaker feed.
+
+**The per leg controls go before the fold, and that is a real decision.**
+Ardour applies cut, dim, polarity and solo in its per channel stage and folds
+after it, so cut left plus mono gives `0.5*R` on both legs rather than `R` on
+both. It is invisible from the UI and it is the kind of thing to pin in a
+test rather than discover, so the test pins it.
+
+**Per leg is a cut set, not a solo set.** SSL ships one pair of buttons that
+is a cut set or a solo set depending on a mode switch, as does the Grace
+m908; Ardour is the outlier in offering both at once as separate columns.
+Cut is the default state of that switch on every console that has it, it
+composes with mono without surprise, and two cuts are reachable where two
+solos are not.
+
+**The polarity invert is per leg and it is standard.** Ardour has it as a
+per channel control; SSL's AWS manual gives the purpose verbatim, "checking
+for any phase anomalies in a stereo mix", and the Duality manual states the
+consequence directly, that with MONO engaged the invert switches the monitor
+to the difference. The Grace m908 makes the difference listen a first class
+feature and makes it momentary, push and hold on the MONO button. Sequoia
+inverts the right leg where SSL inverts the left; the two differ by an
+overall sign and nobody standardises which.
+
+**The dim amount has no standard and everybody makes it adjustable.**
+Ardour's default is -12 dB over a -20 to 0 dB range, stored as a linear
+coefficient (`monitor_processor.cc:58-61`). The C|24 documents a 20 dB
+reduction, UAD Console defaults to -17 dB over seven discrete steps, PreSonus
+trims -30 to -6 dB and fixes its talkback cue dim at -20 dB, the Grace m908
+goes -30 to 0 dB in half decibel steps. Nobody ships a fixed dim on the main
+speaker path. So: adjustable, stored in dB, **-20 dB default** as the
+majority of the console side, over **-30 to 0 dB**, which covers the console
+side of that spread and not all of it: UAD's three lowest steps go below -30
+and are deliberately out of reach, because a 60 dB dim is a mute with extra
+steps. The header says plainly that the number is a choice between sources
+rather than a specification, and names them.
+
+An earlier draft of this paragraph said the range covered every published one,
+which an audit disproved against this entry's own citations. Left on the
+record rather than quietly corrected, because a claim that is present,
+plausible and wrong is what this project keeps meeting, and here it was in the
+argument for a number rather than in the number itself.
+
+**Where it sits, and what it must not reach.** In Ardour the control room is
+not a processor on the master at all: it is a separate route, and
+`Session::add_monitor_section` disconnects the master's output ports from the
+hardware and routes them through it. Three consequences were confirmed in
+code rather than assumed. Export cannot see it:
+`export_profile_manager.cc:566-580` builds the default export channels from
+the master bus's own output ports, which are upstream of the control room
+route. The master meter cannot see it: the meter is a processor on the master
+route, and the loudness dialog analyses "the signal at the master-bus"
+through the export path. Recording cannot see it: disk writers are processors
+on each track, many routes upstream. PreSonus states the same rule for the
+hardware in the form that is easiest to test against, twice: "Note that the
+Mono button has no effect on the Main L/R Line Outputs."
+
+And the rule the hardware manuals state consistently and that is worth
+having in one sentence: **the control room section affects the speaker feed
+and nothing else.** Not the print path, not the cue feed to the player, not
+the line outs. The C|24 is explicit that Dim and Mute hit the control room
+outputs and not Headphone, Cue or Studio LS.
+
+### The three deliberate departures, each with its reason
+
+**The click goes through it.** Ardour's metronome does not:
+`session_click.cc:254-256` sends the click straight to its own ports, and
+Harrison documents the consequence, that the monitor volume knob does not
+control the click. That is the wrong trade for this studio. Dim is the thing
+you reach for while somebody is playing, and a dim that leaves the click at
+full level is not a dim. A mono check that includes a click that was never in
+the mix is not a mono check either. On a console everything the room hears
+goes through the monitor path, and that is the behaviour taken here. In
+practice the click is centred, so the fold leaves it alone; what changes is
+that dim dims it and a cut cuts it.
+
+**None of it is saved, and only half of that is a decision.** Ardour saves
+all of it in the session, `mono` included (`monitor_processor.cc:260`), and
+offers a `monitor_active()` flag for a UI to warn with that its own monitor
+section then does not blink. UAD Console persists the lot to the application.
+
+The latches, mono and dim engaged and the cuts and the inversions, are
+deliberately not saved: they are momentary checks and arriving in one of them
+is a silent wrong state. An hour of mixing in mono is not recoverable and a
+cleared check costs one click. Hardware cannot persist a latch at all, so
+there is no hardware precedent either way, and the mitigation Ardour reaches
+for and does not use is shipped here instead.
+
+The dim amount is a different kind of thing and should be saved, because it
+is calibration rather than a check. **It is not**, and that is a hold rather
+than a view: the one place in this studio where a stored preference is
+applied to the engine is `applyPreferences`, whose actions are populated in
+`MainComponent.cpp`, which an open pull request is holding. So the amount is
+adjustable from the dim button, which is where a console keeps it, and is
+relearned on every launch. It is the first thing to finish in this corner.
+
+Recorded this way because the first draft of this entry, of `ControlRoom.h`
+and of the pull request all said the amount was saved, and nothing in the
+tree saved it: `Preferences.h` had been written and then reverted when the
+hold was noticed, and three descriptions of it were not. An audit found all
+three. That is the shape of fault this project keeps meeting, in the
+sentences rather than in the signal, and it is worth more written down than
+quietly corrected.
+
+**The indicator is half a mitigation, and the other half is owed.** The
+argument above for not persisting the latches leans on something saying the
+speaker feed is not the mix. What ships is on the control room panel itself:
+the border and the title go red, and the panel says which check is engaged.
+The panel is in the mixer, and the mixer is a separate window that is closed
+on launch. So press mono, close the mixer, and nothing on screen says you are
+mixing in mono, which is the same hazard the no-persistence decision was taken
+to avoid, reached by a different route.
+
+This studio already has the right answer to exactly this problem and it is
+`soloAlertButton` on the main toolbar, which lights when anything in the
+mixer is soloed and clears it when clicked. The control room needs the same
+thing, and it is in `MainComponent.cpp`, held by the same pull request as the
+preference. Two things owed to one file, and an audit is what turned "the
+mitigation is shipped" into "half of it is".
+
+**It is called the control room, not the monitor section.** Ardour and SSL
+say monitor; Steinberg says Control Room. Both are established, and `Monitor`
+is already taken in this codebase for input monitoring, which is a different
+thing entirely: one decides whether the player hears themselves, the other
+decides what the speakers do with the finished mix. Two features called
+Monitor in one engine is a collision waiting to confuse somebody reading
+`mixMonitorInput` next to a mono fold.
+
+### What is in the tree
+
+- `Source/ControlRoom.h`, no JUCE: the state, the 2x2 matrix it resolves to,
+  the dim bounds, and the neutrality test. The whole section is linear, so
+  the state becomes four coefficients and the engine applies a matrix rather
+  than a sequence of cases.
+- `Tests/ControlRoomTest.cpp`.
+- `Source/AudioEngine.{h,cpp}`: the atomics, and the matrix applied once at
+  the end of the device callback, after the preview and the click, with the
+  four coefficients slewed through `GainRamp` so a button is not a
+  discontinuity. Ardour's mono fold is unramped and clicks
+  (`monitor_processor.cc:325-361` switches instantly while everything beside
+  it ramps at line 319), which is the one piece of its behaviour not copied.
+- `Source/MixerComponent.h`: the row on the master strip, and the indicator.
+The dim amount is a menu on the dim button, which is where a console keeps
+it, and the list is Ardour's own monitor section presets
+(`monitor_section.cc:251-255`) with this header's floor added. It is not in
+`Preferences.h`, for the reason given above.
+
+`renderOffline` is not touched, which is the whole point, and the reason is
+written at the one place the matrix is applied rather than at the place it is
+absent from.
+
+### What the audits found, which was all in the sentences
+
+Three sessions other than the one that wrote the code: the `dsp-researcher`
+for the specification, the `test-author` for the test and its mutations, and
+the `auditor` over the finished diff. The division was worth it and the
+result is worth stating in one line: **nothing in the arithmetic, in the
+audio thread rules, in the containment claim or in any number anywhere was
+wrong, and seven things that were written down were.** On this project that
+is the dangerous category rather than the harmless one, and two of the seven
+were real faults rather than wording.
+
+The test came back at 57 of 59 mutations caught, with the two survivors
+argued to be unreachable rewrites of `isNeutral`. It also found the first
+real fault, which is in the body of this entry: `describe` claimed a
+difference listen whenever the fold was on and the two polarities differed,
+and with one leg cut and the other inverted that is half of the surviving leg
+rather than a cancellation. A centred signal came out at half level while the
+strip said it was gone, four button presses away, invisible to every other
+check in the file.
+
+The auditor then found the same fault a second time, in the place nobody had
+looked:
+
+**On a one output device the strip described a matrix that was never
+applied.** The engine applied one leg's gain, correctly, while `describe` and
+`isNeutral` were asked about the full six button state. So pressing mono lit
+the "this is not the mix" indicator and changed nothing audible, which is
+exactly what `isNeutral`'s own comment says it was defined on the signal to
+prevent, and mono with the left leg cut printed "mono, right leg only" over a
+speaker that was silent. The fix is the general one rather than a case in the
+strip: `ControlRoom::asHeard (state, legs)` reduces the state to what that
+many speaker legs can express, everything that asks a question asks it about
+the reduced state, and `oneChannelGain` is now that same reduction through
+the same matrix rather than a second law beside it. The three controls that
+have nothing to act on are greyed and the panel says why.
+
+Worth keeping the shape of it rather than only the fix. The first fault was
+found by a test that pinned words against the signal. The second was the same
+fault in the one path that test could not reach, because nothing crossed the
+one leg case with the words. A check that exists is not the same as a check
+that covers.
+
+**The pack and the unpack were in the file no test can compile.** The six
+latches travel to the audio thread as one word, and the engine held both the
+mapping and its inverse: two hand-written lists of six, which is twelve
+chances to transpose a pair. A pair transposed in the unpack alone is a
+studio that works with the speakers swapped under one button. `ControlRoom.h`
+already makes that argument about naming its four coefficients rather than
+indexing them, and the code then put the one order convention in this feature
+somewhere unreachable. Moved into the header, where the round trip is a
+property in one line, and the test now also checks that the 64 states pack to
+64 distinct words, which is what catches two latches sharing a bit.
+
+**Right clicking five of the six buttons toggled a latch.** `juce::Button`
+does not filter on which mouse button, which is written down in this file
+beside a strip's solo button and was written down again beside the dim
+button, one control too narrowly. The panel's own menu was unreachable from
+five sixths of its area. The guard is in the shared wiring now.
+
+The other four were sentences, and each is corrected in place with the
+correction left visible: the comment on the in-place matrix named the wrong
+leg and the wrong effect (written one at a time it is the **right** output
+that reads the left leg it has already overwritten, giving a quarter of the
+left plus three quarters of the right under a fold, which sounds like a mix
+decision); `isNeutral`'s stated principle, "nothing is happening to what you
+hear", is not its definition, since both legs inverted is inaudible on its
+own and is correctly reported as not neutral; the dim range claim above; and
+the invert tooltips claimed the difference listen unconditionally, which is
+the `describe` fault once more in a sentence the user reads before pressing
+anything.
+
+Two things the auditor proved that are worth having on the record because
+they were assumed:
+
+**The loopback probe cannot be corrupted by this, by construction.** JUCE
+sums the output of every audio callback added after the first into the buffer
+once the first has returned, and `AudioEngine::start` adds the engine before
+any UI exists, so `LatencyCalibration` is always downstream. The probe tone
+goes out at full scale through a dim, a cut or a fold, and the measurement is
+of the round trip and nothing else. That is the right way round and it is
+luck turned into a fact by reading `juce_AudioDeviceManager.cpp` rather than
+assuming.
+
+**The same mechanism makes one claim in the code false**, and it is named in
+the comment now rather than left overstated: JUCE's own Test tone in
+Preferences > Audio is summed in after every callback, so pressing it while
+the speakers are cut or dimmed for somebody puts a 440 Hz tone out at half
+scale. It is JUCE's button rather than one of ours, and the honest thing is
+to say so where the comment used to say "everything the speakers will hear".
+
+And one gap the auditor closed with a proof rather than a test: the overflow
+bound during a gesture is asserted over slews that start from a reachable
+state, never from an interrupted one. The property holds anyway, and the
+argument is short enough to keep. For one row, `|a| + |b|` with both ramps
+slewing at one rate toward fixed targets can only change slope from more
+positive to less positive at an arrival, or from negative to positive at a
+zero crossing, never from positive to negative. So it has no interior maximum
+and is bounded by its endpoints, every reachable endpoint is at most one, and
+the engine starts latched at pass through. By induction it holds at every
+sample however many times a gesture is interrupted.
+
+Mutation testing across the three sessions: **90 tried, 88 caught.** The two
+survivors are the same rewrite of `isNeutral`, comparing only the diagonal
+with and without a tolerance, and both were established as genuine no-ops
+twice over: a matrix with a nonzero off diagonal is a folded one, no
+coefficient of a folded matrix can exceed 0.5, so a unit diagonal already
+implies the identity, and the dim is common to both legs so a diagonal near
+but not at unity cannot leave the other at exactly one. Enumerated over 1.9
+million states by the test author and derived independently by the auditor.
+Both become real bugs the moment this section grows a crossfeed or a per leg
+dim, which is why it is written down here rather than treated as covered.
+
+The thirteen mutations over the code the audit itself produced, the pack and
+the unpack, `asHeard` and the reordered `describe`, were all caught.
+
+
 ## 2026-11-25: what monitoring does when the transport is rolling, which nothing here was asking
 
 ### What was looked at
