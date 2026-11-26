@@ -861,6 +861,107 @@ void AudioEngine::setSoloSettings (float gain, bool overridesMute, bool exclusiv
 }
 
 
+void AudioEngine::setControlRoom (ControlRoom::State s) noexcept
+{
+    std::uint32_t bits = 0;
+
+    if (s.mono)        bits |= latchMono;
+    if (s.dim)         bits |= latchDim;
+    if (s.cutLeft)     bits |= latchCutLeft;
+    if (s.cutRight)    bits |= latchCutRight;
+    if (s.invertLeft)  bits |= latchInvertLeft;
+    if (s.invertRight) bits |= latchInvertRight;
+
+    // Brought inside the range here as well as where it is used, so what a
+    // caller reads back is what the speakers will do rather than what it
+    // asked for. A settings file is the thing that puts a number out of range
+    // in here, and the guard in ControlRoom.h says what a NaN one would cost.
+    controlRoomDimDb.store (ControlRoom::clampDimDb (s.dimDb));
+    controlRoomLatches.store (bits);
+}
+
+ControlRoom::State AudioEngine::getControlRoom() const noexcept
+{
+    const auto bits = controlRoomLatches.load();
+
+    ControlRoom::State s;
+    s.mono        = (bits & latchMono)        != 0;
+    s.dim         = (bits & latchDim)         != 0;
+    s.cutLeft     = (bits & latchCutLeft)     != 0;
+    s.cutRight    = (bits & latchCutRight)    != 0;
+    s.invertLeft  = (bits & latchInvertLeft)  != 0;
+    s.invertRight = (bits & latchInvertRight) != 0;
+    s.dimDb       = controlRoomDimDb.load();
+
+    return s;
+}
+
+/*
+    The control room, and the one thing about it that needs saying next to the
+    code rather than only in its header: this runs on the way to the speakers
+    and nowhere else.
+
+    Applied after the master, after the preview and after the click, which is
+    the second deliberate choice here. Ardour's metronome bypasses its monitor
+    section entirely (session_click.cc:254-256 sends the click straight to its
+    own ports) and Harrison documents the consequence, that the monitor volume
+    knob does not control the click. That is the wrong trade for this studio.
+    Dim is the thing you reach for while somebody is playing, and a dim that
+    leaves the click at full level is not a dim. A mono check that includes a
+    click which was never in the mix is not a mono check either. On a console
+    everything the room hears goes through the monitor path, and that is the
+    behaviour taken here: in practice the click is centred, so the fold leaves
+    it alone, and what changes is that a dim dims it and a cut cuts it.
+
+    The coefficients are slewed per sample rather than per block, for the
+    reason GainRamp.h gives at length: a ramp across the buffer makes the
+    gesture's length a function of the buffer size. It matters less here than
+    anywhere else in the mixer, since nothing downstream of this is recorded
+    or rendered, but there is one law in this engine rather than one law and
+    one exception, and the exception is what somebody later would copy.
+*/
+void AudioEngine::applyControlRoom (float* outL, float* outR, int numSamples) noexcept
+{
+    if (outL == nullptr || numSamples <= 0)
+        return;
+
+    const auto state  = getControlRoom();
+    const double step = GainRamp::stepPerSample (sampleRate, GainRamp::levelSeconds);
+    auto& ramps = controlRoomRamps;
+
+    // One output channel is one leg, and ControlRoom.h carries why that is a
+    // figure of its own rather than the matrix with a missing column.
+    if (outR == nullptr)
+    {
+        const double target = ControlRoom::oneChannelGain (state);
+
+        for (int i = 0; i < numSamples; ++i)
+            outL[i] = (float) (ramps.oneChannel.next (target, step) * (double) outL[i]);
+
+        return;
+    }
+
+    const auto m = ControlRoom::matrixFor (state);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        // Both legs read before either is written, because each output is a
+        // function of both inputs: written in place one at a time, a fold
+        // would sum the left leg with itself. This is the one line in here
+        // that is a bug if it moves.
+        const double inL = (double) outL[i];
+        const double inR = (double) outR[i];
+
+        const double ll = ramps.leftFromLeft  .next (m.leftFromLeft,   step);
+        const double lr = ramps.leftFromRight .next (m.leftFromRight,  step);
+        const double rl = ramps.rightFromLeft .next (m.rightFromLeft,  step);
+        const double rr = ramps.rightFromRight.next (m.rightFromRight, step);
+
+        outL[i] = (float) (ll * inL + lr * inR);
+        outR[i] = (float) (rl * inL + rr * inR);
+    }
+}
+
 void AudioEngine::setMonitorMode (Monitor m)
 {
     if (monitorMode.load() == m)
@@ -1449,6 +1550,21 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     // worked out from the sample rate, and a ramp left half way across a
     // restart would be a fade over whatever the new rate makes of it.
     latchGainRamps (panLaw.load());
+
+    // The control room is latched for the same reason, and the reason is not
+    // cosmetic here either: the step size comes from the sample rate, so a
+    // device opening with the fold already engaged would otherwise fade into
+    // mono over however long the new rate makes of five milliseconds.
+    {
+        const auto state = getControlRoom();
+        const auto m     = ControlRoom::matrixFor (state);
+
+        controlRoomRamps.leftFromLeft  .latch (m.leftFromLeft);
+        controlRoomRamps.leftFromRight .latch (m.leftFromRight);
+        controlRoomRamps.rightFromLeft .latch (m.rightFromLeft);
+        controlRoomRamps.rightFromRight.latch (m.rightFromRight);
+        controlRoomRamps.oneChannel    .latch (ControlRoom::oneChannelGain (state));
+    }
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -2001,6 +2117,13 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                 outR[i] += clickBuffer[(size_t) i];
         }
     }
+
+    // ---- the control room, last of all and on the way out only ----
+    // Everything the speakers will hear has now been summed, the click and
+    // the preview included, which is the point: this is the speaker feed and
+    // not the mix. applyControlRoom carries why the click is inside it and
+    // why renderOffline has no counterpart.
+    applyControlRoom (outL, outR, numSamples);
 
     beatPosition.store (position);
 }

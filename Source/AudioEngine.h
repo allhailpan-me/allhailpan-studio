@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <cstdint>
 #include <atomic>
 #include <limits>
 #include <array>
@@ -14,6 +15,7 @@
 #include "RecordAlign.h"
 #include "PanLaw.h"
 #include "FaderLaw.h"
+#include "ControlRoom.h"
 #include "GainRamp.h"
 #include "SoloGraph.h"
 #include "SendTap.h"
@@ -545,6 +547,38 @@ public:
         derivation. */
     void setMonitorRule (MonitorRule::Rule r) noexcept { monitorRule.store (r); }
     MonitorRule::Rule getMonitorRule() const noexcept  { return monitorRule.load(); }
+
+    /** The control room: what the speakers do with the mix, which is not the
+        mix.
+
+        The one thing in this engine that is deliberately on the playback path
+        and not on the export path, and the exception is written here as well
+        as at the one place it is applied, because CLAUDE.md's rule is that
+        anything added to playback and not to the export makes a bounce sound
+        different from what was heard. That rule is about the mixing loop.
+        This is not in the mixing loop: it is after the master, after the
+        preview and after the click, on the way to the speakers, and it is the
+        definition of a control room section that it reaches the speaker feed
+        and nothing else. Every reference confirms the shape: in Ardour the
+        monitor section is a separate route and
+        `Session::add_monitor_section` disconnects the master's output ports
+        from the hardware to put it in between, while the export builds its
+        channels from those same master output ports
+        (`export_profile_manager.cc:566-580`) and so cannot see it. PreSonus
+        states it for the hardware in the form easiest to test against, twice
+        in the Monitor Station V2 manual: "the Mono button has no effect on
+        the Main L/R Line Outputs".
+
+        So `renderOffline` does not call this and must not, the loudness and
+        true peak measurement is taken before it, and no recorder is anywhere
+        near it.
+
+        Read and written on the message thread, which is the only writer.
+        A caller that wants to change one thing reads the state, changes it
+        and sets it back, so there is one source of truth for it rather than
+        a copy on the strip and a copy in the engine that can disagree. */
+    void setControlRoom (ControlRoom::State s) noexcept;
+    ControlRoom::State getControlRoom() const noexcept;
 
     void setMonitorGain (float g) noexcept     { monitorGain.store (juce::jlimit (0.0f, 2.0f, g)); }
     float getMonitorGain() const noexcept      { return monitorGain.load(); }
@@ -1120,6 +1154,48 @@ private:
     // same every time and matches its export. While stopped they run off
     // this free clock instead, so a sound can still be dialled in.
     double modFreeClock = 0.0;
+
+    // The control room's six latches as one word, so a gesture that moves
+    // two of them cannot half arrive at the audio thread, and so a block
+    // reads one atomic rather than six. The dim amount is separate because it
+    // is the one part of this that is saved: the latches are momentary checks
+    // and arriving in one of them is a silent wrong state, which is the
+    // departure from Ardour that ControlRoom.h argues.
+    enum ControlRoomLatch : std::uint32_t
+    {
+        latchMono        = 1u << 0,
+        latchDim         = 1u << 1,
+        latchCutLeft     = 1u << 2,
+        latchCutRight    = 1u << 3,
+        latchInvertLeft  = 1u << 4,
+        latchInvertRight = 1u << 5
+    };
+
+    std::atomic<std::uint32_t> controlRoomLatches { 0 };
+    std::atomic<double>        controlRoomDimDb { ControlRoom::defaultDimDb };
+
+    // One moving gain per coefficient, audio thread only, seeded where a
+    // fresh engine already is: passing the mix through. Slewed rather than
+    // switched because Ardour's own fold is not, and clicks for it
+    // (monitor_processor.cc:325-361 switches instantly while the per channel
+    // stage beside it ramps at line 319). The fifth is the one output channel
+    // case, which has its own figure in ControlRoom.h.
+    struct ControlRoomRamps
+    {
+        GainRamp::Ramp leftFromLeft   { 1.0 };
+        GainRamp::Ramp leftFromRight  { 0.0 };
+        GainRamp::Ramp rightFromLeft  { 0.0 };
+        GainRamp::Ramp rightFromRight { 1.0 };
+        GainRamp::Ramp oneChannel     { 1.0 };
+    };
+
+    ControlRoomRamps controlRoomRamps;
+
+    /** Applies the control room to the speaker feed, in place.
+
+        The last thing the callback does, and the only place any of this is
+        applied. */
+    void applyControlRoom (float* outL, float* outR, int numSamples) noexcept;
 
     std::atomic<Monitor> monitorMode { Monitor::off };
     std::atomic<MonitorRule::Rule> monitorRule { MonitorRule::defaultRule };

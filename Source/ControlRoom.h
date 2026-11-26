@@ -266,6 +266,26 @@ namespace ControlRoom
         return std::abs (m.rightFromLeft) + std::abs (m.rightFromRight);
     }
 
+    /** What a device with one output channel gets.
+
+        Written down as its own figure rather than left as a branch in the
+        engine, because the alternatives are all wrong in a way that would not
+        announce itself. A one channel feed has one leg, so the leg's own cut,
+        polarity and dim apply and the fold has nothing to fold: taking the
+        missing leg as silence would make the fold a 6 dB drop for nothing,
+        and taking it as a copy of the leg that is there would make a cut of
+        the absent leg a 6 dB drop instead. The controls that are about the
+        relationship between two legs simply have no second leg to act on,
+        which is the honest reading, and a dim still dims.
+
+        Rare rather than hypothetical: the engine treats a missing right
+        channel as a real case everywhere else in the block, so this is the
+        case it already has. */
+    inline double oneChannelGain (const State& s) noexcept
+    {
+        return legGain (s.cutLeft, s.invertLeft, dimGain (s));
+    }
+
     /** What the row of buttons says it is doing, for the one line on the
         master strip. Built here rather than at the place that shows it, so
         the words cannot describe a state the matrix does not have. */

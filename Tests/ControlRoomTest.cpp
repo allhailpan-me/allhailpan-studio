@@ -1106,6 +1106,65 @@ int main()
         std::printf ("  difference: %s\n", describe (diff));
     }
 
+    // -----------------------------------------------------------------------
+    // The one output channel case.
+    //
+    // A device with a single output has one leg, and the engine has a separate
+    // figure for it rather than the matrix with a missing column, because
+    // every way of filling that column in is wrong in a way that would not
+    // announce itself: the missing leg as silence makes the fold a 6 dB drop
+    // for nothing, and as a copy of the leg that is there makes a cut of the
+    // absent leg a 6 dB drop instead.
+    //
+    // So the properties are: the leg's own cut, polarity and dim all apply,
+    // and nothing about the other leg or about the fold reaches it. Asserted
+    // over the whole enumeration rather than on a handful of cases, because
+    // the fault would be the fold or the other leg leaking in on some
+    // combination rather than on all of them.
+    std::printf ("the one output channel case, over %d x %d states\n",
+                 64, (int) amounts.size());
+    {
+        for (double db : amounts)
+        {
+            for (int bits = 0; bits < 64; ++bits)
+            {
+                const State s = stateFromBits (bits, db);
+                const double got = oneChannelGain (s);
+
+                // Its own leg, and only its own leg.
+                const double want = s.cutLeft ? 0.0
+                                              : (s.invertLeft ? -dimGain (s) : dimGain (s));
+
+                checkExact (got, want,
+                            "the one channel gain is the left leg's own for " + describeState (s));
+
+                // The fold has nothing to fold, so engaging it must not move
+                // this at all. That is the whole claim and it is the one a
+                // matrix with a missing column would break.
+                State folded = s;
+                folded.mono = ! folded.mono;
+                checkExact (oneChannelGain (folded), got,
+                            "the fold does not move the one channel gain for " + describeState (s));
+
+                // Nor must anything about the leg that is not there.
+                State other = s;
+                other.cutRight    = ! other.cutRight;
+                other.invertRight = ! other.invertRight;
+                checkExact (oneChannelGain (other), got,
+                            "the absent leg does not move the one channel gain for "
+                                + describeState (s));
+
+                // It cannot overflow either, which is the same property the
+                // matrix has and is worth asserting separately because this
+                // path does not go through the matrix at all.
+                check (std::abs (got) <= 1.0,
+                       "the one channel gain is inside unity for " + describeState (s));
+                check (std::isfinite (got),
+                       "the one channel gain is finite for " + describeState (s));
+            }
+        }
+    }
+
     if (failures == 0)
         std::printf ("ControlRoomTest: all checks passed\n");
     else
