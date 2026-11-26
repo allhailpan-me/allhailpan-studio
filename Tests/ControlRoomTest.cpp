@@ -1074,29 +1074,24 @@ int main()
                                + (s.mono ? "on" : "off") + " for " + describeState (s));
 
                 // The difference reading is a statement that centred content
-                // is gone, so it has to actually be gone. Asserted over the
-                // states with neither leg cut, where the equivalence is
-                // exact: a folded state with one leg inverted cancels a
-                // centred signal and nothing else does.
-                //
-                // The states with a cut leg are left out because the header
-                // does not satisfy this there, which is a finding and not a
-                // tolerance: with the fold on, one leg inverted and the other
-                // cut, `describe` says "difference, only what a mono fold
-                // destroys" while the matrix is half of the surviving leg
-                // with its polarity flipped, which cancels nothing. The
-                // ordering fix belongs to whoever owns the strip, so it is
-                // reported rather than pinned red here.
-                if (! s.cutLeft && ! s.cutRight)
-                {
-                    const auto centred = apply (m, 0.37, 0.37);
-                    const bool cancels = centred.left == 0.0 && centred.right == 0.0
-                                      && ! isSilent (m);
+                // is gone, so it has to actually be gone. Asserted over every
+                // state rather than over the ones with both legs present,
+                // which is the strong form and the form that found the fault:
+                // the first version of `describe` claimed a difference listen
+                // whenever the fold was on and the polarities differed, and
+                // with one leg cut and the other inverted that is half of the
+                // surviving leg rather than a cancellation. A centred signal
+                // came out at half level while the strip said it was gone.
+                // Reachable in four button presses, invisible to every other
+                // check in this file, and a sentence rather than a signal,
+                // which is why it is pinned here and not left to an eye.
+                const auto centred = apply (m, 0.37, 0.37);
+                const bool cancels = centred.left == 0.0 && centred.right == 0.0
+                                  && ! isSilent (m);
 
-                    check ((text.find ("difference") != std::string::npos) == cancels,
-                           "describe says \"" + text + "\" where centred content "
-                               + (cancels ? "cancels" : "survives") + " for " + describeState (s));
-                }
+                check ((text.find ("difference") != std::string::npos) == cancels,
+                       "describe says \"" + text + "\" where centred content "
+                           + (cancels ? "cancels" : "survives") + " for " + describeState (s));
             }
 
         std::printf ("  neutral:   %s\n", describe (State {}));
