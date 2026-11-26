@@ -7,6 +7,42 @@ Newest first.
 
 ---
 
+## 2026-11-26: the control surface of the instrument, which every patch is saved through
+
+### What is being looked at
+
+`Source/PanOneParams.h`, 2523 lines, the largest header in the tree that has a
+test and the one with the least test per line of it: 941 lines of
+`PanOneParamsTest.cpp` against 2523 of source. It has never been a target
+here. It was last touched on 28 October and no open pull request goes near it.
+
+It is the whole control surface of PAN One as data: 240 controls, of which 192
+are the modulation matrix at six controls a row, 22 presets at the time
+CLAUDE.md was written, the choice lists every one of those draws from, the
+groups the editor lays out from, and the translation of what version one of
+the instrument saved.
+
+Why it is worth a night. Everything a patch is goes through this table four
+times: building the parameters, reading them back into a patch once a block,
+writing a preset out to them, and saving and loading them in a project. The
+faults it can carry are all of the shape this project keeps meeting. A control
+missing from the table is a knob that works and a preset that sounds almost
+right. A choice saved by index rather than id is every patch anybody ever
+saved pointing one entry along. A choice list whose first entry is not the
+safe one is an unrecognised id landing somewhere wrong rather than nowhere. A
+version one project whose four orphaned controls are dropped rather than
+translated opens with the right envelope times and entirely the wrong sound.
+None of those errors, and none of them look broken.
+
+### What is left to do
+
+- read the header's logic apart from its data, and list what a mutation can aim at
+- mutate it, compiled with run.sh's own sanitizer flags
+- judge every survivor as a gap or a genuine no-op
+- close the gaps
+
+---
+
 ## 2026-11-25: the warp mapping, which decides where a warped clip reads from
 
 ### What is being looked at
