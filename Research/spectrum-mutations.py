@@ -355,6 +355,31 @@ MUTATIONS = [
 ]
 
 
+# The mutations that are expected to survive, with what each one relies on.
+#
+# Every one of them is a genuine no-op: the code it breaks is correct and is
+# also unreachable, or is enforced again somewhere else. They are listed here
+# rather than described in a comment, and the check below works BOTH WAYS: a new
+# survivor fails, and so does an expected survivor that has started being
+# caught. That is the discipline VoiceTest.h uses for its list of unreached
+# modulation destinations, and for the same reason. A list of known gaps that
+# nothing checks quietly becomes a lie.
+EXPECTED_SURVIVORS = {
+    "mirror on every bin":
+        "no resolved band reaches the direct current or the Nyquist bin, which the "
+        "test asserts at every rate and transform size",
+    "weights not clamped":
+        "the run of bins is chosen so the overlap over it is never negative",
+    "first bin not clamped":
+        "band.lower is positive, so ceil (lower/df - 0.5) is never below zero",
+    "last bin not clamped":
+        "no band is allowed above Nyquist, so floor (upper/df + 0.5) <= lastBin",
+    "any transform size":
+        "RealFFT::setSize refuses a size that is not a power of two and leaves "
+        "itself unusable, which the getSize check then catches",
+}
+
+
 def run_one(index):
     name, breaks, old, new = MUTATIONS[index]
 
@@ -429,13 +454,37 @@ def main():
     print("%d mutations: %d caught by the test, %d would not compile, %d survived, %d anchors stale"
           % (len(results), caught, nobuild, len(survived), len(anchor)))
 
+    unexpected = [r for r in survived if r[1] not in EXPECTED_SURVIVORS]
+
     for r in survived:
-        print("  SURVIVED  %2d  %s (%s)" % (r[0], r[1], r[2]))
+        if r[1] in EXPECTED_SURVIVORS:
+            print("  expected survivor  %2d  %s" % (r[0], r[1]))
+            print("                         because %s" % EXPECTED_SURVIVORS[r[1]])
+        else:
+            print("  UNEXPECTED SURVIVOR  %2d  %s (%s)" % (r[0], r[1], r[2]))
+
+    # The other direction: an expected survivor that is now caught means the
+    # reason written above it has stopped being true, or the test has grown to
+    # cover it, and either way this file is out of date.
+    ran = {MUTATIONS[r[0]][0] for r in results}
+    caught_names = {r[1] for r in results if r[3] == "CAUGHT"}
+
+    now_caught = sorted(name for name in EXPECTED_SURVIVORS
+                        if name in ran and name in caught_names)
+
+    for name in now_caught:
+        print("  NO LONGER A NO-OP    %s" % name)
+        print("                       it was expected to survive because %s"
+              % EXPECTED_SURVIVORS[name])
 
     for r in anchor:
-        print("  STALE     %2d  %s" % (r[0], r[1]))
+        print("  STALE ANCHOR         %2d  %s" % (r[0], r[1]))
 
-    return 0 if not survived and not anchor else 1
+    if not unexpected and not anchor and not now_caught:
+        print()
+        print("Every mutation was caught, or survived for a reason this file records.")
+
+    return 0 if not unexpected and not anchor and not now_caught else 1
 
 
 if __name__ == "__main__":
