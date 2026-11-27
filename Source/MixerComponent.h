@@ -1327,9 +1327,14 @@ private:
         {
             auto r = getLocalBounds().reduced (3, 2);
             title.setBounds (r.removeFromTop (14));
-            // Two lines at this font, because the longest thing the section
-            // can say about itself is the difference listen and a single line
-            // of it compresses to something nobody can read.
+            // Two lines at this font, because the longest readings do not
+            // fit on one and a single line of them compresses to something
+            // nobody can read. Which reading is longest is deliberately not
+            // named here: it was the difference listen, then the one output
+            // note pushed past it, then the readings that name a cut leg
+            // along with the surviving leg's polarity. A comment that picks a
+            // winner goes stale every time a reading is added, and the
+            // decision this is explaining is the two lines.
             status.setBounds (r.removeFromBottom (24));
 
             auto row = [&] (juce::TextButton& a, juce::TextButton& b)
