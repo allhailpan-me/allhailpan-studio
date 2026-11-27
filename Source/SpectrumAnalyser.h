@@ -659,6 +659,13 @@ public:
         heldPower.clear();
         frames = 0;
 
+        // The power of two half of this is said here and enforced below:
+        // `RealFFT::setSize` refuses anything else and leaves itself unusable,
+        // which the `getSize` check then catches, so removing this line
+        // changes no behaviour. It is here because a reader deciding whether a
+        // size is acceptable should not have to go and read another header to
+        // find out, and because the minimum of 64 is this file's own and is
+        // not enforced anywhere else.
         if (newFftSize < 64 || (newFftSize & (newFftSize - 1)) != 0)
             return;
 
@@ -998,11 +1005,18 @@ private:
 
             // Bin 0 and the Nyquist bin have no conjugate twin in the half
             // spectrum, so the factor of two that folds the negative
-            // frequencies back on does not apply to them. Neither carries any
-            // band here, since the lowest band edge is 17.78 Hz and no band is
-            // allowed above Nyquist, but writing the mirror out correctly costs
-            // nothing and means a later change of range cannot inherit a
-            // doubled DC term.
+            // frequencies back on does not apply to them.
+            //
+            // NEITHER OF THEM IS REACHED BY ANY BAND THIS DISPLAYS, so this
+            // line changes no reading today: a mutation applying the mirror to
+            // every bin produces identical output. It is written correctly
+            // anyway because the property it relies on belongs to the band
+            // selection rather than to this arithmetic, and a later change of
+            // range or of rate could hand this a doubled direct current term
+            // with nothing to notice. The test checks that no resolved band
+            // reaches either bin, at every rate and transform size the studio
+            // offers, so the claim is a measured one and will fail rather than
+            // quietly stop being true.
             const double mirror = (k == 0 || k == lastBin) ? 0.5 : 1.0;
 
             binPower[(std::size_t) k] += mirror * scale * magnitudeSquared;
@@ -1043,13 +1057,30 @@ private:
             const auto& band = bandList[i];
             auto&       map  = bandBins[i];
 
-            // The bins whose spans can touch this band at all. Clamped into
-            // the half spectrum, and `first` can exceed `last` for a band that
-            // falls entirely outside it, which leaves an empty run and a total
-            // weight of zero, which `resolves` then refuses.
+            // The bins whose spans can touch this band at all. `first` can
+            // exceed `last` for a band that falls entirely outside the half
+            // spectrum, which leaves an empty run and a total weight of zero,
+            // which `resolves` then refuses.
             int first = (int) std::ceil (band.lower / df - 0.5);
             int last  = (int) std::floor (band.upper / df + 0.5);
 
+            // The clamp on `first` is load bearing and the one on `last` is
+            // not, which is worth saying because they look like a pair.
+            //
+            // `first` really does go negative: a band whose lower edge is
+            // inside half a bin of zero reaches below bin zero, and that
+            // happens at 192 kHz with the shortest transform size, where the
+            // bins are 93.75 Hz wide and the bottom band's lower edge is at
+            // 17.78. Unclamped, the index is computed negative and then used
+            // unsigned, which is a read at four billion.
+            //
+            // `last` cannot exceed `lastBin` at all. No band is allowed above
+            // Nyquist, so `band.upper <= lastBin * df`, so
+            // `floor (band.upper / df + 0.5) <= floor (lastBin + 0.5)`, which
+            // is `lastBin`. The clamp stays so that nobody has to re-derive
+            // that to be sure, and so a change to the band selection cannot
+            // turn it into an out of bounds read, but it is not what makes the
+            // read safe today and a mutation removing it changes nothing.
             first = std::max (0, first);
             last  = std::min (lastBin, last);
 
@@ -1063,6 +1094,14 @@ private:
                 const double overlap = std::min (band.upper, binUpper)
                                      - std::max (band.lower, binLower);
 
+                // The guard is defensive rather than reached. `first` is the
+                // lowest bin whose upper span is at or above the band's lower
+                // edge and `last` the highest whose lower span is at or below
+                // its upper edge, so the overlap over that run is never
+                // negative, at worst exactly zero at either end. It is here so
+                // that a change to how the run is chosen cannot start
+                // subtracting weight from a band, which would read as a hole
+                // in the spectrum rather than as an error.
                 const double w = overlap > 0.0 ? overlap / df : 0.0;
 
                 map.weight.push_back (w);

@@ -558,6 +558,99 @@ static void testBinWeights()
 }
 
 //==============================================================================
+static void testEveryRateAndSize()
+{
+    // Every combination the studio can actually be in, with a frame pushed
+    // through each, because two things only go wrong at the ends of that range
+    // and the rest of this file works at 48 kHz.
+    //
+    // At 192 kHz and a transform size of 2048 the bins are 93.75 Hz wide, which
+    // is wider than the bottom band is from zero. The run of bins a band
+    // reaches for then starts below bin zero, and without the clamp that is a
+    // read before the start of the spectrum: an index computed as negative and
+    // then used unsigned, which is a read at four billion. Nothing at 48 kHz
+    // comes near it, and a mutation removing that clamp survived the whole file
+    // until this check existed.
+    for (const double rate : { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 })
+        for (const int size : transformSizes)
+            for (const int perOctave : { 3, 6 })
+            {
+                Analyser analyser;
+                analyser.configure (size, rate, perOctave);
+
+                const std::string where = " at " + std::to_string ((int) rate) + " Hz, size "
+                                        + std::to_string (size) + ", 1/"
+                                        + std::to_string (perOctave) + " octave";
+
+                check (analyser.isConfigured(), "the analyser configures" + where);
+
+                if (! analyser.isConfigured())
+                    continue;
+
+                RealFFT fft (size);
+                Rng     rng { 0x77777777ull };
+
+                std::vector<float> noise;
+                makeSlopedNoise (noise, fft, size, rate, 1.0, 15.0, 0.45 * rate, rng);
+
+                check (analyser.push (noise.data(), noise.data(), size, 1.0 / 30.0),
+                       "a frame is accepted" + where);
+
+                // Every resolved band reads something, and nothing reads a
+                // number that is not a number. A band that came back NaN would
+                // draw at the top of the display, which is the one place a
+                // fault would be read as a mix problem.
+                int resolved = 0;
+
+                for (int i = 0; i < analyser.getNumBands(); ++i)
+                {
+                    if (! analyser.resolves (i))
+                    {
+                        checkNear (analyser.levelDb (i), noReadingDb, 0.0,
+                                   "an unresolved band reads nothing" + where);
+                        continue;
+                    }
+
+                    ++resolved;
+
+                    const double level = analyser.levelDb (i);
+
+                    check (std::isfinite (level), "a band's level is a number" + where);
+                    check (level <= 0.05, "a band's level is on the scale" + where);
+                }
+
+                check (resolved > 0, "something resolves" + where);
+
+                // ---- the two bins with no conjugate twin ----
+                //
+                // The direct current bin and the Nyquist bin carry half the
+                // mirror factor the others do, and the header says that
+                // correction is unobservable here because no band the display
+                // shows reaches either of them. That is a claim about the band
+                // selection rather than about the arithmetic, so it is checked
+                // rather than asserted in a comment: a mutation applying the
+                // mirror to every bin is a genuine no-op only for as long as
+                // this holds, and if a later change of range or of rate breaks
+                // it, this is what says so.
+                const double df      = analyser.binWidth();
+                const int    lastBin = size / 2;
+
+                for (int i = 0; i < analyser.getNumBands(); ++i)
+                {
+                    if (! analyser.resolves (i))
+                        continue;
+
+                    const auto& band = analyser.getBands()[(std::size_t) i];
+
+                    check (band.lower >= 0.5 * df,
+                           "no resolved band reaches the direct current bin" + where);
+                    check (band.upper <= ((double) lastBin - 0.5) * df,
+                           "no resolved band reaches the Nyquist bin" + where);
+                }
+            }
+}
+
+//==============================================================================
 static void testSineReadsItsOwnLevel()
 {
     // Voxengo documents SPAN's "Align 0 dB" as aligning a stationary 1 kHz sine
@@ -933,14 +1026,47 @@ static void testSlopes()
     {
         analyser.setTiltDbPerOctave (t);
 
+        // The pivot, as a property of its own: the band holding 1 kHz does not
+        // move, whatever the tilt. One third octave puts 1 kHz at a band
+        // centre, so this is exact there; the sixth octave display used below
+        // puts it on an edge, where the two bands either side move by half a
+        // band's worth in opposite directions.
+        {
+            Analyser thirds;
+            thirds.configure (n, rate, 3);
+
+            Rng pinkRng { 0x2468aceull };
+            std::vector<float> pink;
+            makeSlopedNoise (pink, fft, n, rate, 1.0, 15.0, 23000.0, pinkRng);
+            thirds.push (pink.data(), nullptr, n, 1.0 / 30.0);
+
+            const int reference = thirds.bandAt (1000.0);
+            check (reference >= 0, "the one third octave display holds 1 kHz");
+
+            if (reference >= 0)
+            {
+                const double untilted = thirds.levelDb (reference);
+
+                thirds.setTiltDbPerOctave (t);
+                checkNear (thirds.levelDb (reference), untilted, 1.0e-9,
+                           "the 1 kHz band does not move under a tilt of "
+                               + std::to_string (t));
+            }
+        }
+
         for (int i = 0; i < analyser.getNumBands(); ++i)
         {
             if (! analyser.resolves (i))
                 continue;
 
             const double centre = analyser.getBands()[(std::size_t) i].centre;
-            const double expected = flat[(std::size_t) i]
-                                  + t * std::log2 (centre / tiltPivotFrequency);
+
+            // 1000.0 written out rather than read from `tiltPivotFrequency`.
+            // Taking the constant from the header would make this a
+            // restatement of the code: moving the pivot would move both sides
+            // of the comparison and the check would pass. It did, and a
+            // mutation moving the pivot to 100 Hz survived because of it.
+            const double expected = flat[(std::size_t) i] + t * std::log2 (centre / 1000.0);
 
             checkNear (analyser.levelDb (i), expected, 1.0e-9,
                        "the tilt is a line through 1 kHz, band " + std::to_string (i));
@@ -1362,6 +1488,28 @@ static void testHold()
     checkNear (analyser.holdDb (band), analyser.levelDb (band), 0.01,
                "the hold rebuilds from the next frame");
 
+    // `clear` has to forget the readings and not only the frame count. Asked
+    // before any frame is pushed, which is the only moment it is observable:
+    // the next frame seeds, so a clear that forgot nothing would be invisible
+    // afterwards. The panel clears when the view is shown and then waits for a
+    // timer, so a stale reading there is the old spectrum flashing up for a
+    // frame when somebody opens the display again.
+    analyser.push (loud.data(), nullptr, n, 1.0 / 200.0);
+    analyser.clear();
+
+    check (analyser.getFrameCount() == 0, "clearing forgets the frame count");
+
+    for (int i = 0; i < analyser.getNumBands(); ++i)
+    {
+        if (! analyser.resolves (i))
+            continue;
+
+        checkNear (analyser.levelDb (i), floorDb, 0.0,
+                   "clearing forgets the level, band " + std::to_string (i));
+        checkNear (analyser.holdDb (i), floorDb, 0.0,
+                   "clearing forgets the hold, band " + std::to_string (i));
+    }
+
     // The tilt reaches the hold as well as the level, so the two cannot be read
     // against different scales on the same display.
     analyser.setTiltDbPerOctave (3.0);
@@ -1457,6 +1605,7 @@ int main()
     testWindowConstants();
     testDisplayRange();
     testBinWeights();
+    testEveryRateAndSize();
     testSineReadsItsOwnLevel();
     testNarrowBandsBlurRatherThanLose();
     testBandPowersSumToTheSignal();
