@@ -7,6 +7,35 @@ Newest first.
 
 ---
 
+## 2026-11-27: the control room's words, which are the only report of the one control you cannot hear
+
+### What is being looked at
+
+`Source/ControlRoom.h` and `Tests/ControlRoomTest.cpp`. The control room
+landed on 2026-11-25 in #94 and has no entry here, so nothing has audited it
+since it merged. No open pull request touches either file.
+
+Why it is worth a night. Three of the four controls in here announce
+themselves the moment they are pressed: a cut goes silent, a dim goes quiet, a
+fold collapses the image. The fourth does not. A polarity invert on both legs
+is inaudible on the speaker pair, and an invert on one leg is inaudible on
+anything centred until something else joins it. So for that one control the
+line of words on the master strip is not a convenience, it is the only report
+there is, and `describe` is the function whose whole stated justification, at
+its own comment, is "so the words cannot describe a state the matrix does not
+have".
+
+`isNeutral` takes that seriously and says so at length: both legs inverted is
+reported as not neutral precisely because it is inaudible on its own. The
+question this night asks is whether `describe`, sitting ten lines below it,
+keeps the same promise.
+
+### Still to do
+
+Mutation table, the survivors and the verdicts, and whatever is found.
+
+---
+
 ## 2026-11-26: the control surface of the instrument, which every patch is saved through
 
 ### What is being looked at
