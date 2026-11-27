@@ -401,6 +401,45 @@ display's refresh interval: at the shortest window and the highest rates some
 of the audio is never looked at, which the header now states and which matters
 only for a peak hold on a very short transient.
 
+### How it closed
+
+Merged as #96 with the `tests` job, `windows-latest` and `ubuntu-latest` green
+on the final commit, which is the rule this lane runs under; macOS was still
+building and is routinely the slow one. The platform builds matter more than
+usual here because `MixReportPanel.h` is the one file in the change that
+nothing local can compile, and they are what says the panel's layout
+arithmetic, its JUCE calls and the new engine members are real.
+
+Final verification, in one place so a later night does not have to reconstruct
+it:
+
+- `./Tests/run.sh`, all 56 test programs, green.
+- 58 mutations, 53 caught by the test. The five survivors are no-ops and
+  `Research/spectrum-mutations.py` now holds the list with each one's reason
+  and checks it in both directions: a new survivor fails, and so does an
+  expected survivor that has started being caught.
+- One `auditor` session that did not write the code, which returned ten
+  findings. Two were behaviour, five were numbers that did not reproduce, and
+  the rest were claims. All fixed in one commit.
+- `Tests/SpectrumProbe.cpp`, kept rather than discarded, which is where every
+  figure the header quotes about narrow bands comes from.
+
+**No release was cut, and the reason is specific rather than general.** v0.9.0
+went out yesterday, 2026-11-26. One user visible change the day after a release
+is not a reason to cut another, and the standing question at the top of this
+file is about the opposite failure: a pile that nobody ships. There is no pile.
+The notes are written and staged under a new `## Since v0.9.0` heading, so
+whoever cuts the next one has them, and the thing that would make it worth
+cutting is the next two or three changes rather than this one.
+
+Worth noting what is now unblocked rather than only what is not. The loudness
+normalisation on export, which this entry and the 11-26 one both record as the
+best candidate on merit, is still held by `MainComponent.cpp` through
+`ExportJob`'s constructor. So are the control room's dim amount and its toolbar
+light. That is three nights running, and the three of them together are a
+stronger argument for the hardening lane finishing #77 than any one of them is
+on its own.
+
 ## 2026-11-26: a control room section, and the one place in the engine that is not the mix
 
 ### What was looked at
