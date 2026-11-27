@@ -7,6 +7,252 @@ Newest first.
 
 ---
 
+## 2026-11-27: the control room's words, which are the only report of the one control you cannot hear
+
+### What is being looked at
+
+`Source/ControlRoom.h` and `Tests/ControlRoomTest.cpp`. The control room
+landed on 2026-11-25 in #94 and has no entry here, so nothing has audited it
+since it merged. No open pull request touches either file.
+
+Why it is worth a night. Three of the four controls in here announce
+themselves the moment they are pressed: a cut goes silent, a dim goes quiet, a
+fold collapses the image. The fourth does not. A polarity invert on both legs
+is inaudible on the speaker pair, and an invert on one leg is inaudible on
+anything centred until something else joins it. So for that one control the
+line of words on the master strip is not a convenience, it is the only report
+there is, and `describe` is the function whose whole stated justification, at
+its own comment, is "so the words cannot describe a state the matrix does not
+have".
+
+`isNeutral` takes that seriously and says so at length: both legs inverted is
+reported as not neutral precisely because it is inaudible on its own. The
+question this night asks is whether `describe`, sitting ten lines below it,
+keeps the same promise.
+
+### The shape of it
+
+455 lines, of which about 80 are code. A per leg stage of cut and polarity
+with a dim over both, then an optional fold, expressed as one 2x2 matrix; a
+reduction of the state to what one speaker leg can express; a six bit word for
+the audio thread; and `describe`, the line of words on the master strip.
+
+### What was found: the words dropped the one control nobody can hear
+
+`describe` reported a polarity invert in 46 of the 64 latch states and dropped
+it in the other 18. The states, and what they said:
+
+| State | Matrix | It said | Heard |
+|---|---|---|---|
+| `mono invL invR` | all -0.5 | "mono" | a fold, upside down |
+| `mono` | all +0.5 | "mono" | a fold |
+| `cutL invR` | `[0 0; 0 -1]` | "left leg cut" | the right leg, upside down |
+| `cutL` | `[0 0; 0 +1]` | "left leg cut" | the right leg |
+| `mono cutL invR` | `[0 -0.5; 0 -0.5]` | "mono, right leg only" | the right leg folded, upside down |
+| `mono cutL` | `[0 +0.5; 0 +0.5]` | "mono, right leg only" | the right leg folded |
+
+Six states, three pairs, three reports. Character for character the same
+sentence for a feed that is the right way up and a feed that is upside down,
+and the eighteen are that pattern with the dim and the mirror legs filled in.
+
+Why it is a fault and not a tidiness complaint. Three of the four controls in
+this section announce themselves the moment they are pressed: a cut goes
+silent, a dim goes quiet, a fold collapses the image. A polarity invert
+announces nothing. Both legs flipped is inaudible on the speaker pair, and one
+leg flipped is inaudible on anything centred until something else joins it.
+`isNeutral`, ten lines above `describe`, argues exactly that at length and
+reports an inversion for exactly that reason. So the two functions disagreed
+about whether an inaudible inversion is worth reporting, in the same header,
+and the one whose entire stated justification is "so the words cannot describe
+a state the matrix does not have" was the one dropping it.
+
+What keeps it from being worse: the six buttons each show their own latch, so
+the information is on the panel even where the sentence loses it. That is the
+honest mitigation and it is why nobody would ever have heard this. It is also
+why it survived: the panel looks right, and the sentence is only wrong by
+omission. The buttons are in the mixer, which is a separate window and closed
+at launch, and the line of words is on the master strip, which is not.
+
+Fixed by giving every reading that can carry a flip a form that carries it:
+"mono, both legs inverted", "left leg cut, right leg inverted", "mono, right
+leg only, inverted", and their mirrors. The dim is still deliberately not
+named in the compound readings and the header now says why: its amount already
+sits on the face of its own button, and 6 to 30 dB of level is heard before it
+is read.
+
+### Why the test could not see it, which is the larger finding
+
+`ControlRoomTest.cpp` is 1322 lines against 455 and it is genuinely strong on
+the arithmetic: the fold's coefficient against four separate justifications,
+the dim read back with a logarithm rather than recomputed with `pow`,
+`isNeutral` against the matrix in both directions over every state, and the
+overflow bound at every intermediate sample of 13.2 million samples of slew
+between randomly generated pairs of states. Two of its measurements are
+pointed at something known to be wrong first and required to notice it.
+
+On the words it checked five things: the `"control room: "` prefix, that the
+mix reading matches `isNeutral`, that the silent reading matches an all zero
+matrix, that neither of those is claimed by a state that has neither, that
+"mono" appears exactly when the fold is on, and that "difference" appears
+exactly when centred content really cancels.
+
+Every one of those predicates is blind to left against right and to how many
+legs are involved. So the words could have named the wrong leg in every
+reading in the function and the suite would have been green. That is the one
+thing `describe` exists to get right, and the one fault it had already shipped
+and had fixed before merge was of exactly that shape: a "difference" claim
+over a feed that cancelled nothing.
+
+The test now derives from the matrix which input legs reach a speaker and with
+what sign, and checks the words against that rather than against the buttons:
+
+- a reading that names the surviving leg names the leg that is heard, and a
+  reading that names a cut leg names the leg that is gone;
+- a flip is mentioned whenever a leg reaches a speaker with a negative
+  coefficient and never otherwise, with the difference reading counting as
+  naming it;
+- where the words count the flipped legs, the count is right;
+- where a flip is pinned to a named leg, it is the leg that is really flipped.
+
+Taking the count off the signal rather than off the buttons is what makes it
+correct about `mono cutL invL`, where the flipped leg is the cut one: the
+invert is engaged, nothing flipped reaches a speaker, and the words must not
+mention it. They do not.
+
+The one output path got the same treatment. It had the gain pinned thoroughly
+and said nothing about the words beyond "not a fold, not a difference", which
+is the path the earlier audit's fault lived on. It now also checks that a
+reduced reading never names the leg that is not there, and that it reports a
+flip exactly when the one coefficient actually applied is negative.
+
+### Mutations
+
+42 single realistic mistakes, each a separate copy of `Source` with one edit,
+each compiled and run against the strengthened test with exactly the flags
+`Tests/run.sh` uses, sanitizers and `_GLIBCXX_ASSERTIONS` included. Harness at
+`/tmp` and not kept; the mutation list is below in full so it can be rebuilt.
+
+**40 caught, 2 survived, both proved to be no-ops.**
+
+The words, which leg (6 of 6 caught): the two mono-plus-cut readings' text
+swapped; their two conditions swapped; the left and right cut readings' text
+swapped; their two conditions swapped; the cut leg polarity suffix reading the
+cut leg instead of the survivor; the same on the mono-plus-cut reading.
+
+The words, polarity (7 of 7 caught): "one leg inverted" tested with `||`
+instead of `!=`; the mono-plus-both-inverted reading removed, which is the
+shipped fault reinstated; the cut leg polarity suffix dropped, likewise;
+"both legs inverted" worded as "one leg inverted"; the mono compound reading
+forgetting to say mono; the mono-plus-cut reading forgetting to say mono; the
+dim fallback claiming the speakers are hearing the mix.
+
+The words, order and guards (3 of 3 caught): the difference claimed above the
+cut readings, which is the fault the previous audit caught before merge; the
+`isNeutral` early return removed; the both-cut silent reading removed.
+
+The one leg reduction (8 of 8 caught): the absent leg's polarity not cleared;
+its cut not cleared; the fold not cleared; off by one on the leg count; a feed
+of no legs reduced as well; the surviving leg taking the absent leg's
+polarity; `oneChannelGain` reading the other leg's coefficient;
+`oneChannelGain` forgetting to reduce.
+
+The arithmetic, re-checked against the strengthened test (16 of 18 caught):
+`foldPerLeg` to 0.7071 and the fold applied to the left row only; `dimGain`
+reading amplitude decibels as power decibels and its disengaged early return
+removed; `legGain`'s polarity sign flipped and its cut guard removed;
+`matrixFor` exchanging the legs on the pass-through row, reading the left
+leg's polarity from the right leg, and moving the per leg stage after the
+fold; `clampDimDb`'s `isfinite` guard removed; `pack` transposing the two cuts
+with `unpack` left alone; `unpack` transposing the fold and the dim;
+`leftBound` summing rather than summing magnitudes; `rightBound`
+copy-pasted from `leftBound`; `dimFloorDb` to -40; `defaultDimDb` to -12.
+
+### The two survivors, and why they are not gaps
+
+Both were proved by enumeration over 12992 states, which is all 64 latch
+combinations against 201 dim amounts across the whole clamp range plus two
+outside it, rather than by argument. The program is reproduced in this
+entry's commit message.
+
+**The mono compound reading's `invertLeft && invertRight` replaced by `||`.**
+Reaching that branch means the fold is on, neither leg is cut, and the two
+polarities are equal, because every earlier branch has already returned on
+those cases. With the two equal, `&&` and `||` are the same function. 0 states
+out of 12992 where they differ.
+
+**`isNeutral`'s `leftFromRight == 0.0` conjunct replaced by a second test of
+`rightFromLeft`.** Unreachable rather than untested, and for a reason worth
+keeping: `isNeutral` requires `leftFromLeft == 1.0`, and under the fold
+`leftFromLeft` is `foldPerLeg` times a leg gain, at most 0.5. So no folded
+state can pass the first conjunct at all, and every state that does is on the
+pass-through branch, where `leftFromRight` is the literal `0.0`. 0 states out
+of 12992 where the dropped conjunct could be false. This is the same survivor
+the pre-merge audit recorded in `Research/BACKLOG.md` as "argued to be
+unreachable", and the argument holds.
+
+### Two comments corrected
+
+Both of the shape this project keeps meeting, and neither found by a mutation.
+
+`ControlRoomTest.cpp` carried a paragraph saying the header's comment claimed
+the dim range "covers every published one", that this overstated what the
+floor does, and that the overstatement was being "reported rather than
+failed". The header says the opposite in two places, explicitly: "the console
+side of that spread and not all of it" at the top, and "rather than a claim to
+cover everything published" at `dimFloorDb`. And nothing was ever reported:
+there is no `printf` for it. So the note was sending the next reader to fix a
+sentence that was already right, which is the same failure as a comment
+claiming the opposite of its code, pointed the other way.
+
+`MixerComponent.h`'s layout comment said the longest thing the section can say
+about itself is the difference listen. The one output note, which is appended
+to a reduced reading, had already passed it. Corrected to explain the two
+lines rather than to name a winner that goes stale every time a reading is
+added.
+
+### What was looked at and found sound
+
+The arithmetic half of this header is the best tested thing this log has
+covered. Every arithmetic mutation that could change an output was caught, and
+both survivors are provably unreachable. Also checked and found correct, by
+reading rather than by test:
+
+- The export containment, which is the one claim in this header that a test
+  here cannot make. `applyControlRoom` has exactly one call site, at the end
+  of the device callback, and `renderOffline` does not reference it.
+  `measureMix` runs upstream of it, so loudness and true peak read the mix and
+  not the speaker feed. This is the one place in the engine where not
+  duplicating a path is the requirement rather than the hazard, and it holds.
+- The audio thread rules. No allocation, no lock, no logging; one `std::pow`
+  per block and only with the dim engaged; `describe` returns string literals
+  and is never called from the callback.
+- New state's four things are not owed here, because the latches are
+  deliberately not project state and nothing in `ProjectIO` or `Project`
+  touches them.
+
+### The two gaps the control room shipped with
+
+Both are recorded in `RELEASE_NOTES.md` and `Research/BACKLOG.md`, and both
+are still only gaps. The dim amount is relearned on every launch, and the test
+pins `defaultDimDb` at exactly -20 so the figure a relaunch lands on cannot
+drift silently. There is no light on the main window saying the speakers are
+not carrying the mix, which nothing in a JUCE free header can check.
+
+Worth noting for whoever closes the first one: nothing asserts that the amount
+is absent from the save path, so a half plumbed version of it would not fail
+anything, and neither would persisting the latches, which is the decision this
+section's whole safety argument rests on.
+
+### Verdict
+
+One real fault, in the words rather than in the signal, and nobody would have
+heard it: the line of words collapsed eighteen states onto six readings,
+losing the one control that cannot announce itself. Fixed, with the assertion
+that would have caught it. The arithmetic is clean and does not need
+re-auditing unless it changes.
+
+---
+
 ## 2026-11-26: the control surface of the instrument, which every patch is saved through
 
 ### What is being looked at

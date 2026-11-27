@@ -259,12 +259,17 @@ int main()
         // UAD's -17 default and the PreSonus and Grace floors at -30 are all
         // inside it.
         //
-        // UAD Console's lowest discrete step, which that same comment cites
-        // as -60 dB, is deliberately NOT asserted here: it is outside this
-        // range, so the comment's "covers every published one" overstates
-        // what the floor does. Reported rather than failed, because -30 is a
-        // defensible floor for a main speaker path and the claim is what is
-        // wrong, not the number.
+        // UAD Console's lowest discrete steps, which that same comment cites
+        // as -43, -51 and -60 dB, are deliberately NOT asserted here. They
+        // are outside this range on purpose, and the header says so in both
+        // places rather than claiming to cover everything published: "the
+        // console side of that spread and not all of it" at the top, and "a
+        // 60 dB dim is a mute with extra steps" at `dimFloorDb`. So there is
+        // nothing to report and nothing to fail. This paragraph used to say
+        // the header overstated the range and that the overstatement was
+        // being reported; the header had already been corrected and no
+        // report was ever printed, so the note was sending the next reader to
+        // fix a sentence that was right.
         for (double published : { -12.0, -17.0, -20.0, -30.0, -6.0, -9.0 })
             check (published >= dimFloorDb && published <= dimCeilingDb,
                    "the range should cover the published dim amount "
@@ -1091,6 +1096,134 @@ int main()
                 check ((text.find ("difference") != std::string::npos) == cancels,
                        "describe says \"" + text + "\" where centred content "
                            + (cancels ? "cancels" : "survives") + " for " + describeState (s));
+
+                // ---- which leg, and which way up ------------------------
+                //
+                // Everything above this point reads the words as four coarse
+                // categories: mix, silent, mono, difference. All four are
+                // insensitive to left against right and to how many legs are
+                // involved, so every leg name in `describe` could be
+                // transposed and this section passed. That is the one thing
+                // the function exists to get right, and the one fault it has
+                // already shipped was of exactly that shape.
+                //
+                // So the leg the words name is checked against the leg the
+                // matrix actually carries, derived from the coefficients
+                // rather than from the buttons: a leg is heard when it
+                // reaches either speaker at all, and it is upside down when
+                // it reaches one with a negative coefficient.
+                const bool leftHeard  = m.leftFromLeft  != 0.0 || m.rightFromLeft  != 0.0;
+                const bool rightHeard = m.leftFromRight != 0.0 || m.rightFromRight != 0.0;
+
+                const bool leftFlipped  = m.leftFromLeft  < 0.0 || m.rightFromLeft  < 0.0;
+                const bool rightFlipped = m.leftFromRight < 0.0 || m.rightFromRight < 0.0;
+
+                // A leg reaches the two speakers with one coefficient or with
+                // two equal ones, so it cannot arrive upright at one and
+                // upside down at the other. Asserted because the check below
+                // reads a single polarity per leg and would be meaningless if
+                // that were not true.
+                check (! (m.leftFromLeft > 0.0 && m.rightFromLeft < 0.0)
+                    && ! (m.leftFromLeft < 0.0 && m.rightFromLeft > 0.0),
+                       "the left leg arrives at the two speakers with opposite signs for "
+                           + describeState (s));
+                check (! (m.leftFromRight > 0.0 && m.rightFromRight < 0.0)
+                    && ! (m.leftFromRight < 0.0 && m.rightFromRight > 0.0),
+                       "the right leg arrives at the two speakers with opposite signs for "
+                           + describeState (s));
+
+                const bool saysLeftOnly  = text.find ("left leg only")  != std::string::npos;
+                const bool saysRightOnly = text.find ("right leg only") != std::string::npos;
+
+                if (saysLeftOnly)
+                    check (leftHeard && ! rightHeard,
+                           "describe says \"" + text + "\" where the left leg is "
+                               + (leftHeard ? "heard" : "not heard") + " and the right leg is "
+                               + (rightHeard ? "heard" : "not heard") + " for " + describeState (s));
+
+                if (saysRightOnly)
+                    check (rightHeard && ! leftHeard,
+                           "describe says \"" + text + "\" where the right leg is "
+                               + (rightHeard ? "heard" : "not heard") + " and the left leg is "
+                               + (leftHeard ? "heard" : "not heard") + " for " + describeState (s));
+
+                // A named cut is the mirror of a named survivor: the leg the
+                // words cut must be the one that is gone, and the other must
+                // still be there, or the reading is of a different state.
+                if (text.find ("left leg cut") != std::string::npos)
+                    check (! leftHeard && rightHeard,
+                           "describe says \"" + text + "\" where the left leg is "
+                               + (leftHeard ? "heard" : "not heard") + " and the right leg is "
+                               + (rightHeard ? "heard" : "not heard") + " for " + describeState (s));
+
+                if (text.find ("right leg cut") != std::string::npos)
+                    check (! rightHeard && leftHeard,
+                           "describe says \"" + text + "\" where the right leg is "
+                               + (rightHeard ? "heard" : "not heard") + " and the left leg is "
+                               + (leftHeard ? "heard" : "not heard") + " for " + describeState (s));
+
+                // ---- a polarity invert is never dropped -----------------
+                //
+                // This is the one property in this file that is about the
+                // words rather than about the sound, and it is here because
+                // of what the sound does not do. A cut goes silent, a dim
+                // goes quiet and a fold collapses the image, so all three
+                // announce themselves the moment they are pressed. A
+                // polarity invert announces nothing: both legs flipped is
+                // inaudible on the speaker pair, and one leg flipped is
+                // inaudible on anything centred until something else joins
+                // it. `isNeutral` argues that case at length and reports it.
+                //
+                // So for that one control these words are the only report
+                // there is, and two states that differ only by a polarity
+                // reaching a speaker must not read the same. Counted off the
+                // matrix, so the words have to follow the signal rather than
+                // the buttons: a flipped leg that is cut is not flipped at
+                // the speaker and must not be mentioned.
+                const int flipped = (leftHeard  && leftFlipped  ? 1 : 0)
+                                  + (rightHeard && rightFlipped ? 1 : 0);
+
+                // The difference reading counts as naming it: a difference
+                // listen is a statement that one leg is upside down, which is
+                // the whole of what it means.
+                const bool saysFlipped = text.find ("invert") != std::string::npos
+                                      || text.find ("difference") != std::string::npos;
+
+                check (saysFlipped == (flipped > 0),
+                       "describe says \"" + text + "\" where " + std::to_string (flipped)
+                           + " of the legs reaching a speaker are upside down, for "
+                           + describeState (s));
+
+                // And where the words count the flipped legs, the count has
+                // to be the right one. Without this, relaxing the two legged
+                // reading to anything that fires on one leg would go
+                // unnoticed, because the check above only asks whether a
+                // flip is mentioned at all.
+                if (text.find ("both legs inverted") != std::string::npos)
+                    check (flipped == 2,
+                           "describe says \"" + text + "\" where " + std::to_string (flipped)
+                               + " leg(s) are upside down, for " + describeState (s));
+
+                if (text.find ("one leg inverted") != std::string::npos)
+                    check (flipped == 1,
+                           "describe says \"" + text + "\" where " + std::to_string (flipped)
+                               + " leg(s) are upside down, for " + describeState (s));
+
+                // A flip pinned to a named leg has to be pinned to the leg
+                // that is really upside down, which is the leg name check
+                // again in the one reading that carries both a cut and a
+                // polarity.
+                if (text.find ("left leg inverted") != std::string::npos)
+                    check (leftHeard && leftFlipped,
+                           "describe says \"" + text + "\" where the left leg is "
+                               + (leftHeard ? "heard" : "not heard") + " and "
+                               + (leftFlipped ? "flipped" : "upright") + " for " + describeState (s));
+
+                if (text.find ("right leg inverted") != std::string::npos)
+                    check (rightHeard && rightFlipped,
+                           "describe says \"" + text + "\" where the right leg is "
+                               + (rightHeard ? "heard" : "not heard") + " and "
+                               + (rightFlipped ? "flipped" : "upright") + " for " + describeState (s));
             }
 
         std::printf ("  neutral:   %s\n", describe (State {}));
@@ -1309,6 +1442,29 @@ int main()
                 check ((words.find ("difference") != std::string::npos) == false,
                        "nothing on one leg is described as a difference, said \"" + words
                            + "\" for " + describeState (s));
+
+                // Nor is the leg that is not there ever named. The fault the
+                // reduction exists to prevent was a reading about the right
+                // leg on a device that has no right leg, so the absence of
+                // that word is the property, asserted directly rather than
+                // left to follow from the three latches being cleared.
+                check (words.find ("right") == std::string::npos,
+                       "a one leg reading names the leg that is not there, said \"" + words
+                           + "\" for " + describeState (s));
+
+                // And the polarity rule holds here too, against the one
+                // coefficient that is actually applied rather than against a
+                // matrix with a column nothing reads. A leg arriving upside
+                // down is as inaudible on one speaker as it is on two, and on
+                // one speaker this line is even more alone: the fold, the cut
+                // of the absent leg and its polarity button are all greyed
+                // out, so there is less on the panel to read it off.
+                const bool flippedOne = m.leftFromLeft < 0.0;
+
+                check ((words.find ("invert") != std::string::npos) == flippedOne,
+                       "a one leg reading says \"" + words + "\" where the leg arrives "
+                           + (flippedOne ? "upside down" : "upright") + " for "
+                           + describeState (s));
             }
         }
     }

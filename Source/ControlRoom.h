@@ -408,7 +408,39 @@ namespace ControlRoom
 
     /** What the row of buttons says it is doing, for the one line on the
         master strip. Built here rather than at the place that shows it, so
-        the words cannot describe a state the matrix does not have. */
+        the words cannot describe a state the matrix does not have.
+
+        A POLARITY INVERT IS NEVER DROPPED, AND NOTHING ELSE IS GUARANTEED
+
+        Three of the four controls in this section announce themselves the
+        moment they are pressed: a cut goes silent, a dim goes quiet, a fold
+        collapses the image. A polarity invert announces nothing. Both legs
+        flipped is inaudible on the speaker pair, and one leg flipped is
+        inaudible on anything centred until something else joins it, which is
+        the case `isNeutral` above argues at length and reports for exactly
+        that reason.
+
+        So for that one control this line is the only report there is, and it
+        shipped dropping it in eighteen of the sixty four states. "mono" and
+        "mono" for a fold with both legs upright and a fold with both legs
+        upside down, "left leg cut" and "left leg cut" for a surviving leg
+        arriving either way up: two states reading the same, character for
+        character, with the inaudible one losing. The six buttons do each show
+        their own latch, which is the mitigation and is why this was a
+        reporting fault rather than a fault anybody would have heard, but the
+        buttons are in a window that is closed at launch and this line is
+        what gets read. Now every reading that can carry a flip carries it,
+        and the test counts the flipped legs off the matrix rather than off
+        the buttons, so a leg that is flipped and then cut is correctly not
+        mentioned.
+
+        The dim is deliberately not named in the compound readings, and that
+        is a decision rather than the same oversight twice. It is the one
+        control here whose amount already has a home, on the face of the
+        button that applies it, and it is 6 to 30 dB of level change, so it
+        is heard before it is read. A line that named every latch would be a
+        list of the buttons sitting above it rather than a sentence about the
+        feed. */
     inline const char* describe (const State& s) noexcept
     {
         if (isNeutral (s))
@@ -429,14 +461,32 @@ namespace ControlRoom
         // version of this said it, reachable in four button presses, and the
         // test that pins the difference reading against the actual
         // cancellation is what found it.
-        if (s.mono && s.cutLeft)      return "control room: mono, right leg only";
-        if (s.mono && s.cutRight)     return "control room: mono, left leg only";
+        //
+        // Each of these four readings names the surviving leg, so each also
+        // has to say which way up it is arriving. See the note on polarity
+        // below: three of the four controls in this section announce
+        // themselves and this one does not, so dropping it here would leave
+        // two different states reading the same, and the inaudible one is the
+        // one that gets dropped.
+        if (s.mono && s.cutLeft)
+            return s.invertRight ? "control room: mono, right leg only, inverted"
+                                 : "control room: mono, right leg only";
+        if (s.mono && s.cutRight)
+            return s.invertLeft ? "control room: mono, left leg only, inverted"
+                                : "control room: mono, left leg only";
 
         if (s.mono && (s.invertLeft != s.invertRight))
             return "control room: difference, what mono destroys";
-        if (s.mono)                   return "control room: mono";
-        if (s.cutLeft)                return "control room: left leg cut";
-        if (s.cutRight)               return "control room: right leg cut";
+        if (s.mono)
+            return s.invertLeft && s.invertRight
+                       ? "control room: mono, both legs inverted"
+                       : "control room: mono";
+        if (s.cutLeft)
+            return s.invertRight ? "control room: left leg cut, right leg inverted"
+                                 : "control room: left leg cut";
+        if (s.cutRight)
+            return s.invertLeft ? "control room: right leg cut, left leg inverted"
+                                : "control room: right leg cut";
         if (s.invertLeft != s.invertRight)
             return "control room: one leg inverted";
         if (s.invertLeft && s.invertRight)
