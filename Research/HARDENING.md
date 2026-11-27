@@ -243,6 +243,14 @@ is absent from the save path, so a half plumbed version of it would not fail
 anything, and neither would persisting the latches, which is the decision this
 section's whole safety argument rests on.
 
+### CI on the merged tree
+
+`tests`, `ubuntu-latest` and `windows-latest` all green on #97 before the
+squash and again on the merged tree. `macos-latest` was still building both
+times, which is the usual backlog rather than a signal, and nothing in this
+change is Mac specific: the one file here that nothing local can compile is
+`MixerComponent.h`, and it is two lines of comment.
+
 ### Verdict
 
 One real fault, in the words rather than in the signal, and nobody would have
