@@ -405,10 +405,12 @@ only for a peak hold on a very short transient.
 
 Merged as #96 with the `tests` job, `windows-latest` and `ubuntu-latest` green
 on the final commit, which is the rule this lane runs under; macOS was still
-building and is routinely the slow one. The platform builds matter more than
-usual here because `MixReportPanel.h` is the one file in the change that
-nothing local can compile, and they are what says the panel's layout
-arithmetic, its JUCE calls and the new engine members are real.
+building at that point and is routinely the slow one. **All four jobs then came
+green on the merged tree as well**, macOS included, which is the state to
+record rather than the state at the moment of merging. The platform builds
+matter more than usual here because `MixReportPanel.h` is the one file in the
+change that nothing local can compile, and they are what says the panel's
+layout arithmetic, its JUCE calls and the new engine members are real.
 
 Final verification, in one place so a later night does not have to reconstruct
 it:
@@ -425,8 +427,9 @@ it:
   figure the header quotes about narrow bands comes from.
 
 **No release was cut, and the reason is specific rather than general.** v0.9.0
-went out yesterday, 2026-11-26. One user visible change the day after a release
-is not a reason to cut another, and the standing question at the top of this
+went out yesterday, 2026-11-26. All three platforms built, so there was nothing
+stopping one; that is a permission rather than a reason. One user visible change
+the day after a release is not a reason to cut another, and the standing question at the top of this
 file is about the opposite failure: a pile that nobody ships. There is no pile.
 The notes are written and staged under a new `## Since v0.9.0` heading, so
 whoever cuts the next one has them, and the thing that would make it worth
