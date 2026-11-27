@@ -723,25 +723,38 @@ public:
     // the display. All the audio thread does here is copy.
 
     /** Starts and stops the copy. Off whenever the display is not on screen,
-        because a ring nobody reads is work for nothing. */
-    void setSpectrumListening (bool shouldListen) noexcept { spectrumListening.store (shouldListen); }
-    bool isSpectrumListening() const noexcept              { return spectrumListening.load(); }
+        because a ring nobody reads is work for nothing.
+
+        Turning it on also marks everything already in the ring as stale, which
+        matters more than it sounds. The ring's counter is cumulative and is
+        never reset, so a read taken the moment the display comes back would
+        succeed and hand over whatever was playing when it was last closed.
+        The analyser seeds its ballistics on the first frame it is given, so
+        that would be drawn at full confidence: ten minutes of silence on the
+        output and a loud spectrum on screen until a whole window of fresh
+        audio had arrived. */
+    void setSpectrumListening (bool shouldListen) noexcept;
+    bool isSpectrumListening() const noexcept { return spectrumListening.load(); }
 
     /** The most recent frame of the mix, newest last, one vector per leg.
 
         Both must already be sized to the frame wanted and both must be the
-        same size. The two legs are one frame: a display that analysed
-        different stretches of them would be describing a stereo image that
-        never existed.
+        same size.
 
-        Returns false if there is not that much audio yet or if the writer
-        overtook either copy, and on false NEITHER vector may be used, the same
-        contract `Tuner::InputRing::readLatest` states for its own destination.
-        One leg tearing refuses the whole frame rather than half of it, because
-        the two are summed and half a frame of one leg is not a quieter mix, it
-        is a different one.
+        The two legs really are one frame, because the ring holds them
+        interleaved and this takes one snapshot of it. That is the reason for
+        the interleaving: with a ring each, a block arriving between the two
+        reads leaves the legs a whole block apart, and the engine's own bound
+        on a block is 8192 samples, which is four times the shortest frame this
+        display asks for. So the two could have described entirely disjoint
+        stretches of audio while a comment said they were one frame.
+
+        Returns false if there is not that much FRESH audio yet, meaning
+        written since the display was last turned on, or if the writer overtook
+        the copy. On false the vectors must not be used, which is the contract
+        `Tuner::InputRing::readLatest` states for its own destination.
     */
-    bool readSpectrumFrame (std::vector<float>& left, std::vector<float>& right) const;
+    bool readSpectrumFrame (std::vector<float>& left, std::vector<float>& right);
 
     /** The names the device gives its active inputs, in the order the audio
         callback hands them over.
@@ -1334,10 +1347,17 @@ private:
     // taken. A fixed ring removes the question instead of answering it.
     Tuner::InputRing    tunerRing;
 
-    std::atomic<bool>   spectrumListening { false };
-    // Index 0 is the left leg and 1 the right, which is the order every other
-    // pair in this engine uses.
-    Tuner::InputRing    spectrumRings[2];
+    std::atomic<bool>          spectrumListening { false };
+    std::atomic<std::uint64_t> spectrumFreshFrom { 0 };
+    // The two legs interleaved, left first, which is the order every other
+    // pair in this engine uses. One ring so that a snapshot of it is one
+    // frame of both legs.
+    Tuner::InputRing           spectrumRing;
+    // Sized once, in the constructor, because the audio thread writes through
+    // it and must not allocate.
+    std::vector<float>         spectrumInterleave;
+    // The message thread's side of the same arrangement.
+    std::vector<float>         spectrumSnapshot;
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;

@@ -67,9 +67,12 @@
     A constant ratio band display summed as power already reads pink noise
     flat, and exactly rather than nearly. Pink noise has power density c/f, so
     a band holds the integral of c/f from f1 to f2, which is c * ln(f2/f1), and
-    f2/f1 is G^(1/b) for every band whatever its centre. Measured across 20 Hz
-    to 20 kHz the spread is 6.2e-15 dB at one third octave and 1.6e-14 dB at
-    one sixth.
+    f2/f1 is G^(1/b) for every band whatever its centre. So every band holds the
+    same power, and measured across 20 Hz to 20 kHz the spread between them is
+    a few times 1e-14 dB, which is floating point residue and nothing else. No
+    figure is quoted to two places here because the residue is not reproducible
+    between two ways of writing the same expression, and quoting it as if it
+    were would claim more than can be had.
 
     So the band summing and the 3.01 dB per octave part of the conventional
     4.5 are the same correction applied twice. Do both and pink noise, the
@@ -107,15 +110,20 @@
       `resolves` below. No source anywhere for this; the precedent is this
       project's own `Tuner::InputRing`, which refuses a snapshot it cannot
       serve safely rather than returning a torn one.
-    - The window, and its 75 per cent overlap. Voxengo's Primary guide names
-      Hann as its default and calls it "best for music analysis"; every other
-      manual read documents the control and withholds the default.
+    - The window. Voxengo's Primary guide names Hann as its default and calls
+      it "best for music analysis"; every other manual read documents the
+      control and withholds the default.
+    - How often a reading is taken, which here is not a parameter at all: there
+      is no overlap mechanism, and the hop is however often the display asks
+      for a frame. See `transformSizes` for what that means and what it
+      costs.
     - The tilt pivot of exactly 1000 Hz. SPAN and Pro-Q both say only "around
       1 kHz" and neither publishes a number. The pivot only slides the whole
       curve up or down, so it is cosmetic, but this cannot claim to match
       either product's numbers.
-    - A full scale sine reading 0 dB, rather than -3.01. See
-      `fullScaleSineOffsetDb`.
+    - Referencing the scale to a full scale sine in BOTH channels, so that one
+      reads 0 dB and a single channel carrying full scale reads -3.01. See
+      `fullScaleReferenceDb`.
     - Infinite peak hold with a manual reset. The most widely documented
       behaviour (SPAN's "Max", Pro-Q's Freeze, Ableton's Max, Insight's
       Infinite, and one of Logic MultiMeter's options), but Logic also
@@ -255,8 +263,17 @@ inline double normalisedBandwidth (int bandsPerOctave) noexcept
     there is no honest answer: Annex E.3 of IEC 61260-1:2014 specifies the
     labels for other bandwidths, it is normative, and it was not read. Inventing
     a preferred series for sixths and calling it standard is exactly the kind of
-    plausible invention this project keeps meeting, so a sixth octave display
-    labels nothing here and the panel labels its exact centres instead.
+    plausible invention this project keeps meeting.
+
+    So a display at any other bandwidth has no band to hang a preferred label
+    on, and the panel does not try: it labels its frequency axis by frequency,
+    placing each preferred frequency where it actually falls, which at one
+    sixth octave is the join between the two bands nested in a third. An
+    earlier version matched labels to band centres within three per cent, which
+    at one sixth octave matches nothing at all, since the exact nesting puts
+    every third octave centre 5.93 per cent from the nearest sixth octave
+    centre. That display had sixty two bars and a blank axis, and an audit
+    found it.
 */
 inline double nominalThirdOctaveFrequency (int x, int bandsPerOctave) noexcept
 {
@@ -320,11 +337,19 @@ inline double audioRangeUpperEdge() noexcept
     Every band that fits entirely inside the audio range and entirely below
     Nyquist. At one third octave and 48 kHz that is the full 31 bands, 20 Hz to
     20 kHz nominal. At 44.1 kHz the 20 kHz band is left out, because its upper
-    edge is 22387.2 Hz and Nyquist is 22050: truncated at Nyquist that band
-    reads 0.74 dB low, and the deficit changes with the sample rate, so it
-    would be a band that quietly means something different on different
+    edge is 22387.2 Hz and Nyquist is 22050. Truncated there it would read
+    0.30 dB low on a 1/f density and 0.33 dB low on a flat one, which is small,
+    and the point is not the size: the deficit changes with the sample rate, so
+    it would be a band that quietly means something different on different
     hardware. Left out rather than shown wrong, which is the same decision as
     `resolves` below and for the same reason.
+
+    An earlier draft of this comment said 0.74 dB, which came from the research
+    this was built from and does not reproduce: the figure is
+    `10*log10(ln(22050/17782.79) / ln(22387.21/17782.79))`, which is 0.296. Left
+    on the record rather than quietly corrected, because a number that is
+    present, plausible and wrong is what this project keeps meeting, and an
+    audit found this one.
 
     Each band's lower edge is taken from its neighbour's upper edge rather than
     computed again, so the display is exactly contiguous. Computed separately
@@ -452,11 +477,11 @@ inline double coherentGain (const std::vector<double>& window)
     Dividing by the noise bandwidth instead makes the per bin quantity the
     power in one bin's worth of bandwidth, so a band sum is the integral of the
     power density across the band, which is what a band level is. Measured on
-    the same two signals: a full scale sine's band reads 0.0000 dB, and the
-    band powers of a broadband signal filling the display sum to its own mean
-    square to within 2 parts in 10000. Both at once, which is the check that
-    this is the right constant and not a coincidence that happens to suit a
-    tone.
+    the same two signals: a full scale sine in both channels reads 0.0000 dB in
+    its band, and the band powers of a broadband signal filling the display sum
+    to that signal's own mean square to within 0.016 dB, which is 37 parts in
+    10000. Both at once, which is the check that this is the right constant and
+    not a coincidence that happens to suit a tone.
 
     Written out at this length because the mistake is invisible. It is a fixed
     1.7609 dB on everything, so the shape of the spectrum is untouched, pink
@@ -530,28 +555,47 @@ inline double idealDecayDbPerSecond (double timeConstant) noexcept
 //==============================================================================
 // Display conventions.
 
-/** What to add to `10 * log10(mean square)` so that a full scale sine reads
-    0 dB: 10*log10(2), which is 3.0103.
+/** What the levels are read against: A FULL SCALE SINE IN BOTH CHANNELS READS
+    EXACTLY 0 dB, which needs no offset at all, so this is zero.
 
-    A full scale sine has a mean square of one half, so measured honestly it is
-    3.01 dB below full scale, and AES17 designates exactly that RMS value as
-    0 dBFS. The display here is peak referenced instead, so a full scale sine
-    reads 0.0 dB, and the reasons are both about the rest of this studio rather
-    than about a standard. It is what Voxengo documents for SPAN's "Align 0 dB"
-    control, which aligns "a stationary 1 kHz sine at 0 dBFS to 0 dB visually,
-    regardless of Block Size". And it is what every peak meter in this studio
-    already says about the same tone, so a band reading and a meter reading
-    agree.
+    It is zero for a reason rather than by luck, and the reason is worth having
+    because an earlier version of this file added 3.0103 here and was wrong.
+    A full scale sine has a mean square of one half. The two channels are
+    summed as powers, so a full scale sine present in both of them sums to
+    exactly one, and ten times the logarithm of one is zero. The factor of two
+    from peak referencing a single channel and the factor of two from having
+    two channels are the same factor of two, which is why adding the first on
+    top of the second read every stereo mix 3.01 dB high.
 
-    The consequence to write down, because somebody will report it as a bug:
-    this display reads 3.01 dB above an AES17 RMS reading of the same tone, and
-    it does not agree with `LoudnessMeter.h` on a sine either, because BS.1770
-    is an RMS loudness scale with its own -0.691 dB offset on top. Both are
-    correct. Sound Forge references the other way, so that a full scale sine
-    reads -3, and Adobe Audition offers the user the choice, so the industry
-    genuinely disagrees and this is a choice rather than a specification.
+    The reference is therefore the stereo one, and that is the choice. The mix
+    report measures the master, which is always two channels, so referencing to
+    a full scale stereo tone is referencing to the loudest thing that can
+    arrive: the top of the display is where full scale material sits, and the
+    reading agrees with what this studio's peak meters say about the same tone.
+    It is also what Voxengo documents for SPAN's "Align 0 dB" control, which
+    aligns "a stationary 1 kHz sine at 0 dBFS to 0 dB visually, regardless of
+    Block Size", since that is a claim about the signal as presented rather
+    than about one leg of it.
+
+    THE CONSEQUENCE, because somebody will report it as a bug: a full scale
+    sine in ONE channel reads -3.01 dB, not zero. That is correct. One leg of a
+    stereo master carrying full scale is half the power of two legs carrying
+    it, and this display is about how much of the mix sits in a band.
+
+    Two more disagreements, both expected. AES17 designates the RMS value of a
+    full scale sine as 0 dBFS, which for a single channel is 3.01 dB below this
+    scale; Sound Forge references that way and Adobe Audition lets the user
+    pick, so the industry does not agree and this is a choice rather than a
+    specification. And this does not agree with `LoudnessMeter.h` on a tone,
+    because BS.1770 is an RMS loudness scale with its own -0.691 dB offset: a
+    full scale stereo sine reads 0.0 dB here and -3.70 LUFS there. What the two
+    DO agree about is which signal "the mix" is, because both sum the channels
+    as powers with a gain of one, so a change that moves one moves the other.
+
+    A tilt can still put a band above this, which is why the display draws
+    above zero rather than claiming nothing can reach it: see the tilt below.
 */
-inline constexpr double fullScaleSineOffsetDb = 3.0102999566398120;
+inline constexpr double fullScaleReferenceDb = 0.0;
 
 /** The tilt a per FFT bin display needs to make pink noise flat: 3.0103 dB per
     octave, which is `10 * log10(2)` again and for the same reason, one octave
@@ -590,10 +634,33 @@ inline constexpr double floorDb = -200.0;
 
 /** The transform sizes the display offers, smallest first.
 
-    2048 is 43 ms at 48 kHz and cannot resolve anything below 25 Hz. 16384 is
-    341 ms and reaches the bottom band. That is the trade FabFilter documents
-    for Pro-Q's Resolution control, in its own words: more low frequency
-    precision against a lower update rate and a slower attack. */
+    This is the trade FabFilter documents for Pro-Q's Resolution control, in
+    its own words: more low frequency precision against a lower update rate and
+    a slower attack. What it costs here, as the lowest one third octave band
+    that resolves at all, measured:
+
+        rate        2048      4096      8192     16384
+        44.1 kHz   100 Hz     50 Hz     25 Hz     20 Hz
+        48 kHz     125 Hz     63 Hz   31.5 Hz     20 Hz
+        96 kHz     250 Hz    125 Hz     63 Hz   31.5 Hz
+        192 kHz    500 Hz    250 Hz    125 Hz     63 Hz
+
+    So the shortest window does not lose a band or two at the very bottom, it
+    loses the whole bass range: eight of the thirty one bands at 48 kHz, and
+    twenty one of the sixty two at one sixth octave. And the longest window
+    reaches the 20 Hz band only at 44.1 and 48 kHz. An earlier version of this
+    comment said 2048 "cannot resolve anything below 25 Hz", which was out by
+    two octaves and was found by an audit.
+
+    There is no overlap mechanism anywhere in this file, so these lengths also
+    decide how much of the audio is looked at at all. The hop is however often
+    the display asks for a frame, which is its refresh rate: at 48 kHz a 16384
+    window at twenty frames a second overlaps by 85 per cent, and a 2048 window
+    at the same rate leaves a 7 ms gap between frames, so 15 per cent of the
+    audio is never analysed. At 192 kHz with the shortest window the gap is
+    four fifths of the audio. Nothing in a steady mix cares, and a short
+    transient landing in a gap is simply not seen, which is the one thing to
+    know before trusting a peak hold at the shortest window. */
 inline constexpr int transformSizes[4] = { 2048, 4096, 8192, 16384 };
 
 inline constexpr int largestTransformSize = 16384;
@@ -617,6 +684,23 @@ inline constexpr int largestTransformSize = 16384;
 inline constexpr int ringCapacity (int largestBlockSamples) noexcept
 {
     return largestTransformSize + 4 * largestBlockSamples;
+}
+
+/** The same figure for a ring holding the two legs interleaved, which is what
+    the engine actually keeps.
+
+    One ring rather than two, so the legs are aligned by construction: one
+    write, one tear check, and no way for a block arriving between two separate
+    reads to leave the display analysing a different stretch of the left from
+    the right. Two rings were tried first and the comment claiming they were
+    one frame was not true of them, which an audit pointed out.
+
+    Everything is in interleaved samples, so both the snapshot and the block
+    bound double, and this doubles with them.
+*/
+inline constexpr int interleavedRingCapacity (int largestBlockSamples) noexcept
+{
+    return 2 * ringCapacity (largestBlockSamples);
 }
 
 /** What an unresolved band reads: far below the floor, so a caller that forgets
@@ -736,49 +820,80 @@ public:
         than a gap, because 20 Hz is the frequency people argue about most and
         the one nobody can check by ear.
 
+        THE REFUSED BANDS ARE ALWAYS THE LOWEST ONES, so a display has one
+        boundary rather than holes in it. A band's width is a fixed fraction of
+        its centre and the bin width does not depend on frequency, so the width
+        in bins grows monotonically across the display and the refusals are a
+        prefix of it. Measured at every rate, size and bandwidth the studio
+        offers, by `Tests/SpectrumProbe.cpp`. That matters because it says the
+        stripes are the bottom edge of the display rather than a gap in the
+        middle of it.
+
         WHAT A RESOLVED BUT STILL NARROW BAND DOES, because one bin is the
         threshold for showing a band at all and not the threshold for the
-        reading being exact. There are two separate effects here and the first
-        draft of this comment ran them together, which made the published
-        figures mean nothing: a sweep that avoided the band edges measured the
-        second, and a sweep that included them measured the first.
+        reading being exact. Every figure below comes from that probe, over the
+        whole matrix of rates, sizes and bandwidths. It is worth saying why the
+        probe exists: the first version of this comment was measured at 48 kHz
+        with the longest window and the one third octave band set, which is the
+        only combination in which every band resolves, and three of the numbers
+        it published were therefore wrong. An audit found them.
 
-        A TONE SITTING ON A JOIN READS ABOUT 3.3 dB DOWN IN BOTH BANDS, AT
-        EVERY WIDTH AND EVERY TRANSFORM SIZE. Measured between -2.9 and -3.3
-        dB across every resolved band at four sizes. That is not a defect and
-        not something a larger transform improves: half the tone's power is
-        either side of the line, both neighbours read their half, and the two
-        together are right. Every band display does this, whatever its filters
-        are made of.
+        A tone sitting on a join between TWO RESOLVED BANDS is shared between
+        them and nothing is lost: each reads about 3 dB down and the two
+        together are right. That part is inherent in any band display, at any
+        width and any transform size, and no window length improves it.
 
-        THE WIDTH DECIDES HOW MUCH OF THE BAND'S INTERIOR IS EXACT, and that
-        is the part a transform size can fix. The periodic Hann spreads a tone
-        over three bins, so a band of about that width cannot hold the whole
-        main lobe even when the tone is at its centre. Measured at 48 kHz, for
-        a tone at the band's own centre frequency:
+        "Between two resolved bands" means three bins inside the resolved span
+        rather than one band above the boundary, and the difference matters.
+        The window spreads a tone about two bins either side, and a narrow band
+        is a fraction of a bin wide, so a tone two or three bands above the
+        boundary can still put a tail of itself into the stripes. Inside that
+        margin the total over the display is the tone's own power to within
+        0.02 dB; the test asserts it there and asserts the bounded loss
+        everywhere else, rather than one loosened tolerance over both.
 
-            width in bins      1.2    1.6    2.0    2.5    3.1    4.0
-            error at centre   -2.2   -1.1   -0.4   -0.3   -0.1    0.0
+        A tone sitting on THE ONE BOUNDARY AT THE BOTTOM, where the band below
+        is refused, is a different matter and this is the real cost of the
+        threshold. Half its lobe lands in a band that is drawn as stripes, so
+        it is not shared, it is gone from the display. Worst case measured:
+        the resolved band reads 4.09 dB low, and the total over the whole
+        display is 3.28 dB low, meaning 53 per cent of the tone is drawn
+        nowhere. That is at 44.1 kHz with a 4096 window at one sixth octave,
+        for a tone at 89 Hz. So the stripes do not only mean "no reading here",
+        they also mean "and the bar next to me is reading low". The panel says
+        so; a longer window moves the boundary down and the problem with it.
 
-        So a band under about three bins wide reads even a centred tone low, by
-        at most a couple of decibels, and from four bins up it does not.
+        Away from that boundary, the band's width decides how much of its
+        interior is exact, and this is the part a longer window fixes. The
+        periodic Hann spreads a tone over three bins, so a band of about that
+        width cannot hold the whole main lobe even with the tone at its centre:
 
-        One bin is still where the refusal is drawn rather than four, and the
-        reason is what the two effects have in common: NOTHING IS LOST, IT IS
-        ONLY SHARED. The test asserts that the total over the whole display
-        equals the tone's own power at every band width, so a bass note is
-        never missing from the display, only split between two bars. And
-        broadband content, which is most of a mix, is unaffected at any width,
-        because what smears out of a band smears in from its neighbour.
-        Refusing at four bins would blank the bottom two octaves at every
-        practical transform size, to avoid an error of two decibels on isolated
-        low tones, which is the worse trade. Below one bin there is nothing to
-        trade: the reading stops being a measurement of the band at all.
+            width in bins      1.07   1.32   1.57   2.07   2.53   3.10   4.30
+            error at centre   -2.71  -1.97  -1.15  -0.73  -0.36  -0.09  -0.01
 
-        Raising the transform size is the remedy for the second effect and it is
-        the one FabFilter documents for Pro-Q, whose help says a higher
-        Resolution gives "more low-frequency precision ... but a lower update
-        rate and slower attack".
+        Each row is the worst case found at that width anywhere in the matrix,
+        so the widths are the ones that actually occur rather than round
+        numbers: 1.07 bins is the 200 Hz band at 88.2 kHz with a 2048 window,
+        and nothing narrower than 1.57 bins exists at 48 kHz at all.
+
+        So the worst a centred tone reads is 2.71 dB low and the worst a tone
+        anywhere in a resolved band reads is 4.09 dB low. One bin is still
+        where the refusal is drawn rather than four, and that is a trade rather
+        than a result: refusing at four bins would blank the bottom two octaves
+        at every practical window length, which is the whole bass range, to
+        avoid a few decibels on isolated low tones. Below one bin there is
+        nothing to trade, because the reading stops being a measurement of the
+        band at all: it catches one whole bin or none depending on where the
+        edges fall between bin centres.
+
+        Broadband content, which is most of a mix, is unaffected at any width,
+        because what smears out of a band smears in from its neighbour. All of
+        the above is about isolated tones, which at the bottom of the spectrum
+        is what a sustained bass note is.
+
+        Raising the transform size is the remedy, and it is the one FabFilter
+        documents for Pro-Q, whose help says a higher Resolution gives "more
+        low-frequency precision ... but a lower update rate and slower attack".
     */
     bool resolves (int band) const noexcept
     {
@@ -1064,23 +1179,32 @@ private:
             int first = (int) std::ceil (band.lower / df - 0.5);
             int last  = (int) std::floor (band.upper / df + 0.5);
 
-            // The clamp on `first` is load bearing and the one on `last` is
-            // not, which is worth saying because they look like a pair.
+            // NEITHER CLAMP CAN FIRE, and both stay. An earlier version of
+            // this comment claimed the first one was load bearing and gave a
+            // worked example at 192 kHz; the worked example disproves the
+            // claim and an audit noticed. Worth leaving on the record, because
+            // a comment asserting the opposite of what the code does is the
+            // fault this project meets most often, and here it was in a
+            // comment about a safety check, which is the worst place for it.
             //
-            // `first` really does go negative: a band whose lower edge is
-            // inside half a bin of zero reaches below bin zero, and that
-            // happens at 192 kHz with the shortest transform size, where the
-            // bins are 93.75 Hz wide and the bottom band's lower edge is at
-            // 17.78. Unclamped, the index is computed negative and then used
-            // unsigned, which is a read at four billion.
+            // `first` cannot go negative. `band.lower` is positive, so
+            // `band.lower / df - 0.5 > -0.5`, and the ceiling of anything
+            // above -0.5 is zero or more. At 192 kHz with the shortest
+            // transform size, which is the narrowest case the studio has, the
+            // bins are 93.75 Hz wide against a bottom band edge of 17.78, and
+            // the argument is -0.3103, whose ceiling is zero.
             //
-            // `last` cannot exceed `lastBin` at all. No band is allowed above
+            // `last` cannot exceed `lastBin`. No band is allowed above
             // Nyquist, so `band.upper <= lastBin * df`, so
             // `floor (band.upper / df + 0.5) <= floor (lastBin + 0.5)`, which
-            // is `lastBin`. The clamp stays so that nobody has to re-derive
-            // that to be sure, and so a change to the band selection cannot
-            // turn it into an out of bounds read, but it is not what makes the
-            // read safe today and a mutation removing it changes nothing.
+            // is `lastBin`.
+            //
+            // They stay because both of them are the difference between a
+            // changed band selection and an out of bounds read, and because
+            // nobody should have to re-derive either argument to be sure the
+            // read is in range. A mutation removing either changes nothing
+            // today, and the mutation record says so rather than claiming a
+            // gap in the test.
             first = std::max (0, first);
             last  = std::min (lastBin, last);
 
@@ -1117,7 +1241,7 @@ private:
 
         const double centre = bandList[(std::size_t) band].centre;
 
-        double db = 10.0 * std::log10 (power) + fullScaleSineOffsetDb;
+        double db = 10.0 * std::log10 (power) + fullScaleReferenceDb;
 
         if (tilt != 0.0 && centre > 0.0)
             db += tilt * std::log2 (centre / tiltPivotFrequency);

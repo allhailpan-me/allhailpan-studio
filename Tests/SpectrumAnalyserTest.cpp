@@ -229,7 +229,7 @@ static double bandPower (const Analyser& analyser, int band)
     if (db <= floorDb)
         return 0.0;
 
-    return std::pow (10.0, (db - fullScaleSineOffsetDb) / 10.0);
+    return std::pow (10.0, (db - fullScaleReferenceDb) / 10.0);
 }
 
 //==============================================================================
@@ -698,14 +698,31 @@ static void testSineReadsItsOwnLevel()
                 std::vector<float> sine;
                 makeSine (sine, n, 48000.0, frequency, 1.0);
 
+                // BOTH legs, which is what the panel does and what the scale
+                // is referenced to. The mono case is checked below, and the
+                // two differ by exactly 3.01 dB, so testing only the mono one
+                // would have left the product's own reading unchecked: that is
+                // how the display came to read every stereo mix 3.01 dB above
+                // the convention its own comment described.
                 analyser.clear();
-                check (analyser.push (sine.data(), nullptr, n, 1.0 / 30.0),
+                check (analyser.push (sine.data(), sine.data(), n, 1.0 / 30.0),
                        "a frame of sine is accepted");
 
                 checkNear (analyser.levelDb (band), 0.0, 0.05,
-                           "a full scale sine reads 0 dB at " + std::to_string ((int) nominal)
+                           "a full scale sine in both legs reads 0 dB at "
+                               + std::to_string ((int) nominal)
                                + " Hz, size " + std::to_string (n)
                                + ", bin offset " + std::to_string (offset));
+
+                // And one leg of it is 3.01 dB down, which is the whole of
+                // what the stereo reference means.
+                analyser.clear();
+                analyser.push (sine.data(), nullptr, n, 1.0 / 30.0);
+
+                checkNear (analyser.levelDb (band), -3.0102999566398120, 0.05,
+                           "a full scale sine in one leg reads 3.01 dB down at "
+                               + std::to_string ((int) nominal)
+                               + " Hz, size " + std::to_string (n));
             }
         }
     }
@@ -724,7 +741,7 @@ static void testSineReadsItsOwnLevel()
         makeSine (sine, 8192, 48000.0, frequency, amplitude);
 
         analyser.clear();
-        analyser.push (sine.data(), nullptr, 8192, 1.0 / 30.0);
+        analyser.push (sine.data(), sine.data(), 8192, 1.0 / 30.0);
 
         checkNear (analyser.levelDb (band), 20.0 * std::log10 (amplitude), 0.05,
                    "a sine at amplitude " + std::to_string (amplitude) + " reads its own level");
@@ -734,151 +751,217 @@ static void testSineReadsItsOwnLevel()
 //==============================================================================
 static void testNarrowBandsBlurRatherThanLose()
 {
-    // The bound the header publishes, and the reason the refusal threshold is
-    // one bin rather than four.
+    // The bounds the header publishes, over every rate, transform size and
+    // bandwidth the studio offers rather than at one of them.
     //
-    // A band only a couple of bins wide cannot hold the whole main lobe of an
-    // isolated tone, so it reads low. The claim is that the shortfall is
-    // bounded at three decibels, that it falls as the band widens, and above
-    // all that it is a blur across the join rather than a loss: the energy
-    // appears in the neighbouring band instead, and the total over the whole
-    // display is still the tone's own power.
+    // The first version of this check ran at 48 kHz with the longest window and
+    // the one third octave band set, which is the ONLY combination in the whole
+    // matrix where every band resolves. So it never had a resolved band next to
+    // a refused one, which is where the only real loss in this display happens,
+    // and three of the figures it asserted were 48 kHz accidents. An audit
+    // found them. `Tests/SpectrumProbe.cpp` is the measurement the numbers below
+    // come from.
     //
-    // That last part is what makes the threshold defensible. A bass note is
-    // never missing from the display, only shared between two bars.
-    const int    n    = 16384;
-    const double rate = 48000.0;
+    // What is claimed, and each part is separate:
+    //
+    //   * The refused bands are always the lowest ones, so a display has one
+    //     boundary and not holes.
+    //   * Between two resolved bands nothing is lost. A tone on the join is
+    //     shared, and the total over the display is still the tone's power.
+    //   * At the one boundary at the bottom, energy IS lost, up to about half
+    //     of a tone sitting on it, because the band next door is drawn as
+    //     stripes. That is the cost of the threshold and it is asserted as a
+    //     bounded fact rather than denied.
+    //   * A tone anywhere in a resolved band reads no more than 4.2 dB low, and
+    //     a tone at a band's own centre no more than 2.8 dB low.
+    const double rates[5] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
 
-    Analyser analyser;
-    analyser.configure (n, rate, 3);
+    double worstInBand = 0.0, worstCentred = 0.0, worstAtBoundary = 0.0;
 
-    double worstNarrow = 0.0;
-
-    for (int band = 0; band < analyser.getNumBands(); ++band)
-    {
-        if (! analyser.resolves (band))
-            continue;
-
-        const auto& b = analyser.getBands()[(std::size_t) band];
-
-        // Across the band, including very close to both joins, which is where
-        // the worst case lives.
-        for (const double fraction : { 0.02, 0.25, 0.5, 0.75, 0.98 })
-        {
-            const double frequency = b.lower + fraction * (b.upper - b.lower);
-
-            std::vector<float> sine;
-            makeSine (sine, n, rate, frequency, 1.0);
-
-            analyser.clear();
-            analyser.push (sine.data(), nullptr, n, 1.0 / 30.0);
-
-            const std::string where = " at " + std::to_string ((int) frequency)
-                                    + " Hz in a band " + std::to_string (analyser.bandWeight (band))
-                                    + " bins wide";
-
-            // Never above its own level, which would be energy invented
-            // rather than mislaid.
-            check (analyser.levelDb (band) <= 0.05, "a tone never reads above full scale" + where);
-
-            // The published bound, which is the join case: half the power
-            // either side of the line. Asserted for every resolved band
-            // rather than for the narrow ones only, because it is the width
-            // independent half of the behaviour and a change that broke a wide
-            // band would show up here.
-            check (analyser.levelDb (band) >= -3.4,
-                   "a tone in its own band reads within 3.4 dB of its level" + where);
-
-            worstNarrow = std::min (worstNarrow, analyser.levelDb (band));
-
-            // And the conservation claim: summed over the whole display, the
-            // tone's power is all still there. The two bands either side of a
-            // join hold it between them.
-            //
-            // Not asked of the bottom and top bands, where part of the lobe
-            // genuinely falls off the end of the display rather than into a
-            // neighbour.
-            if (band > 0 && band + 1 < analyser.getNumBands())
+    for (const double rate : rates)
+        for (const int size : transformSizes)
+            for (const int perOctave : { 3, 6 })
             {
-                double summed = 0.0;
+                Analyser analyser;
+                analyser.configure (size, rate, perOctave);
+
+                if (! analyser.isConfigured())
+                    continue;
+
+                const std::string config = " at " + std::to_string ((int) rate) + " Hz, size "
+                                         + std::to_string (size) + ", 1/"
+                                         + std::to_string (perOctave) + " octave";
+
+                // ---- the refusals are a prefix ----
+                //
+                // A band's width is a fixed fraction of its centre and the bin
+                // width does not depend on frequency, so the width in bins
+                // grows across the display and the refusals cannot be
+                // interleaved with the resolved bands. That is what makes the
+                // stripes the bottom edge of the display rather than a gap in
+                // the middle of it, and it is what the conservation argument
+                // below relies on.
+                int lowestResolved = -1;
+                bool prefix = true;
 
                 for (int i = 0; i < analyser.getNumBands(); ++i)
+                {
                     if (analyser.resolves (i))
-                        summed += bandPower (analyser, i);
+                    {
+                        if (lowestResolved < 0)
+                            lowestResolved = i;
+                    }
+                    else if (lowestResolved >= 0)
+                    {
+                        prefix = false;
+                    }
+                }
 
-                checkNear (10.0 * std::log10 (summed) + fullScaleSineOffsetDb, 0.0, 0.02,
-                           "the tone's power is all still on the display" + where);
+                check (prefix, "the refused bands are the lowest ones" + config);
+                check (lowestResolved >= 0, "something resolves" + config);
+
+                if (lowestResolved < 0)
+                    continue;
+
+                // The bands worth asking: the lowest few resolved ones, where
+                // the boundary and the narrowest widths are, and one in the
+                // middle of the display as a control.
+                std::vector<int> wanted;
+
+                for (int i = lowestResolved; i < lowestResolved + 4
+                                             && i < analyser.getNumBands(); ++i)
+                    wanted.push_back (i);
+
+                if (const int middle = analyser.bandAt (1000.0); middle >= 0)
+                    wanted.push_back (middle);
+
+                for (const int band : wanted)
+                {
+                    if (! analyser.resolves (band))
+                        continue;
+
+                    const auto& b     = analyser.getBands()[(std::size_t) band];
+                    const double width = analyser.bandWeight (band);
+
+                    const std::string where = config + ", band at "
+                                            + std::to_string ((int) b.centre) + " Hz, "
+                                            + std::to_string (width) + " bins";
+
+                    // Where the sharing claim holds, and the condition is
+                    // sharper than "the band next door resolves".
+                    //
+                    // The Hann window spreads a tone about two bins either
+                    // side, and a narrow band is a fraction of a bin wide, so
+                    // the lobe reaches well past the immediate neighbours. A
+                    // tone two bands above the boundary can still put part of
+                    // itself in the stripes. So the claim is about the tone's
+                    // distance from the edges of the resolved span in BINS,
+                    // not in bands, and three bins is the margin: inside that,
+                    // every part of the lobe lands in a band that is drawn.
+                    //
+                    // The same applies at the top, where what is outside the
+                    // span is not stripes but the end of the display.
+                    const double df            = analyser.binWidth();
+                    const double resolvedLower = analyser.getBands()[(std::size_t) lowestResolved].lower;
+                    const double resolvedUpper = analyser.getBands().back().upper;
+
+                    for (const double fraction : { 0.0, 0.25, 0.5, 0.75, 1.0 })
+                    {
+                        const double frequency = b.lower + fraction * (b.upper - b.lower);
+
+                        std::vector<float> sine;
+                        makeSine (sine, size, rate, frequency, 1.0);
+
+                        analyser.clear();
+
+                        if (! analyser.push (sine.data(), sine.data(), size, 1.0 / 30.0))
+                        {
+                            fail ("a frame of sine is accepted" + where);
+                            continue;
+                        }
+
+                        const double level = analyser.levelDb (band);
+
+                        const std::string at = where + ", tone at "
+                                             + std::to_string ((int) frequency) + " Hz";
+
+                        check (level <= 0.05, "a tone never reads above its level" + at);
+                        check (level >= -4.2,
+                               "a tone in a resolved band reads within 4.2 dB" + at);
+
+                        worstInBand = std::min (worstInBand, level);
+
+                        double summed = 0.0;
+
+                        for (int i = 0; i < analyser.getNumBands(); ++i)
+                            if (analyser.resolves (i))
+                                summed += bandPower (analyser, i);
+
+                        const double whole = summed > 0.0
+                                               ? 10.0 * std::log10 (summed) + fullScaleReferenceDb
+                                               : floorDb;
+
+                        const bool wellInside = frequency >= resolvedLower + 3.0 * df
+                                              && frequency <= resolvedUpper - 3.0 * df;
+
+                        if (wellInside)
+                        {
+                            checkNear (whole, 0.0, 0.02,
+                                       "between two resolved bands the tone's power is all "
+                                       "still on the display" + at);
+                        }
+                        else
+                        {
+                            // Near an edge of the resolved span the loss is
+                            // real, and bounded. Half of a tone sitting on the
+                            // boundary is the worst case, which is 3.01 dB,
+                            // and the measurement allows a little more because
+                            // a narrow band spreads its lobe over three bins
+                            // rather than two.
+                            check (whole <= 0.05 && whole >= -3.4,
+                                   "near an edge of the resolved span the loss is bounded" + at);
+
+                            if (lowestResolved > 0)
+                                worstAtBoundary = std::min (worstAtBoundary, whole);
+                        }
+                    }
+
+                    // ---- a tone at the band's own centre ----
+                    std::vector<float> centred;
+                    makeSine (centred, size, rate, b.centre, 1.0);
+
+                    analyser.clear();
+                    analyser.push (centred.data(), centred.data(), size, 1.0 / 30.0);
+
+                    const double error = analyser.levelDb (band);
+
+                    check (error >= -2.8, "a centred tone reads within 2.8 dB" + where);
+                    check (error <= 0.05, "a centred tone never reads above its level" + where);
+
+                    // From four bins up it is exact, which is where the
+                    // header's table ends.
+                    if (width >= 4.0)
+                        checkNear (error, 0.0, 0.05, "a centred tone is exact" + where);
+
+                    worstCentred = std::min (worstCentred, error);
+                }
             }
-        }
-    }
 
-    // And the bound is tight rather than generous, which is what says the
-    // measurement is of the real thing rather than of a tolerance picked to
-    // pass: somewhere in the display a tone really does read about three
-    // decibels down, so a check at 3.4 dB is not passing by a mile.
-    check (worstNarrow < -2.5,
-           "the worst case really is near the published bound (measured "
-               + std::to_string (worstNarrow) + " dB)");
-
-    // ---- the width dependent half, measured at the band's own centre ----
-    //
-    // This is the effect a larger transform fixes, and it is a different claim
-    // from the one above: a band of about the window's main lobe width cannot
-    // hold a centred tone, and from four bins up it can. The table in the
-    // header is this measurement.
-    auto errorAtCentre = [&] (int band)
-    {
-        const auto& b = analyser.getBands()[(std::size_t) band];
-
-        std::vector<float> sine;
-        makeSine (sine, n, rate, b.centre, 1.0);
-
-        analyser.clear();
-        analyser.push (sine.data(), nullptr, n, 1.0 / 30.0);
-
-        return analyser.levelDb (band);
-    };
-
-    int narrowest = -1;
-
-    for (int i = 0; i < analyser.getNumBands(); ++i)
-    {
-        if (! analyser.resolves (i))
-            continue;
-
-        if (narrowest < 0)
-            narrowest = i;
-
-        const double width = analyser.bandWeight (i);
-        const double error = errorAtCentre (i);
-
-        const std::string where = " in a band " + std::to_string (width) + " bins wide";
-
-        // From four bins up a centred tone is exact, which is the claim the
-        // header's table ends on.
-        if (width >= 4.0)
-            checkNear (error, 0.0, 0.05, "a centred tone is exact" + where);
-
-        // And below that it is low, but by at most the couple of decibels the
-        // table publishes, rather than by an unbounded amount.
-        check (error >= -2.5, "a centred tone in a narrow band is only slightly low" + where);
-        check (error <= 0.05, "a centred tone never reads above its level" + where);
-    }
-
-    // The narrowest band the display shows is measurably worse at its centre
-    // than a wide one, which is what makes the table a measurement rather than
-    // a guess, and what would catch a weighting that had stopped depending on
-    // the band's width at all.
-    check (narrowest >= 0, "there is a narrowest resolved band");
-
-    if (narrowest >= 0)
-    {
-        check (analyser.bandWeight (narrowest) < 2.0,
-               "the narrowest resolved band really is under two bins wide");
-        check (errorAtCentre (narrowest) < -0.5,
-               "the narrowest band reads a centred tone measurably low (measured "
-                   + std::to_string (errorAtCentre (narrowest)) + " dB)");
-    }
+    // The bounds are tight rather than generous, which is what says these are
+    // measurements of the real thing and not tolerances chosen to pass. If a
+    // change made the analyser better, these fail and the published figures
+    // get corrected, which is the right way round.
+    check (worstInBand < -3.8,
+           "the worst in band reading really is near the published 4.09 dB (measured "
+               + std::to_string (worstInBand) + ")");
+    check (worstCentred < -2.4,
+           "the worst centred reading really is near the published 2.71 dB (measured "
+               + std::to_string (worstCentred) + ")");
+    check (worstAtBoundary < -3.0,
+           "the loss at the bottom boundary really is about half the tone (measured "
+               + std::to_string (worstAtBoundary) + " dB, which is "
+               + std::to_string (100.0 * (1.0 - std::pow (10.0, worstAtBoundary / 10.0)))
+               + " per cent drawn nowhere)");
 }
 
 //==============================================================================
@@ -1116,7 +1199,7 @@ static void testBallistics()
             // Settled first, so the decay starts from the steady reading
             // rather than from part way up.
             for (int i = 0; i < 1200; ++i)
-                analyser.push (sine.data(), nullptr, n, step);
+                analyser.push (sine.data(), sine.data(), n, step);
 
             checkNear (analyser.levelDb (band), 20.0 * std::log10 (amplitude), 0.05,
                        std::string ("the steady reading before the decay, ") + c.name);
@@ -1127,7 +1210,7 @@ static void testBallistics()
             const double spanSeconds  = 0.8 * c.tau * 10.0;
 
             for (double t = 0.0; t < firstSeconds; t += step)
-                analyser.push (silence.data(), nullptr, n, step);
+                analyser.push (silence.data(), silence.data(), n, step);
 
             const double startDb = analyser.levelDb (band);
 
@@ -1135,7 +1218,7 @@ static void testBallistics()
 
             for (double t = 0.0; t < spanSeconds; t += step)
             {
-                analyser.push (silence.data(), nullptr, n, step);
+                analyser.push (silence.data(), silence.data(), n, step);
                 elapsed += step;
             }
 
@@ -1175,7 +1258,7 @@ static void testBallistics()
         std::vector<float> sine;
         makeSine (sine, n, rate, frequency, 1.0);
 
-        analyser.push (sine.data(), nullptr, n, step);
+        analyser.push (sine.data(), sine.data(), n, step);
 
         checkNear (analyser.levelDb (band), 0.0, 0.05,
                    "the first frame reads its own level rather than ramping up");
@@ -1220,13 +1303,19 @@ static void testChannelCombination()
         return analyser.levelDb (band);
     };
 
-    const double oneChannel = read (sine.data(), nullptr);
-    checkNear (oneChannel, 0.0, 0.05, "one channel of full scale sine reads 0 dB");
+    // 10*log10(2) written out, not taken from the header: what is being
+    // checked is the relationship between one channel and two, and reading the
+    // number from the file under test would make that a restatement.
+    const double threeDb = 3.0102999566398120;
 
-    checkNear (read (sine.data(), sine.data()), oneChannel + fullScaleSineOffsetDb, 0.02,
+    const double oneChannel = read (sine.data(), nullptr);
+    checkNear (oneChannel, -threeDb, 0.05,
+               "one channel of full scale sine reads 3.01 dB below the stereo reference");
+
+    checkNear (read (sine.data(), sine.data()), oneChannel + threeDb, 0.02,
                "two correlated channels read 3.01 dB above one");
 
-    checkNear (read (sine.data(), inverted.data()), oneChannel + fullScaleSineOffsetDb, 0.02,
+    checkNear (read (sine.data(), inverted.data()), oneChannel + threeDb, 0.02,
                "two anti-correlated channels read 3.01 dB above one, and do not cancel");
 
     checkNear (read (sine.data(), silence.data()), oneChannel, 0.02,
@@ -1237,7 +1326,7 @@ static void testChannelCombination()
     std::vector<float> quarter;
     makeSine (quarter, n, rate, frequency, 1.0, 1.5707963267948966);
 
-    checkNear (read (sine.data(), quarter.data()), oneChannel + fullScaleSineOffsetDb, 0.02,
+    checkNear (read (sine.data(), quarter.data()), oneChannel + threeDb, 0.02,
                "two channels in quadrature read 3.01 dB above one");
 }
 
@@ -1335,7 +1424,7 @@ static void testRefusals()
         std::vector<float> sine;
         makeSine (sine, 4096, rate, frequency, 1.0);
 
-        analyser.push (sine.data(), nullptr, 4096, 1.0 / 30.0);
+        analyser.push (sine.data(), sine.data(), 4096, 1.0 / 30.0);
         const double before = analyser.levelDb (band);
         checkNear (before, 0.0, 0.05, "the good frame read its own level");
 
@@ -1346,7 +1435,7 @@ static void testRefusals()
             auto poisoned = sine;
             poisoned[1234] = bad;
 
-            check (! analyser.push (poisoned.data(), nullptr, 4096, 1.0 / 30.0),
+            check (! analyser.push (poisoned.data(), sine.data(), 4096, 1.0 / 30.0),
                    "a frame with a non-finite sample is refused");
             checkNear (analyser.levelDb (band), before, 0.0,
                        "a refused frame changes nothing");
@@ -1357,7 +1446,7 @@ static void testRefusals()
                    "a frame with a non-finite sample on the right is refused");
         }
 
-        check (analyser.push (sine.data(), nullptr, 4096, 1.0 / 30.0),
+        check (analyser.push (sine.data(), sine.data(), 4096, 1.0 / 30.0),
                "the analyser still works after a refused frame");
         checkNear (analyser.levelDb (band), before, 0.05,
                    "and reads the same level it did before");
@@ -1462,12 +1551,12 @@ static void testHold()
     makeSine (loud,  n, rate, frequency, 1.0);
     makeSine (quiet, n, rate, frequency, 0.01);
 
-    analyser.push (loud.data(), nullptr, n, 1.0 / 200.0);
+    analyser.push (loud.data(), loud.data(), n, 1.0 / 200.0);
 
     const double peak = analyser.levelDb (band);
 
     for (int i = 0; i < 2000; ++i)
-        analyser.push (quiet.data(), nullptr, n, 1.0 / 200.0);
+        analyser.push (quiet.data(), quiet.data(), n, 1.0 / 200.0);
 
     checkNear (analyser.levelDb (band), -40.0, 0.1, "the level followed the signal down");
     checkNear (analyser.holdDb (band), peak, 0.01, "the hold kept the peak");
@@ -1484,7 +1573,7 @@ static void testHold()
     // read does on a click.
     checkNear (analyser.holdDb (band), floorDb, 0.0, "resetting the hold clears it");
 
-    analyser.push (quiet.data(), nullptr, n, 1.0 / 200.0);
+    analyser.push (quiet.data(), quiet.data(), n, 1.0 / 200.0);
     checkNear (analyser.holdDb (band), analyser.levelDb (band), 0.01,
                "the hold rebuilds from the next frame");
 
@@ -1494,7 +1583,7 @@ static void testHold()
     // afterwards. The panel clears when the view is shown and then waits for a
     // timer, so a stale reading there is the old spectrum flashing up for a
     // frame when somebody opens the display again.
-    analyser.push (loud.data(), nullptr, n, 1.0 / 200.0);
+    analyser.push (loud.data(), loud.data(), n, 1.0 / 200.0);
     analyser.clear();
 
     check (analyser.getFrameCount() == 0, "clearing forgets the frame count");
@@ -1555,6 +1644,24 @@ static void testRingCapacity()
         // comfortable.
         check (capacity >= largestTransformSize + 3 * block,
                "the ring clears the requirement with room to spare at a block of "
+                   + std::to_string (block));
+
+        // The engine keeps the two legs interleaved in one ring, so everything
+        // doubles: the snapshot it has to serve, and the block bound, since a
+        // block of the callback is twice as many samples once interleaved.
+        // One ring rather than two is what makes a snapshot one frame of both
+        // legs instead of two frames that a block may have come between.
+        const int interleaved = interleavedRingCapacity (block);
+
+        check (interleaved >= 2 * largestTransformSize + 2 * (2 * block),
+               "the interleaved ring clears the same requirement at a block of "
+                   + std::to_string (block));
+
+        // And it can actually serve the largest frame, which `InputRing` also
+        // bounds: a snapshot larger than the capacity less one block can never
+        // be told intact from overwritten.
+        check (2 * largestTransformSize <= interleaved - 2 * block,
+               "the largest frame is servable from the interleaved ring at a block of "
                    + std::to_string (block));
     }
 

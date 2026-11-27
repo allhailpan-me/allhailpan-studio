@@ -142,9 +142,17 @@ MUTATIONS = [
      "        const double scale   = 2.0 / ((double) fftSize * windowSumOfSquares);",
      "        const double scale   = 2.0 * 1.5 / ((double) fftSize * windowSumOfSquares);"),
 
-    ("RMS reference", "3.01 dB, from treating a sine's mean square as full scale",
-     "inline constexpr double fullScaleSineOffsetDb = 3.0102999566398120;",
-     "inline constexpr double fullScaleSineOffsetDb = 0.0;"),
+    ("per channel reference", "3.01 dB, the fault the audit found: one leg taken as full scale",
+     "inline constexpr double fullScaleReferenceDb = 0.0;",
+     "inline constexpr double fullScaleReferenceDb = 3.0102999566398120;"),
+
+    ("RMS reference", "3.01 dB the other way, from AES17's convention for a sine",
+     "inline constexpr double fullScaleReferenceDb = 0.0;",
+     "inline constexpr double fullScaleReferenceDb = -3.0102999566398120;"),
+
+    ("interleaved capacity not doubled", "a ring half the size the two legs need",
+     "    return 2 * ringCapacity (largestBlockSamples);",
+     "    return ringCapacity (largestBlockSamples);"),
 
     ("no single sided factor", "the negative frequencies left out",
      "        const double scale   = 2.0 / ((double) fftSize * windowSumOfSquares);",

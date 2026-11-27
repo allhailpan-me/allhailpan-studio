@@ -67,9 +67,10 @@ public:
 
         resolutionBox.setSelectedId (4, juce::dontSendNotification);
         resolutionBox.setTooltip ("How much audio each reading looks at. Longer reaches further "
-                                  "down: the 20 Hz band is 4.6 Hz wide and needs 16384 samples "
-                                  "before the analysis can separate it at all. Shorter follows "
-                                  "the music more closely and leaves the bottom bands blank.");
+                                  "down: at 48 kHz the lowest band that can be separated at all "
+                                  "is 125 Hz on the shortest setting and 20 Hz on the longest, so "
+                                  "the short settings leave the whole bass range blank. Shorter "
+                                  "follows the music more closely.");
         resolutionBox.onChange = [this] { repaint(); };
 
         addAndMakeVisible (ballisticsBox);
@@ -104,8 +105,10 @@ public:
         addAndMakeVisible (holdButton);
         holdButton.setButtonText ("Peak hold");
         holdButton.setClickingTogglesState (true);
-        holdButton.setTooltip ("Marks the highest each band has reached, and keeps it until it "
-                              "is cleared.");
+        holdButton.setTooltip ("Marks the highest each band has reached in the readings taken, "
+                              "and keeps it until it is cleared. Readings are snapshots at the "
+                              "display rate rather than a continuous measurement, so a very "
+                              "short transient can fall between two of them.");
         holdButton.onClick = [this] { repaint(); };
 
         addAndMakeVisible (holdResetButton);
@@ -302,12 +305,14 @@ public:
     void mouseMove (const juce::MouseEvent& e) override
     {
         cursorX = e.x;
+        cursorY = e.y;
         repaint();
     }
 
     void mouseExit (const juce::MouseEvent&) override
     {
         cursorX = -1;
+        cursorY = -1;
         repaint();
     }
 
@@ -336,11 +341,18 @@ private:
                 // The real interval rather than the timer's nominal one,
                 // because the ballistics integrate over it and a timer that
                 // was late by half of it would otherwise make the display
-                // decay at the wrong rate. Clamped at both ends: a zero or
-                // negative interval is refused by the analyser anyway, and a
-                // very long one, which is what a window that was buried behind
-                // another for a minute produces, is a jump to the new reading
-                // rather than a crawl towards it.
+                // decay at the wrong rate.
+                //
+                // Clamped at both ends. A zero or negative interval the
+                // analyser refuses anyway. A very long one, which is what a
+                // window buried behind another for a minute produces, is
+                // clamped to half a second: that is four time constants on the
+                // fast weighting, so very nearly a jump to the new reading,
+                // and half of one on the slow weighting, so a third of the way
+                // towards it. Either is better than integrating a minute of
+                // elapsed time into one frame, and neither matters much,
+                // because the engine refuses a frame at all until a whole
+                // window of audio has arrived since the display was shown.
                 const double seconds = lastPushMs > 0.0 ? (now - lastPushMs) * 0.001
                                                         : 1.0 / 20.0;
                 lastPushMs = now;
@@ -383,35 +395,45 @@ private:
         lastPushMs = 0.0;
     }
 
-    /** The label under a bar, or nothing.
+    /** The octave series this axis labels, and the text for each.
 
-        Only the octave series gets one: thirty one labels across a window will
-        not fit and the eye does not need them. The series is ISO 266's own, by
-        way of `nominalThirdOctaveFrequency`, so what is printed is a preferred
-        frequency rather than a rounded exact centre. One sixth octave bands
-        have no standardised nominal label at all, which the analyser's header
-        explains, so they are matched against the third octave series by their
-        centres and the ones in between are left unlabelled. */
-    static juce::String labelForBand (const Spectrum::Band& band, int perOctave)
+        ISO 266's own preferred frequencies, by way of
+        `Spectrum::nominalThirdOctaveFrequency`, so what is printed is a
+        preferred frequency and not a rounded exact centre. Only the octave
+        series gets a label: thirty one across a window will not fit and the
+        eye does not need them. */
+    static juce::String octaveLabel (double frequency)
     {
-        static const double octaves[10] = { 31.5, 63.0, 125.0, 250.0, 500.0,
-                                            1000.0, 2000.0, 4000.0, 8000.0, 16000.0 };
+        if (frequency >= 1000.0)
+            return juce::String ((int) std::round (frequency / 1000.0)) + "k";
 
-        const double nominal = perOctave == 3
-                                 ? Spectrum::nominalThirdOctaveFrequency (band.x, 3)
-                                 : 0.0;
+        return frequency == 31.5 ? juce::String ("31.5") : juce::String ((int) frequency);
+    }
 
-        for (const double o : octaves)
-        {
-            const bool matches = perOctave == 3 ? (nominal > 0.0 && std::abs (nominal - o) < 0.01)
-                                                : (std::abs (band.centre / o - 1.0) < 0.03);
+    /** Where a frequency sits across the plot.
 
-            if (matches)
-                return o >= 1000.0 ? juce::String ((int) (o / 1000.0)) + "k"
-                                   : (o == 31.5 ? juce::String ("31.5") : juce::String ((int) o));
-        }
+        Labels are placed by frequency rather than under a bar, and that is not
+        a tidiness point: at one sixth octave NO band is centred on a preferred
+        frequency, because the exact nesting of sixths inside thirds puts every
+        third octave centre on a sixth octave EDGE. Matching labels to band
+        centres therefore gave sixty two bars and a completely blank frequency
+        axis, which an audit found. Placing them by frequency labels the join
+        between the two sixths, which is exactly where that frequency is.
 
-        return {};
+        The mapping is a logarithm because the bands are geometrically spaced
+        and drawn at equal width, so a band index is linear in log frequency
+        and so is this. The two agree by construction rather than by being
+        tuned to look right. */
+    static float xForFrequency (double frequency, juce::Rectangle<int> plot,
+                                double lowEdge, double highEdge)
+    {
+        if (! (frequency > 0.0) || ! (lowEdge > 0.0) || ! (highEdge > lowEdge))
+            return (float) plot.getX();
+
+        const double across = std::log (frequency / lowEdge) / std::log (highEdge / lowEdge);
+
+        return (float) plot.getX()
+             + (float) (juce::jlimit (0.0, 1.0, across) * (double) plot.getWidth());
     }
 
     void drawSpectrum (juce::Graphics& g, juce::Rectangle<int> area)
@@ -431,8 +453,15 @@ private:
 
         // Pro-Q 4's documented default range, which is the only published
         // default for one anywhere on the reference list. The top is 0 dB
-        // because the display is peak referenced, so a full scale sine reaches
-        // exactly the top of the plot and nothing can go above it.
+        // because that is where a full scale mix sits: SpectrumAnalyser.h
+        // references the scale to a full scale sine in both channels.
+        //
+        // A band CAN go above it, which an earlier version of this comment
+        // denied. Any tilt other than none lifts the top of the display, by
+        // 5.96 dB at 16 kHz on the +1.5 dB per octave setting, and a bar that
+        // went over used to flatten silently against the top while the cursor
+        // read out a number above the scale. A bar over the top is capped in
+        // red now, so it is visibly pinned.
         const double topDb   = 0.0;
         const double rangeDb = 90.0;
 
@@ -514,6 +543,15 @@ private:
                 g.fillRect ((float) x, top, (float) width, (float) plot.getBottom() - top);
             }
 
+            // Over the top of the scale rather than at it. `yFor` clamps, so
+            // without this the bar would sit flat against the top and look
+            // like a band that happened to reach full scale.
+            if (level > topDb)
+            {
+                g.setColour (Ahp::rec);
+                g.fillRect ((float) x, (float) plot.getY(), (float) width, 3.0f);
+            }
+
             if (holdButton.getToggleState())
             {
                 const double held = analyser.holdDb (i);
@@ -527,24 +565,59 @@ private:
         }
 
         // ---- the frequency axis ----
+        const double lowEdge  = bands.front().lower;
+        const double highEdge = bands.back().upper;
+
+        static const double octaves[10] = { 31.5, 63.0, 125.0, 250.0, 500.0,
+                                            1000.0, 2000.0, 4000.0, 8000.0, 16000.0 };
+
         g.setColour (Ahp::muted);
         g.setFont (juce::FontOptions (9.5f));
 
-        for (int i = 0; i < count; ++i)
+        for (const double frequency : octaves)
         {
-            const auto label = labelForBand (bands[(std::size_t) i], perOctave);
-
-            if (label.isEmpty())
+            if (frequency < lowEdge || frequency > highEdge)
                 continue;
 
-            const int centre = plot.getX() + (int) std::round (((double) i + 0.5) * barWidth);
+            const int at = (int) std::round (xForFrequency (frequency, plot, lowEdge, highEdge));
 
-            g.drawText (label, centre - 20, axis.getY(), 40, axis.getHeight(),
+            g.drawText (octaveLabel (frequency), at - 20, axis.getY(), 40, axis.getHeight(),
                         juce::Justification::centred);
         }
 
+        // ---- and what the stripes at the bottom mean ----
+        //
+        // Said in words rather than left to the stripes. A refused band is not
+        // only blank: the lowest band that IS shown has part of any tone near
+        // its lower edge sitting in the refused one, so it reads up to 4 dB
+        // low as well. SpectrumAnalyser.h has the measurement. Somebody
+        // looking at the bottom of this display deserves to know that the
+        // window length and not the mix is what they are looking at.
+        int lowestResolved = -1;
+
+        for (int i = 0; i < count; ++i)
+            if (analyser.resolves (i))
+            {
+                lowestResolved = i;
+                break;
+            }
+
+        if (lowestResolved > 0)
+        {
+            const double from = bands[(std::size_t) lowestResolved].lower;
+
+            g.setColour (Ahp::muted);
+            g.setFont (juce::FontOptions (10.0f));
+            g.drawText ("Below " + juce::String ((int) std::round (from))
+                            + " Hz the window is too short to separate the bands. "
+                              "The lowest bar shown reads low too.",
+                        plot.reduced (8, 6).withTrimmedRight (120),
+                        juce::Justification::bottomLeft, true);
+        }
+
         // ---- what is under the pointer ----
-        if (cursorX >= plot.getX() && cursorX < plot.getRight())
+        if (cursorX >= plot.getX() && cursorX < plot.getRight()
+            && cursorY >= plot.getY() && cursorY < plot.getBottom())
         {
             const int index = juce::jlimit (0, count - 1,
                                             (int) ((double) (cursorX - plot.getX()) / barWidth));
@@ -581,6 +654,7 @@ private:
     std::vector<float> frameLeft, frameRight;
     double             lastPushMs = 0.0;
     int                cursorX    = -1;
+    int                cursorY    = -1;
 
     // The title row, the target row and the analyser row with the gaps between
     // them, plus the gap below the last one, all measured from inside the
