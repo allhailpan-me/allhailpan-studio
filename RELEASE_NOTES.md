@@ -1,5 +1,59 @@
 You can hear the mix in mono now, and find out what it costs you: under the master in the mixer there is a control room panel with mono, dim, a cut per speaker and a polarity flip per speaker, which is the check that finds two mics fighting each other before a phone or a club PA finds it for you. None of it reaches your bounce, your meters or your takes, and none of the buttons is saved, so you never open a session that is quietly folded to mono. If you play with a sustain pedal, the note that used to hang when you switched channels with your foot down is gone, and pressing Stop now releases what the pedal was holding instead of hoping the plugin understands a catch all message. Notes you play in on a keyboard now land where you played them instead of a few milliseconds behind, and a guitar and a keyboard recorded in one pass line up with each other. A send can sit still while you ride the fader: each send has a post or pre button next to its amount, so a reverb you want a fixed amount of stops following the part it is on. You can leave a track armed without hearing yourself over the song: right click a mixer strip, pick Input monitoring, and choose to hear your input only while recording, or the way a tape machine did, which is stopped and recording but not during playback. Moving a fader, a pan knob or a send while something is playing no longer puts a faint crackle on it, and neither does a volume or pan automation curve: the level travels to where you put it now instead of jumping there once a buffer. You can measure what your audio interface really costs you: patch a cable from an output back into an input, press Measure the round trip in Preferences > Audio, and the studio works out the true figure and corrects your recordings by it, instead of taking the driver's word for something plenty of drivers get wrong or will not answer at all. You can lift the feel off a part you played and put it on a part you programmed: play a bar of hats the way it should sit, press Feel from a part in the channel rack, and what you step in from then on sits that way too, with the accents as well if you want them. The studio has a time signature at last: type 3/4 or 6/8 into the Sig field next to the tempo and every bar line, click, snap and readout follows it, without moving a note you have already played. You can punch in now too: loop the line you want to redo, press Punch, and the new performance replaces that line and nothing else, with your original kept underneath to go back to. There is a tuner too, on Ctrl+T, so tuning a guitar no longer means reaching for something that is not this studio. You can pick up more than one note in the piano roll at last: drag a rectangle round a chord or a riff and move, transpose, stretch or duplicate the lot in one gesture, and a group always keeps its shape. You can tidy a part you played in too: there is a Quantise button on the piano roll, with a strength so it does not have to be an all or nothing snap. Your faders have a real scale, with 0 dB three quarters of the way up and silence at the bottom, and every mix you have saved comes back at the level you left it. Exports can be 16 bit now, dithered properly, so a file you send somewhere is not a conversion done in another program. PAN One is a much bigger instrument than it was: two wavetable oscillators, a wavefolder, a low pass gate, four LFOs and a modulation matrix that wires any of it to anything, sixty seven presets, and a Grow button that breeds a new sound out of the one you are playing. The mixer has a solo, and soloing a vocal keeps the reverb it is sending to. Every audio clip has a fade in and a fade out you can drag, and a short fade at every edge so trimming a take does not click. A short sound in the playlist plays once a bar rather than over and over. Below that, from v0.7.1: panning a mono track no longer makes it quieter, takes land where you played them, which they did not quite before, and the app icon is visible again. Below that again, every mixer strip taking its own input and all of them recording at once, a mono input heard in the middle, and ASIO, which is what makes an audio interface playable on Windows at all. Then the instrument as it first shipped, two fixes found by playing v0.3.0, and everything that went into v0.3.0.
 
+## Since v0.9.0
+
+**You can see where your mix sits across the spectrum now.** Open the Mix
+report tab and there is a bar for every third of an octave from 20 Hz to
+20 kHz, under the loudness and true peak numbers that were already there.
+
+It is the check that finds the two things your speakers cannot tell you. One is
+energy below what they reproduce at all: a kick with a 40 Hz thump, or a rumble
+off a mic stand, that is doing nothing for you on these speakers and plenty on
+somebody else's. The other is a resonance sitting exactly where your room
+already flatters it, so you keep turning it down and it keeps sounding right.
+
+Five things to know about it.
+
+**It reads the mix, not the speakers.** It taps the master in the same place
+the loudness meter does, which is before the control room, so pressing Mono or
+Dim does not move the bars. The thing you are checking stays the thing you are
+looking at.
+
+**The window length decides how far down it reaches, and the shortest one does
+not reach far.** "Window" is how much audio each reading looks at. On the
+longest setting, which is where it starts, it separates every band down to
+20 Hz. On the shortest it cannot separate anything below 125 Hz, so the whole
+bass range comes up as faint stripes instead of bars. That is deliberate: a
+band the analysis cannot separate would show a confident number that is simply
+wrong, and 20 Hz is exactly the frequency nobody can check by ear. Stripes mean
+"lengthen the window or do not trust the bottom here", and the panel says so in
+words under the bars. Shorter windows follow the music more closely, so they
+are worth having when you want to see a drum hit rather than a balance.
+
+**There is a tilt, and it starts at none, which is not what most analysers
+do.** Plugin analysers usually lean the display by about 4.5 dB per octave so
+that pink noise draws a flat line, because they measure in even slices of
+frequency and pink noise falls across those. This one measures in octaves, so
+pink noise already draws a flat line with no lean at all. Leaning it again
+would tilt the picture by 45 dB from end to end and would still have looked
+believable on music, which is the kind of wrong that is worth avoiding. The
+tilted setting is there if you prefer the look, and it is the 1.5 dB per octave
+that is actually left over, not the 4.5.
+
+**Speed is the two settings a sound level meter has, by their real names.**
+Fast follows a kick drum. Slow shows you the balance over a phrase. If you are
+judging a mix rather than watching a transient, slow is the one.
+
+**Peak hold marks the highest each band has reached** and keeps it until you
+press Clear peaks, so you can play a section through and then look at what it
+actually did.
+
+The bands themselves are the ones every measurement microphone and acoustics
+tool uses, taken from the standard that defines them rather than from memory,
+and the frequencies on the axis are the standard's own preferred ones: 31.5,
+63, 125 and so on. So a reading here means the same thing as a reading from
+anything else that measures in third octaves, which is the point of using them.
+
 ## Since v0.8.0
 
 **You can hear the mix in mono now, and find out what it costs you.** There
