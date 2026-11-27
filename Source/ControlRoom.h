@@ -461,6 +461,7 @@ namespace ControlRoom
         // version of this said it, reachable in four button presses, and the
         // test that pins the difference reading against the actual
         // cancellation is what found it.
+        //
         // Each of these four readings names the surviving leg, so each also
         // has to say which way up it is arriving. See the note on polarity
         // below: three of the four controls in this section announce

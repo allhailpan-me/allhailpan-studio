@@ -1442,6 +1442,29 @@ int main()
                 check ((words.find ("difference") != std::string::npos) == false,
                        "nothing on one leg is described as a difference, said \"" + words
                            + "\" for " + describeState (s));
+
+                // Nor is the leg that is not there ever named. The fault the
+                // reduction exists to prevent was a reading about the right
+                // leg on a device that has no right leg, so the absence of
+                // that word is the property, asserted directly rather than
+                // left to follow from the three latches being cleared.
+                check (words.find ("right") == std::string::npos,
+                       "a one leg reading names the leg that is not there, said \"" + words
+                           + "\" for " + describeState (s));
+
+                // And the polarity rule holds here too, against the one
+                // coefficient that is actually applied rather than against a
+                // matrix with a column nothing reads. A leg arriving upside
+                // down is as inaudible on one speaker as it is on two, and on
+                // one speaker this line is even more alone: the fold, the cut
+                // of the absent leg and its polarity button are all greyed
+                // out, so there is less on the panel to read it off.
+                const bool flippedOne = m.leftFromLeft < 0.0;
+
+                check ((words.find ("invert") != std::string::npos) == flippedOne,
+                       "a one leg reading says \"" + words + "\" where the leg arrives "
+                           + (flippedOne ? "upside down" : "upright") + " for "
+                           + describeState (s));
             }
         }
     }
