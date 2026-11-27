@@ -1381,6 +1381,51 @@ static void testHold()
 }
 
 //==============================================================================
+static void testRingCapacity()
+{
+    // `Tuner::InputRing`'s stated requirement is `capacity >= snapshot +
+    // 2 * block`, and the snapshot the display asks for is the largest
+    // transform size. Checked here rather than taken on trust, because the
+    // tuner's own version of these two numbers met in `AudioEngine.cpp`, where
+    // nothing can compile them together, and an audit pointed out that halving
+    // the capacity to a figure that still looked generous would have started
+    // accepting torn snapshots with nothing to fail.
+    //
+    // A torn frame is a discontinuity in the middle of the window, which a
+    // transform reads as a broadband click: a spectrum that is flat and
+    // plausible and describes nothing that was played.
+    for (const int block : { 64, 128, 256, 512, 1024, 2048, 4096, 8192 })
+    {
+        const int capacity = ringCapacity (block);
+
+        check (capacity >= largestTransformSize + 2 * block,
+               "the ring clears InputRing's requirement at a block of "
+                   + std::to_string (block));
+
+        // And by a margin, since the requirement is the point at which a
+        // snapshot can be served at all rather than the point at which it is
+        // comfortable.
+        check (capacity >= largestTransformSize + 3 * block,
+               "the ring clears the requirement with room to spare at a block of "
+                   + std::to_string (block));
+    }
+
+    // Every size the display offers can be served, not only the largest.
+    for (const int size : transformSizes)
+    {
+        check (size <= largestTransformSize,
+               "every offered transform size fits the ring");
+        check (size >= 64 && (size & (size - 1)) == 0,
+               "every offered transform size is a power of two the analyser accepts");
+
+        Analyser analyser;
+        analyser.configure (size, 48000.0, 3);
+        check (analyser.isConfigured(),
+               "the analyser configures at every offered size, " + std::to_string (size));
+    }
+}
+
+//==============================================================================
 static void testBandLookup()
 {
     Analyser analyser;
@@ -1420,6 +1465,7 @@ int main()
     testChannelCombination();
     testRefusals();
     testHold();
+    testRingCapacity();
     testBandLookup();
 
     if (failures == 0)

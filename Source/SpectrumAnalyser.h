@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <vector>
 
@@ -583,6 +584,40 @@ inline constexpr double tiltPivotFrequency = 1000.0;
 /** What a band with nothing in it reads, and the bottom of the scale. Matches
     the figure `AudioEngine::MixReading` already uses for "no measurement". */
 inline constexpr double floorDb = -200.0;
+
+//==============================================================================
+// What the tap in front of the analyser has to be able to serve.
+
+/** The transform sizes the display offers, smallest first.
+
+    2048 is 43 ms at 48 kHz and cannot resolve anything below 25 Hz. 16384 is
+    341 ms and reaches the bottom band. That is the trade FabFilter documents
+    for Pro-Q's Resolution control, in its own words: more low frequency
+    precision against a lower update rate and a slower attack. */
+inline constexpr int transformSizes[4] = { 2048, 4096, 8192, 16384 };
+
+inline constexpr int largestTransformSize = 16384;
+
+/** The smallest ring capacity that can serve a frame of the largest transform
+    size safely, given the largest block a device callback can deliver.
+
+    `Tuner::InputRing`, which is the ring the engine uses for this, states its
+    requirement as `capacity >= snapshot + 2 * block`: one block because the
+    write counter is published after a block rather than during it, and one
+    more so there is room to tell an intact copy from an overwritten one. This
+    doubles that block margin.
+
+    Derived here rather than written down in `AudioEngine.cpp`, and that is not
+    a tidiness point. The tuner's two numbers met in that file once, which no
+    test can compile, and an audit pointed out that halving the capacity to a
+    figure that still looked generous would have silently started accepting
+    torn snapshots with nothing to error or fail. Here a test can check the
+    arithmetic against the requirement it comes from.
+*/
+inline constexpr int ringCapacity (int largestBlockSamples) noexcept
+{
+    return largestTransformSize + 4 * largestBlockSamples;
+}
 
 /** What an unresolved band reads: far below the floor, so a caller that forgets
     to ask `resolves` draws it off the bottom of any sensible scale rather than

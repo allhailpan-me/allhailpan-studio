@@ -23,6 +23,7 @@
 #include "TransportSilence.h"
 #include "HoldPedal.h"
 #include "Tuner.h"
+#include "SpectrumAnalyser.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -706,6 +707,42 @@ public:
         the tuner's analysis. */
     Tuner::InputRing& tunerInput() noexcept { return tunerRing; }
 
+    //=========================================================================
+    // The spectrum analyser's tap on the master.
+    //
+    // Two rings, one per leg, written from `measureMix`, which is where the
+    // loudness and the true peak are already measured. So this reads THE MIX
+    // AND NOT THE SPEAKER FEED. The control room's fold, dim, cuts and
+    // polarity inversions are applied later and on the way out only, and a
+    // display that says what the mix measures must not see them: pressing Mono
+    // to check a fold must not change the spectrum of the thing being checked.
+    // ControlRoom.h carries that contract and this is one of the places it has
+    // to hold.
+    //
+    // The transform costs milliseconds, so it runs on whatever thread drives
+    // the display. All the audio thread does here is copy.
+
+    /** Starts and stops the copy. Off whenever the display is not on screen,
+        because a ring nobody reads is work for nothing. */
+    void setSpectrumListening (bool shouldListen) noexcept { spectrumListening.store (shouldListen); }
+    bool isSpectrumListening() const noexcept              { return spectrumListening.load(); }
+
+    /** The most recent frame of the mix, newest last, one vector per leg.
+
+        Both must already be sized to the frame wanted and both must be the
+        same size. The two legs are one frame: a display that analysed
+        different stretches of them would be describing a stereo image that
+        never existed.
+
+        Returns false if there is not that much audio yet or if the writer
+        overtook either copy, and on false NEITHER vector may be used, the same
+        contract `Tuner::InputRing::readLatest` states for its own destination.
+        One leg tearing refuses the whole frame rather than half of it, because
+        the two are summed and half a frame of one leg is not a quieter mix, it
+        is a different one.
+    */
+    bool readSpectrumFrame (std::vector<float>& left, std::vector<float>& right) const;
+
     /** The names the device gives its active inputs, in the order the audio
         callback hands them over.
 
@@ -1296,6 +1333,11 @@ private:
     // graph lock does not help, because the tap runs before that lock is
     // taken. A fixed ring removes the question instead of answering it.
     Tuner::InputRing    tunerRing;
+
+    std::atomic<bool>   spectrumListening { false };
+    // Index 0 is the left leg and 1 the right, which is the order every other
+    // pair in this engine uses.
+    Tuner::InputRing    spectrumRings[2];
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;

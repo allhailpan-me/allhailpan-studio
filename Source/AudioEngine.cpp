@@ -38,6 +38,15 @@ AudioEngine::AudioEngine()
     // the capacity is derived from, so the two cannot drift apart here the way
     // the capacity and the requirement once did.
     tunerRing.setSize (Tuner::studioRingCapacity(), Tuner::largestStudioBlockSamples);
+
+    // The same discipline for the spectrum's two rings, and for the same
+    // reason: the capacity and the requirement it comes from are both in
+    // SpectrumAnalyser.h, where a test can compile them together. The block
+    // bound is the tuner's, because it is a property of the device callback
+    // rather than of either display.
+    for (auto& ring : spectrumRings)
+        ring.setSize (Spectrum::ringCapacity (Tuner::largestStudioBlockSamples),
+                      Tuner::largestStudioBlockSamples);
 }
 
 AudioEngine::~AudioEngine()
@@ -3248,6 +3257,22 @@ void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSam
         corrLR = corrLL = corrRR = 0.0;
     }
 
+    // The spectrum's tap, taken before the early return below and deliberately
+    // not gated on the transport.
+    //
+    // The loudness has to be gated: an integrated figure that kept averaging
+    // through an idle session would walk down towards silence and describe
+    // nothing that was ever played. A band display has no integration over the
+    // session at all, only its own ballistics, which read silence as silence
+    // and recover in a time constant. And the master carries a live input
+    // while somebody is monitoring a guitar through it, which is a spectrum
+    // worth looking at and never a loudness worth integrating.
+    if (spectrumListening.load() && numSamples > 0 && master.getNumChannels() >= 2)
+    {
+        spectrumRings[0].write (master.getReadPointer (0), numSamples);
+        spectrumRings[1].write (master.getReadPointer (1), numSamples);
+    }
+
     // Only while the transport rolls, so an idle session does not quietly
     // average itself down toward silence.
     if (! isRunning || numSamples <= 0 || master.getNumChannels() < 2)
@@ -3283,6 +3308,23 @@ void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSam
     analysisMomentary.store (loudness.getMomentaryLufs());
     analysisRange.store (loudness.getLoudnessRange());
     analysisTruePeak.store (loudness.getTruePeak());
+}
+
+bool AudioEngine::readSpectrumFrame (std::vector<float>& left, std::vector<float>& right) const
+{
+    if (left.empty() || left.size() != right.size())
+        return false;
+
+    // Both legs, and both have to come back intact. The two copies are a few
+    // microseconds apart, so at worst one block of audio arrived between them
+    // and the two frames describe moments a block apart. At the shortest
+    // transform size that is a twentieth of the window, which no band level
+    // can tell the difference between; what it is not allowed to be is one
+    // torn leg, which is why either failing refuses both.
+    if (! spectrumRings[0].readLatest (left))
+        return false;
+
+    return spectrumRings[1].readLatest (right);
 }
 
 AudioEngine::MixReading AudioEngine::getMixReading() const
