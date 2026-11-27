@@ -23,6 +23,7 @@
 #include "TransportSilence.h"
 #include "HoldPedal.h"
 #include "Tuner.h"
+#include "SpectrumAnalyser.h"
 
 // ---------------------------------------------------------------------------
 // The audio engine.
@@ -706,6 +707,55 @@ public:
         the tuner's analysis. */
     Tuner::InputRing& tunerInput() noexcept { return tunerRing; }
 
+    //=========================================================================
+    // The spectrum analyser's tap on the master.
+    //
+    // Two rings, one per leg, written from `measureMix`, which is where the
+    // loudness and the true peak are already measured. So this reads THE MIX
+    // AND NOT THE SPEAKER FEED. The control room's fold, dim, cuts and
+    // polarity inversions are applied later and on the way out only, and a
+    // display that says what the mix measures must not see them: pressing Mono
+    // to check a fold must not change the spectrum of the thing being checked.
+    // ControlRoom.h carries that contract and this is one of the places it has
+    // to hold.
+    //
+    // The transform costs milliseconds, so it runs on whatever thread drives
+    // the display. All the audio thread does here is copy.
+
+    /** Starts and stops the copy. Off whenever the display is not on screen,
+        because a ring nobody reads is work for nothing.
+
+        Turning it on also marks everything already in the ring as stale, which
+        matters more than it sounds. The ring's counter is cumulative and is
+        never reset, so a read taken the moment the display comes back would
+        succeed and hand over whatever was playing when it was last closed.
+        The analyser seeds its ballistics on the first frame it is given, so
+        that would be drawn at full confidence: ten minutes of silence on the
+        output and a loud spectrum on screen until a whole window of fresh
+        audio had arrived. */
+    void setSpectrumListening (bool shouldListen) noexcept;
+    bool isSpectrumListening() const noexcept { return spectrumListening.load(); }
+
+    /** The most recent frame of the mix, newest last, one vector per leg.
+
+        Both must already be sized to the frame wanted and both must be the
+        same size.
+
+        The two legs really are one frame, because the ring holds them
+        interleaved and this takes one snapshot of it. That is the reason for
+        the interleaving: with a ring each, a block arriving between the two
+        reads leaves the legs a whole block apart, and the engine's own bound
+        on a block is 8192 samples, which is four times the shortest frame this
+        display asks for. So the two could have described entirely disjoint
+        stretches of audio while a comment said they were one frame.
+
+        Returns false if there is not that much FRESH audio yet, meaning
+        written since the display was last turned on, or if the writer overtook
+        the copy. On false the vectors must not be used, which is the contract
+        `Tuner::InputRing::readLatest` states for its own destination.
+    */
+    bool readSpectrumFrame (std::vector<float>& left, std::vector<float>& right);
+
     /** The names the device gives its active inputs, in the order the audio
         callback hands them over.
 
@@ -1296,6 +1346,18 @@ private:
     // graph lock does not help, because the tap runs before that lock is
     // taken. A fixed ring removes the question instead of answering it.
     Tuner::InputRing    tunerRing;
+
+    std::atomic<bool>          spectrumListening { false };
+    std::atomic<std::uint64_t> spectrumFreshFrom { 0 };
+    // The two legs interleaved, left first, which is the order every other
+    // pair in this engine uses. One ring so that a snapshot of it is one
+    // frame of both legs.
+    Tuner::InputRing           spectrumRing;
+    // Sized once, in the constructor, because the audio thread writes through
+    // it and must not allocate.
+    std::vector<float>         spectrumInterleave;
+    // The message thread's side of the same arrangement.
+    std::vector<float>         spectrumSnapshot;
 
     double sampleRate = 44100.0;
     int    blockSize  = 512;

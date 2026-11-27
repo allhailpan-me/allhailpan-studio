@@ -118,6 +118,289 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-27: a spectrum analyser, and the tilt that would have double counted
+
+### What was looked at
+
+Nine open pull requests, every one a `harden/` branch again, so there was no
+draft of this lane's own to finish. Between them they hold `Project.h`,
+`MainComponent.cpp`, `PianoRollComponent.cpp`, `PlaylistComponent.cpp`,
+`RELEASE_NOTES.md`, `Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`,
+`Punch.h`, `NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`. `Source/Synth` and `Source/Fx` are being built
+by hand, so both are out of bounds whatever the pull requests say.
+
+The same two holds as last night decided most of it, and it is worth recording
+that they have now cost three strong candidates on three separate nights rather
+than one:
+
+- **Loudness normalisation on export**, which the 11-26 entry recorded as the
+  first thing to build when `MainComponent.cpp` frees up. It is still the
+  sharpest workflow gap in the tree and it is still one line out of reach:
+  `ExportJob` takes its bit depth and dither through its constructor, which is
+  called in `MainComponent.cpp`, so the choice cannot be plumbed to it. The
+  research for it is half done in that entry. Unchanged, and still first in
+  the queue.
+- **The dim amount, and the control room light on the main toolbar**, both owed
+  to `MainComponent.cpp` by last night's own account.
+- **A per insert monitor override**, deferred on `Project.h` since 11-25.
+
+What is left is anything that needs no saved project state and no transport,
+toolbar or menu change. Taking inventory of that: there is no tempo map, there
+are no markers, there are no track groups, there is no freeze, and there is no
+frequency display of any kind. The first four all need `Project.h`. The fifth
+does not.
+
+### What was chosen
+
+**A spectrum analyser on the master, in fractional octave bands.**
+
+The mix report already measures integrated loudness, true peak, loudness range
+and stereo correlation, and tells the owner in words what each one means. It has
+nothing to say about *where in the spectrum* the mix sits, which is the first
+question anybody asks about a mix they cannot quite place. Every studio on the
+reference list ships one: Ableton's Spectrum, Logic's MultiMeter and Channel EQ
+analyser, Cubase and Studio One's frequency displays, Reaper's, plus the
+specialist tools the manuals for this were read from. Here there is nothing.
+
+It is also the candidate that most helps the owner specifically. He records
+guitar and vocals and mixes, and a frequency display is the check that finds the
+two faults that monitoring cannot: energy below what the speakers reproduce, and
+a resonance sitting where the room already flatters it. It is the natural
+companion to the control room section that merged last night: the mono fold says
+what survives a collapse, and this says where the mix's weight actually is.
+
+| Candidate | Verdict |
+|---|---|
+| **A fractional octave spectrum analyser on the master** | **Chosen.** Missing entirely, standard everywhere, daily while mixing, and the arithmetic is band geometry and power sums that go in a JUCE free header beside `RealFFT.h`. Touches no held file. |
+| Loudness normalisation on export | **Deferred on a file hold, not on merit, for the second night running.** See above. |
+| The dim amount persisted, and a control room light on the toolbar | Deferred on `MainComponent.cpp`, owed by last night's entry. |
+| A per insert monitor override | Deferred on `Project.h`, unchanged since 11-25. |
+| Markers and a tempo map | **Both confirmed absent and both genuinely wanted.** Markers are how anybody navigates an arrangement and a tempo map is how anybody writes a song that changes speed. Both are saved project state, so both are `Project.h`, and both are bigger than one night. Recorded as the two largest known gaps in the arranging half of the studio. |
+| Track groups and freeze | Absent. Both need `Project.h`. Lower than markers. |
+| Speaker set switching, A/B/Alt | **Deferred, and the reason changed since last night.** It was named as the next thing in the control room corner, and on inspection the calibration it needs (which output pair, and the trim per set) is exactly the kind of state that must be saved, and the one route from a stored preference to the engine is `preferenceActions()` in `MainComponent.cpp`. Shipping a second control room calibration that is relearned on every launch would repeat a gap this project has already named. Wait for the file. |
+| A correlation meter | **Already there.** `MixReading::correlation` and the mix report's "MONO COMPATIBILITY" number. Checked rather than assumed. |
+| A spectrogram over the arrangement | Rejected for tonight. `Spectrogram.h` is held, and a time against frequency view of a whole song is a view of its own rather than a panel. |
+| A per band analyser on each mixer strip | Rejected. Sixteen analysers is sixteen FFTs for a display nobody can read at strip width, and the question "where is this mix heavy" is asked of the mix. |
+| Claiming IEC 61260 conformance | **Rejected on the research's own finding, and the single most important thing not to do.** See below. |
+
+### What the research settled
+
+The `dsp-researcher` agent read IEC 61260-1:2014 (official preview, clauses 3.x
+and 5.1 to 5.5 in full), the full text of ANSI/ASA S1.11-2004, ISO 266:1997,
+IS 15575-1:2005 which is the Indian adoption of IEC 61672-1:2002, and Harris's
+NUC TP 532 of 1976, which carries the same Table I as the 1978 Proceedings
+paper. It cross checked every display convention against manufacturer manuals:
+Voxengo's SPAN and Primary guides, FabFilter's Pro-Q 4 help and manual, the
+Ableton Live 12 audio effect reference, Apple's Logic Pro 7 Plug-In Reference
+and the current Logic MultiMeter and Channel EQ pages, and the iZotope Insight
+help. Nothing was taken from source code of any project.
+
+**The tilt would have double counted, exactly and completely, and nothing in the
+picture would have said so.** This is the finding the night turned on. SPAN and
+Pro-Q both document a default display slope of 4.5 dB per octave pivoting
+"around 1 kHz", and it is the obvious number to copy. It is right for those two
+displays and wrong here, because both are per FFT bin, constant bandwidth
+displays, where pink noise falls at 3.01 dB per octave and the tilt is what
+flattens it. A constant ratio band display summed as power **already reads pink
+noise flat**, exactly: band power for a 1/f density is proportional to
+`ln(f2/f1)`, which is the same for every band whatever its centre, measured
+across 20 Hz to 20 kHz as 6.2e-15 dB of spread. Add 4.5 dB per octave on top and
+pink noise rises at the full 4.5, which is 45 dB end to end over the ten octaves
+of the display. The default here is therefore **0.0 dB per octave**, which is
+what copying SPAN's *intent* rather than its number means, and the residual
+preference tilt that survives the move to bands is **1.49 dB per octave** rather
+than 4.5. It is worth stating plainly that this would have looked right on
+music: a real mix carries more low frequency energy than pink noise, so the
+tilt partly cancels it, and only a noise source would have shown it up.
+
+**Band energy is an integral, not an average, and that is the same lesson
+`Fx/Tilt.h` already carries.** Dividing a band's power by its bandwidth in hertz
+is the other way to destroy the property: measured, it turns pink from -0.003 to
+-3.013 dB per octave. The two mistakes are the same mistake in opposite
+directions and both leave a plausible looking spectrum.
+
+**One sixth octave bands are centred by a different formula than one third
+octave bands, because b is even.** IEC 61260-1:2014 clause 5.4.1 gives
+`f_m = f_r * G^(x/b)` for odd b and clause 5.4.2 gives
+`f_m = f_r * G^((2x+1)/(2b))` for even b, with `f_r` exactly 1000 Hz and
+`G = 10^(3/10)` from clause 5.2.1. So 1 kHz is a band centre at one third
+octave and a band **edge** at one sixth octave. Building sixths with the odd
+formula gives the right count, the right ratios and the right widths, with every
+centre out by `G^(1/12)`, which is 99.66 cents, almost exactly a semitone. The
+test pins it from the other side as well: with the correct formula, sixths nest
+exactly in pairs inside thirds, which ANSI S1.11-2004 clause 3.5 Note 1
+sanctions, and the nesting breaks the moment the formula is wrong.
+
+**Base ten, not base two.** `G = 10^(3/10)` is the definition in the body of
+IEC 61260-1:2014; `G = 2` is an informative annex. They are identical at 1 kHz
+and differ by -23.27 cents at the 20 Hz band and +17.79 cents at the 20 kHz
+band, so a check written at 1 kHz passes under either and says nothing.
+
+**An FFT binned analyser cannot claim IEC 61260 conformance and must not say it
+does.** Both standards specify filters, with tolerance masks on the skirts, and
+neither mentions the FFT at all; ANSI S1.11-2004 clause 1.3 leaves the
+realisation to the manufacturer provided the instrument conforms. The band
+*definitions* are the standard's and are cited as such. The band *filters* here
+are brick walls over FFT bins and are not conformant. Logic's MultiMeter is the
+one analyser on the reference list that claims to comply with IEC 1260, and it
+is a filter bank.
+
+**The two window normalisations are different constants and both are needed, in
+different places.** Harris Table I, for the Hann window: coherent gain 0.50 and
+equivalent noise bandwidth 1.50 bins. Those are exact at every size for the
+**periodic** window, `0.5 - 0.5*cos(2*pi*i/N)`, which is Harris equation (27b)
+and which `Spectrogram.h` already uses; the symmetric form gives 0.499878 and
+1.500366 at 4096, which is inaudible and makes the constants depend on the
+size, so no test can assert them. Getting the choice between them wrong is a
+fixed error of 1.76 dB, or 3.01 dB, or the 4.77 dB of both together, and
+chasing that as one bug is a dead end.
+
+**Correction, written the same night: the sentence that stood here was wrong,
+and it is the one thing in this entry that would have shipped a fault.** It
+said the band path wants the window sum normalisation and then **no** division
+by the noise bandwidth, "which is the one combination that makes a full scale
+sine read its own level and pink noise read flat at the same time". That is
+true of a reading taken off ONE BIN and false of a band, which is a sum of
+bins. The periodic Hann puts a tone on three bins at relative powers 1, 1/4 and
+1/4, so any band wide enough to hold the main lobe collects 1.5 times the peak
+bin and reads 1.7609 dB high. Measured at 48 kHz and a transform size of 16384:
+peak bin 0.0000 dB, band sum +1.7609 dB.
+
+What shipped is `2 * |X|^2 / (N * sum(w^2))`, which is the window sum
+normalisation divided by the noise bandwidth, so the per bin quantity is the
+power in one bin's worth of bandwidth and a band sum is the integral of the
+density across the band. That reads a full scale sine at 0.0000 dB **and** sums
+a broadband signal's bands to its own mean square within 0.016 dB. Both at
+once, which is what says it is the right constant.
+
+Left on the record rather than edited out, because this file is what a later
+night reads to avoid relitigating a decision, and an entry that records the
+wrong answer silently is worse than no entry. The code was right from the
+first commit; an audit found that the correction had gone into the header and
+not into here.
+
+**A band narrower than one FFT bin has to be refused, not approximated.** The
+20 Hz one third octave band is 4.6044 Hz wide. At 48 kHz that is 1.57 bins at a
+size of 16384 and 0.20 bins at 2048, and a band that catches no bin reads
+whatever the fallback happens to be, which is a confident wrong number at the
+exact frequency people argue about most. So a band resolving to less than one
+bin width of weight reports no reading at all, which is the same way round as
+`Tuner::InputRing` refusing a snapshot it cannot serve safely. No standard and
+no manufacturer documents this, and the header says so.
+
+**Summing the channel powers, not the channels.** Four defensible channel
+combinations span 6 dB, and two of them cancel anti correlated content
+completely. Logic's MultiMeter offers a "Mono" that is the time domain sum, so
+an out of phase bass guitar vanishes from it. Summing the per channel powers
+cannot cancel, reads 3.01 dB above one channel alone on correlated material, and
+is the same convention as ITU-R BS.1770, so the analyser and `LoudnessMeter.h`
+agree about what "the mix" is instead of sitting 3 or 6 dB apart for reasons
+nobody can reconstruct later.
+
+**The ballistics are the sound level meter's, on the mean square.**
+IEC 61672-1 clause 3.4 defines a time weighting as an exponential function
+weighting the *square* of the instantaneous pressure, clause 5.7.1 gives
+F = 0.125 s and S = 1 s, and clause 5.7.2 gives the acceptance windows for the
+decay rate: at least 25 dB/s for F, and between 3.4 and 5.3 dB/s for S. The
+ideal rates those constants imply are 34.74 and 4.343 dB/s. Smoothing the
+magnitude or the decibel value instead gives a level dependent decay that meets
+neither, and the test asserts against the standard's windows rather than against
+the implementation's own arithmetic.
+
+**Where no standard exists, the header says so.** The bin to band mapping, what
+to do when a band holds less than a bin, window and overlap defaults, the exact
+tilt pivot, the peak hold convention, whether 0 dBFS means a full scale sine's
+peak or its RMS, the channel combination, and the nominal labels for one sixth
+octave bands. On the last one, IEC 61260-1:2014 Annex E.3 is normative and is
+paywalled, and ISO 266 standardises only the one third octave series, so no
+preferred series is invented: the axis is labelled by frequency, placing each
+ISO 266 preferred frequency where it actually falls, which at one sixth octave
+is the join between the two bands nested inside a third.
+
+### What is in the tree
+
+- `Source/SpectrumAnalyser.h`, no JUCE: the band geometry from IEC 61260-1, the
+  bin to band weights, the window and its two constants, the power sums, the
+  IEC 61672-1 ballistics and the hold.
+- `Tests/SpectrumAnalyserTest.cpp`.
+- `Source/AudioEngine.{h,cpp}`: one ring holding the two legs interleaved, fed
+  from `measureMix`, which is where the loudness and the true peak are already
+  measured and is therefore the mix rather than the speaker feed. It is a
+  `Tuner::InputRing`, reused rather than reimplemented, because a second copy
+  of a tear check that took two audits to get right is a second chance to get
+  it wrong.
+- `Source/MixReportPanel.h`: the display, under the four numbers it belongs
+  beside.
+- `Tests/SpectrumProbe.cpp`, not run by the suite: where every figure the
+  header quotes about narrow bands comes from, over every rate, transform size
+  and bandwidth. It exists because the first set of those figures was measured
+  at 48 kHz with the longest window and one third octave bands, which is the
+  only combination in which every band resolves, and three of them were wrong.
+- `Research/spectrum-mutations.py`: the mutation harness, 56 deliberate
+  mistakes compiled with the sanitizers.
+
+`renderOffline` is not touched: an analyser is a display and has no counterpart
+in a rendered file.
+
+### What the audit found, which was again mostly in the sentences
+
+Ten findings. Two were behaviour and the rest were claims:
+
+**The display read every stereo mix 3.01 dB high.** The scale was referenced so
+that a full scale sine in ONE channel read 0 dB, while the two channels are
+summed as powers, and the panel always feeds both. So a full scale stereo tone
+read +3.01 and the panel's own comment said nothing could go above zero. The
+reference is the stereo one now, which needs no offset at all: a full scale
+sine in both legs has a summed mean square of exactly one. A band can still go
+over the top under a tilt, and a bar that does is capped in red rather than
+flattening silently.
+
+**"Nothing is lost, it is only shared" was false at the bottom of the
+display.** It is true between two resolved bands and not true where the band
+next door is refused: half of a tone on that boundary lands in a band drawn as
+stripes, so 53 per cent of it is drawn nowhere and the bar that is shown reads
+up to 4.09 dB low. The threshold is still one bin, because refusing at four
+would blank the whole bass range, but the cost is now written down, measured,
+asserted, and said on the panel in words.
+
+**At one sixth octave the frequency axis had no labels at all.** The panel
+matched preferred frequencies to band centres within three per cent, and by the
+exact nesting the header is proudest of, every third octave centre is a sixth
+octave EDGE, 5.93 per cent from the nearest centre. Sixty two bars and a blank
+axis. Labels are placed by frequency now, which lands them on the join where
+the frequency actually is.
+
+**Two rings could not promise what the comment said they did.** The two legs
+were read one after the other, so a block arriving in between left them a whole
+block apart, against an engine bound of 8192 samples, which is four times the
+shortest frame. One interleaved ring now, so a snapshot is one frame of both
+legs by construction.
+
+**Reopening the view drew a stale spectrum at full confidence.** The ring's
+counter is cumulative and the tap only stops being written, so the first frame
+after the display came back was whatever was playing when it was last closed,
+and the analyser seeds on its first frame. The engine marks the ring's position
+when the display is turned on and refuses a frame until a whole window of fresh
+audio has arrived.
+
+**And five numbers did not reproduce**, which on this project is the category
+that matters: the Nyquist truncation was 0.30 dB and not 0.74, the broadband
+conservation was 0.016 dB and not 2 parts in 10000, the join case ran to
+-4.09 dB and not -3.3, the width table had a row for a band width that does not
+exist at the rate it claimed to be measured at, and the comment on the clamp
+that keeps a band's lowest bin in range said it was load bearing and gave a
+worked example that disproves it. All corrected, with the probe as the source,
+and the wrong figures left on the record where they were argued.
+
+Two things not changed, deliberately. The five new controls are not saved, which
+matches the panel's own precedent, since the loudness target beside them is not
+saved either; `Preferences.h` is where they would go and `MainComponent.cpp` is
+what is holding that. And there is no overlap mechanism, so the hop is the
+display's refresh interval: at the shortest window and the highest rates some
+of the audio is never looked at, which the header now states and which matters
+only for a peak hold on a very short transient.
+
 ## 2026-11-26: a control room section, and the one place in the engine that is not the mix
 
 ### What was looked at

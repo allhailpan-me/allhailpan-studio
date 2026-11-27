@@ -350,6 +350,7 @@ braces on their own line.
 | `AudioDefaults.h` | The driver preference order and the buffer size arithmetic for first run. No JUCE |
 | `InputSource.h` | Which input channel feeds which mixer insert, Auto-map, and the rule that a mono source is centred rather than pinned to one speaker. No JUCE |
 | `RealFFT.h` | A radix-2 transform for real signals. No JUCE, so the spectral chain is testable end to end |
+| `SpectrumAnalyser.h` | What a mix measures across the spectrum: the IEC 61260-1 band geometry, the bins summed into bands, the window and which of its two constants a band wants, the sound level meter's ballistics, and the bands too narrow for the window to say anything about. No JUCE |
 | `Tuner.h` | The chromatic tuner: equal temperament, YIN from the paper, the gate that decides whether to show a number, the pacing of the readings, and the ring the audio thread writes into. No JUCE |
 | `Spectrogram.h` | Short time analysis and weighted overlap-add resynthesis: the window, the hop, and the sum that has to come back flat. No JUCE |
 | `SpectralEdit.h` | A region of the time against frequency plane and the gain applied to it, with tapered edges so a repair does not ring. No JUCE |
@@ -633,6 +634,59 @@ and wrong, in the argument rather than in the signal.
 through a copy of it, by passing a block bound of zero, which is the old check
 exactly. A probe that demonstrates a fault against its own reimplementation of
 the code demonstrates nothing.
+
+**A band is a sum of bins, and the constant that is right for one bin is wrong
+for a band.** `SpectrumAnalyser.h` normalises its spectrum by the window's
+noise bandwidth, not by the window's sum, and the difference is 1.7609 dB on
+everything.
+
+The argument for the window sum is that it makes a full scale sine read its own
+level, which is what every analyser's manual says its display does. It is true,
+and it is true of the one bin the tone's peak lands on. A periodic Hann spreads
+a tone over three bins at relative powers 1, 1/4 and 1/4, so any band wide
+enough to hold the main lobe, which is every band a display of this kind shows,
+collects one and a half times the peak bin. Divide by the noise bandwidth
+instead and the per bin quantity becomes the power in one bin's worth of
+bandwidth, so a band sum is the integral of the density across the band, which
+is what a band level is: a tone then reads 0.0000 dB in its band and a
+broadband signal's bands sum to its own mean square.
+
+Both of those have to be checked, because each constant satisfies one of them
+and only one satisfies both. The research that preceded the code recommended
+the wrong one, in a sentence that reasoned correctly about a bin and concluded
+about a band, and nothing but a measurement of both signals separates them.
+`Research/BACKLOG.md` keeps that sentence with its correction.
+
+**And the scale is referenced to a full scale sine in BOTH channels**, which
+needs no offset at all because such a tone has a summed mean square of exactly
+one. The first version referenced one channel and added 3.0103, while the
+channels are summed as powers and the panel always feeds both, so every stereo
+mix read 3.01 dB high and the display's own comment claimed nothing could
+exceed full scale. The factor of two from peak referencing one channel and the
+factor of two from having two channels are the same factor of two.
+
+**A tone on a band join is shared between two bands; where the band next door
+is refused, it is lost.** The same header refuses a band narrower than one FFT
+bin, because such a band catches one whole bin or none depending on where its
+edges fall, and shows stripes instead. Those refusals are always the lowest
+bands, since a band's width is a fraction of its centre and a bin's is not, so
+there is exactly one boundary and it is at the bottom.
+
+At that boundary half of a tone lands in a band that is drawn as stripes: 53 per
+cent of it is drawn nowhere and the bar that is shown reads up to 4.09 dB low.
+Between two resolved bands nothing is lost at all, and "between" means three
+bins inside the resolved span rather than one band above the boundary, because
+the window's lobe is two bins wide and a narrow band is a fraction of a bin.
+
+Worth the detail for the shape of the mistake rather than the fix. The first
+version of that comment said plainly that nothing was ever lost, and its test
+agreed, because the test ran at 48 kHz with the longest window and one third
+octave bands, which is the only combination in the whole matrix where every
+band resolves. A resolved band next to a refused one never occurred in it. The
+figures it published were measured in that one configuration and written down
+as general properties, and three of them were wrong. `Tests/SpectrumProbe.cpp`
+exists so the numbers can be rechecked over every rate, size and bandwidth the
+studio offers, which is what the test now sweeps.
 
 **A modulation routing is saved in the project, so it is named and not
 numbered.** `Synth/ModMatrix.h` gives every source and destination a stable

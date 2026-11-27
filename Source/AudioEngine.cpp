@@ -38,6 +38,19 @@ AudioEngine::AudioEngine()
     // the capacity is derived from, so the two cannot drift apart here the way
     // the capacity and the requirement once did.
     tunerRing.setSize (Tuner::studioRingCapacity(), Tuner::largestStudioBlockSamples);
+
+    // The same discipline for the spectrum's ring, and for the same reason:
+    // the capacity and the requirement it comes from are both in
+    // SpectrumAnalyser.h, where a test can compile them together. The block
+    // bound is the tuner's, because it is a property of the device callback
+    // rather than of either display, doubled because this ring holds the two
+    // legs interleaved.
+    spectrumRing.setSize (Spectrum::interleavedRingCapacity (Tuner::largestStudioBlockSamples),
+                          2 * Tuner::largestStudioBlockSamples);
+
+    // Sized here and never again, because the audio thread interleaves through
+    // it on every block and must not allocate.
+    spectrumInterleave.assign ((std::size_t) (2 * Tuner::largestStudioBlockSamples), 0.0f);
 }
 
 AudioEngine::~AudioEngine()
@@ -3248,6 +3261,39 @@ void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSam
         corrLR = corrLL = corrRR = 0.0;
     }
 
+    // The spectrum's tap, taken before the early return below and deliberately
+    // not gated on the transport.
+    //
+    // The loudness has to be gated: an integrated figure that kept averaging
+    // through an idle session would walk down towards silence and describe
+    // nothing that was ever played. A band display has no integration over the
+    // session at all, only its own ballistics, which read silence as silence
+    // and recover in a time constant. And the master carries a live input
+    // while somebody is monitoring a guitar through it, which is a spectrum
+    // worth looking at and never a loudness worth integrating.
+    if (spectrumListening.load() && numSamples > 0 && master.getNumChannels() >= 2)
+    {
+        // Interleaved into one ring rather than written to two, so that a
+        // snapshot of it is one frame of both legs. AudioEngine.h carries why
+        // two rings could not promise that.
+        //
+        // A block larger than the bound keeps only its newest samples, which
+        // is what the ring itself would do with an oversized write, and the
+        // scratch buffer is sized for the bound so nothing here allocates.
+        const int n = juce::jmin (numSamples, Tuner::largestStudioBlockSamples);
+
+        const auto* l = master.getReadPointer (0) + (numSamples - n);
+        const auto* r = master.getReadPointer (1) + (numSamples - n);
+
+        for (int i = 0; i < n; ++i)
+        {
+            spectrumInterleave[(std::size_t) (2 * i)]     = l[i];
+            spectrumInterleave[(std::size_t) (2 * i + 1)] = r[i];
+        }
+
+        spectrumRing.write (spectrumInterleave.data(), 2 * n);
+    }
+
     // Only while the transport rolls, so an idle session does not quietly
     // average itself down toward silence.
     if (! isRunning || numSamples <= 0 || master.getNumChannels() < 2)
@@ -3283,6 +3329,53 @@ void AudioEngine::measureMix (const juce::AudioBuffer<float>& master, int numSam
     analysisMomentary.store (loudness.getMomentaryLufs());
     analysisRange.store (loudness.getLoudnessRange());
     analysisTruePeak.store (loudness.getTruePeak());
+}
+
+void AudioEngine::setSpectrumListening (bool shouldListen) noexcept
+{
+    // Marked before the flag goes up, so nothing can slip in between and be
+    // counted as fresh when it is not. The other order would be harmless and
+    // this one needs no argument.
+    if (shouldListen && ! spectrumListening.load())
+        spectrumFreshFrom.store (spectrumRing.totalWritten());
+
+    spectrumListening.store (shouldListen);
+}
+
+bool AudioEngine::readSpectrumFrame (std::vector<float>& left, std::vector<float>& right)
+{
+    if (left.empty() || left.size() != right.size())
+        return false;
+
+    const std::size_t want       = left.size();
+    const std::size_t interleaved = 2 * want;
+
+    // Nothing written before the display was turned on. The counter is
+    // cumulative and never reset, so without this the first frame after the
+    // view comes back is whatever was playing when it was last closed, and the
+    // analyser seeds on its first frame, so it would be drawn at full
+    // confidence. The subtraction cannot wrap: the mark is taken from this
+    // same counter, which only ever increases.
+    if (spectrumRing.totalWritten() - spectrumFreshFrom.load() < (std::uint64_t) interleaved)
+        return false;
+
+    if (spectrumSnapshot.size() != interleaved)
+        spectrumSnapshot.assign (interleaved, 0.0f);
+
+    if (! spectrumRing.readLatest (spectrumSnapshot))
+        return false;
+
+    // The snapshot starts on a left sample, and that is by construction rather
+    // than by luck: the ring is only ever written in whole blocks of two
+    // channels, so its counter is always even, and an even number of samples
+    // taken from an even position leaves the interleaving in step.
+    for (std::size_t i = 0; i < want; ++i)
+    {
+        left[i]  = spectrumSnapshot[2 * i];
+        right[i] = spectrumSnapshot[2 * i + 1];
+    }
+
+    return true;
 }
 
 AudioEngine::MixReading AudioEngine::getMixReading() const
