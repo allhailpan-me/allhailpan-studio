@@ -7,6 +7,39 @@ Newest first.
 
 ---
 
+## 2026-11-28: the send tap, the cut it meets twice, and the button that said the opposite
+
+### What is being looked at
+
+`Source/SendTap.h`, `Tests/SendTapTest.cpp`, the pre fader figure in
+`Source/SoloGraph.h`, the tap's own control in `Source/MixerComponent.h`, and
+the two call sites in `Source/AudioEngine.cpp` that act on all of it. The tap
+point landed on 2026-11-24 in #90 and has no entry here, so nothing has
+audited it since it merged. No open pull request touches any of those files.
+
+Why it is worth a night. A send tap is a choice between two buffers that both
+hold the right strip at a plausible level, so every way of getting it wrong is
+silent: there is no click, nothing on a meter, and no error. The feature's own
+header says so at `sourceIsPreFader`, calling an inverted answer there "the
+quietest possible breakage of this whole feature". And the one number that
+differs between the two taps is the solo cut, which a send meets twice on its
+way to the master, so it is the figure most able to be plausible and wrong.
+
+### What is being audited for
+
+Three things, in order. Whether the cut arithmetic is right at both taps.
+Whether the claims made about it in comments are reproduced by anything in the
+tree. And whether `Tests/SendTapTest.cpp`, which is a strong test of the
+header, can see any of the ways the engine's call sites could act on the
+header wrongly.
+
+### Status
+
+In progress. This note is committed first so that an interrupted night leaves
+its target written down.
+
+---
+
 ## 2026-11-27: the control room's words, which are the only report of the one control you cannot hear
 
 ### What is being looked at
