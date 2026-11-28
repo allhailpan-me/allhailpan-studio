@@ -2094,8 +2094,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
 
                 auto& slot = insertSlots[(size_t) i];
 
-                // Sends are taken post fader and fed forward, so the
-                // destination is still ahead in this same pass.
+                // Fed forward, so the destination is still ahead in this
+                // same pass. Which point the copy is taken from is per send
+                // and is routeSends' own question: both taps sit after the
+                // effect slots, so neither moves anything the compensation
+                // produces and neither changes the order of this loop.
                 routeSends (i, numSamples);
 
                 // Then hold this insert back to match the others.
@@ -2909,11 +2912,18 @@ void AudioEngine::processInsert (int index, int numSamples, PanLaw::Law law)
             // change in; or it has left it and the fade off it is still
             // running, which is the case that would otherwise lose the signal
             // it is fading away from half way through.
+            //
+            // In SendTap.h rather than here because the predicate routeSends
+            // asks is this one short of a clause, so the two read like a
+            // duplication with a mistake in it and are neither. The reason
+            // they differ is written down beside them, with the property that
+            // neither may decline a copy something is about to read.
             wantsPreFader = wantsPreFader
-                         || tap == SendTap::Tap::preFader
-                         || slot.sendActiveTap[(size_t) s] == SendTap::Tap::preFader
-                         || (slot.sendTapFade[(size_t) s] > 0.0
-                             && slot.sendFadeFrom[(size_t) s] == SendTap::Tap::preFader);
+                         || SendTap::preFaderCopyWantedBeforeRouting (
+                                tap,
+                                slot.sendActiveTap[(size_t) s],
+                                slot.sendTapFade[(size_t) s],
+                                slot.sendFadeFrom[(size_t) s]);
         }
 
         // Taken only when a send on this insert is asking for it, so an insert
@@ -3623,8 +3633,8 @@ void AudioEngine::routeSends (int index, int numSamples)
         // two paths above that feed nothing drop it rather than leave it armed.
         auto& fade = slot.sendTapFade[(size_t) s];
 
-        const bool needsPreFaderCopy = tap == SendTap::Tap::preFader
-                                    || (fade > 0.0 && slot.sendFadeFrom[(size_t) s] == SendTap::Tap::preFader);
+        const bool needsPreFaderCopy
+            = SendTap::preFaderCopyWantedWhileRouting (tap, fade, slot.sendFadeFrom[(size_t) s]);
 
         if (slot.sendScratch.getNumChannels() < 2 || slot.sendScratch.getNumSamples() < numSamples
             || (needsPreFaderCopy && ! slot.preFaderReady))
@@ -3676,20 +3686,25 @@ void AudioEngine::routeSends (int index, int numSamples)
 
             for (int i = 0; i < numSamples; ++i)
             {
-                // One figure for both channels, for the reason processInsert
-                // gives about a level change: a crossfade running at different
-                // rates on the two halves would move the image for as long as
-                // it lasted.
-                const double t = 1.0 - fade;
-
                 // The ramp is read rather than assumed to be at the target,
                 // because the amount can be moved during the fade and the send
                 // must then travel to where it is now going rather than to
                 // where it was going when the tap changed.
                 const double g = ramp.next (target, levelStep);
 
-                outL[i] = (float) SendTap::fadeSample (fromL[i], held, toL[i], g, t);
-                outR[i] = (float) SendTap::fadeSample (fromR[i], held, toR[i], g, t);
+                // `fade` is what is left, and it is handed over as that rather
+                // than turned into progress here, because the subtraction is
+                // the one mistake in this loop that every property of the
+                // blend survives: it stays convex, monotone and exact at both
+                // ends, and only runs the five milliseconds backwards. It
+                // lives in SendTap.h next to that reasoning.
+                //
+                // One figure for both channels, for the reason processInsert
+                // gives about a level change: a crossfade running at different
+                // rates on the two halves would move the image for as long as
+                // it lasted.
+                outL[i] = (float) SendTap::fadeSampleRemaining (fromL[i], held, toL[i], g, fade);
+                outR[i] = (float) SendTap::fadeSampleRemaining (fromR[i], held, toR[i], g, fade);
 
                 fade = std::max (0.0, fade - levelStep);
             }
