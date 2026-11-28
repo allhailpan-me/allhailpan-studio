@@ -580,6 +580,29 @@ set. Recorded because it changes what a hard trim means.
 - **No clamp on a clip's stretch**, which is what would make the four times
   limit the engine's limit too. `Project.h` is held.
 
+### How it closed, and why no release was cut
+
+Merged as #98 with `tests`, `windows-latest` and `ubuntu-latest` all green and
+macOS still building after thirty five minutes, which is the rule this project
+already set for a slow runner: two platforms plus the tests, and no failure
+anywhere.
+
+**No release.** `v0.9.0` was cut two days ago and `main` is two commits past it,
+one of which is the hardening lane. The standing question at the top of this
+file sets the test as a specific reason rather than a general one, and "a clip
+reads better" with the build two days old is not one. It will be the lead item
+of the next release and the notes are written and staged under
+`## Since v0.9.0` rather than left for somebody to reconstruct.
+
+The notes name the two things this changes rather than fixes, in the owner's
+own terms: a clip can read above the loudest sample in its file, which matters
+only when bouncing an imported full scale master to a fixed point word length,
+and a hard trim now carries about a millisecond of what was trimmed off. They
+also name the CPU cost and offer a cheaper mode behind a setting if a large
+session at a small buffer starts dropping out, because that is the one way this
+can make the studio worse for him rather than better and he should not have to
+guess at the cause.
+
 ## 2026-11-27: a spectrum analyser, and the tilt that would have double counted
 
 ### What was looked at

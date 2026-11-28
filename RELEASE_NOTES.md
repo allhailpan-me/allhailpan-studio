@@ -2,6 +2,71 @@ You can hear the mix in mono now, and find out what it costs you: under the mast
 
 ## Since v0.9.0
 
+**Audio clips are read properly now, and the old way was quietly dulling your
+takes.** This one has no button and nothing to set. Every audio clip in the
+playlist, every bounce, and the preview when you click a file in the browser,
+all sound different and all sound right.
+
+Here is what was happening, because it explains a thing you may have noticed
+and had no way to name.
+
+When the studio plays an audio clip it has to work out where in the file to
+read, and that lands between two stored samples almost every time. It used to
+split the difference between the two, which is the cheapest thing you can do
+and the worst. Splitting the difference is a tone control: it takes the top off.
+**Trimmed in the middle, a take lost 2 dB at 10 kHz, 5 dB at 15 kHz and 12 dB
+at 20 kHz.** Not a setting, not a plugin, just gone, and how much depended on
+exactly where you happened to drag the edge of the clip. Drag it one sample
+further and the same guitar sounded different. Nothing told you, nothing
+flickered, no meter moved.
+
+Three ordinary things put you in that position and you could not avoid any of
+them:
+
+- **Trimming or nudging a clip.** This is the big one, and it is the one that
+  was hardest to see because it is not distortion, it is just dull. Every clip
+  you drag the end of, and every clip that does not start exactly on a whole
+  sample, which is most of them.
+- **A file recorded at a different rate from the one you are working at.** A
+  44.1 kHz file in a 48 kHz session was every single sample interpolated, and
+  on top of the dulling it was adding grit about 30 dB under the sound, which
+  is audible on a cymbal.
+- **Stretching or warping a clip**, where the read position moves continuously
+  and never lands anywhere near a sample.
+
+It now reads the way a mastering sample rate converter does, built from the
+published method rather than from a guess, and measured against the exact
+answer: the error is more than a hundred decibels below the sound, where before
+it was twelve. A 96 kHz or 192 kHz file dropped into a 44.1 kHz session is now
+filtered on the way down instead of folding its top end back into the audible
+range. The same read is used for the bounce as for playback, deliberately, so
+what you export is what you heard.
+
+**Two things you should know, because they are changes rather than fixes.**
+
+A clip can now read a little louder than the loudest sample in its file. That
+sounds wrong and it is correct: the actual waveform between two samples goes
+higher than either of them, which is the same reason the true peak meter exists
+and reads higher than a normal peak meter. A square-ish full scale sound reads
+about 2 dB above full scale. In practice this only matters at one point: if you
+import a master that was limited right up to 0 dBFS and bounce it to 16 or 24
+bit, it can clip now where it did not before. Pull the clip gain down a
+decibel or two if you hit it.
+
+And a hard trim now carries about a millisecond of whatever you trimmed off,
+very quietly, because that is honestly what the file sounds like at that point.
+If you cut a count-in click tight against the downbeat and hear a trace of it,
+drag a short fade in on the clip and it is gone. Every clip already gets a tiny
+fade at its edges, so most of the time this is already handled.
+
+**It costs CPU.** Reading a clip this way is about sixty times the arithmetic of
+the old way, which is roughly one per cent of a processor core per stereo clip
+playing. On a handful of tracks you will not notice. On twenty four tracks of
+audio playing at once it is a real slice of the budget, so if you are running a
+very large session at a very small buffer size and you start getting dropouts
+that you did not get before, that is this. Tell me and I will put a cheaper mode
+behind a setting.
+
 **You can see where your mix sits across the spectrum now.** Open the Mix
 report tab and there is a bar for every third of an octave from 20 Hz to
 20 kHz, under the loudness and true peak numbers that were already there.
