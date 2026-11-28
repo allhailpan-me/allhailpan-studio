@@ -23,6 +23,7 @@
 #include "TransportSilence.h"
 #include "HoldPedal.h"
 #include "Tuner.h"
+#include "ClipResampler.h"
 #include "SpectrumAnalyser.h"
 
 // ---------------------------------------------------------------------------
@@ -1291,6 +1292,18 @@ private:
     std::atomic<float>  analysisTruePeak { 0.0f }, analysisCorrelation { 1.0f };
     std::atomic<bool>   analysisRunning { false };
     double corrLR = 0.0, corrLL = 0.0, corrRR = 0.0;
+
+    // How every audio clip is read when the read position is not a whole
+    // sample, which is almost always. Built here, once, at construction: the
+    // table is about 192 kB and the alternative is building it the first time
+    // somebody drops a clip on the playlist, which is a pause in the middle of
+    // their work. The same trade the instrument's wavetables make.
+    //
+    // One kernel shared by `renderAudioClips`, which both playback and
+    // `renderOffline` call, and by `renderPreview`. It is read only once
+    // built, so the audio thread holding a reference to it needs no lock. See
+    // ClipResampler.h for the method, its sources and the measurements.
+    ClipResampler::Kernel clipKernel;
 
     std::shared_ptr<SampleData> previewHold;
     const SampleData* previewData = nullptr;

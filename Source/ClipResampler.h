@@ -105,38 +105,62 @@
     protected band. The protection is for 88.2 kHz files and above, and for
     clips played fast.
 
-    The worst realisable case, and the one the tap count is chosen by, is an
-    **88.2 kHz file in a 44.1 kHz session with a tone at 24.1 kHz**, which
-    folds onto exactly 20.0 kHz and sits only 260 Hz inside the designed
-    stopband edge, where the empirical length formula is least accurate.
-    Measured on this kernel, against a source tone at full scale:
+    The worst realisable case, and the one the tap count is chosen by, is a
+    44.1 kHz session, where the output Nyquist is 22.05 kHz and so only 2.05
+    kHz separates the top of the protected band from the place the cutoff has
+    to sit. Two conversions can put an alias in there: an **88.2 kHz file** and
+    a **clip played fast**. Measured as the worst output level over every place
+    an alias can land between 10 and 20 kHz, against a source tone at full
+    scale, and in both cases the worst place is the top of the band:
 
-    | taps | 88.2 kHz into 44.1 kHz, 24.1 kHz tone | a 44.1 kHz clip at 1.2x, 20.08 kHz tone |
+    | taps | 88.2 kHz into 44.1 kHz | a 44.1 kHz clip at 1.2x |
     |---|---|---|
-    | 64 | -54.75 dB | -54.55 dB |
-    | 84, which is what the formula asks for | -120.36 dB | **-117.68 dB** |
-    | **96** | **-121.87 dB** | **-121.57 dB** |
-    | 128 | -154.89 dB | -131.26 dB |
+    | 64 | -54.75 dB | -54.75 dB |
+    | 84, which is what the formula asks for | -120.36 dB | **-120.08 dB** |
+    | **96** | **-121.87 dB** | **-121.08 dB** |
+    | 112 | -124.00 dB | -123.27 dB |
 
-    So the formula's answer **fails** the specification it was given, by 2.3 dB
-    on the second case, and 96 taps is the smallest even tap count that passes
-    both. The MathWorks page that states the formula says in the same breath
-    that a filter designed this way "will meet the specifications
-    approximately, but you should verify this". That sentence is not
-    boilerplate.
+    **The formula's answer lands 0.08 dB inside the specification it was
+    given**, which is to say exactly on it. That is what the MathWorks page
+    that states the formula means when it says in the same breath that a filter
+    designed this way "will meet the specifications approximately, but you
+    should verify this".
+
+    So **84 taps would have been adequate and 96 is a judgement, recorded as
+    one**: twelve more taps is 14 per cent more arithmetic, bought for a
+    decibel of margin against an empirical formula whose own documentation asks
+    to be checked. A figure that moves across the specification when the test
+    tone moves by three hertz is not a figure to ship on. Nothing measured says
+    96 is necessary, and that is said here rather than left to look like it
+    does.
+
+    What is measured, and is the reason not to go lower, is that **the next step
+    down is a cliff rather than a slope**: 64 taps measures -54.75 dB, which is
+    65 dB worse than 84. The transition width is inversely proportional to the
+    length, so a kernel a third shorter does not have a third of the rejection,
+    it has the rejection of a filter whose stopband has not started yet by the
+    time the alias arrives.
 
     It is also not the dramatic failure the research that preceded this code
-    reported, and the difference is worth keeping. That research measured
-    84 taps at 79 dB, for a 48 kHz source with a tone at 24.1 kHz. **A 48 kHz
-    file cannot contain a 24.1 kHz tone**: generating one produces its own
-    alias at 23.9 kHz, which lands somewhere else against the stopband edge
-    entirely. The conclusion survived the correction and the number did not.
-    The figures above are the ones measured here, through this kernel, and
-    nothing in this header quotes the 79 dB.
+    reported, and the correction is kept rather than quietly applied. That
+    research measured 84 taps at 79 dB, for a 48 kHz source with a tone at
+    24.1 kHz. **A 48 kHz file cannot contain a 24.1 kHz tone**: generating one
+    produces its own alias at 23.9 kHz, which lands somewhere else entirely
+    against the stopband edge. So the sentence "the formula is 41 dB
+    optimistic" was measuring a signal that cannot occur. The conclusion, that
+    the formula has to be verified rather than trusted, survived. The number
+    did not, and the number was the part that sounded convincing.
 
     For the same reason the old read is quoted on the same case rather than on
-    a different one: linear interpolation lets that 24.1 kHz tone through at
+    a different one: linear interpolation lets the 24.1 kHz tone through at
     **-3.32 dB**, which is to say almost completely, folded onto 20 kHz.
+
+    And the passband, which is the other thing the length has to buy, is
+    comfortable at either: reading a 44.1 kHz file into a 48 kHz session, 20
+    kHz measures -0.1652 dB at 48 taps, -0.0159 at 64 and 0.0000 at 84 and
+    above. **The passband would have been satisfied by 64 taps. The decimation
+    is what sets the length**, which is worth knowing before anybody tries to
+    shorten it on the grounds that the response looks flat.
 
     `Tests/ClipResampleProbe.cpp` is where these tables live, so the choice can
     be rechecked over the rates and tap counts the studio actually offers.
