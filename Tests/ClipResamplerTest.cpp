@@ -363,6 +363,22 @@ int main()
         check (worstPassband < 0.01,
                "the passband is flat to 0.01 dB, worst " + std::to_string (worstPassband) + " dB");
 
+        // And the shape parameter itself against the figures the quoted
+        // piecewise formula gives, on all three of its branches. Pinning a
+        // published constant is not the same thing as recomputing the header's
+        // arithmetic: the formula IS the specification here, and a beta from
+        // the wrong branch or with the length formula's numerator in it lands
+        // close enough to pass every measurement above while being a different
+        // filter from the one the header says it is.
+        check (std::abs (ClipResampler::kaiserBeta (120.0) - 12.26526) < 1.0e-5,
+               "beta at 120 dB is 12.26526, got "
+                   + std::to_string (ClipResampler::kaiserBeta (120.0)));
+        check (std::abs (ClipResampler::kaiserBeta (40.0) - 3.39532) < 1.0e-5,
+               "beta at 40 dB comes off the middle branch, got "
+                   + std::to_string (ClipResampler::kaiserBeta (40.0)));
+        check (ClipResampler::kaiserBeta (15.0) == 0.0,
+               "beta below 21 dB is zero, which is no window at all");
+
         std::printf ("  window: stopband %.2f dB against %.0f asked for, passband ripple %.6f dB\n",
                      worstStopband, kernel.attenuationDb, worstPassband);
 
@@ -757,6 +773,15 @@ int main()
         check (ClipResampler::halfTapsForStep (kernel, 64.0) == 4 * kernel.crossings,
                "past the tracked step the cost stops growing, because the cutoff stops "
                "coming down");
+
+        // At a step that is not a whole number the tap count has to round up,
+        // not down: the last tap has something under it and dropping it leaves
+        // the stretched kernel cut off. Every step above is an exact ratio, so
+        // rounding the wrong way gives the same answer for all of them and
+        // none of them can see this.
+        check (ClipResampler::halfTapsForStep (kernel, 48000.0 / 44100.0) == 53,
+               "a 48 kHz file in a 44.1 kHz session costs 53 taps a side, rounded up from "
+               "52.23, got " + std::to_string (ClipResampler::halfTapsForStep (kernel, 48000.0 / 44100.0)));
 
         // Degenerate steps the engine should never produce, checked because an
         // audio thread that divides by one of them takes the studio down.

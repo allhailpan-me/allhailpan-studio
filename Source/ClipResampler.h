@@ -616,7 +616,17 @@ inline Frame read (const Kernel& kernel,
     // reusing the same fraction for both, which puts the far wing one table
     // step out. Taking the absolute distance from the read position gets the
     // reflection for free and there is nothing to forget.
-    for (int i = -half; i <= half + 1; ++i)
+    //
+    // **The range is exactly the taps that can contribute, and `std::floor`
+    // above is what makes that true.** A tap contributes while
+    // `|i - offset| < crossings / scale`, and with `offset` in [0, 1) that is
+    // `i` from `-half + 1` to `half`. Truncating towards zero instead of
+    // flooring would put `offset` in (-1, 1) for a position just before the
+    // start of the file, and the tap at `-half` would then have something
+    // under it that this loop never reaches. A read before the first sample is
+    // ordinary rather than exotic: the kernel is tens of samples wide, so it
+    // happens at the leading edge of every clip.
+    for (int i = -half + 1; i <= half; ++i)
     {
         const int sample = centre + i;
 
@@ -626,6 +636,12 @@ inline Frame read (const Kernel& kernel,
         const double distance = std::abs ((double) i - offset) * tableScale;
         const int    entry    = (int) distance;
 
+        // Belt on braces, and said so rather than left looking load bearing:
+        // the loop above already stops before the end of the table, so this
+        // cannot fire for any position and step the engine produces. It is
+        // here because the cost of one comparison against reading off the end
+        // of a table on the audio thread is not a trade worth making, and
+        // because `scale` is computed from a step this function does not own.
         if (entry >= count - 1)
             continue;
 
