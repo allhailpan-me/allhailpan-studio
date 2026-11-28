@@ -2774,6 +2774,33 @@ void AudioEngine::renderAudioClips (int numSamples)
         const WarpSegment* warp = warpOk ? snapshot.warp.data() + clip.warpFirst : nullptr;
         int warpCursor = 0;
 
+        // How far the read position advances per output sample, in source
+        // samples. It is what decides the cutoff of the read, by Smith's
+        // min{Fs,Fs'} rule: see ClipResampler.h. Three things make it anything
+        // other than one, and the arithmetic collapses to a single product
+        // because the block's beats are evenly spaced:
+        // the file's own rate against the device's, the clip's stretch ratio,
+        // and, for a warped clip, the slope of the segment being read, which
+        // is why that one is taken inside the loop.
+        const double plainStep = ClipResampler::stepFor (clip.rate, srcRate, sampleRate);
+
+        // How far outside the file the widest read can reach, which is what
+        // the range check below has to allow for.
+        //
+        // The old check refused any position outside the buffer, which was
+        // right for a two sample read. It is widened rather than kept, and an
+        // audit corrected what that is worth, so the honest version is here
+        // rather than the flattering one: keeping it would not have cut any of
+        // a clip's own content, because every position inside the file still
+        // reads with the whole kernel and the taps hanging off the end are
+        // dropped by the read itself. What it would have refused is the
+        // kernel's ring out at positions before the first sample and after the
+        // last, which for an ordinary clip is outside its own span and never
+        // emitted anyway. So this is a correctness margin for the case where a
+        // clip's span does reach past its file, not a fix for a fault the old
+        // check would have caused.
+        const int reach = clipKernel.crossings * (int) ClipResampler::Kernel::maxTrackedStep + 2;
+
         for (int i = 0; i < numSamples; ++i)
         {
             const double beat = blockBeats[(size_t) i] - shift;
@@ -2784,11 +2811,18 @@ void AudioEngine::renderAudioClips (int numSamples)
                                  ? warpSourceAtSegment (warp, clip.warpCount, warpCursor, beat)
                                  : clip.readOffset + (beat - clip.start) * secondsPerBeat * clip.rate;
             const double frame   = seconds * srcRate;
-            const int    f0      = (int) frame;
-            if (f0 < 0 || f0 >= frames)
+            if (frame < -(double) reach || frame >= (double) (frames + reach))
                 continue;
-            const int   f1   = std::min (f0 + 1, frames - 1);
-            const float frac = (float) (frame - f0);
+
+            // Taken after warpSourceAtSegment has moved the cursor, so it is
+            // the slope of the segment this sample is actually inside. A warped
+            // clip changes rate at every marker, and reading the cutoff off the
+            // wrong segment is the same fault as not scaling the kernel at all,
+            // only intermittent.
+            const double step = warp != nullptr
+                              ? ClipResampler::stepForWarpSlope (warp[warpCursor].slope,
+                                                                 beatsPerSample, srcRate)
+                              : plainStep;
 
             // A comped stretch is ramped at its joins, and the clip's own two
             // edges are ramped by whatever fade they carry. Four comparisons
@@ -2806,8 +2840,10 @@ void AudioEngine::renderAudioClips (int numSamples)
                              * (float) compFadeGain (clip.fade, beat)
                              * (float) ClipFade::gainAt (clip.edgeFade, beat);
 
-            left[i]  += (srcL[f0] + (srcL[f1] - srcL[f0]) * frac) * gain;
-            right[i] += (srcR[f0] + (srcR[f1] - srcR[f0]) * frac) * gain;
+            const auto sample = ClipResampler::read (clipKernel, srcL, srcR, frames, frame, step);
+
+            left[i]  += sample.left  * gain;
+            right[i] += sample.right * gain;
         }
     }
 }
@@ -3716,18 +3752,24 @@ void AudioEngine::renderPreview (float* left, float* right, int numSamples)
     const auto* srcR   = data->audio.getReadPointer (std::min (1, data->audio.getNumChannels() - 1));
     const double step  = data->sampleRate / sampleRate;
 
+    // The same bandlimited read the playlist gets, and for the same reason: an
+    // audition is how somebody decides whether a file is the one they want, so
+    // it should not be the one place in the studio that plays it through a
+    // lowpass. A browser file at 44.1 kHz on a 48 kHz device is every sample
+    // interpolated, which is the case ClipResampler.h measures.
     for (int i = 0; i < numSamples; ++i)
     {
-        const int f0 = (int) previewPos;
-        if (f0 >= frames - 1)
+        if (previewPos >= (double) (frames - 1))
         {
             previewData = nullptr;
             return;
         }
-        const float frac = (float) (previewPos - f0);
-        left[i] += (srcL[f0] + (srcL[f0 + 1] - srcL[f0]) * frac) * 0.8f;
+
+        const auto sample = ClipResampler::read (clipKernel, srcL, srcR, frames, previewPos, step);
+
+        left[i] += sample.left * 0.8f;
         if (right != nullptr)
-            right[i] += (srcR[f0] + (srcR[f0 + 1] - srcR[f0]) * frac) * 0.8f;
+            right[i] += sample.right * 0.8f;
         previewPos += step;
     }
 }
