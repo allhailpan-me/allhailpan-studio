@@ -24,9 +24,13 @@
 // way: "a check that compares against additive synthesis sees everything
 // wherever it lands".
 //
-// Measured, that residual separates the two reads by more than a hundred
-// decibels at every frequency in every case, from -110 dB at worst for the
-// bandlimited read against -2.6 dB for the lerp at 20 kHz.
+// Measured, and the figures are the ones this file prints rather than rounder
+// ones: the residual is -109.06 dB at worst for the bandlimited read and
+// -12.28 dB for the lerp at 10 kHz, a separation of 96.8 dB. An earlier draft
+// of this comment said "more than a hundred decibels" and "-110 dB at worst",
+// which is the shape of mistake this project keeps meeting in its own prose
+// and is why the figures below are printed by the program rather than only
+// written here.
 //
 // The properties, each a claim the header makes rather than a restatement of
 // its arithmetic:
@@ -47,10 +51,20 @@
 //     of confusing radians per sample with cycles per sample.
 //   * Every phase's taps sum to one, and the mirror symmetry that makes a per
 //     entry scale a legitimate per phase scale, asserted to the last bit.
-//   * **A clip at the device's own rate trimmed to a sample boundary reads bit
-//     for bit**, which is what makes a bounce of an untouched take reproduce
-//     the file, and which only holds because a sinc of a whole number of
-//     samples is written as exactly zero rather than evaluated.
+//   * **A read at an exactly integer position returns the stored sample bit for
+//     bit**, at any step of one or less, which only holds because a sinc of a
+//     whole number of samples is written as exactly zero rather than
+//     evaluated. That is a property of the kernel and not a promise about the
+//     product: the engine's read position comes from an accumulated beat, so it
+//     lands near a whole sample rather than on one, and ClipResampler.h says
+//     what that is worth.
+//   * The step, which decides the cutoff, and which until an audit said so
+//     lived in the engine where nothing could reach it.
+//   * The loop covering exactly the taps that can contribute, asserted by
+//     putting an impulse at the outermost one and at the first one beyond it.
+//   * What a read can produce from full scale material, which is not one,
+//     against the kernel's own worst case gain and with the signal that
+//     attains it constructed.
 //   * The read is linear, which is asserted as superposition and homogeneity
 //     over randomised signals rather than assumed from the shape of the code.
 //   * Reads off both ends of a buffer, over randomised short buffers, where
@@ -397,6 +411,200 @@ int main()
     }
 
     // -----------------------------------------------------------------------
+    // The step, which decides the cutoff and used to be two expressions in the
+    // engine that nothing could reach. An audit pointed out that inverting
+    // either of them left all 57 programs green while a 96 kHz file read into a
+    // 48 kHz session passed everything above 24 kHz through, folded, at full
+    // level: the kernel was thoroughly tested and the two lines feeding it were
+    // not tested at all.
+    // -----------------------------------------------------------------------
+    {
+        for (const auto& conversion : conversions)
+        {
+            const double step = ClipResampler::stepFor (1.0, conversion.sourceRate,
+                                                        conversion.sessionRate);
+            const double expected = conversion.sourceRate / conversion.sessionRate;
+
+            check (std::abs (step - expected) < 1.0e-12,
+                   std::string ("the step for ") + conversion.what + " is "
+                       + std::to_string (expected) + ", got " + std::to_string (step));
+        }
+
+        // The direction, stated as a property rather than as a number, because
+        // an inverted ratio is the mistake and it still looks like a ratio. A
+        // file at a higher rate than the device has to be read at more than one
+        // source sample per output sample, or it plays slow.
+        check (ClipResampler::stepFor (1.0, 96000.0, 48000.0) > 1.0,
+               "a file at a higher rate than the device reads at more than one source "
+               "sample per output sample");
+        check (ClipResampler::stepFor (1.0, 44100.0, 48000.0) < 1.0,
+               "a file at a lower rate than the device reads at less than one");
+        check (ClipResampler::stepFor (2.0, 48000.0, 48000.0) > 1.0,
+               "a clip stretched to twice the speed reads at more than one");
+
+        // And the two forms have to agree, which is the check that catches an
+        // inversion or a dropped conversion in either: a warped clip whose
+        // segments all carry the slope an unwarped clip would have must read at
+        // exactly the same step.
+        for (double bpm : { 60.0, 120.0, 128.0, 174.0 })
+        {
+            for (const auto& conversion : conversions)
+            {
+                const double beatsPerSample  = bpm / 60.0 / conversion.sessionRate;
+                const double secondsPerBeat  = 60.0 / bpm;
+                const double rate            = 1.3;
+
+                const double plain = ClipResampler::stepFor (rate, conversion.sourceRate,
+                                                             conversion.sessionRate);
+                const double warped = ClipResampler::stepForWarpSlope (secondsPerBeat * rate,
+                                                                       beatsPerSample,
+                                                                       conversion.sourceRate);
+
+                check (std::abs (plain - warped) < 1.0e-12 * std::max (1.0, plain),
+                       "the warped and unwarped forms of the step agree at "
+                           + std::to_string ((int) bpm) + " bpm for "
+                           + std::string (conversion.what));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The loop runs over exactly the taps that can contribute. An impulse at
+    // the outermost sample that should reach the read has to reach it, and one
+    // beyond it must not.
+    //
+    // This is here because dropping one tap off either end of the loop is a
+    // change of about -125 dB, which every threshold in this file is too loose
+    // to see, and because the one of those two mutations that the suite did
+    // catch was caught by 0.04 dB, which is a coin flip on the last bits of
+    // libm rather than a test. Asserted structurally, where it is exact.
+    // -----------------------------------------------------------------------
+    {
+        Rng rng (0x6a09e667ull);
+
+        for (int trial = 0; trial < 400; ++trial)
+        {
+            const double step   = rng.unit() < 0.3 ? 1.0 : rng.between (0.25, 4.0);
+            const double offset = rng.between (0.02, 0.98);
+            const double scale  = ClipResampler::scaleForStep (kernel, step);
+
+            // A tap contributes while its distance from the read position is
+            // inside the kernel's half width, which the table expresses as
+            // crossings / scale source samples.
+            const double width  = (double) kernel.crossings / scale;
+            const int    centre = 4000;
+            const int    frames = 8000;
+
+            const int outermostRight = (int) std::floor (offset + width - 1.0e-9);
+            const int outermostLeft  = (int) std::ceil  (offset - width + 1.0e-9);
+
+            for (int which = 0; which < 4; ++which)
+            {
+                const bool inside = which < 2;
+                const int  at = which == 0 ? outermostRight
+                              : which == 1 ? outermostLeft
+                              : which == 2 ? outermostRight + 1
+                                           : outermostLeft - 1;
+
+                std::vector<float> impulse ((std::size_t) frames, 0.0f);
+                impulse[(std::size_t) (centre + at)] = 1.0f;
+
+                const auto frame = ClipResampler::read (kernel, impulse.data(), impulse.data(),
+                                                        frames, (double) centre + offset, step);
+
+                if (inside)
+                    check (frame.left != 0.0f,
+                           "the tap " + std::to_string (at) + " samples from the read, at step "
+                               + std::to_string (step) + " offset " + std::to_string (offset)
+                               + ", is inside the kernel and reaches the output");
+                else
+                    check (frame.left == 0.0f,
+                           "the tap " + std::to_string (at) + " samples from the read, at step "
+                               + std::to_string (step) + " offset " + std::to_string (offset)
+                               + ", is outside the kernel and contributes nothing");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // What a read can produce from full scale material, which is not one.
+    //
+    // Linear interpolation was a convex combination of two samples and so could
+    // never leave the input's range. A windowed sinc overshoots, which is the
+    // one place this change alters the signal rather than improving it, so the
+    // bound is asserted against the quantity it actually is, and the worst case
+    // signal is constructed and required to come close to it. An audit found
+    // this check asserting 1.5 with a comment naming a quantity that is 2.95.
+    // -----------------------------------------------------------------------
+    {
+        double worstPhaseGain = 0.0;
+
+        for (int phase = 0; phase <= kernel.entriesPerCrossing; ++phase)
+            worstPhaseGain = std::max (worstPhaseGain, kernel.phaseGain (phase));
+
+        check (worstPhaseGain > 1.0,
+               "a windowed sinc overshoots, so the worst case gain is above one, got "
+                   + std::to_string (worstPhaseGain));
+
+        // The signal that attains it: the sign of each tap. Legal audio, full
+        // scale, and nothing can read higher.
+        const int frames = 4000, centre = 2000;
+        const double offset = 0.5, step = 1.0;
+
+        std::vector<float> adversarial ((std::size_t) frames, 0.0f);
+
+        for (int i = -kernel.crossings; i <= kernel.crossings + 1; ++i)
+        {
+            std::vector<float> probe ((std::size_t) frames, 0.0f);
+            probe[(std::size_t) (centre + i)] = 1.0f;
+
+            const auto one = ClipResampler::read (kernel, probe.data(), probe.data(), frames,
+                                                  (double) centre + offset, step);
+            adversarial[(std::size_t) (centre + i)] = one.left >= 0.0f ? 1.0f : -1.0f;
+        }
+
+        const auto peak = ClipResampler::read (kernel, adversarial.data(), adversarial.data(),
+                                               frames, (double) centre + offset, step);
+
+        check (std::abs (peak.left) <= worstPhaseGain + 1.0e-4,
+               "the worst case signal cannot exceed the worst case gain, got "
+                   + std::to_string (peak.left) + " against " + std::to_string (worstPhaseGain));
+
+        check (std::abs (peak.left) > 0.9 * worstPhaseGain,
+               "the worst case signal comes close to the worst case gain, so the bound is "
+               "the real one rather than a loose one: got " + std::to_string (peak.left)
+                   + " against " + std::to_string (worstPhaseGain));
+
+        // And something ordinary, so the figure in the header is checkable: a
+        // full scale square wave is the overshoot anybody will actually meet.
+        std::vector<float> square ((std::size_t) frames);
+
+        for (int i = 0; i < frames; ++i)
+            square[(std::size_t) i] = ((i / 48) % 2) == 0 ? 1.0f : -1.0f;
+
+        double squarePeak = 0.0;
+
+        // Swept across a whole period rather than a couple of samples: the
+        // overshoot is largest right at an edge, and a short sweep that misses
+        // the edge reads it as nothing. The first version of this check swept
+        // two samples and measured 0.10 dB where the real figure is 2.1.
+        for (int i = 0; i < 9600; ++i)
+        {
+            const double position = (double) centre + i * 0.01;
+            const auto frame = ClipResampler::read (kernel, square.data(), square.data(),
+                                                    frames, position, 1.0);
+            squarePeak = std::max (squarePeak, std::abs ((double) frame.left));
+        }
+
+        check (squarePeak > 1.25 && squarePeak < 1.32,
+               "a full scale square wave reads above full scale, by the 2.1 dB the header "
+               "quotes: got " + std::to_string (squarePeak));
+
+        std::printf ("  overshoot: worst case gain %.4f, square wave %.4f (%+.2f dB)\n",
+                     worstPhaseGain, squarePeak, 20.0 * std::log10 (squarePeak));
+    }
+
+    // -----------------------------------------------------------------------
     // A clip at the device's own rate, trimmed to a sample boundary, reads bit
     // for bit. This is what makes a bounce of an untouched take reproduce the
     // file, and it holds only because phase zero is an exact impulse.
@@ -736,11 +944,12 @@ int main()
                    "a read at " + std::to_string (position) + " in a buffer of "
                        + std::to_string (frames) + " is finite");
 
-            // Bounded by the kernel's own gain. A windowed sinc overshoots, so
-            // the bound is the sum of the magnitudes of one phase's taps rather
-            // than one, and it is worth asserting because the alternative to a
-            // bound is finding out from a clipped bounce.
-            check (std::abs (frame.left) <= 1.5 && std::abs (frame.right) <= 1.5,
+            // Bounded by the kernel's own worst case gain, which is the
+            // quantity checked properly above. Here it is only a sanity bound
+            // on a short buffer, and it says so: most of the kernel hangs off
+            // the end of a buffer of 1 to 120 samples, so this cannot see the
+            // real bound and is not the check that does.
+            check (std::abs (frame.left) <= 3.0 && std::abs (frame.right) <= 3.0,
                    "a read of full scale material is bounded, got "
                        + std::to_string (frame.left));
 

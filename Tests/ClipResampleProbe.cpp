@@ -199,6 +199,31 @@ int main()
     }
 
     // -----------------------------------------------------------------------
+    std::printf ("\n   (c) Why the cutoff sits exactly at the lower Nyquist rather than below\n");
+    std::printf ("       it. The loss at 20 kHz reading a 44.1 kHz file into a 48 kHz\n");
+    std::printf ("       session. Backing the cutoff off buys transition width with passband,\n");
+    std::printf ("       and passband is the thing being fixed.\n\n");
+    std::printf ("   taps   cutoff 0.90   cutoff 0.95   at the Nyquist\n");
+
+    for (int crossings : { 16, 32, 48 })
+    {
+        std::printf ("   %4d ", 2 * crossings);
+
+        for (double cutoff : { 0.90, 0.95, 1.00 })
+            std::printf ("  %+11.5f", sweep (ClipResampler::Kernel (crossings, 512, 120.0, cutoff),
+                                             How::bandlimited, 20000.0, 44100.0,
+                                             44100.0 / 48000.0, 0.37, 6000).levelDb);
+
+        std::printf ("\n");
+    }
+
+    std::printf ("\n       The cutoff is a constructor parameter for this table and for nothing\n");
+    std::printf ("       else: the shipped kernel is always at the Nyquist, which is Smith's\n");
+    std::printf ("       rule exactly. It exists because an earlier draft of the header quoted\n");
+    std::printf ("       three figures here from a measurement nothing in the repository could\n");
+    std::printf ("       reproduce.\n");
+
+    // -----------------------------------------------------------------------
     std::printf ("\n\n3. THE TABLE DENSITY\n\n");
     std::printf ("   Reading between two table entries is itself a linear interpolation, so the\n");
     std::printf ("   table has to be dense enough that it does not become the error. Smith's\n");
@@ -288,7 +313,52 @@ int main()
     }
 
     // -----------------------------------------------------------------------
-    std::printf ("\n\n5. WHAT IT COSTS\n\n");
+    std::printf ("\n\n5. WHAT A READ CAN PRODUCE FROM FULL SCALE MATERIAL\n\n");
+    std::printf ("   The one place this change alters the signal rather than improving it.\n");
+    std::printf ("   Linear interpolation was a convex combination of two samples and could\n");
+    std::printf ("   never leave the input's range. A windowed sinc overshoots, which is the\n");
+    std::printf ("   same fact TruePeak.h exists for: the waveform a converter reconstructs\n");
+    std::printf ("   from a square wave really does go above the largest sample in the file.\n\n");
+
+    {
+        const ClipResampler::Kernel k;
+        double worstGain = 0.0;
+
+        for (int phase = 0; phase <= k.entriesPerCrossing; ++phase)
+            worstGain = std::max (worstGain, k.phaseGain (phase));
+
+        std::printf ("   worst case gain, the sum of one phase's tap magnitudes: %.4f (%+.2f dB)\n",
+                     worstGain, 20.0 * std::log10 (worstGain));
+
+        const int frames = 8000, centre = 4000;
+
+        for (int period : { 960, 480, 109, 48 })
+        {
+            std::vector<float> square ((std::size_t) frames);
+
+            for (int i = 0; i < frames; ++i)
+                square[(std::size_t) i] = ((i / (period / 2)) % 2) == 0 ? 1.0f : -1.0f;
+
+            double peak = 0.0;
+
+            for (int i = 0; i < period * 100; ++i)
+            {
+                const double position = (double) centre + i * 0.01;
+                peak = std::max (peak, std::abs ((double) ClipResampler::read (
+                    k, square.data(), square.data(), frames, position, 1.0).left));
+            }
+
+            std::printf ("   a full scale square wave at %6.1f Hz reads %.4f (%+.2f dB)\n",
+                         48000.0 / period, peak, 20.0 * std::log10 (peak));
+        }
+
+        std::printf ("\n   So a master limited to exactly full scale, imported at 44.1 kHz into a\n");
+        std::printf ("   48 kHz session, reads above full scale on its insert, and a bounce to a\n");
+        std::printf ("   fixed point word length can clip where it did not before.\n");
+    }
+
+    // -----------------------------------------------------------------------
+    std::printf ("\n\n6. WHAT IT COSTS\n\n");
     std::printf ("   One stereo clip, per output sample, on whatever this is running on. The\n");
     std::printf ("   tap count grows with the step because the kernel stretches, which is\n");
     std::printf ("   inherent to the method: a clip played four times fast costs four times the\n");

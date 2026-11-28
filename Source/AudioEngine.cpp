@@ -2782,15 +2782,23 @@ void AudioEngine::renderAudioClips (int numSamples)
         // the file's own rate against the device's, the clip's stretch ratio,
         // and, for a warped clip, the slope of the segment being read, which
         // is why that one is taken inside the loop.
-        const double plainStep = clip.rate * srcRate / sampleRate;
+        const double plainStep = ClipResampler::stepFor (clip.rate, srcRate, sampleRate);
 
         // How far outside the file the widest read can reach, which is what
-        // the range check below has to allow for. The old check refused any
-        // position outside the buffer, which was right for a two sample read
-        // and would now cut the last tens of samples off every clip: a
-        // bandlimited read is tens of samples wide and treats what is beyond
-        // the file as what it is, silence, which is also what stops the end of
-        // a clip being a step.
+        // the range check below has to allow for.
+        //
+        // The old check refused any position outside the buffer, which was
+        // right for a two sample read. It is widened rather than kept, and an
+        // audit corrected what that is worth, so the honest version is here
+        // rather than the flattering one: keeping it would not have cut any of
+        // a clip's own content, because every position inside the file still
+        // reads with the whole kernel and the taps hanging off the end are
+        // dropped by the read itself. What it would have refused is the
+        // kernel's ring out at positions before the first sample and after the
+        // last, which for an ordinary clip is outside its own span and never
+        // emitted anyway. So this is a correctness margin for the case where a
+        // clip's span does reach past its file, not a fix for a fault the old
+        // check would have caused.
         const int reach = clipKernel.crossings * (int) ClipResampler::Kernel::maxTrackedStep + 2;
 
         for (int i = 0; i < numSamples; ++i)
@@ -2812,7 +2820,8 @@ void AudioEngine::renderAudioClips (int numSamples)
             // wrong segment is the same fault as not scaling the kernel at all,
             // only intermittent.
             const double step = warp != nullptr
-                              ? warp[warpCursor].slope * beatsPerSample * srcRate
+                              ? ClipResampler::stepForWarpSlope (warp[warpCursor].slope,
+                                                                 beatsPerSample, srcRate)
                               : plainStep;
 
             // A comped stretch is ramped at its joins, and the clip's own two

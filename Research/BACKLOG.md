@@ -244,21 +244,43 @@ wing only, read with linear interpolation between table entries.
 | Kernel | Kaiser windowed sinc, symmetric, linear phase | Smith, CCRMA |
 | Stopband attenuation A | 120 dB | Valimaki and Bilbao, JAES 71(3) 2023: "the dynamic range should be at least 120 dB for highest-quality work". Carson, Valimaki, Wright and Bilbao, arXiv:2501.18470, choose the same figure for the same problem |
 | Kaiser beta | 12.26526 | computed from `0.1102 (A - 8.7)`, the `A > 50` branch of the piecewise form attributed to Kaiser 1974 |
-| Half width | 48 zero crossings, so 96 taps at a step of one or less | **Measured, not taken from the length formula.** See below |
+| Half width | 48 zero crossings, so 96 taps at a step of one or less | **Verified by measurement, and 96 rather than the formula's 84 is a judgement about margin.** See below |
 | Cutoff | the lower of the two Nyquist frequencies | Smith, quoted: `h_s(t) = min{1, Fs'/Fs} sinc(min{Fs,Fs'} t)`, "where the scale factor maintains unity gain in the passband" |
 | Amplitude scale | `min(1, 1/step)` | the same quoted sentence, which states what the factor is for |
-| Table entries per zero crossing | 512 | Smith's own reference design, and measured at -143 dB |
+| Table entries per zero crossing | 512 | Smith's own reference design, and the point past which a denser table buys nothing: measured -148.3 dB at 512 and -132.9 at 1024, which is the float storage floor arriving |
 | Between entry lookup | linear, against a stored difference table | Smith's equations (3) to (5) |
-| Minimum supported step | 4 source samples per output sample | Smith: beyond some ratio "the required extra input data becomes infinite, and some limit must be chosen" |
+| Largest step the cutoff follows | 4 source samples per output sample | Smith: beyond some ratio "the required extra input data becomes infinite, and some limit must be chosen". **The engine can ask for more**, which the audit section below records |
 
-**The Kaiser length formula promises 120 dB at 84 taps and delivers 79.** That
-is measured, at the one frequency where it matters, which is the input tone
-that folds exactly onto 20 kHz when decimating 48 kHz to 44.1. At 96 taps the
-same measurement reads -119.4 dB. The formula is empirical and least accurate
-at the stopband edge, which is exactly where this test lands, and the MathWorks
-page that states the formula says in the same breath that a filter designed
-this way "will meet the specifications approximately, but you should verify
-this". Trusting it would have cost 41 dB. That sentence is in the header.
+**The Kaiser length formula's answer meets the specification by 0.08 dB**,
+which is to say exactly, and that figure went through two corrections before it
+was right. Both are kept here because the second one is the more instructive.
+
+The research reported 84 taps at 79 dB and the formula 41 dB optimistic, from a
+48 kHz source with a tone at 24.1 kHz. **A 48 kHz file cannot carry a 24.1 kHz
+tone**: generating one produces its own alias at 23.9 kHz, which lands
+somewhere else against the stopband edge. So that measurement was of a signal
+that cannot occur, and the first draft of this entry repeated it.
+
+The replacement, measured here, was 84 taps at -117.68 dB, a fail by 2.3 dB.
+That was wrong too, in a smaller and more interesting way: it was one hardcoded
+tone, and moving it by three hertz moved the figure across the specification.
+Measured properly, as the worst over every place an alias can land between 10
+and 20 kHz, 84 taps reads -120.08 dB and 96 reads -121.08 dB.
+
+So **84 taps would have been adequate and 96 is a judgement about margin,
+recorded as one** rather than dressed up as a measured necessity. Twelve more
+taps is 14 per cent more arithmetic bought for a decibel against an empirical
+formula whose own documentation says a filter designed this way "will meet the
+specifications approximately, but you should verify this". What the measurement
+does say is that going lower is a cliff and not a slope: 64 taps reads
+-54.75 dB, 65 dB worse than 84, because the transition width goes as one over
+the length and a shorter kernel's stopband has not begun by the time the alias
+arrives.
+
+The useful part for a later night is the shape rather than the number. Three
+figures, each measured, each wrong, each wrong for a different reason: a test
+signal that cannot exist, a single tone standing in for a band, and then the
+right answer. The first two both sounded more convincing than the third.
 
 **The unit convention in that formula is a factor of 6.28 waiting to happen.**
 Sources state the length as `(A - 7.95) / (2.285 dw)` with `dw` in radians per
@@ -330,8 +352,9 @@ nothing to trade.
   divergence is worst.
 - **Backing the cutoff off below Nyquist** to buy a shorter kernel. Measured
   and rejected: it spends passband, which is the thing being fixed.
-- **Trusting the Kaiser length formula.** Measured and rejected, at a cost of
-  41 dB.
+- **Trusting the Kaiser length formula.** Verified rather than trusted, which
+  is not the same as rejected: its answer meets the specification by 0.08 dB.
+  The extra twelve taps are margin and the entry above says so.
 - **Carson et al.'s passband specification of plus or minus 0.5 dB.** It is the
   closest published analogue to this problem and the figure is not
   transferable: they justify it by a 16 kHz passband on the grounds that "in
@@ -382,6 +405,180 @@ nothing to trade.
   full citations were obtained; neither text was reached. The formulas are
   quoted from three secondary sources that agree on all five constants, and
   the header says so rather than implying the primary was read.
+
+### Mutation testing: 43 tried, 33 caught, 10 survive with reasons
+
+`Research/clip-resample-mutations.py`, compiled with the sanitizers and exactly
+the flags `Tests/run.sh` uses. Two rounds, because the first found two real
+gaps in the test and the audit found a third thing wrong with the harness
+itself.
+
+What the first round's survivors changed in the code:
+
+- **The read loop ran two taps wider than the taps that can contribute**, so
+  dropping a tap off either end was a no operation. The range is now the
+  contributing one, and there is a structural check that puts an impulse at the
+  outermost sample that should reach the read and at the first one beyond it.
+  That check exists because the one of those two mutations the suite did catch
+  was caught by 0.04 dB, which is a coin flip on the last bits of `libm` and
+  would have reported differently on another platform.
+- **Every step the tap count was asserted at was a whole number ratio**, so
+  rounding it down rather than up gave the same answer for all of them. A
+  48 kHz file in a 44.1 kHz session costs 52.23 taps a side and the test now
+  pins 53.
+- **The Kaiser shape parameter is pinned against the quoted formula on all
+  three of its branches.** Measuring the designed filter does not catch a beta
+  with the length formula's numerator in it, or one off the 21 to 50 dB branch:
+  both land close enough to pass every measurement while being a different
+  filter from the one the header describes.
+
+One survivor is recorded as a **gap rather than a no operation**, which is the
+honest outcome and is written into the harness rather than left out of it.
+Building the difference table from the unnormalised taps makes the two tables
+describe different kernels, which is the third of the three conditions the
+header calls out as breaking silently, and it moves the central residual from
+-109.06 dB to -109.05. It cannot be caught at any tolerance this file could
+honestly set, because the normalisation is itself only worth -132.8 dB against
+a 120 dB specification. So the condition is right, the code honours it, and
+nothing checks it. Said plainly, because an unrecorded gap is how a real one
+hides next time.
+
+### What the audit found, which was again almost all in the sentences
+
+The `auditor` agent was given the diff and the six places I already distrusted.
+It reported that the DSP is right and said so with measurements rather than by
+reading: the step formula, the cutoff rule, the `reach` bound, the warp cursor,
+the audio thread rules and the playback against export equivalence all hold,
+and it checked `updateLatency` is correctly not called because a symmetric
+kernel has no group delay. **Every finding was in the prose, the recorded
+reasons, or a signal level consequence nothing had written down.** That is the
+third audit running on this project to land in the same place.
+
+The two that were faults rather than wording:
+
+**The step lived in the engine, where nothing could reach it.** It is the
+quantity that decides the cutoff, and the audit pointed out that inverting it
+in `AudioEngine.cpp` leaves all 57 test programs green while a 96 kHz file read
+into a 48 kHz session passes everything above 24 kHz through, folded, at full
+level. That is `CLAUDE.md`'s warning about `LatencyGraph.h` word for word, on a
+new decision: the kernel was thoroughly tested and the two lines feeding it
+were not tested at all. `ClipResampler::stepFor` and `stepForWarpSlope` are now
+in the header, and the test pins both, including that the warped and unwarped
+forms agree, which is the check that catches an inversion in either.
+
+**The test's overflow bound checked 1.5 against a comment naming a quantity
+that is 2.95.** The sum of the magnitudes of one phase's taps is the most a
+read can produce from full scale material, and it was neither computed nor
+reached: the check ran on buffers of up to 120 samples, where most of the
+kernel hangs off the end. `Kernel::phaseGain` now exposes it, the test asserts
+against it, and the worst case signal is constructed and required to come close
+to it, so the bound is the real one rather than a loose one.
+
+The sentences, which were worse in aggregate:
+
+- **A comment said a bounds check could not fire. It fires one or two times per
+  output sample on the most ordinary conversion the studio does.** `half` is a
+  ceiling, so whenever the step is not a whole number ratio the loop runs over a
+  tap or two that cannot contribute, and the guard is what trims them: reading a
+  48 kHz file in a 44.1 kHz session produces table indices up to 24931 against
+  a table of 24577. Deleting it reads 1416 bytes past the end of a heap vector
+  on the audio thread. The comment now says it is load bearing and says what it
+  is bearing. **Two of the recorded mutation survivor reasons rested on the same
+  false claim** and both are rewritten with the mechanism that is actually true.
+- **`std::floor` was written up as a correctness requirement and is worth a part
+  in ten million.** The audit measured truncation towards zero at -144.5 dB.
+  Flooring is still right, and `CLAUDE.md` already carries one case of exactly
+  this shape in `Tuner::InputRing`, so the comment now says what the margin is.
+- **"A bounce of an untouched take reproduces the file bit for bit" is true of
+  the kernel and false of the product.** The phase zero tap set really is an
+  exact impulse, so an integer read position returns the stored sample exactly.
+  The engine's read position is an accumulated beat and lands near a whole
+  sample rather than on one: simulated, at 128 bpm with a clip at beat 64 it is
+  bit exact for 284 output samples in 48000 and up to -108.7 dB out. Inaudible,
+  below a sixteen bit word, and not a null. The old read was equally inexact so
+  nothing regressed, but it was a checkable claim stated as a guarantee.
+- **Three figures about backing the cutoff off below Nyquist could not be
+  reproduced by anything in the repository**, because the kernel had no way to
+  build one. The constructor now takes a cutoff fraction for that single
+  purpose, the probe measures the table, and the figures are this kernel's:
+  at 96 taps, 20 kHz loses 8.35 dB at 0.90 of Nyquist, 0.25 dB at 0.95 and
+  0.00003 dB at the Nyquist. The old numbers were from the research's setup, not
+  this one.
+- **"Measured 250 dB down" was not measured and cannot be**, through float
+  buffers: the measurement floor arrives at about -156 dB. The claim is
+  analytic, so it is stated analytically.
+- **"Better than that at larger steps" was true only of the whole number
+  steps.** Every step above one that is not a whole number sits at about
+  -115 dB whatever its size.
+- **The documented four times limit is not the engine's limit.** A clip's
+  stretch is clamped to [0.1, 10] in `Project.h` and `followTempo` sets it from
+  a tempo ratio with no clamp at that site at all, so the step reaches 8 for a
+  96 kHz file at four times speed and around 12 for a tempo matched one, where
+  the cutoff is pinned and the read aliases. Still better than what it replaced,
+  which aliased at every step. Clamping the stretch is a change in `Project.h`,
+  which an open pull request holds, so it is recorded rather than fixed.
+- **"At 96 taps there is nothing to trade" is too strong.** One sounding stereo
+  clip is 1.1 per cent of a core at 48 kHz, 65 times what the two point read
+  cost, and twenty four tracks of audio playing at once is about a quarter of a
+  128 sample callback before a single plugin runs. Affordable, and a budget.
+- **The comment justifying the widened range check was flattering.** Keeping
+  the old narrow one would not have cut any of a clip's own content; what it
+  would have refused is the kernel's ring out beyond the file, which for an
+  ordinary clip is outside the clip's span and never emitted. It is a margin for
+  the case where a clip does reach past its file, and now says so.
+
+### Two things this changes rather than fixes, both found by the audit
+
+Neither is a fault and neither was written down anywhere until the audit asked.
+
+**A read can come out above the input's peak.** Linear interpolation was a
+convex combination of two samples and could never leave the input's range; a
+windowed sinc overshoots. Measured, a full scale square wave reads 2.15 dB
+above full scale and the worst case signal reads 9.4 dB above it. This is
+correct bandlimited reconstruction and the same fact `TruePeak.h` exists for,
+but the consequence is real: a master limited to exactly full scale, imported
+at 44.1 kHz into a 48 kHz session, now reads above full scale on its insert, so
+a bounce to a fixed point word length can clip where it did not before and the
+same project bounced before and after this change differs at the top.
+
+**A trimmed clip carries about a millisecond of what was trimmed off.** The
+read is non causal by the kernel's half width. A full scale transient ten
+samples before the trim arrives at roughly -24 dB, and a step from full scale
+to silence at the trim point reads about half amplitude. Again this is what the
+bandlimited reconstruction of that file is, a comp join is crossfaded so the
+folder case is masked, and the de-click fade covers the clip case wherever it is
+set. Recorded because it changes what a hard trim means.
+
+### What is in the tree
+
+- `Source/ClipResampler.h`, no JUCE: the Bessel function, the Kaiser
+  parameters, the kernel table with its per phase normalisation, the worst case
+  gain, the step, and the read.
+- `Tests/ClipResamplerTest.cpp`.
+- `Tests/ClipResampleProbe.cpp`, not run by the suite: the lerp's tilt against
+  its closed form, the tap count against both things it has to buy, the cutoff
+  table, the table density, the per phase gain with and without its
+  normalisation, the overshoot, and the cost.
+- `Source/AudioEngine.{h,cpp}`: one kernel built in the constructor, and the
+  read in `renderAudioClips`, which both playback and `renderOffline` call, and
+  in `renderPreview`.
+- `Research/clip-resample-mutations.py`: 43 deliberate mistakes.
+
+### What is deliberately not built
+
+- **No resample quality setting.** Reaper has one. Its route to the engine is
+  `preferenceActions()` in `MainComponent.cpp`, which is held, and the better
+  reason is in the table above: a quality choice earns its place only when the
+  top quality cannot be afforded.
+- **No separate resampler for the bounce**, which three of the studios
+  document. It is a deliberate divergence in the one place this project's own
+  rules say divergence is worst.
+- **No fast path at a step of one**, where the tap set is constant for a whole
+  block and the read degenerates to one fixed FIR with no table lookup. It is
+  the obvious next thing and it is measured in the probe rather than guessed at.
+  It was not needed to afford this.
+- **No clamp on a clip's stretch**, which is what would make the four times
+  limit the engine's limit too. `Project.h` is held.
 
 ## 2026-11-27: a spectrum analyser, and the tilt that would have double counted
 

@@ -20,8 +20,11 @@
     What was here before was two point linear interpolation. At a step of
     exactly one source sample per output sample with a constant fractional
     offset, which is the trimmed clip and by far the most common case, that is
-    a linear time invariant filter: it produces no new frequencies at all,
-    measured 250 dB down. The whole defect is a static tilt, because linear
+    a linear time invariant filter: **it produces no new frequencies at all.**
+    That is not a measurement and is not quoted as one, it is what the form of
+    the expression says; measured through the float buffers the studio actually
+    uses, the floor of the measurement arrives first, at about -156 dB. The
+    whole defect is a static tilt, because linear
     interpolation at fractional delay `d` is the one zero FIR
     `H(z) = (1-d) + d z^-1`, whose magnitude at `d = 0.5` is `cos(pi f / fs)`:
 
@@ -188,10 +191,20 @@
     ## Why the cutoff is not backed off below Nyquist
 
     Smith's rule puts it exactly at the lower Nyquist, and that was checked
-    rather than assumed. At 32 taps a cutoff at 0.90 of Nyquist loses 1.6 dB at
-    20 kHz and one at 0.95 loses 0.39 dB, while the cutoff at Nyquist with
-    enough taps loses 0.00001 dB. The transition band is bought with taps
-    rather than with passband, because passband is the thing being fixed.
+    rather than assumed. The loss at 20 kHz reading a 44.1 kHz file into a
+    48 kHz session, measured on this kernel:
+
+    | taps | cutoff at 0.90 Nyquist | at 0.95 | at Nyquist |
+    |---|---|---|---|
+    | 32 | -6.74 dB | -2.73 dB | -0.77 dB |
+    | 96 | -8.35 dB | -0.25 dB | -0.00003 dB |
+
+    So the transition band is bought with taps rather than with passband,
+    because passband is the thing being fixed. The constructor takes a cutoff
+    fraction for no other reason than that this table should be re-runnable: an
+    earlier draft of this header quoted three figures from a measurement that
+    nothing in the repository could reproduce, which is exactly the kind of
+    sentence this project keeps finding in its own comments.
 
     ## Per phase gain, and the reason that is not the oversampler's reason
 
@@ -235,23 +248,39 @@
 
     At a step above one the normalisation is close rather than exact, because
     the taps then come off a different sub-lattice of the table and the convex
-    combination argument does not hold. Measured, the residual is about -115 dB
-    at a step of 1.088 and better than that at larger steps, and the explicit
-    amplitude factor does the real work there. Said here rather than claimed
-    exact.
+    combination argument does not hold. Measured, the residual is -114.95 dB at
+    a step of 1.088435, which is a 48 kHz file in a 44.1 kHz session, and
+    -115.55 dB at 2.176871, which is a 96 kHz one. **Not "better at larger
+    steps", which an earlier draft said on the strength of the whole number
+    steps:** those are exact or near it, because the taps land back on the
+    lattice, and every step above one that is not a whole number sits at about
+    -115 dB whatever its size. The explicit amplitude factor does the real work
+    there. Said here rather than claimed exact.
 
     ## Why a sinc of a whole number of samples is written as exactly zero
 
     `sin(pi x) / (pi x)` evaluated at `x = 48` does not give zero in floating
-    point, it gives about -1.6e-14. Written that way, a clip sitting at the
-    session's own sample rate and trimmed to a whole sample would come back
-    with fourteen digits of someone else's audio added to it. Every table entry
-    at a whole number of samples is therefore set to its exact value, which is
-    one at the centre and zero everywhere else, and the consequence is worth
-    having: **the tap set at phase zero is exactly an impulse, so a clip at the
-    device's own rate trimmed to a sample boundary is read bit for bit.**
-    `ClipResamplerTest` asserts that, because it is what makes a bounce of an
-    untouched take reproduce the file.
+    point, it gives about -1.6e-14. Written that way, a read landing exactly on
+    a stored sample would come back with fourteen digits of its neighbours
+    added to it. Every table entry at a whole number of samples is therefore set
+    to its exact value, which is one at the centre and zero everywhere else, so
+    **the tap set at phase zero is exactly an impulse and a read at an exactly
+    integer position, at any step of one or less, returns the stored sample bit
+    for bit.** `ClipResamplerTest` asserts that over randomised positions and
+    steps.
+
+    **What that does not buy, and an earlier draft of this comment claimed it
+    did: a bounce of an untouched take does not reproduce the file bit for
+    bit.** The engine's read position comes from a beat accumulated one
+    `beatsPerSample` at a time, so it lands near a whole sample rather than on
+    one. An audit simulated that accumulation: at 120 bpm and 48 kHz a clip at
+    the first bar is bit exact for 47154 output samples in 48000 and never more
+    than 3.7e-9 out, and at 128 bpm with the clip at beat 64 it is bit exact for
+    284 in 48000 and up to 3.7e-6 out, which is -108.7 dB. That is inaudible
+    and far below a sixteen bit word, and it is not a null. The old two point
+    read was equally inexact for the same reason, so nothing regressed, but the
+    guarantee belongs to the kernel and not to the product, and saying otherwise
+    would be a claim somebody could check and find false.
 
     ## One read for playback and for the bounce
 
@@ -261,8 +290,49 @@
     opt in with a CPU cost; Ardour and Logic both document a quality choice at
     import. `CLAUDE.md`'s rule goes the other way and wins here, because
     `renderAudioClips` is called by both paths and anything added to one and
-    not the other makes a bounce sound different from what was heard. At 96
-    taps there is nothing to trade: see the probe for the measured cost.
+    not the other makes a bounce sound different from what was heard.
+
+    The cost is what makes that affordable rather than merely principled, and
+    it is quoted rather than waved at. Measured, one sounding stereo clip at a
+    step of one is about 1.1 per cent of a core at 48 kHz, which is 65 times
+    what the two point read cost. Per sounding clip, not per clip in the
+    project. **At twenty four tracks of audio playing at once that is roughly a
+    quarter of a 128 sample callback before a single plugin runs**, and nearer
+    half on a slow laptop, so it is a real budget rather than free. The probe
+    names the two things that would halve it, a constant tap set for a whole
+    block at a step of one and a fixed point table index, and neither was
+    needed to afford this.
+
+    ## Two things this changes rather than fixes, both named rather than found
+
+    **A read can come out above the input's peak.** Linear interpolation was a
+    convex combination of two samples, so it could never leave the input's
+    range. A windowed sinc overshoots. Measured on this kernel, a full scale
+    square wave reads 2.15 dB above full scale, and the worst case signal, the
+    sign of each tap, reads 9.4 dB above it, which is `Kernel::phaseGain`.
+
+    This is correct bandlimited reconstruction rather than a fault, and it is
+    the same fact `TruePeak.h` exists for: the continuous waveform a converter
+    reconstructs from a square wave really does overshoot, and the largest
+    sample in a file is not its peak. But the consequence is real and belongs
+    where somebody will find it. A master limited to exactly full scale,
+    imported at 44.1 kHz into a 48 kHz session, now reads above full scale on
+    its insert. The float mixer does not care, and a bounce to a fixed point
+    word length can clip where it did not before, so the same project bounced
+    before and after this change differs at the top. Nothing in the studio
+    needs to do anything about it, and nothing pretends it did not happen.
+
+    **A trimmed clip carries a little of what was trimmed off.** The read is
+    non causal by the kernel's half width, which at a step of one is 48 source
+    samples, about a millisecond. So a clip trimmed to cut a count in click or
+    a false start now carries the sinc tail of that material into its first
+    output samples: a full scale transient ten samples before the trim arrives
+    at roughly -24 dB, and at the trim point itself a step from full scale to
+    silence reads about half amplitude. Again this is what a bandlimited
+    reconstruction of that file is, and every studio does it; a comp join is
+    crossfaded so the folder case is masked, and `ClipFade`'s de-click fade
+    covers the clip case wherever it is set. Written down because it changes
+    what a hard trim means.
 
     No JUCE, so the whole of the design and every figure above can be compiled
     and measured in a second with sanitizers on.
@@ -341,9 +411,11 @@ inline double kaiserBeta (double attenuationDb) noexcept
     measures the result against its own specification.
 
     It is an estimate and this header does not use it to choose anything. The
-    half width below was measured, because at the stopband edge this formula
-    was 41 dB optimistic. It is kept so that the design can be stated in the
-    terms the sources state it in, and so the probe can show the gap.
+    half width below was verified by measurement instead, because the formula's
+    own answer meets the specification by 0.08 dB, which for an empirical
+    formula is no margin at all. It is kept so that the design can be stated in
+    the terms the sources state it in, and so the probe can show how little
+    room the formula leaves.
 */
 inline double kaiserTaps (double attenuationDb, double transitionCyclesPerSample) noexcept
 {
@@ -351,6 +423,42 @@ inline double kaiserTaps (double attenuationDb, double transitionCyclesPerSample
         return 0.0;
 
     return (attenuationDb - 7.95) / (14.36 * transitionCyclesPerSample);
+}
+
+//==============================================================================
+/** How far the read position advances per output sample, in source samples.
+
+    One line, and it is here rather than in the engine for the reason
+    `CLAUDE.md` gives about `LatencyGraph.h`: it is the quantity that decides
+    the cutoff, so getting it wrong is the fault the whole of this header
+    exists to prevent, and a decision moved back into the engine stops being
+    testable. An audit found exactly that: inverting this expression in
+    `AudioEngine.cpp` left every one of the suite's programs green while a
+    96 kHz file read into a 48 kHz session passed its content above 24 kHz
+    straight through, folded, at full level.
+
+    `clipRate` is the clip's stretch ratio in source seconds per output second,
+    which is `AudioClipRT::rate`.
+*/
+inline double stepFor (double clipRate, double sourceRate, double deviceRate) noexcept
+{
+    return deviceRate > 0.0 ? clipRate * sourceRate / deviceRate : 0.0;
+}
+
+/** The same, for a warped clip, whose rate is the slope of the segment being
+    read rather than one figure for the whole clip.
+
+    `sourceSecondsPerBeat` is `WarpSegment::slope` and `beatsPerSample` is the
+    transport's own, so the two arguments carry the conversion between the
+    arrangement's time base and the file's. Kept beside `stepFor` because the
+    two have to agree: a warped clip whose segments all have the slope an
+    unwarped clip would have must read at the same step, and `ClipResamplerTest`
+    asserts that rather than leaving it to inspection.
+*/
+inline double stepForWarpSlope (double sourceSecondsPerBeat, double beatsPerSample,
+                                double sourceRate) noexcept
+{
+    return sourceSecondsPerBeat * beatsPerSample * sourceRate;
 }
 
 //==============================================================================
@@ -370,9 +478,18 @@ inline double kaiserTaps (double attenuationDb, double transitionCyclesPerSample
 struct Kernel
 {
     /** Half width in zero crossings, which is half the tap count at a step of
-        one or less. **Measured rather than derived**: see the header comment.
-        The Kaiser length formula asks for 84 and that delivers 79 dB where
-        120 was specified. */
+        one or less.
+
+        **Verified rather than derived, and 96 rather than 84 is a judgement
+        about margin rather than a measured necessity.** The Kaiser length
+        formula asks for 84 at 120 dB, and 84 measures -120.08 dB on the worst
+        case in the studio, which meets the specification by 0.08 dB. 96
+        measures -121.08 dB. The whole argument, including the figure an
+        earlier draft of this file got wrong, is in the header comment under
+        "The tap count", and the tables are in
+        `Tests/ClipResampleProbe.cpp`. **Do not shorten this from the passband,
+        which 64 taps already satisfies: the decimation is what sets the
+        length, and 64 taps measures -54.75 dB.** */
     static constexpr int defaultCrossings = 48;
 
     /** Table entries per zero crossing. Smith's own reference design uses 512,
@@ -393,16 +510,31 @@ struct Kernel
     static constexpr double defaultAttenuationDb = 120.0;
 
     /** The largest step whose cutoff the kernel still follows, in source
-        samples per output sample. Smith's method needs a limit chosen here
-        because the tap count grows as the step does, and a clip read four
-        times fast already costs four times the taps. Beyond this the cutoff
-        stops coming down, so a clip sped up past 4x aliases, which is a
-        documented limit rather than an oversight. */
+        samples per output sample. Smith's method needs a limit chosen
+        somewhere, because the tap count grows as the step does and a clip read
+        four times fast already costs four times the taps.
+
+        Beyond this the cutoff stops coming down, so the read aliases. **The
+        engine can ask for more than this, by about a factor of three**, and an
+        audit established that rather than it being assumed otherwise: a clip's
+        stretch is clamped to [0.1, 10] in `Project.h`, so `rate` reaches 10,
+        and `followTempo` sets it from a tempo ratio with no clamp at that site
+        at all, which puts the step at 8 for a 96 kHz file at four times speed
+        and around 12 for a tempo matched one. A warp segment's slope is
+        clamped below and not above and can do the same.
+
+        So this is where the protection stops and not where the engine stops,
+        and a clip at eight times speed aliases at full level. It is still an
+        improvement on what it replaced, which aliased at every step, and
+        clamping the stretch to four is a change in `Project.h`, which an open
+        pull request holds. Recorded here rather than described as a limit the
+        studio observes. */
     static constexpr double maxTrackedStep = 4.0;
 
     int    crossings = 0;
     int    entriesPerCrossing = 0;
     double attenuationDb = 0.0;
+    double cutoffFraction = 1.0;
     double beta = 0.0;
 
     std::vector<float> taps;        /**< right wing, normalised per phase */
@@ -413,11 +545,19 @@ struct Kernel
     {
     }
 
-    Kernel (int halfWidthCrossings, int perCrossing, double stopbandDb)
+    /** `cutoff` is the cutoff as a fraction of the source's Nyquist, and the
+        shipped value is 1, which is Smith's rule exactly. It is a parameter
+        only so that the figures the header quotes for backing it off can be
+        measured again rather than taken on trust: a number whose measurement
+        cannot be re-run is a number nobody can revisit, which is what
+        `Tests/WaveTableProbe.cpp` exists for in the instrument. Nothing in the
+        studio passes anything but 1. */
+    Kernel (int halfWidthCrossings, int perCrossing, double stopbandDb, double cutoff = 1.0)
     {
         crossings          = halfWidthCrossings < 1 ? 1 : halfWidthCrossings;
         entriesPerCrossing = perCrossing < 1 ? 1 : perCrossing;
         attenuationDb      = stopbandDb;
+        cutoffFraction     = cutoff > 0.0 ? cutoff : 1.0;
         beta               = kaiserBeta (stopbandDb);
 
         const int    count = crossings * entriesPerCrossing + 1;
@@ -443,13 +583,21 @@ struct Kernel
             // digits of the wrong answer there would matter.
             double sinc;
 
-            if (j % entriesPerCrossing == 0)
+            if (cutoffFraction == 1.0 && j % entriesPerCrossing == 0)
             {
+                // Only a zero of the sinc when the cutoff is at the Nyquist,
+                // which is the shipped case. A backed off cutoff puts its zeros
+                // somewhere else and has to be evaluated.
                 sinc = j == 0 ? 1.0 : 0.0;
+            }
+            else if (j == 0)
+            {
+                sinc = 1.0;
             }
             else
             {
-                const double x = 3.14159265358979323846 * (double) j / (double) entriesPerCrossing;
+                const double x = 3.14159265358979323846 * cutoffFraction
+                               * (double) j / (double) entriesPerCrossing;
                 sinc = std::sin (x) / x;
             }
 
@@ -491,6 +639,43 @@ struct Kernel
 
             if (entry >= 0 && entry < count)
                 sum += (double) taps[(std::size_t) entry];
+        }
+
+        return sum;
+    }
+
+    /** The sum of the magnitudes of one phase's taps, which is that phase's
+        gain against the worst case input and therefore the most a read can
+        ever produce from full scale material.
+
+        It is not one. A windowed sinc overshoots, and that is the one
+        user visible difference between this read and the lerp it replaced that
+        is a change rather than a fix: linear interpolation is a convex
+        combination of two samples, so it can never leave the input's range,
+        and this read can. Measured on the shipped kernel, a full scale square
+        wave reads up to 2.1 dB above full scale and the worst case signal, the
+        sign of each tap, reads 9.4 dB above it.
+
+        That is correct bandlimited reconstruction rather than a fault: the
+        continuous waveform a converter would produce from a square wave really
+        does overshoot, which is the same fact `TruePeak.h` exists for. But it
+        means a master that was limited to exactly full scale can read above it
+        here, so a bounce to a fixed point word length can clip where it did
+        not before, and the same project bounced before and after this change
+        differs at the top. Exposed rather than left implicit because it is the
+        bound `ClipResamplerTest` checks against, and an audit found the test
+        checking against 1.5 with a comment that named this quantity. */
+    double phaseGain (int phase) const noexcept
+    {
+        const int count = entryCount();
+        double sum = 0.0;
+
+        for (int i = -crossings + 1; i <= crossings; ++i)
+        {
+            const int entry = std::abs (i * entriesPerCrossing - phase);
+
+            if (entry >= 0 && entry < count)
+                sum += std::abs ((double) taps[(std::size_t) entry]);
         }
 
         return sum;
@@ -617,15 +802,21 @@ inline Frame read (const Kernel& kernel,
     // step out. Taking the absolute distance from the read position gets the
     // reflection for free and there is nothing to forget.
     //
-    // **The range is exactly the taps that can contribute, and `std::floor`
-    // above is what makes that true.** A tap contributes while
-    // `|i - offset| < crossings / scale`, and with `offset` in [0, 1) that is
-    // `i` from `-half + 1` to `half`. Truncating towards zero instead of
-    // flooring would put `offset` in (-1, 1) for a position just before the
-    // start of the file, and the tap at `-half` would then have something
-    // under it that this loop never reaches. A read before the first sample is
-    // ordinary rather than exotic: the kernel is tens of samples wide, so it
-    // happens at the leading edge of every clip.
+    // The range covers every tap that can contribute, and at a whole number
+    // step it is exactly those taps: one contributes while
+    // `|i - offset| < crossings / scale`, which with `offset` in [0, 1) is `i`
+    // from `-half + 1` to `half`. At any other step `half` is a ceiling and the
+    // range is a superset by a tap or two, which the guard below trims.
+    //
+    // `std::floor` rather than a truncation towards zero, because truncating
+    // puts `offset` in (-1, 1) for a position just before the start of the file
+    // and shifts the window by one, dropping a tap at the far end of the
+    // kernel. **That is worth a part in ten million, not a correctness
+    // requirement**, and it is written down that way deliberately: an audit
+    // measured the difference at -144.5 dB, and `CLAUDE.md` already carries one
+    // case here of a margin written up as a requirement, in
+    // `Tuner::InputRing`. Flooring is still the right thing to write, because
+    // it is what the arithmetic means and it costs nothing.
     for (int i = -half + 1; i <= half; ++i)
     {
         const int sample = centre + i;
@@ -636,12 +827,16 @@ inline Frame read (const Kernel& kernel,
         const double distance = std::abs ((double) i - offset) * tableScale;
         const int    entry    = (int) distance;
 
-        // Belt on braces, and said so rather than left looking load bearing:
-        // the loop above already stops before the end of the table, so this
-        // cannot fire for any position and step the engine produces. It is
-        // here because the cost of one comparison against reading off the end
-        // of a table on the audio thread is not a trade worth making, and
-        // because `scale` is computed from a step this function does not own.
+        // **This is load bearing, and an earlier draft of this comment said it
+        // could not fire.** It fires one or two times per output sample on the
+        // most ordinary conversion the studio does. `half` is a ceiling, so
+        // whenever `crossings / scale` is not a whole number the loop runs over
+        // a tap or two that cannot contribute, and this is what trims them:
+        // reading a 48 kHz file in a 44.1 kHz session produces table indices up
+        // to 24931 against a table of 24577 entries, at every fractional
+        // offset. Deleting it reads up to 1416 bytes past the end of a heap
+        // vector, on the audio thread. The suite does catch its deletion,
+        // through `_GLIBCXX_ASSERTIONS` rather than through any measurement.
         if (entry >= count - 1)
             continue;
 

@@ -86,16 +86,16 @@ MUTATIONS = [
      '        const double window   = 1.0;'),
 
     ('sinc evaluated at integers', 'sin(pi x)/(pi x) at a whole number of samples, which is 1.6e-14 and not zero',
-     '            if (j % entriesPerCrossing == 0)\n            {\n                sinc = j == 0 ? 1.0 : 0.0;\n            }\n            else\n            {',
-     '            if (j == 0)\n            {\n                sinc = 1.0;\n            }\n            else\n            {'),
+     '            if (cutoffFraction == 1.0 && j % entriesPerCrossing == 0)',
+     '            if (cutoffFraction == 1.0 && j == 0)'),
 
     ('sinc cutoff doubled', 'the cutoff an octave above the source Nyquist',
-     '                const double x = 3.14159265358979323846 * (double) j / (double) entriesPerCrossing;',
-     '                const double x = 2.0 * 3.14159265358979323846 * (double) j / (double) entriesPerCrossing;'),
+     '                const double x = 3.14159265358979323846 * cutoffFraction\n                               * (double) j / (double) entriesPerCrossing;',
+     '                const double x = 2.0 * 3.14159265358979323846 * cutoffFraction\n                               * (double) j / (double) entriesPerCrossing;'),
 
     ('sinc cutoff halved', 'the cutoff an octave below the source Nyquist',
-     '                const double x = 3.14159265358979323846 * (double) j / (double) entriesPerCrossing;',
-     '                const double x = 0.5 * 3.14159265358979323846 * (double) j / (double) entriesPerCrossing;'),
+     '                const double x = 3.14159265358979323846 * cutoffFraction\n                               * (double) j / (double) entriesPerCrossing;',
+     '                const double x = 0.5 * 3.14159265358979323846 * cutoffFraction\n                               * (double) j / (double) entriesPerCrossing;'),
 
     ('sinc centre zero', 'the centre tap zero instead of one',
      '                sinc = j == 0 ? 1.0 : 0.0;',
@@ -122,26 +122,8 @@ MUTATIONS = [
      '            for (int i = -crossings + 1; i <= crossings; ++i)\n            {\n                const int entry = i * entriesPerCrossing - phase;\n\n                if (entry >= 0 && entry < count)\n                    sum += built[(std::size_t) entry];\n            }'),
 
     ('differences before normalising', 'the two tables describing different kernels',
-     """        normalisePerPhase (built);
-
-        taps.resize ((std::size_t) count);
-        differences.resize ((std::size_t) count);
-
-        for (int j = 0; j < count; ++j)
-            taps[(std::size_t) j] = (float) built[(std::size_t) j];""",
-     """        taps.resize ((std::size_t) count);
-        differences.resize ((std::size_t) count);
-
-        for (int j = 0; j < count; ++j)
-            taps[(std::size_t) j] = (float) built[(std::size_t) j];
-
-        for (int j = 0; j + 1 < count; ++j)
-            differences[(std::size_t) j] = taps[(std::size_t) (j + 1)] - taps[(std::size_t) j];
-
-        normalisePerPhase (built);
-
-        for (int j = 0; j < count; ++j)
-            taps[(std::size_t) j] = (float) built[(std::size_t) j];"""),
+     '        normalisePerPhase (built);\n\n        taps.resize ((std::size_t) count);\n        differences.resize ((std::size_t) count);\n\n        for (int j = 0; j < count; ++j)\n            taps[(std::size_t) j] = (float) built[(std::size_t) j];\n\n        // Built from the normalised values, which is the third of the three\n        // conditions in the header comment: differences straddle phase\n        // boundaries, so doing this first and normalising after would leave\n        // the two tables describing different kernels.\n        for (int j = 0; j + 1 < count; ++j)\n            differences[(std::size_t) j] = taps[(std::size_t) (j + 1)] - taps[(std::size_t) j];',
+     '        taps.resize ((std::size_t) count);\n        differences.resize ((std::size_t) count);\n\n        for (int j = 0; j < count; ++j)\n            taps[(std::size_t) j] = (float) built[(std::size_t) j];\n\n        for (int j = 0; j + 1 < count; ++j)\n            differences[(std::size_t) j] = taps[(std::size_t) (j + 1)] - taps[(std::size_t) j];\n\n        normalisePerPhase (built);\n\n        for (int j = 0; j < count; ++j)\n            taps[(std::size_t) j] = (float) built[(std::size_t) j];'),
 
     ('differences reversed', 'h(j) - h(j+1) instead of h(j+1) - h(j)',
      '            differences[(std::size_t) j] = taps[(std::size_t) (j + 1)] - taps[(std::size_t) j];',
@@ -234,6 +216,31 @@ MUTATIONS = [
 # out again. The harness fails if one of these is ever caught, because that
 # means the reason has stopped being true.
 EXPECTED_SURVIVORS = {
+    "differences before normalising":
+        "measured, and it is a GAP rather than a no operation, which is why it "
+        "is written here in full. Building the difference table from the "
+        "unnormalised taps makes the two tables describe different kernels, "
+        "which is the third of the three conditions the header calls out as "
+        "breaking silently. It moves the central residual from -109.06 dB to "
+        "-109.05 dB. It cannot be caught at any tolerance this file could "
+        "honestly set, because the normalisation itself is only worth -132.8 "
+        "dB and the residual threshold is -100: a test tight enough to see "
+        "this would be pinning a figure 23 dB inside the specification and "
+        "would fail on another compiler's libm. So the condition is correct, "
+        "the code honours it, and nothing checks it. Said plainly because an "
+        "unrecorded gap is how a real one hides next time.",
+
+    "truncation not floor":
+        "measured by an audit at -144.5 dB worst single sample difference, "
+        "over positions from -60 to +140 reading a 10 kHz tone at 44.1 into "
+        "48. The mechanism is that |i - offset| is the true distance to a "
+        "sample whichever way the position was rounded, so truncating only "
+        "shifts the loop window by one and the tap that falls off the far end "
+        "is worth about 1e-7. The header's comment at that line says this "
+        "rather than calling flooring a correctness requirement, which an "
+        "earlier draft did: that is the Tuner::InputRing shape CLAUDE.md "
+        "already records, a margin written up as a requirement.",
+
     "window unnormalised":
         "dividing the window by I0(beta) is one constant applied to the whole "
         "kernel, and the per phase normalisation that follows divides it out "
@@ -276,18 +283,25 @@ EXPECTED_SURVIVORS = {
         "same reason as 'no per phase normalisation'.",
 
     "last difference not zeroed":
-        "the final table entry cannot be reached. The read loop runs only over "
-        "the taps that can contribute, which stops two entries short of the "
-        "end, and the guard inside it stops one short again. So the value "
-        "stored in the last difference is never multiplied by anything. That "
-        "the mutation survives is the demonstration that the bound holds.",
+        "entry count - 1 is never read, so whatever is stored in its difference "
+        "is never multiplied by anything. **The GUARD is what prevents that, "
+        "not the loop bound**, and an earlier version of this entry said the "
+        "opposite: it claimed the loop stops short of the end of the table. It "
+        "does not. `half` is a ceiling, so at any step where crossings / scale "
+        "is not a whole number the loop overshoots, by up to 354 entries at a "
+        "step of 1.088435. An audit measured that. So this survivor is evidence "
+        "that the guard works and evidence of nothing about the loop.",
 
     "table read past the end":
-        "same reason. The loop never produces an entry index that reaches "
-        "count - 1, so widening the guard to count changes nothing. Both are "
-        "belt on braces over a loop bound that is already right, which is why "
-        "the header says so at the line rather than leaving the guard looking "
-        "load bearing.",
+        "widening the guard from count - 1 to count admits exactly one more "
+        "entry, count - 1, which is in bounds and holds exactly zero: it sits a "
+        "whole number of samples from the centre, where the sinc is written as "
+        "its exact value rather than evaluated, and its difference is pinned to "
+        "zero. So the extra tap multiplies the source by nothing. **Not because "
+        "the index cannot be reached**, which an earlier version of this entry "
+        "said and an audit disproved: the loop reaches 24931 against a table of "
+        "24577 at a step of 1.088435, which is why the guard is load bearing "
+        "and says so at the line.",
 }
 
 def run_one(index):
