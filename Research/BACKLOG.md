@@ -118,6 +118,271 @@ A running record of what each night looked at, what it built, what it rejected,
 and why. Rejected ideas stay listed so a later night does not revisit them
 blindly. Newest first.
 
+## 2026-11-28: how an audio clip is read, which was the cheapest interpolator there is
+
+### What was looked at
+
+Nine open pull requests, every one a `harden/` branch again, so there was no
+draft of this lane's own to finish. Between them they hold `Project.h`,
+`MainComponent.cpp`, `PianoRollComponent.cpp`, `PlaylistComponent.cpp`,
+`RELEASE_NOTES.md`, `Meter.h`, `SongLength.h`, `LoudnessMeter.h`, `TruePeak.h`,
+`Punch.h`, `NoteSelection.h`, `LatencyGraph.h`, `Envelope.h`, `Spectrogram.h`,
+`Fx/Svf.h` and `Fx/BellMatch.h`. `Source/Synth` and `Source/Fx` are being built
+by hand, so both are out of bounds whatever the pull requests say, and `Fx` has
+two open branches in it besides.
+
+The same three candidates as the last three nights are still held by the same
+two files, and they are recorded again rather than rediscovered:
+
+- **Loudness normalisation on export**, first in the queue since 11-26 and
+  still one line out of reach: `ExportJob` takes its bit depth and its dither
+  through a constructor called in `MainComponent.cpp`.
+- **The dim amount persisted, and a control room light on the toolbar**, owed
+  to `MainComponent.cpp` since 11-26.
+- **A per insert monitor override**, deferred on `Project.h` since 11-25.
+
+So the search was again for something needing no saved project state and no
+transport, toolbar or menu change. It was found by reading the one function
+that every audio clip in the studio passes through, `renderAudioClips`, and
+looking at the two lines that actually produce the sound:
+
+```
+left[i]  += (srcL[f0] + (srcL[f1] - srcL[f0]) * frac) * gain;
+right[i] += (srcR[f0] + (srcR[f1] - srcR[f0]) * frac) * gain;
+```
+
+**Every audio clip in this studio, in playback and in every bounce, is read
+with two point linear interpolation**, which is the cheapest and worst
+interpolator there is. `renderPreview`, which auditions a file in the browser,
+has the same two lines.
+
+### Why this is worth a night, and the measurement that decided it
+
+The fractional read position is non zero in three ordinary situations, and
+nothing in the studio avoids any of them:
+
+- The file's sample rate differs from the device rate. A 44.1 kHz file in a
+  48 kHz session is every sample interpolated.
+- The clip is stretched or warped, so the read position moves at something
+  other than one source sample per output sample.
+- **The clip was simply trimmed, or nudged, to a position that is not a whole
+  number of source samples**, which is what a mouse does every time. The step
+  is then exactly one and the fractional part is a constant.
+
+The third is the common one and it was measured first:
+
+| at 10 kHz | at 15 kHz | at 20 kHz |
+|---|---|---|
+| -2.01 dB | -5.11 dB | -11.74 dB |
+
+That is the loss at a half sample offset in a 48 kHz session, and it is a
+closed form rather than an estimate: at fractional delay `d`, linear
+interpolation is the one zero FIR `H(z) = (1-d) + d z^-1`, so at `d = 0.5` the
+magnitude is `cos(pi f / fs)`. The amount depends on where the clip happens to
+have been trimmed, and the limit case is the one everybody has met somewhere:
+a two tap average.
+
+So a guitar take trimmed by hand is played back through a lowpass filter
+nobody asked for, whose corner depends on the trim, and a second copy of the
+same take trimmed a sample later sounds different. Nothing errors, nothing
+crackles, no meter moves. Dattorro's own description of the effect is the right
+one to put in the header: linear interpolation has "a dynamic zero at the
+Nyquist frequency, creating muffled (veil-like) sounds", and "the only
+frequency for which there is no amplitude error is dc".
+
+The 44.1 into 48 case is the one that is genuine distortion rather than a tilt.
+Measured, with a 6 kHz tone, the worst spurious product sits **32 dB** below
+it. Peer reviewed corroboration exists for the order of magnitude: Valimaki and
+Bilbao, JAES 71(3) 2023, upsampling 44.1 to 96 kHz, report that under linear
+interpolation "some of the images are attenuated by only about 40 dB", against
+"-98 dB or lower" for a high order polyphase FIR.
+
+| Candidate | Verdict |
+|---|---|
+| **A bandlimited read for every audio clip, replacing the linear interpolation** | **Chosen.** It is in the signal path of every clip in every project, in playback and in every bounce. It has a canonical published method, it is measurable to a number, and the whole of it fits in a header with no JUCE in it. It touches no held file. |
+| Loudness normalisation on export | **Deferred on a file hold, not on merit, for the third night running.** |
+| The dim amount persisted, and a control room light on the toolbar | Deferred on `MainComponent.cpp`, owed since 11-26. |
+| A per insert monitor override | Deferred on `Project.h`, unchanged since 11-25. |
+| Markers and a tempo map | Still the two largest known gaps in the arranging half, still `Project.h`, still bigger than one night. |
+| A resample quality setting, the way Reaper has one | **Rejected, and the reason is this project's own rule rather than the file hold.** See below. |
+| A separate, better resampler for the bounce, the way Ableton documents one | **Rejected on `CLAUDE.md`.** See below. |
+| A compressor, which the studio has none of | Genuinely the largest missing effect and genuinely out of lane: it belongs in `Source/Fx`, which is being built by hand and has two open branches in it. |
+
+### What the research settled, and the finding that redesigned the test
+
+The `dsp-researcher` agent was given the three cases above and the project's
+rule about established definitions. It read Julius Smith's "Digital Audio
+Resampling Home Page" at CCRMA in full, including the implementation and table
+sizing pages, the Kaiser window design equations from three sources that each
+attribute them to Kaiser 1974, the NIST DLMF entry for the modified Bessel
+function, two peer reviewed papers for the target figures, Dattorro's JAES
+paper for the analysis of linear interpolation, and the published documentation
+of Reaper, Ableton Live, Logic, Cubase, Ardour and libsamplerate. It wrote no
+code and it named what it could not reach.
+
+**The most important thing it found is that the most common case produces no
+distortion at all, so a distortion test cannot see it.** At a constant
+fractional offset and a step of exactly one, linear interpolation is linear and
+time invariant. Measured, the worst spurious component is 250 dB down: there
+are no new frequencies, because nothing non linear is happening. The entire
+defect is the static tilt in the table above.
+
+A test suite built around aliasing, images or THD would therefore have passed
+the old code with full marks on the case the product hits most, and the night
+would have shipped a header full of correct figures about cases nobody meets.
+**So the first test is a magnitude response sweep over fractional offset and
+frequency, and it is the only test in the file that fails if the read goes back
+to a lerp.** That is the single reason this entry exists in the shape it does.
+
+### The specification, with each constant's source
+
+The method is Smith's: a tabulated Kaiser windowed sinc, stored as the right
+wing only, read with linear interpolation between table entries.
+
+| Parameter | Value | Where it comes from |
+|---|---|---|
+| Kernel | Kaiser windowed sinc, symmetric, linear phase | Smith, CCRMA |
+| Stopband attenuation A | 120 dB | Valimaki and Bilbao, JAES 71(3) 2023: "the dynamic range should be at least 120 dB for highest-quality work". Carson, Valimaki, Wright and Bilbao, arXiv:2501.18470, choose the same figure for the same problem |
+| Kaiser beta | 12.26526 | computed from `0.1102 (A - 8.7)`, the `A > 50` branch of the piecewise form attributed to Kaiser 1974 |
+| Half width | 48 zero crossings, so 96 taps at a step of one or less | **Measured, not taken from the length formula.** See below |
+| Cutoff | the lower of the two Nyquist frequencies | Smith, quoted: `h_s(t) = min{1, Fs'/Fs} sinc(min{Fs,Fs'} t)`, "where the scale factor maintains unity gain in the passband" |
+| Amplitude scale | `min(1, 1/step)` | the same quoted sentence, which states what the factor is for |
+| Table entries per zero crossing | 512 | Smith's own reference design, and measured at -143 dB |
+| Between entry lookup | linear, against a stored difference table | Smith's equations (3) to (5) |
+| Minimum supported step | 4 source samples per output sample | Smith: beyond some ratio "the required extra input data becomes infinite, and some limit must be chosen" |
+
+**The Kaiser length formula promises 120 dB at 84 taps and delivers 79.** That
+is measured, at the one frequency where it matters, which is the input tone
+that folds exactly onto 20 kHz when decimating 48 kHz to 44.1. At 96 taps the
+same measurement reads -119.4 dB. The formula is empirical and least accurate
+at the stopband edge, which is exactly where this test lands, and the MathWorks
+page that states the formula says in the same breath that a filter designed
+this way "will meet the specifications approximately, but you should verify
+this". Trusting it would have cost 41 dB. That sentence is in the header.
+
+**The unit convention in that formula is a factor of 6.28 waiting to happen.**
+Sources state the length as `(A - 7.95) / (2.285 dw)` with `dw` in radians per
+sample, and as `(A - 7.95) / (14.36 df)` with `df` in cycles per sample. They
+are the same constant, since `dw = 2 pi df`. Mixing them gives a filter six
+times too long or too short. The header says which pairing it uses, and the
+test measures the window against its own specification so the confusion cannot
+survive.
+
+### The three departures from what the sources say, each with its reason
+
+**The cutoff sits exactly at the lower Nyquist rather than backed off below
+it.** Smith's rule says exactly that, and it was checked rather than assumed:
+at 32 taps a cutoff at 0.90 of Nyquist loses 1.6 dB at 20 kHz and one at 0.95
+loses 0.39 dB, while the cutoff at Nyquist with enough taps loses 0.00001 dB.
+The transition band is bought with taps instead of with passband.
+
+**Per phase gain normalisation is applied, and `Fx/Oversampler.h`'s reasoning
+for it does not transfer even though its conclusion does.** That header says an
+interpolating filter's taps must sum to one per phase because "the interpolator
+sees a zero between every input sample, so only every other tap has anything
+under it". That is a correct and complete account of integer factor zero
+stuffed polyphase interpolation, and there is no zero stuffing here at all:
+every tap sits on a real source sample. The right reason is simpler. The tap
+set for a given fractional position is an independent FIR filter, and its DC
+gain is the sum of its taps, which has to be one. For an infinite unwindowed
+sinc that is automatic; with a window and a finite length it is not, and the
+residual is a gain that varies with the fractional position, which is a
+modulation of a steady signal.
+
+The magnitude is the part worth having rather than the argument. Measured on
+this design, the raw table's per phase DC gain is already correct to -132.8 dB,
+so against a 120 dB target the normalisation is a nicety that costs nothing at
+build time rather than the necessity it was in the oversampler, where the
+measurement was five parts in a million. The oversampler's figure is not quoted
+here, because it is a different number about a different filter.
+
+Three conditions on doing it are recorded in the header because each breaks
+silently: it is exact only because linear table interpolation is a convex
+combination; a per entry scale is a per phase scale only because phase `p` and
+phase `L - p` use the identical entry set, which holds only while the kernel is
+symmetric; and the difference table has to be built from the normalised values
+rather than the other way round.
+
+**One read serves playback and the bounce, which is the opposite of what three
+of the studios document.** Ableton says plainly that its export path uses a
+different and better resampler from its realtime path, and that its high
+quality clip read is an opt in with a CPU cost; Ardour and Logic both document
+a quality choice on import. `CLAUDE.md`'s rule is the other way and it wins
+here: "anything added to playback and not to the export makes a bounce sound
+different from what was heard, which is among the worst bugs a studio can
+have". `renderAudioClips` is called by both paths, so there is one read and the
+bounce gets it for free, and at 96 taps it is affordable enough that there is
+nothing to trade.
+
+### What was rejected, and why
+
+- **A resample quality setting.** Reaper has one, and its user guide names the
+  range: "Playback and render resample mode, from Lowest (point sampling) thru
+  Medium (64 Sinc) to Extreme HQ (768 HQ Sinc)". Rejected on two grounds. The
+  honest one first: a setting is a route from a stored preference to the engine,
+  and the one route this studio has is `preferenceActions()` in
+  `MainComponent.cpp`, which is held. The better one is that a quality choice
+  only earns its place when the top quality cannot be afforded, and at 96 taps
+  it can. One quality, measured, is worth more than three, two of which are
+  there to be wrong.
+- **A separate, better resampler for the bounce.** See above. It is a
+  deliberate divergence in the one place this project's own rules say
+  divergence is worst.
+- **Backing the cutoff off below Nyquist** to buy a shorter kernel. Measured
+  and rejected: it spends passband, which is the thing being fixed.
+- **Trusting the Kaiser length formula.** Measured and rejected, at a cost of
+  41 dB.
+- **Carson et al.'s passband specification of plus or minus 0.5 dB.** It is the
+  closest published analogue to this problem and the figure is not
+  transferable: they justify it by a 16 kHz passband on the grounds that "in
+  guitar processing these frequencies would typically be attenuated by the
+  speaker cabinet", which is true of a guitar amplifier model and not of a
+  studio reading a file. Their 120 dB and their stopband reasoning are taken;
+  their passband is not.
+- **Smith's "-80 dB".** His own pages mention 80 dB attenuation as an example
+  of how a specification might be stated, not as the method's performance, and
+  his reference design carries no attenuation figure at all. Not quoted.
+- **libsamplerate's prose figure of 97 dB.** Recorded because it is this
+  project's favourite shape of mistake, found in somebody else's
+  documentation. Its documentation page gives "a worst case Signal-to-Noise
+  Ratio (SNR) of 97 decibels" for its best converter and the same 97 dB for all
+  three of its sinc converters, differentiating them only by bandwidth, while
+  the library's own description strings read 144 dB, 121 dB and 97 dB. Three
+  converters cannot plausibly differ in bandwidth by seventeen percentage
+  points and not at all in SNR: the 97 dB is the floor of the measurement that
+  was used, reasoned about correctly and then attached to three things. The
+  description strings are the credible set, and 120 dB was chosen to sit
+  between its medium and its best rather than to claim to beat the field.
+  Its "bandwidth" percentages are of Nyquist and not of the audio band, which
+  is the other half of that page worth not misreading: 80 per cent means 3 dB
+  down at 17.6 kHz in a 44.1 kHz session.
+- **Copying any implementation.** Smith's `resample` is LGPL and his prose
+  carries no licence, libsoxr is LGPL, and libsamplerate is BSD-2-Clause and so
+  would actually have been compatible. None of them is used. The equations and
+  the published measured figures are facts; the code is nobody's to take.
+
+### What could not be sourced, named as such
+
+- **Reaper's full mode list and its default.** The user guide sentence quoted
+  above gives two endpoints and one midpoint and no default, reaper.fm refuses
+  this sandbox, and the Cockos wiki page search returns now redirects to the
+  company's front page. The mode names in circulation, "Good (64pt Sinc)" and
+  "Better (192pt Sinc)", appear in a Sound on Sound reader's question rather
+  than in anything Cockos published, so they are not quoted as documentation.
+- **Whether Ableton's Hi-Q defaults on.** The manual does not say.
+- **Logic's current sample rate conversion page.** Apple's Logic 9 manual
+  documents one checkbox and no quality choice, which is a sourced negative;
+  the current page's body could not be extracted.
+- **Ardour's conversion quality level names.** The manual documents that the
+  drop-down exists and does not list its entries.
+- **Niemitalo's polynomial interpolator paper and Crochiere and Rabiner.**
+  Both unreachable from this sandbox. No figure from either is quoted, from
+  memory or otherwise.
+- **Kaiser 1974 itself, and Oppenheim and Schafer's equation numbers.** The
+  full citations were obtained; neither text was reached. The formulas are
+  quoted from three secondary sources that agree on all five constants, and
+  the header says so rather than implying the primary was read.
+
 ## 2026-11-27: a spectrum analyser, and the tilt that would have double counted
 
 ### What was looked at
