@@ -585,7 +585,11 @@ set. Recorded because it changes what a hard trim means.
 Merged as #98 with `tests`, `windows-latest` and `ubuntu-latest` all green and
 macOS still building after thirty five minutes, which is the rule this project
 already set for a slow runner: two platforms plus the tests, and no failure
-anywhere.
+anywhere. **macOS came green on the branch afterwards, so all four jobs passed
+on the tree that was merged**, and on the merged tree itself `tests`, Windows
+and Linux are green with macOS again still building. Checked rather than
+assumed, because "two of three is enough" is a rule about when to merge and not
+a reason to stop looking.
 
 **No release.** `v0.9.0` was cut two days ago and `main` is two commits past it,
 one of which is the hardening lane. The standing question at the top of this
