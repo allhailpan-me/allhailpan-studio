@@ -223,6 +223,63 @@ namespace SendTap
         where that is dealt with. */
     inline bool sourceIsPreFader (Tap tap) noexcept  { return tap == Tap::preFader; }
 
+    //==========================================================================
+    /** Whether the pre fader copy has to be taken this block, asked from the
+        two places that ask it, which are not asking the same question.
+
+        The copy is one block of two channels taken inside `processInsert`
+        before the fader multiply, and it is taken only when some send on the
+        insert is going to read it, so an insert with no pre fader send pays
+        nothing. Which means the guard and the read have to agree exactly. A
+        guard that is narrower than the reads hands `routeSends` a buffer
+        `processInsert` did not fill, and the engine's own comment says what
+        that is: this insert's audio from an earlier block, which is a few
+        milliseconds of the right strip at the wrong time and is not a sound
+        anybody could trace back to a mixer control.
+
+        **The two predicates differ by one clause and the difference is
+        deliberate**, which is the whole reason they are written down here
+        rather than left as two inline expressions that look like a
+        duplication somebody should tidy into one. `processInsert` runs first
+        and `routeSends` runs second, in the same block, and `routeSends` is
+        itself where a tap change is noticed: it moves `activeTap` on and arms
+        the fade. So the two run either side of that move and see different
+        state.
+
+        `processInsert` has to anticipate it. On the block a tap changes it
+        still sees the old `activeTap`, and the fade that will need the old
+        tap's copy has not been armed yet, so it takes the copy on the
+        strength of `activeTap` alone. `routeSends`, asking afterwards, has
+        the armed fade to read instead, and its `fadeFrom` is that same
+        `activeTap`. One clause, before and after the same fact is written
+        down.
+
+        Get that wrong in either direction and nothing announces it. Drop the
+        anticipation and the first block of every fade off the pre fader tap
+        reads a stale buffer or is latched to silence. Keep a clause that is
+        no longer needed and the cost is one memcpy nobody can hear.
+
+        The property worth asserting over both, and the one the test asserts,
+        is not either formula: it is that neither can decline a copy that
+        something is about to read. They are therefore written in terms of
+        `sourceIsPreFader`, which is the function that actually decides which
+        buffer a send reads, rather than against `Tap::preFader` again.
+    */
+    inline bool preFaderCopyWantedWhileRouting (Tap tap, double fade, Tap fadeFrom) noexcept
+    {
+        return sourceIsPreFader (tap)
+            || (fade > 0.0 && sourceIsPreFader (fadeFrom));
+    }
+
+    /** As above, from before the tap change has been written down. */
+    inline bool preFaderCopyWantedBeforeRouting (Tap tap, Tap activeTap,
+                                                 double fade, Tap fadeFrom) noexcept
+    {
+        return sourceIsPreFader (tap)
+            || sourceIsPreFader (activeTap)
+            || (fade > 0.0 && sourceIsPreFader (fadeFrom));
+    }
+
     /** Whether the strip's own cut, its mute and whatever somebody else's solo
         does to it, reaches a send taken at this tap.
 
@@ -243,30 +300,6 @@ namespace SendTap
     }
 
     //==========================================================================
-    /** The gain a send's own ramp should be heading for.
-
-        `preFaderCutGain` is the figure `SoloGraph` worked out for the pre fader
-        point, `State::preFaderSendGain`, and it is **read only on the pre fader
-        branch**. That is not an optimisation: a post fader send is copied out
-        of the buffer the cut was already applied to, so folding a cut in here
-        as well would apply it twice and arrive at its square. At full mute that
-        is still silence and at a partial solo cut it is a wet path collapsing
-        instead of coming down with the mix, which is the failure written up in
-        `SoloGraph.h` under WHAT A PARTIAL CUT DOES TO A WET PATH. The post
-        fader branch therefore cannot be affected by this argument at all, which
-        is a property the test asserts rather than a convention to be trusted.
-
-        A number this function cannot make sense of reads as silence rather than
-        being clamped to the nearest end. The discipline and the reason are
-        `SoloGraph::safeSoloMuteGain`'s: the level control is 0 to 1, a file the
-        application does not control can hold anything, every comparison against
-        a NaN is false so a clamp hands the NaN straight back, and of the
-        readings available for a number that means nothing, silence is the only
-        one that cannot damage a mix. Above unity a send would arrive louder
-        than the insert it was taken from and could clip a destination that was
-        fine. Unity is not an acceptable fallback for an unreadable cut either:
-        that would be a mute that did nothing.
-    */
     /** One sample of a send while it is travelling from one tap to the other.
 
         Each side arrives here **resolved**: the strip's copy at that tap times
@@ -295,9 +328,13 @@ namespace SendTap
         sum coherently and a curve would put a bump in the middle of a level
         that should simply travel.
 
-        `t` runs from 0 to 1 and is not clamped here. The caller drives it and
-        the test sweeps outside the range to pin what that would do, which is
-        to extrapolate rather than to saturate.
+        `t` runs from 0 to 1 and is not clamped here. The caller drives it,
+        and the engine cannot currently take it outside that range: the fade is
+        armed at one and floored at nothing. The test sweeps outside it anyway,
+        to pin what it would do, which is to extrapolate rather than to
+        saturate. That is a property nothing relies on today rather than a
+        guarantee anybody is leaning on, and it is said that way round because
+        this sentence previously claimed a sweep that did not exist.
     */
     inline double fadeSample (double fromSample, double fromGain,
                               double toSample,   double toGain,
@@ -319,7 +356,59 @@ namespace SendTap
         return from * (1.0 - t) + to * t;
     }
 
+    /** The same sample, driven by the fade that is **left** rather than by the
+        progress that has been made.
+
+        Which is what the engine holds: `sendTapFade` is armed at one and
+        counted down to nothing, so every caller of `fadeSample` had to write
+        `1.0 - fade` first, and a caller that wrote `fade` instead would get a
+        crossfade that runs backwards. That one is worth removing by
+        construction rather than testing for, because of what it does and does
+        not do. It still produces a convex combination of the same two steady
+        states, so it cannot overshoot, cannot click at a join and stays
+        monotone: every property `fadeSample` promises survives it. The only
+        symptom is that the first sample after the button is the tap the send
+        has just arrived at and the last one is the tap it left, so the
+        discontinuity is moved from the start of the five milliseconds to the
+        end of them instead of being removed.
+
+        So the subtraction lives here, once, next to the reason for it, and the
+        direction is pinned by a test that names the two ends: a whole fade
+        remaining is the tap being left, and none remaining is the tap being
+        arrived at.
+    */
+    inline double fadeSampleRemaining (double fromSample, double fromGain,
+                                       double toSample,   double toGain,
+                                       double remaining) noexcept
+    {
+        return fadeSample (fromSample, fromGain, toSample, toGain, 1.0 - remaining);
+    }
+
     //==========================================================================
+    /** The gain a send's own ramp should be heading for.
+
+        `preFaderCutGain` is the figure `SoloGraph` worked out for the pre fader
+        point, `State::preFaderSendGain`, and it is **read only on the pre fader
+        branch**. That is not an optimisation: a post fader send is copied out
+        of the buffer the cut was already applied to, so folding a cut in here
+        as well would apply it twice and arrive at its square. At full mute that
+        is still silence and at a partial solo cut it is a wet path collapsing
+        instead of coming down with the mix, which is the failure written up in
+        `SoloGraph.h` under WHAT A PARTIAL CUT DOES TO A WET PATH. The post
+        fader branch therefore cannot be affected by this argument at all, which
+        is a property the test asserts rather than a convention to be trusted.
+
+        A number this function cannot make sense of reads as silence rather than
+        being clamped to the nearest end. The discipline and the reason are
+        `SoloGraph::safeSoloMuteGain`'s: the level control is 0 to 1, a file the
+        application does not control can hold anything, every comparison against
+        a NaN is false so a clamp hands the NaN straight back, and of the
+        readings available for a number that means nothing, silence is the only
+        one that cannot damage a mix. Above unity a send would arrive louder
+        than the insert it was taken from and could clip a destination that was
+        fine. Unity is not an acceptable fallback for an unreadable cut either:
+        that would be a mute that did nothing.
+    */
     inline double levelTarget (Tap tap, double sendLevel, double preFaderCutGain) noexcept
     {
         if (! (sendLevel >= 0.0 && sendLevel <= 1.0))

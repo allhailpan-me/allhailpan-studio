@@ -290,6 +290,18 @@ public:
             // mute and solo reach the pre fader tap unless somebody turns that
             // off on the strip menu. A control whose own tooltip describes a
             // configuration it is not in is worse than one with no tooltip.
+            //
+            // The second version then got the same setting wrong the other
+            // way round, which is why both branches below now name the number
+            // of times the cut is met rather than only the setting's state.
+            // It said that a partial cut reaches a post fader send twice and a
+            // pre fader one once, under the branch that runs when the setting
+            // is ON, and once is what the setting being OFF buys: with it on,
+            // SoloGraph hands the pre fader point the insert's own gain, so
+            // the cut is folded in here and met again at the bus and both taps
+            // arrive at its square. The two branches had been written from the
+            // difference between the taps instead of from what each setting
+            // does, and the difference is the whole of what the setting is.
             sendTap[k]->setTooltip (
                 juce::String ("This send is taken ") + SendTap::displayName (tap)
                 + ". Post fader follows the fader and the pan, which is what a reverb that "
@@ -297,13 +309,15 @@ public:
                   "and before the fader and the pan, so its level stays where you put it "
                   "however the fader afterwards moves."
                 + (engine.getMuteAffectsPreFaderSends()
-                     ? " A mute silences either kind, and so does soloing something else, "
-                       "except that a partial solo cut set in Preferences reaches a post fader "
-                       "send twice and a pre fader one once: that is the project setting on a "
-                       "strip's own menu, and it is on."
+                     ? " A mute silences either kind, and so does soloing something else. A "
+                       "partial solo cut set in Preferences reaches either kind twice, once "
+                       "here and again at the bus, so a wet path arrives at the square of the "
+                       "cut: that is the project setting on a strip's own menu, and it is on."
                      : " A mute, or soloing something else, silences a post fader send and "
-                       "leaves a pre fader one feeding its bus at full level: that is the "
-                       "project setting on a strip's own menu, and it is off."));
+                       "leaves a pre fader one feeding its bus at the level you put it at, so "
+                       "this strip is still heard through that bus. A partial solo cut then "
+                       "reaches it once, at the bus alone: that is the project setting on a "
+                       "strip's own menu, and it is off."));
 
             sendTap[k]->setEnabled (valid);
         }

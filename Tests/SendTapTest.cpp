@@ -750,6 +750,360 @@ void testTheFadeCannotOvershootEitherEndOfItself()
     }
 }
 
+// ---------------------------------------------------------------------------
+// What the fade does outside its own range.
+//
+// The header says `t` is not clamped and that going outside the range
+// extrapolates rather than saturates. That sentence said "the test sweeps
+// outside the range" while no test did, which is the shape of claim CLAUDE.md
+// is about: a number or a behaviour stated in a comment with nothing in the
+// tree still producing it. The engine cannot currently drive `t` outside the
+// range, since `fade` is armed at one and floored at nothing, so this pins a
+// property nothing relies on today and the comment now says that too.
+//
+// Asserted as collinearity rather than by recomputing the weighted sum, which
+// would be the implementation restated. A straight line continued is the whole
+// claim: equal steps in `t` give equal steps in the output, everywhere, and a
+// clamp would flatten them at the ends.
+// ---------------------------------------------------------------------------
+void testTheFadeExtrapolatesRatherThanSaturating()
+{
+    std::printf ("\nThe fade outside its own range\n");
+
+    const double fromSample = 0.7, fromGain = 0.5;    // resolves to  0.35
+    const double toSample = -0.2, toGain = 0.25;      // resolves to -0.05
+
+    const double a = fromSample * fromGain;
+    const double b = toSample * toGain;
+
+    int bent = 0, saturated = 0;
+
+    double previous = SendTap::fadeSample (fromSample, fromGain, toSample, toGain, -2.0);
+    double previousStep = 0.0;
+
+    for (int i = -19; i <= 30; ++i)
+    {
+        const double t = (double) i / 10.0;
+        const double out = SendTap::fadeSample (fromSample, fromGain, toSample, toGain, t);
+
+        const double step = out - previous;
+
+        // Equal steps in t have to give equal steps out, which is what makes
+        // it one straight line through the whole sweep rather than a line with
+        // the ends bent over.
+        if (i > -19 && std::fabs (step - previousStep) > 1.0e-12)
+            ++bent;
+
+        // And beyond each end it has to have gone past that end, which is the
+        // half a clamp would get wrong while still passing the collinearity
+        // check on the inside of the range.
+        if (t > 1.0 && std::fabs (out - b) <= std::fabs (b - a) * 1.0e-9)
+            ++saturated;
+
+        if (t < 0.0 && std::fabs (out - a) <= std::fabs (b - a) * 1.0e-9)
+            ++saturated;
+
+        previousStep = step;
+        previous = out;
+    }
+
+    check (bent == 0, std::to_string (bent) + " steps of a sweep from t of -2 to t of 3 were not "
+                      "the same size as the step before: the fade is not one straight line");
+    check (saturated == 0, std::to_string (saturated) + " points outside the range sat on an "
+                           "endpoint rather than past it: that is a clamp, and the header says "
+                           "there is not one");
+
+    // The two the sweep is really about, as named cases, because a reader
+    // wanting to know what t of 2 does should find it written down.
+    check (SendTap::fadeSample (fromSample, fromGain, toSample, toGain, 2.0) < b,
+           "t of two has to be past the tap being arrived at");
+    check (SendTap::fadeSample (fromSample, fromGain, toSample, toGain, -1.0) > a,
+           "t of minus one has to be past the tap being left");
+
+    std::printf ("  50 points from t of -2 to 3 are one straight line, and the ends are not\n");
+    std::printf ("    clamped: t of 2 reads %s against an end of %s\n",
+                 str (SendTap::fadeSample (fromSample, fromGain, toSample, toGain, 2.0)).c_str(),
+                 str (b).c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Which end of the fade is which, when it is driven by what is left.
+//
+// `sendTapFade` is armed at one and counted down, so the engine holds the fade
+// that remains and not the progress made, and every caller of `fadeSample` had
+// to turn one into the other. `fadeSampleRemaining` is that subtraction, in one
+// place, and the reason it is worth having its own function is that getting it
+// backwards is invisible to every other check in this file: the output stays
+// convex, stays monotone, stays exact at both ends and never oversteps. It just
+// runs the five milliseconds the wrong way round, so the join the fade exists
+// to remove is moved to the far end of it rather than removed.
+//
+// So this names the two ends by what they are rather than by their arithmetic:
+// a whole fade still to run is the tap being LEFT, and none left is the tap
+// being ARRIVED AT.
+// ---------------------------------------------------------------------------
+void testTheFadeRunsFromTheTapBeingLeftToTheOneBeingArrivedAt()
+{
+    std::printf ("\nThe direction of a fade driven by what is left of it\n");
+
+    const double leaving = 0.8, leavingGain = 0.5;      // resolves to 0.40
+    const double arriving = 0.3, arrivingGain = 0.25;   // resolves to 0.075
+
+    // Exactly, for the reason the endpoints are exact in the test above: the
+    // blocks either side of a fade take the steady path.
+    check (SendTap::fadeSampleRemaining (leaving, leavingGain, arriving, arrivingGain, 1.0)
+             == leaving * leavingGain,
+           "a whole fade still to run has to give back the tap being left, exactly");
+    check (SendTap::fadeSampleRemaining (leaving, leavingGain, arriving, arrivingGain, 0.0)
+             == arriving * arrivingGain,
+           "no fade left has to give back the tap being arrived at, exactly");
+
+    // And it has to travel from the first of those to the second as the fade
+    // counts down, which is the assertion an inverted subtraction fails and
+    // nothing else in this file can see. Swept the way the engine drives it:
+    // from a full fade down to nothing.
+    {
+        int wrongWay = 0;
+        double previous = leaving * leavingGain;
+
+        for (int i = 64; i >= 0; --i)
+        {
+            const double remaining = (double) i / 64.0;
+            const double out = SendTap::fadeSampleRemaining (leaving, leavingGain,
+                                                             arriving, arrivingGain, remaining);
+
+            // The tap being arrived at resolves below the one being left
+            // here, so every step of a countdown has to be downward. A
+            // reversed drive starts at the far end and climbs back.
+            if (out > previous + 1.0e-12)
+                ++wrongWay;
+
+            previous = out;
+        }
+
+        check (wrongWay == 0, std::to_string (wrongWay) + " samples of a fade counted down from "
+                              "one to nothing moved towards the tap it was leaving rather than "
+                              "the one it was arriving at");
+    }
+
+    // The relationship to the function underneath, which is the one line this
+    // wrapper is, swept over both arguments so that a wrapper that dropped the
+    // subtraction entirely is caught as well as one that inverted it.
+    {
+        std::mt19937 rng (20261128u);
+        std::uniform_real_distribution<double> sym (-1.0, 1.0);
+        std::uniform_real_distribution<double> unit (0.0, 1.0);
+
+        int disagreed = 0;
+
+        for (int trial = 0; trial < 20000; ++trial)
+        {
+            const double fs = sym (rng), ts = sym (rng);
+            const double fg = unit (rng), tg = unit (rng);
+            const double remaining = unit (rng);
+
+            if (SendTap::fadeSampleRemaining (fs, fg, ts, tg, remaining)
+                  != SendTap::fadeSample (fs, fg, ts, tg, 1.0 - remaining))
+                ++disagreed;
+        }
+
+        check (disagreed == 0, std::to_string (disagreed) + " of 20000 blends disagreed with the "
+                               "same blend driven by the progress made");
+
+        std::printf ("  20000 blends, and a whole fade left reads %s, the tap being left,\n",
+                     str (leaving * leavingGain).c_str());
+        std::printf ("    while none left reads %s, the one being arrived at\n",
+                     str (arriving * arrivingGain).c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The pre fader copy, which may never be declined to something about to read
+// it.
+//
+// `processInsert` takes one block of two channels before the fader multiply,
+// and only when a send on the insert is going to read it, so an insert with no
+// pre fader send pays nothing. That makes the guard and the read two halves of
+// one decision, and the engine's own comment says what a guard narrower than
+// the reads produces: `routeSends` reading a buffer `processInsert` did not
+// fill this block, which is this insert's audio from an earlier block. A few
+// milliseconds of the right strip at the wrong time, with nothing to connect
+// it to any control.
+//
+// The two predicates differ by one clause because they are asked either side
+// of the moment a tap change is written down, and `routeSends` is what writes
+// it down. So the check that matters is not either formula: it is the
+// implication ACROSS that transition, which relates the two functions to each
+// other rather than to themselves.
+//
+// Stated honestly, because the three checks below are not equally strong:
+//
+//   * The transition implication is the real one. It is the only check here
+//     that compares two different functions, and it is what fails when the
+//     anticipating clause is dropped.
+//   * The guard covering the reads is the guard restated from the two places
+//     the buffer is read, so it is worth exactly this much: it fails when the
+//     guard moves and the reads do not. Nothing can catch both moving
+//     together.
+//   * Nothing pre fader anywhere must want no copy, which is what fails when
+//     a guard is left stuck at true.
+//
+// And all three are pointed at deliberately wrong twins of both predicates and
+// required to reject them, because a sweep that catches nothing is
+// indistinguishable from code with no bugs.
+// ---------------------------------------------------------------------------
+
+// Every state the two can be asked about. `fade` is in three places rather
+// than two because a fade part way through is a different case from a fade
+// just armed, and the shipped predicates only test it against nothing.
+struct SendState
+{
+    SendTap::Tap tap, activeTap, fadeFrom;
+    double fade;
+};
+
+std::vector<SendState> everySendState()
+{
+    std::vector<SendState> states;
+
+    for (auto tap : bothTaps)
+        for (auto active : bothTaps)
+            for (auto from : bothTaps)
+                for (double fade : { 0.0, 0.5, 1.0 })
+                    states.push_back ({ tap, active, from, fade });
+
+    return states;
+}
+
+// What routeSends does to the state before it acts on it, when the tap has
+// changed and the destination has not: the tap it was running at becomes the
+// tap it is fading from, the fade is armed, and the active tap moves on. Taken
+// from AudioEngine::routeSends rather than invented here.
+SendState afterRouteSendsNoticesTheChange (SendState before)
+{
+    if (before.tap != before.activeTap)
+    {
+        before.fadeFrom  = before.activeTap;
+        before.fade      = 1.0;
+        before.activeTap = before.tap;
+    }
+
+    return before;
+}
+
+// Which buffer routeSends reads, modelled from the two reads themselves: the
+// tap it is heading for, and, while a fade is running, the tap it is fading
+// from. Both of those are `sourceIsPreFader` calls in the engine.
+bool routeSendsReadsThePreFaderCopy (const SendState& s)
+{
+    return SendTap::sourceIsPreFader (s.tap)
+        || (s.fade > 0.0 && SendTap::sourceIsPreFader (s.fadeFrom));
+}
+
+void testThePreFaderCopyIsNeverDeclinedToSomethingAboutToReadIt()
+{
+    std::printf ("\nThe pre fader copy, and the two questions that are not the same question\n");
+
+    const auto states = everySendState();
+
+    // The shipped pair, and three wrong twins. Each twin is one plausible
+    // mistake: a clause left out, or a guard that never refuses.
+    const auto beforeShipped = [] (const SendState& s)
+    {
+        return SendTap::preFaderCopyWantedBeforeRouting (s.tap, s.activeTap, s.fade, s.fadeFrom);
+    };
+
+    const auto whileShipped = [] (const SendState& s)
+    {
+        return SendTap::preFaderCopyWantedWhileRouting (s.tap, s.fade, s.fadeFrom);
+    };
+
+    // Wrong twin one: the anticipating clause dropped, which is the mistake
+    // the two predicates looking alike invites.
+    const auto beforeWithoutAnticipation = [] (const SendState& s)
+    {
+        return SendTap::sourceIsPreFader (s.tap)
+            || (s.fade > 0.0 && SendTap::sourceIsPreFader (s.fadeFrom));
+    };
+
+    // Wrong twin two: the running fade dropped instead.
+    const auto beforeWithoutTheFade = [] (const SendState& s)
+    {
+        return SendTap::sourceIsPreFader (s.tap) || SendTap::sourceIsPreFader (s.activeTap);
+    };
+
+    // Wrong twin three: a guard that never refuses, which costs nothing
+    // audible and is still not what the header claims.
+    const auto alwaysWants = [] (const SendState&) { return true; };
+
+    // ---- the real check: nothing may be declined to something about to read
+    // it, across the transition routeSends performs.
+    const auto countsDeclined = [&states] (auto before, auto whileRouting)
+    {
+        int declined = 0;
+
+        for (const auto& s : states)
+        {
+            const auto after = afterRouteSendsNoticesTheChange (s);
+
+            if (! routeSendsReadsThePreFaderCopy (after))
+                continue;
+
+            // One state, one count, whichever of the two guards refused it.
+            if (! before (s) || ! whileRouting (after))
+                ++declined;
+        }
+
+        return declined;
+    };
+
+    const int declined = countsDeclined (beforeShipped, whileShipped);
+
+    check (declined == 0, std::to_string (declined) + " of " + std::to_string (states.size())
+                          + " send states would have read a pre fader copy that one of the two "
+                            "guards declined to take");
+
+    // The twins have to be caught, or the check above says nothing.
+    check (countsDeclined (beforeWithoutAnticipation, whileShipped) > 0,
+           "dropping the anticipating clause has to be caught: the block a send leaves the pre "
+           "fader tap is the block processInsert has not been told about yet");
+    check (countsDeclined (beforeWithoutTheFade, whileShipped) > 0,
+           "dropping the running fade has to be caught: the fade off the pre fader tap outlives "
+           "the block the tap changed in");
+
+    // ---- the guard covering the reads, which is the guard restated and is
+    // worth what the comment above says it is worth.
+    {
+        int mismatched = 0;
+
+        for (const auto& s : states)
+            if (whileShipped (s) != routeSendsReadsThePreFaderCopy (s))
+                ++mismatched;
+
+        check (mismatched == 0, std::to_string (mismatched) + " send states had routeSends' guard "
+                                "and routeSends' reads disagreeing about the pre fader copy");
+    }
+
+    // ---- and a copy nobody will read is not taken, which is what fails when
+    // a guard is left stuck at true.
+    {
+        const SendState nothingPreFader { SendTap::Tap::postFader, SendTap::Tap::postFader,
+                                          SendTap::Tap::postFader, 0.0 };
+
+        check (! beforeShipped (nothingPreFader),
+               "an insert whose sends are all post fader, with nothing fading, must not pay for "
+               "a copy");
+        check (! whileShipped (nothingPreFader),
+               "and routeSends must not ask for one either");
+        check (alwaysWants (nothingPreFader) && ! routeSendsReadsThePreFaderCopy (nothingPreFader),
+               "the twin that never refuses has to be wrong in this state, or the two checks "
+               "above are rejecting nothing");
+    }
+
+    std::printf ("  %zu states, none of them reading a copy that was declined,\n", states.size());
+    std::printf ("    and three wrong twins of the pair rejected\n");
+}
+
 int main()
 {
     std::printf ("SendTap\n=======\n\n");
@@ -762,6 +1116,9 @@ int main()
     testThePreFaderBranchCarriesTheCutOnce();
     testANumberItCannotReadIsSilence();
     testTheFadeCannotOvershootEitherEndOfItself();
+    testTheFadeExtrapolatesRatherThanSaturating();
+    testTheFadeRunsFromTheTapBeingLeftToTheOneBeingArrivedAt();
+    testThePreFaderCopyIsNeverDeclinedToSomethingAboutToReadIt();
 
     std::printf ("\n");
 

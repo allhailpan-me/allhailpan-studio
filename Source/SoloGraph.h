@@ -180,15 +180,33 @@
     the test measures it rather than leaving it to be discovered.
 
     A pre fader send meets it twice as well while `muteAffectsPreFaderSends` is
-    on, which is the default, so the square above is what the whole mixer does
-    and the test asserts that both taps agree about it. With the setting off a
-    pre fader send is the one path in the mixer that meets the cut exactly once,
-    because nothing is applied at the source and only the bus's own cut is left.
+    on, which is the default, so the square above is what the whole mixer does.
+    With the setting off a pre fader send is the one path in the mixer that
+    meets the cut exactly once, because nothing is applied at the source and
+    only the bus's own cut is left.
+
     That is arguably the better answer rather than an oversight, and it is said
     here because it is the one place in this file where the two taps differ in
     their arithmetic rather than only in what they are copied from. Fixing it
     would mean a second figure per insert, one for its own output and one for
     what passes through it, which is a real feature and not a tidy up.
+
+    Both of those are measured at the master through the mixer's own forward
+    pass, at both taps, in `testBothTapsAgreeAboutThePartialCut`. They are
+    measured rather than read off the figure because those are two different
+    claims and only the second is what somebody hears, and because this
+    sentence previously asserted the agreement with nothing in the tree
+    producing it: the one test that pushed a pre fader send to the master ran
+    at the default cut of nothing, where the cut and its square are both zero
+    and the two taps cannot be told apart. The tap's own tooltip was wrong
+    about that configuration, in that direction, for four days.
+
+    At a cut of 0.25 into a bus that is cut as well, both taps put the wet path
+    at 0.0312 with the setting on, and the setting off puts the pre fader one
+    at 0.1250, which is one cut louder exactly. Into a bus the solo is keeping
+    audible the setting off is the cue path and meets no cut at all, so the
+    silenced strip arrives through its own reverb at the send level it was put
+    at.
 
     WHAT THE GAIN IS APPLIED TO
 

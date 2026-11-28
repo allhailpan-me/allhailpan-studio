@@ -1866,6 +1866,233 @@ void testWhatAPreFaderSendOfASilencedInsertCarries()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The same forward pass, with a tap per send.
+//
+// `masterContribution` above models one send point, the post fader one, which
+// is what the mixer had when it was written. The two taps differ in the buffer
+// the copy comes out of AND in the gain that copy is given, so a model that
+// only varies one of them cannot see the thing the setting decides. Both come
+// from `SendTap`: `sourceIsPreFader` picks the buffer and `levelTarget` sets
+// the gain, exactly as `AudioEngine::routeSends` does.
+//
+// `preFaderSendGain` is read from the SOURCE insert, which is the insert the
+// copy is taken from, because that is whose cut the copy has not had applied
+// to it yet. Reading the destination's instead is a mistake this model cannot
+// catch in the engine, where the indexing lives: see the note in
+// Research/HARDENING.md.
+// ---------------------------------------------------------------------------
+double masterContributionAtTap (const Mixer& m, const SoloGraph::Result& r,
+                                int injectAt, SendTap::Tap tap)
+{
+    const int n = m.n;
+    std::vector<double> in ((std::size_t) n, 0.0), out ((std::size_t) n, 0.0);
+
+    in[(std::size_t) injectAt] = 1.0;
+
+    double master = 0.0;
+
+    for (int i = 1; i < n; ++i)
+    {
+        const double g = (double) r.inserts[(std::size_t) i].gain;
+
+        out[(std::size_t) i] = in[(std::size_t) i] * g;
+        master += out[(std::size_t) i];
+
+        // The pre fader copy is taken before the multiply, so it is the
+        // insert's input; the post fader one is its output.
+        const double sendSource = SendTap::sourceIsPreFader (tap) ? in[(std::size_t) i]
+                                                                  : out[(std::size_t) i];
+
+        const double cut = (double) r.inserts[(std::size_t) i].preFaderSendGain;
+
+        for (int s = 0; s < kNumSends; ++s)
+        {
+            const int to = m.sendTo[(std::size_t) i][(std::size_t) s];
+            const float level = m.sendLevel[(std::size_t) i][(std::size_t) s];
+
+            if (to > i && to < n && level > 0.0f)
+                in[(std::size_t) to] += sendSource
+                                      * SendTap::levelTarget (tap, (double) level, cut);
+        }
+    }
+
+    return master * (double) r.inserts[0].gain;
+}
+
+// ---------------------------------------------------------------------------
+// Both taps against a partial cut, measured at the master.
+//
+// This is the measurement the header claimed. `SoloGraph.h` says, of the
+// square a wet path arrives at, that "a pre fader send meets it twice as well
+// while muteAffectsPreFaderSends is on, which is the default, so the square
+// above is what the whole mixer does and the test asserts that both taps agree
+// about it". Nothing asserted it. `testAPartialCutOnAWetPath` measures the
+// square through the post fader point alone, and the only test that pushes a
+// pre fader send to the master runs at the default cut of nothing, where the
+// cut and its square are both zero and the two taps cannot be told apart.
+//
+// So the one configuration where the claim is a claim had no measurement in
+// it, and the tap's own tooltip was wrong about exactly that configuration in
+// exactly that direction. A number that is present, plausible and wrong, in
+// the words rather than in the signal.
+//
+// Two configurations, because the bus a send feeds decides how many times the
+// cut is met and they are different claims:
+//
+//   * The bus is cut too, which is the ordinary case of soloing something
+//     unrelated. On, both taps arrive at the square. Off, the pre fader tap
+//     meets the cut exactly once, at the bus, which is the sentence two lines
+//     below the one above.
+//   * The bus is kept audible by the solo, which is the cue path the setting
+//     exists for. Off, the pre fader send arrives at its full level having met
+//     no cut at all.
+// ---------------------------------------------------------------------------
+void testBothTapsAgreeAboutThePartialCut()
+{
+    std::printf ("\nBoth taps against a partial cut, measured at the master\n");
+
+    const float cut = 0.25f;            // about -12 dB
+    const double c = (double) cut;
+    const float level = 0.5f;
+
+    const int vocal = 3, guitar = 4, reverb = 9;
+
+    // ---- the bus is cut as well: nothing soloed reaches it.
+    {
+        std::mt19937 rng (5u);
+        Mixer m = makeMixer (rng, 12, 0.0);
+        m.route (guitar, reverb, level);
+        m.selfSoloed[(std::size_t) vocal] = 1;
+
+        SoloGraph::Result r;
+
+        for (bool setting : { true, false })
+        {
+            SoloGraph::Settings settings;
+            settings.soloMuteGain = cut;
+            settings.muteAffectsPreFaderSends = setting;
+
+            SoloGraph::compute (m.setup (settings), r);
+
+            check (r.inserts[(std::size_t) reverb].gain == cut,
+                   "this configuration needs a reverb bus that is cut too, and it was not");
+
+            const double post = masterContributionAtTap (m, r, guitar, SendTap::Tap::postFader);
+            const double pre  = masterContributionAtTap (m, r, guitar, SendTap::Tap::preFader);
+
+            // The dry path meets the cut once, and the wet path is what the
+            // taps disagree about.
+            const double dry = c;
+            const double wetTwice = c * (double) level * c;
+            const double wetOnce  = (double) level * c;
+
+            check (std::abs (post - (dry + wetTwice)) < 1.0e-9,
+                   "a post fader send's wet path has to meet the cut twice whatever this setting "
+                   "says: measured " + std::to_string (post));
+
+            if (setting)
+            {
+                check (std::abs (pre - post) < 1.0e-12,
+                       "with the setting on the two taps have to agree about the square, and "
+                       "they differed: pre " + std::to_string (pre) + " against post "
+                         + std::to_string (post));
+
+                std::printf ("  bus cut, setting on : both taps %.4f at the master, "
+                             "wet %.4f which is the cut squared\n", pre, wetTwice);
+            }
+            else
+            {
+                check (std::abs (pre - (dry + wetOnce)) < 1.0e-9,
+                       "with the setting off the pre fader tap has to meet the cut exactly once, "
+                       "at the bus: measured " + std::to_string (pre));
+
+                // And the two taps must then differ by exactly the cut on the
+                // wet path, which is the whole of what the setting buys.
+                check (std::abs ((pre - dry) - (post - dry) / c) < 1.0e-9,
+                       "the setting off has to leave the wet path exactly one cut louder than the "
+                       "setting on, and did not");
+
+                std::printf ("  bus cut, setting off: pre %.4f against post %.4f, "
+                             "wet %.4f which is the cut once\n", pre, post, wetOnce);
+            }
+        }
+    }
+
+    // ---- the bus is kept audible by the solo: the cue path.
+    {
+        std::mt19937 rng (5u);
+        Mixer m = makeMixer (rng, 12, 0.0);
+        m.route (vocal, reverb, level);
+        m.route (guitar, reverb, level);
+        m.selfSoloed[(std::size_t) vocal] = 1;
+
+        SoloGraph::Result r;
+
+        for (bool setting : { true, false })
+        {
+            SoloGraph::Settings settings;
+            settings.soloMuteGain = cut;
+            settings.muteAffectsPreFaderSends = setting;
+
+            SoloGraph::compute (m.setup (settings), r);
+
+            check (r.inserts[(std::size_t) reverb].gain == 1.0f,
+                   "this configuration needs the reverb the soloed vocal feeds to stay at unity");
+
+            const double post = masterContributionAtTap (m, r, guitar, SendTap::Tap::postFader);
+            const double pre  = masterContributionAtTap (m, r, guitar, SendTap::Tap::preFader);
+
+            const double dry = c;
+
+            if (setting)
+            {
+                // The bus is at unity, so one cut at the source is all there
+                // is and both taps carry it.
+                check (std::abs (pre - post) < 1.0e-12,
+                       "with the setting on the taps have to agree here too, and they differed");
+                check (std::abs (pre - (dry + c * (double) level)) < 1.0e-9,
+                       "into an audible bus the cut is met once at the source: measured "
+                         + std::to_string (pre));
+
+                std::printf ("  bus audible, setting on : both taps %.4f, the guitar is held "
+                             "under the solo\n", pre);
+            }
+            else
+            {
+                check (std::abs (pre - (dry + (double) level)) < 1.0e-9,
+                       "with the setting off the cue path meets no cut at all and arrives at its "
+                       "own level: measured " + std::to_string (pre));
+
+                std::printf ("  bus audible, setting off: pre %.4f against post %.4f, the guitar "
+                             "is heard through the reverb at full send level\n", pre, post);
+            }
+        }
+    }
+
+    // And the model has to be able to tell the two taps apart at all, or every
+    // agreement above is the same number twice. The setting off, the bus cut,
+    // is the one configuration where they must differ.
+    {
+        std::mt19937 rng (5u);
+        Mixer m = makeMixer (rng, 12, 0.0);
+        m.route (guitar, reverb, level);
+        m.selfSoloed[(std::size_t) vocal] = 1;
+
+        SoloGraph::Settings settings;
+        settings.soloMuteGain = cut;
+        settings.muteAffectsPreFaderSends = false;
+
+        SoloGraph::Result r;
+        SoloGraph::compute (m.setup (settings), r);
+
+        check (masterContributionAtTap (m, r, guitar, SendTap::Tap::preFader)
+                 != masterContributionAtTap (m, r, guitar, SendTap::Tap::postFader),
+               "the forward pass cannot tell the two taps apart, so nothing above means "
+               "anything");
+    }
+}
+
 } // namespace
 
 int main()
@@ -1888,6 +2115,7 @@ int main()
     testThePreFaderFigureHasTwoAnswers();
     testThePreFaderFigureAgreesWithTheTap();
     testWhatAPreFaderSendOfASilencedInsertCarries();
+    testBothTapsAgreeAboutThePartialCut();
     testGestures();
     testReuseAndEdges();
 

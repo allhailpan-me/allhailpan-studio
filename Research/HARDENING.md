@@ -7,6 +7,263 @@ Newest first.
 
 ---
 
+## 2026-11-28: the send tap, the cut it meets twice, and the button that said the opposite
+
+### What is being looked at
+
+`Source/SendTap.h`, `Tests/SendTapTest.cpp`, the pre fader figure in
+`Source/SoloGraph.h`, the tap's own control in `Source/MixerComponent.h`, and
+the two call sites in `Source/AudioEngine.cpp` that act on all of it. The tap
+point landed on 2026-11-24 in #90 and has no entry here, so nothing has
+audited it since it merged. No open pull request touches any of those files.
+
+Why it is worth a night. A send tap is a choice between two buffers that both
+hold the right strip at a plausible level, so every way of getting it wrong is
+silent: there is no click, nothing on a meter, and no error. The feature's own
+header says so at `sourceIsPreFader`, calling an inverted answer there "the
+quietest possible breakage of this whole feature". And the one number that
+differs between the two taps is the solo cut, which a send meets twice on its
+way to the master, so it is the figure most able to be plausible and wrong.
+
+### What is being audited for
+
+Three things, in order. Whether the cut arithmetic is right at both taps.
+Whether the claims made about it in comments are reproduced by anything in the
+tree. And whether `Tests/SendTapTest.cpp`, which is a strong test of the
+header, can see any of the ways the engine's call sites could act on the
+header wrongly.
+
+### What was found: the button described the opposite of the setting it names
+
+`MixerComponent.h`'s tooltip for the tap button, in the branch that runs when
+`muteAffectsPreFaderSends` is **on**, which is the shipped default:
+
+> A mute silences either kind, and so does soloing something else, except that
+> a partial solo cut set in Preferences reaches a post fader send twice and a
+> pre fader one once: that is the project setting on a strip's own menu, and it
+> is on.
+
+"Once" is what the setting being **off** buys. With it on,
+`SoloGraph::preFaderSendGainFor` hands the pre fader point the insert's own
+gain, `SendTap::levelTarget` folds that cut into the send at the source, and
+the destination insert applies its own cut again: both taps arrive at the
+square. The sentence had been written from the difference between the two taps
+and then attached to the setting that removes the difference.
+
+Measured at the master through the mixer's forward pass, at a solo cut of 0.25
+and a send level of 0.5 into a bus that is cut as well:
+
+| | wet path at the master | the cut, met |
+|---|---|---|
+| post fader, either setting | 0.0312 | twice |
+| pre fader, setting **on** | 0.0312 | twice |
+| pre fader, setting **off** | 0.1250 | once, at the bus |
+
+And into a bus the solo is keeping audible, which is the cue path the setting
+exists for, the setting off meets no cut at all: the silenced strip arrives
+through its own reverb at 0.5, the send level it was put at, against 0.125
+with the setting on.
+
+Why it is a fault and not a wording complaint. The setting is not on the tap
+button: it is on the strip's context menu, and the tooltip is where somebody
+finds out what it does. Its stated purpose is a cue path that keeps its level
+under a solo. A person who wants one reads this tooltip, concludes the studio
+already behaves that way, and leaves the setting alone. At a -12 dB cut the
+wet path they were promised 12 dB down sits 24 dB down, and the control that
+would have fixed it is the one the sentence told them was already doing it.
+
+**This is the second time this one tooltip has been wrong about this one
+setting**, and the comment above it records the first: an earlier version said
+a pre fader send is taken before the fader, the pan "and the mute", which is
+Ardour's default and not this studio's. That comment ends "A control whose own
+tooltip describes a configuration it is not in is worse than one with no
+tooltip", and the next version of it then described the other configuration.
+Both branches now name the number of times the cut is met rather than the
+setting's state, because the count is the whole of what the setting decides,
+and the comment says what went wrong this time.
+
+### The claim that let it happen
+
+`SoloGraph.h`, immediately above the arithmetic the tooltip got wrong:
+
+> A pre fader send meets it twice as well while `muteAffectsPreFaderSends` is
+> on, which is the default, so the square above is what the whole mixer does
+> **and the test asserts that both taps agree about it**.
+
+Nothing asserted it. The two tests that come closest each miss it in a
+different way, and the way they miss it is the interesting part:
+
+- `testAPartialCutOnAWetPath` measures the square through the forward pass,
+  but `masterContribution` models one send point. The post fader one. No tap
+  argument enters it, so it cannot compare the taps at all.
+- `testWhatAPreFaderSendOfASilencedInsertCarries` is the only test that pushes
+  a pre fader send through to the master, and it runs at the default
+  `soloMuteGain` of 0.0, where the cut and its square are both zero. At a full
+  mute the two taps are indistinguishable by construction.
+
+So the one configuration in which the claim is a claim, a **partial** cut
+through a **pre fader** tap, had no measurement anywhere in the tree. That is
+CLAUDE.md's item 8 exactly: a comment asserting a measurement that nothing
+still produces. The test now exists, the header cites it by name and carries
+the four figures, and the forward pass takes a tap and varies both halves of
+what a tap decides, the buffer through `sourceIsPreFader` and the gain through
+`levelTarget`. A model that varied only one could not see the setting.
+
+Also made honest: `SendTap.h` said "the test sweeps outside the range to pin
+what that would do, which is to extrapolate rather than to saturate" and no
+test swept outside the range. It does now, as collinearity across 50 points
+from `t` of -2 to 3 rather than by recomputing the weighted sum, and the
+header now also says the engine cannot drive `t` out of range anyway, so the
+property is pinned rather than relied on.
+
+### Two silent choices lifted out of the mixing loop
+
+Neither of these was wrong. Both were inline expressions in `routeSends` and
+`processInsert` that no test could reach, in a feature where every mistake is
+inaudible, so they are now named functions in `SendTap.h` with the reasoning
+beside them and an oracle under them.
+
+**The pre fader copy guard.** `processInsert` takes the copy only when a send
+is going to read it, so the guard and the reads are two halves of one decision
+and a guard narrower than the reads hands `routeSends` a buffer nothing filled
+this block: the right strip, a few milliseconds late, with nothing to connect
+it to any control. The two places that ask differ by one clause, which reads
+exactly like a duplication somebody should tidy into one and is not. They are
+asked either side of the moment `routeSends` writes a tap change down, so
+`processInsert` has to anticipate from `activeTap` what `routeSends` can later
+read off the armed fade.
+
+The property the test asserts is not either formula. It is that neither may
+decline a copy something is about to read, across the transition `routeSends`
+performs, which is the only check here that relates the two functions to each
+other rather than to themselves. Three wrong twins of the pair are required to
+be rejected. The test says in its own comment which of its three checks is
+strong and which is the guard restated from the reads it guards, because they
+are not equally worth anything.
+
+**The fade direction.** `sendTapFade` is armed at one and counted down, so the
+loop held what was left and turned it into progress with a subtraction written
+in the loop. Getting that backwards is invisible to every check that existed:
+the blend stays convex, stays monotone, stays exact at both ends and never
+oversteps. It only runs the five milliseconds the wrong way round, which moves
+the join the crossfade exists to remove to the far end of it. The subtraction
+is now `SendTap::fadeSampleRemaining`, once, next to that reasoning, so the
+loop cannot write it backwards, and the test names the two ends by what they
+are rather than by their arithmetic.
+
+### Mutation testing
+
+28 mutations across `Source/SendTap.h` and `preFaderSendGainFor` in
+`Source/SoloGraph.h`, each a single plausible mistake, every one compiled with
+address and undefined behaviour sanitizers at the flags `Tests/run.sh` uses.
+`Research/send-tap-mutations.py` is the harness.
+
+**28 of 28 caught. No survivors, so there is nothing to judge as a no-op.**
+
+What that number does and does not say, because a clean sweep is easy to
+overread. Twenty four of the twenty eight apply to the header as it stood on
+main, and **the test as it stood on main caught all twenty four.**
+`SendTapTest.cpp` was already a strong test of the header and this night did
+not find a gap in it. The four it could not have caught are the three
+functions that did not exist until tonight. So the night's findings are in the
+words, in the claims, and in the two choices that were outside any test's
+reach, not in the table's coverage.
+
+The harness's own first version is the more useful result in here. It claimed
+to run every mutation against both tests, and for every `SendTap.h` mutation
+it ran against one while reporting two: a quoted include resolves against the
+directory of the including file before any `-I` path, so with a mutated
+`SendTap.h` on the include path and the real `Source` behind it,
+`Source/SoloGraph.h`'s own `#include "SendTap.h"` picked up the real header
+and `SoloGraphTest` never saw the mutation. **It reported a clean sweep either
+way**, which is what makes it worth recording: the broken harness and the
+fixed one printed the same number. CLAUDE.md documents this mechanism as the
+reason a quoted include under `Source` must be written relative to its own
+file; it bites a mutation harness identically. The harness now copies the
+whole of `Source`, mutates inside the copy, and compiles against the copy
+alone.
+
+With it fixed, two mutations are caught by the end to end measurement as well
+as by the table's own test, and one is the inversion the header itself calls
+the quietest possible breakage of the whole feature: the buffer a send is
+copied out of. The forward pass sees it as a post fader wet path that stopped
+meeting the cut twice.
+
+### What was looked at and found sound
+
+- **The cut is applied exactly once on each branch.** A post fader send's cut
+  is in the buffer it is copied from and `levelTarget` returns the level
+  alone; a pre fader send's is folded in at the source from `SoloGraph`'s
+  figure. Folding it into both would square it, and that mutation is caught
+  7372 times.
+- **The compensation claim holds.** `SendTap.h` says a tap point may not move
+  a single number the compensation produces. `LatencyGraph::Setup` and
+  `Result` carry no tap, `sendDelay` is built from `inLat` and `outLat` only,
+  and both taps sit after all eight effect slots with one gain multiply
+  between them, which has no latency. `setSendTap` correctly takes no lock and
+  triggers no graph update.
+- **Export matches playback.** `renderOffline` and the device callback both
+  run `processInsert` then `routeSends` then `align`, and the tap latch and
+  the pre fader copy are inside the shared `processInsert`. `latchGainRamps`
+  resets every piece of tap and fade state and latches the send ramp through
+  `levelTarget`, so a bounce cannot open mid crossfade.
+- **The audio thread rules.** No allocation on either path:
+  `preFaderScratch` and `sendScratch` are sized in `audioDeviceAboutToStart`,
+  the `juce::AudioBuffer` built in `routeSends` is the non owning pointer
+  wrapping constructor, and the new functions are arithmetic over scalars.
+- **New state's four things** are all present for `sendTap` and
+  `muteAffectsPreFaderSends`: saved, restored, reset in the clear path, and
+  correctly absent from `Project::capture`, which matches the destination and
+  the level.
+
+### What is still outside any test's reach
+
+Recorded rather than fixed, because nothing in a JUCE free header can see
+them and a reader should not have to rediscover that. Two are at call sites in
+`AudioEngine.cpp` and are named here with the case that would show them:
+
+- **`routeSends` reads `preFaderSendGain[index]`, the source insert's figure.**
+  Reading the destination's instead compiles and is wrong in one configuration
+  only: with something soloed, a pre fader send from a silenced strip into a
+  bus the solo is keeping audible would carry the bus's unity rather than the
+  strip's cut, so the silenced strip is heard under the solo. That is the exact
+  failure the setting's default was chosen to prevent. Tonight's forward pass
+  models the correct indexing, so the property is written down, but the model
+  cannot check the engine's subscript.
+- **`slot.sendFadeGain[s] = ramp.value`**, the gain the send was actually
+  running at when the tap changed. Writing `target` there instead satisfies
+  every property `fadeSample` promises, because the function is still handed
+  two numbers and still blends them convexly. On a strip muted by somebody
+  else's solo it would hand the bus the muted strip's full signal at the new
+  target for five milliseconds, which is the burst the crossfade was written to
+  remove, arriving up to 85 ms later through the send's alignment line.
+
+And one comment, left alone deliberately: `LatencyGraph.h` line 52 still
+argues the monitoring exemption from the premise that "a send is a copy of the
+insert taken after its fader", which is now true of half the sends. The
+conclusion survives a pre fader tap, since that copy carries more of the
+player's input rather than less, but the premise does not. **Open pull request
+#72 changes that file**, so it is not touched here. Whoever lands #72 should
+take the sentence with them.
+
+### CI on this tree
+
+Recorded on the pull request when the jobs report.
+
+### Verdict
+
+One real fault, and it was in the words rather than in the signal: the tap
+button told somebody the opposite of what the shipped default does, in the one
+configuration nothing measured, for four days. Fixed, along with the claim in
+`SoloGraph.h` whose absence let it stand, which is now a measurement at the
+master rather than a sentence. The arithmetic of the tap itself is clean and
+was already well tested: twenty four of twenty eight mutations were caught by
+the test as it already stood. Two choices that no test could reach have been
+given names and an oracle, and two that still cannot be reached are written
+down above with the case that would show them.
+
+---
+
 ## 2026-11-27: the control room's words, which are the only report of the one control you cannot hear
 
 ### What is being looked at
